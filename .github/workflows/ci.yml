@@ -318,20 +318,27 @@ jobs:
   # (--lb-shard K/2, tests/spark/conftest.py): eight parallel jobs. Every file
   # is in exactly one shard of each pass, balanced on the recorded times in
   # tests/spark/shard_weights.json, and the reverse jobs run their shard's
-  # tests backwards, so the order check still covers every test. One unsharded
-  # pass of 381 tests took 30 to 52 min on 2026-10-02 (37011145001,
-  # 37020573180); by 2026-10-03 the tier had about 463 tests and three runs
-  # failed only on the 70-minute budget (4239 to 4265 s; 37139482365,
-  # 37145033026). Those runs' logs, split by file and shard, put each shard
-  # at 1465 to 2261 s; the budget is 50 minutes (scripts/ci_budget.py), 32%
-  # above the slowest, with timeout-minutes 75 as the backstop.
+  # tests backwards. The order check still runs every test after and before
+  # the other files of its shard, but no longer next to a file in the other
+  # shard; a job that turns red right after the weights change and move files
+  # between shards points at an order dependency. One unsharded pass of 381
+  # tests took 30 to 52 min on 2026-10-02 (37011145001, 37020573180); by
+  # 2026-10-03 the tier had 455 tests (collected at a5923850) and Spark jobs in train runs failed
+  # only on the 70-minute budget (4239 to 4265 s; 37139482365, 37145033026).
+  # Sharded, the test step took 1064 to 2096 s in 37153895161 (4.0 forward
+  # 1307 and 2096 s, 4.0 reverse 1064 and 1943, 4.1 forward 2000 and 2073,
+  # 4.1 reverse 2047 and 2034). On the 4.1 line the split is within 3% of an
+  # even one; on the 4.0 line it is not (one weight per file serves both
+  # lines), and its forward 2/2 is the slowest job. The budget is 48 minutes
+  # (scripts/ci_budget.py), 37% above that shard, with timeout-minutes 72 as
+  # the backstop.
   # Coverage is collected on the two 4.0 forward shards and combined in the
   # "Spark coverage floors" job below. Each job keeps its JUnit report, the
   # input of scripts/spark_shard_weights.py.
   spark-tests:
     name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 72
     strategy:
       fail-fast: false
       matrix:
@@ -398,7 +405,7 @@ jobs:
       # or only before, another one.
       - name: Run Spark tests
         run: >-
-          python scripts/ci_budget.py --seconds 3000
+          python scripts/ci_budget.py --seconds 2880
           --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)" --
           pytest tests/spark -q -rsxX -p no:cacheprovider --lb-shard ${{ matrix.shard }}/2
           --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}"
@@ -414,6 +421,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-spark-data-${{ matrix.shard }}
+          overwrite: true
           path: coverage-spark-${{ matrix.shard }}.data
           retention-days: 7
           if-no-files-found: error
@@ -423,6 +431,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: spark-junit-${{ matrix.leg }}-${{ matrix.order }}-${{ matrix.shard }}
+          overwrite: true
           path: ${{ runner.temp }}/spark-junit.xml
           retention-days: 30
           if-no-files-found: ignore
@@ -433,6 +442,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: spark-subprocess-logs-${{ matrix.leg }}-${{ matrix.order }}-${{ matrix.shard }}
+          overwrite: true
           path: ${{ runner.temp }}/spark-*/**/spark-subprocess.log
           if-no-files-found: ignore
 
@@ -440,11 +450,15 @@ jobs:
   # two 4.0 forward shards' coverage data combined, which is the same set of
   # tests one unsharded 4.0 forward pass measured. The coverage version is
   # the one pinned in pyproject.toml (tests/test_workflows.py checks this).
+  # It runs when a Spark job failed too, so a coverage drop is still reported
+  # while another leg is red; a 4.0 forward shard that failed uploads no data
+  # and the combine step then fails.
   spark-coverage:
     name: Spark coverage floors
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [spark-tests]
+    if: ${{ !cancelled() }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -480,6 +494,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-spark
+          overwrite: true
           path: coverage-spark.json
           retention-days: 30
           if-no-files-found: ignore

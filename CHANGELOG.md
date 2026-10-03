@@ -777,7 +777,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **CI's Spark tier runs as eight jobs.** Each pyspark line's forward and
   reverse passes are split in two by test file (`--lb-shard K/N` in
   `tests/spark/conftest.py`, balanced on the recorded seconds per file in
-  `tests/spark/shard_weights.json`), each job under a 50-minute budget (one
+  `tests/spark/shard_weights.json`), each job under a 48-minute budget (one
   unsharded pass had outgrown its 70 minutes). Every file is in exactly one
   shard. The Spark coverage floors are checked on the two 4.0 forward
   shards' coverage combined, in a "Spark coverage floors" job.

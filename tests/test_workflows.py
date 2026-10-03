@@ -11,6 +11,7 @@ Offline: reads the workflow files and .github/action-runtimes.json only.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import importlib.util
 import math
 import re
@@ -745,7 +746,9 @@ def test_spark_tier_runs_each_leg_forward_and_reverse_in_sharded_parallel_jobs()
     assert run.count("--cov") == 2, "coverage only on the 4.0 forward shards"
     assert job["env"]["LB_REQUIRE_JARS"] == "1"
     budgeted = {n: b for n, _, _, b in _budgeted_steps()}
-    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 4200
+    # Sized per shard (2880 s, 37% above the slowest shard in 37153895161),
+    # not for an unsharded pass (4200 s).
+    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 2880
     assert not any(s.get("name") == "Coverage floors" for s in job["steps"])
 
 
@@ -762,6 +765,8 @@ def test_spark_coverage_floors_are_checked_on_every_4_0_forward_shard_combined()
     jobs = _load("ci.yml")["jobs"]
     cov = jobs["spark-coverage"]
     assert cov["needs"] == ["spark-tests"]
+    # Checked even when another Spark job is red.
+    assert cov["if"] == "${{ !cancelled() }}"
     assert "spark-coverage" in jobs["build"]["needs"]
     runs = [" ".join(str(s.get("run", "")).split()) for s in cov["steps"]]
     download = next(s for s in cov["steps"] if "download-artifact" in str(s.get("uses")))
@@ -789,8 +794,11 @@ def _spark_harness():
 
 
 def test_the_ci_shards_cover_every_spark_test_file_exactly_once():
-    """The shards CI runs for each (leg, order) pass partition tests/spark:
-    a file in no shard would silently never run."""
+    """The shard numbers the CI matrix runs for each (leg, order) pass, with
+    the N on its --lb-shard, take in every tests/spark file once: a matrix
+    that left out a shard number would silently never run that shard's
+    files. (That the hook keeps exactly its shard's tests is checked in
+    tests/test_spark_harness.py.)"""
     job, _, n = _spark_job()
     harness = _spark_harness()
     files = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests" / "spark").rglob("test_*.py")}
@@ -806,8 +814,17 @@ def test_the_ci_shards_cover_every_spark_test_file_exactly_once():
 
 
 def test_no_ci_artifact_is_taken_by_the_release_download():
-    """release.yml calls ci.yml and downloads the pattern lakebench-*."""
+    """release.yml calls ci.yml in the same run, so no CI artifact name may
+    equal or match a name or pattern release.yml uploads or downloads."""
+    release = set()
+    for j in _load("release.yml")["jobs"].values():
+        for step in j.get("steps") or []:
+            if "-artifact@" in str(step.get("uses")):
+                w = step.get("with") or {}
+                release |= {str(w[k]) for k in ("name", "pattern") if k in w}
+    assert release, "release.yml names no artifact"
     for job in _load("ci.yml")["jobs"].values():
         for step in job.get("steps") or []:
             if "upload-artifact" in str(step.get("uses")):
-                assert not str(step["with"]["name"]).startswith("lakebench-"), step
+                name = str(step["with"]["name"])
+                assert not any(fnmatch.fnmatchcase(name, r) for r in release), (name, release)

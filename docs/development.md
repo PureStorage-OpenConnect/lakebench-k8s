@@ -341,7 +341,8 @@ rest. Every file is in exactly one shard, and the split depends only on the
 files under `tests/spark` and the recorded seconds per file in
 `tests/spark/shard_weights.json` (heaviest file first, each to the shard
 with the least time so far; a file with no recorded time weighs the
-median). With `--lb-reverse` a shard runs its own tests backwards. The
+median). With `--lb-reverse` a shard runs its own tests backwards, so the
+order check pairs a file only with the files of its own shard. The
 weights only balance the shards, so a new test file needs no entry; refresh
 them from the CI jobs' `spark-junit-*` artifacts with
 `python scripts/spark_shard_weights.py --source "<run id>" <reports>` when
@@ -540,7 +541,7 @@ raised from that report, never lowered. The Spark tier runs on two legs,
 `pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, forward and with
 `--lb-reverse`, and each of those four passes is split into two jobs with
 `--lb-shard 1/2` and `2/2`: eight parallel jobs, each under a
-50-minute budget. Every job fetches the jars pinned in
+48-minute budget. Every job fetches the jars pinned in
 `tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py`, runs with
 `LB_REQUIRE_JARS=1` and keeps its JUnit report as a `spark-junit-*`
 artifact. The two 4.0 forward jobs collect coverage, and the "Spark

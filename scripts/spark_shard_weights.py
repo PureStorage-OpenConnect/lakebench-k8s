@@ -5,7 +5,12 @@ file that ``--lb-shard`` balances on (tests/spark/conftest.py shard_files).
 Reads JUnit XML reports of Spark-tier runs (each CI Spark job keeps its
 report as the ``spark-junit-*`` artifact), sums each file's test times per
 report (setup, call and teardown, so the module's Spark session start is
-counted) and records the mean over the reports that ran the file.
+counted) and records the largest over the reports that ran the file: the
+slowest job sets the tier's wall time, so a file weighs what it costs on the
+Spark line where it is slowest. On the eight reports of run 37153895161 the
+split from the largest put 2067 s in the slowest shard and the split from
+the mean 2190 s (a check made offline, not by a CI run). One weight per file
+serves both Spark lines, so a line whose files are faster stays uneven.
 
 The weights only balance the shards: a stale or missing entry makes one
 shard slower, never drops a test, because every file is in exactly one
@@ -51,12 +56,12 @@ def file_seconds(report: Path, root: Path = ROOT) -> dict[str, float]:
 
 
 def weights(reports: list[Path], root: Path = ROOT) -> dict[str, float]:
-    """Mean seconds per file over the reports that ran it."""
+    """Largest seconds per file over the reports that ran it."""
     runs: dict[str, list[float]] = defaultdict(list)
     for report in reports:
         for rel, secs in file_seconds(report, root).items():
             runs[rel].append(secs)
-    return {rel: round(sum(v) / len(v), 1) for rel, v in sorted(runs.items())}
+    return {rel: round(max(v), 1) for rel, v in sorted(runs.items())}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         print("no Spark test files in the reports", file=sys.stderr)
         return 1
     doc = {
-        "_comment": "Written by scripts/spark_shard_weights.py; balances --lb-shard only.",
+        "_comment": "Seconds per Spark test file; balances --lb-shard only. "
+        "Refresh with scripts/spark_shard_weights.py.",
         "source": args.source,
         "seconds": seconds,
     }

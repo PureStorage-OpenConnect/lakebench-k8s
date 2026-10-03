@@ -44,7 +44,7 @@ def test_classname_resolves_to_its_file(tmp_path):
     assert ssw.file_of("tests.spark.test_gone", root) is None
 
 
-def test_weights_sum_per_report_and_average_over_reports(tmp_path):
+def test_weights_sum_per_report_and_take_the_largest_report(tmp_path):
     root = _tree(tmp_path)
     one = _report(
         tmp_path / "1.xml",
@@ -54,7 +54,7 @@ def test_weights_sum_per_report_and_average_over_reports(tmp_path):
         tmp_path / "2.xml", [("tests.spark.test_x", 25.0), ("tests.spark.test_gone", 9.0)]
     )
     assert ssw.weights([one, two], root) == {
-        "tests/spark/test_x.py": 20.0,
+        "tests/spark/test_x.py": 25.0,
         "tests/spark/test_y.py": 2.0,
     }
 

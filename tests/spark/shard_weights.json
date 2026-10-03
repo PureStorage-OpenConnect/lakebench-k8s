@@ -1,6 +1,6 @@
 {
-  "_comment": "Written by scripts/spark_shard_weights.py; balances --lb-shard only.",
-  "source": "CI Spark job logs (per-file times from line timestamps), runs 37139482365 and 37145033026 attempt 1 (train/1003-b ab2a0de6, train/1003-d facfa553), 2026-10-03, all four legs each",
+  "_comment": "Seconds per Spark test file; balances --lb-shard only. Refresh with scripts/spark_shard_weights.py.",
+  "source": "First set, before any JUnit report existed: the mean over the eight passes of per-file times read from the timestamps of the pytest progress lines in the CI Spark job logs, runs 37139482365 and 37145033026 attempt 1 (train/1003-b ab2a0de6, train/1003-d facfa553), 2026-10-03, all four legs each",
   "seconds": {
     "tests/spark/test_a1_atomic_preflight_stages_before_write.py": 14.8,
     "tests/spark/test_a1_atomic_sidecar_written_last.py": 8.4,
