@@ -745,15 +745,21 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   bucket holding a corpus from a spent seed (42) now stops at bronze-verify
   instead of running unscored, and a batch run over a corpus without a
   manifest stops instead of warning. The continuous preflight checks the
-  manifest when it is there, and requires one with `--skip-generate`.
+  manifest when it is there, and requires one with `--skip-generate`. A
+  financial `run --stage silver-build` or `gold-finalize` runs bronze-verify's
+  check alone first. A check that cannot run (a storage or Spark error) stops
+  the job too, but exits 1 as a failure, not 2.
 - **A registered look scores only the corpus `generate --registered-corpus`
   wrote** (owner decision, 10-03). `scripts/aml_gate.py --registered` refuses
   unless the corpus ledger holds a `generated` entry for that role and seed
   whose corpus fingerprint (every data file's path and size, each manifest
   file's sha256, recorded from S3 when the generation finishes) equals the
-  local corpus's, every datagen pod of it ran the `--generator-image` digest,
-  and no other attempt submitted a Job into that bronze prefix meanwhile.
-  `generate --registered-corpus` now needs `images.datagen` pinned by digest.
+  local corpus's (data files by path and size, manifests by sha256), the
+  generation was pinned to the `--generator-image` digest and every datagen pod
+  of it ran one image, and no other attempt on this host had a datagen Job in
+  that bronze prefix meanwhile (the ledger is per host). `generate
+  --registered-corpus` now needs `images.datagen` pinned by digest, and exits 1
+  when it generated the corpus but could not fingerprint it.
 - **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
   scored run it can find on this host: stored run records, the configs the
   journals name and the held-out tokens in them, the bronze manifests and

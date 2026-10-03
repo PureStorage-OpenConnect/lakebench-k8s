@@ -86,6 +86,10 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
 REGISTER = _REGISTER_MODE == "1"
 CONTINUOUS_RESET = _REGISTER_MODE == "schema"
+# Only the held-out check, nothing else: run --stage silver-build or
+# gold-finalize on the financial schema runs this first, so a stage subset
+# never reads a protected corpus either.
+CHECK_ONLY = _REGISTER_MODE == "check"
 # A corpus from a held-out (or spent) AML seed is refused before anything is
 # read or written (refuse_protected_corpus). Every batch run reads a corpus
 # that has its manifest, so a missing manifest refuses there. The continuous
@@ -96,6 +100,9 @@ CONTINUOUS_RESET = _REGISTER_MODE == "schema"
 MANIFEST_REQUIRED = (not CONTINUOUS_RESET) or env("LB_MANIFEST_REQUIRED", "0") == "1"
 # Prefix of the refusal; the CLI reads it in the driver log and exits 2.
 PROTECTED_REFUSAL = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
+# Prefix when the check itself could not run (a storage or Spark error): the
+# job still stops before reading the corpus, and the CLI reports a failure.
+PROTECTED_UNCHECKED = "LAKEBENCH-PROTECTED-CORPUS-UNCHECKED"
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
@@ -407,8 +414,11 @@ def refuse_protected_corpus(spark) -> None:
     """Stop before any read or write when the corpus is a protected one."""
     try:
         reason = protected_manifest_reason(spark, required=MANIFEST_REQUIRED)
-    except Exception as e:  # noqa: BLE001 -- an unchecked corpus is refused
-        reason = f"the manifest could not be checked ({type(e).__name__})"
+    except Exception as e:  # noqa: BLE001 -- an unchecked corpus is not read
+        why = f"the manifest could not be checked ({type(e).__name__})"
+        log(f"ERROR: {PROTECTED_UNCHECKED}: {why}")
+        spark.stop()
+        raise SystemExit(f"{PROTECTED_UNCHECKED}: {why}") from None
     if reason is None:
         log("Held-out check: the corpus manifest comes from no held-out or spent seed")
         return
@@ -425,6 +435,10 @@ def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
     # First, before any namespace, table, ConfigMap or bronze read.
     refuse_protected_corpus(spark)
+    if CHECK_ONLY:
+        log("Held-out check only (a stage subset follows); nothing else done")
+        spark.stop()
+        return
     # Hive does not pre-create namespaces the way the Polaris bootstrap does.
     ensure_namespaces(spark, CATALOG, (BRONZE_TABLE,))
     start_time = time.time()
