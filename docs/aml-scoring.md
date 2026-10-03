@@ -705,12 +705,15 @@ the log's first ticks.
 Each tick also records the `silver.transactions` snapshot it read for the
 time-travel read after the window, from the snapshot's metadata only (no
 scan, so the tick's timings do not move): `continuous.time_travel.ticks[]`
-holds the driver start, the cycle, the snapshot id, its `committed_at` (UTC),
-and its `total_records`, `pos_deletes` and `eq_deletes` from the Iceberg
-snapshot summary, with `count_source: "summary"`. When the summary has no
-row count, `total_records` is null and `count_source` is `"unavailable"`; the
-current table's count is never recorded in its place. A tick with no
-transactions snapshot records none.
+holds the driver start, the cycle, whether the tick completed, the snapshot
+id, its `committed_at` (UTC), and from the Iceberg snapshot summary its
+`total_records` (the record count of its live data files) and
+`pos_deletes` and `eq_deletes` (deleted-row totals, 0 on the copy-on-write
+tables Lakebench creates, when `total_records` is the live row count), with
+`count_source: "summary"`. When the summary has no record count,
+`total_records` is null and `count_source` is `"unavailable"`; the current
+table's count is never recorded in its place. A tick with no transactions
+snapshot records none.
 
 After the streams stop and every gate has decided, the score job reads
 those six snapshots of the drained tick and scores **`recall_covered`** per

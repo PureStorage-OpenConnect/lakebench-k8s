@@ -558,10 +558,14 @@ def snapshot_record(spark, fq, sid):
     snapshot's metadata only (one query on ``{fq}.snapshots``, no data scan):
     ``{snapshot, committed_at, total_records, pos_deletes, eq_deletes,
     count_source}``. ``committed_at`` is ISO 8601 UTC. ``total_records`` is
-    the summary's ``total-records`` (Iceberg's live row count at ``sid``),
-    and ``count_source`` is ``summary`` when that is present, else
-    ``unavailable`` with every field None: a failed or empty lookup is never
-    filled in from the current table."""
+    the summary's ``total-records``: the sum of the record counts of the data
+    files live at ``sid``, deletes not subtracted, so it equals the live row
+    count only when ``pos_deletes`` and ``eq_deletes`` (the summary's
+    deleted-row totals) are 0, as under the copy-on-write tables Lakebench
+    creates. ``count_source`` is ``summary`` when ``total_records`` is
+    present, else ``unavailable``; the fields the summary does carry are kept
+    either way. A failed or empty lookup leaves every field None, and nothing
+    is ever filled in from the current table."""
     rec = {
         "snapshot": sid,
         "committed_at": None,
