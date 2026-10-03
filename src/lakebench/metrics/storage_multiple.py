@@ -131,9 +131,14 @@ def _describe_detail_size(stdout: str) -> float | None:
     return None
 
 
-def _excluded_label(bucket_layer: str, key: str, datagen_prefix: str) -> str | None:
-    """The exclusion group of *key*, or None."""
-    if _CHECKPOINT_SEGMENT.search(key):
+def _excluded_label(
+    bucket_layer: str, key: str, datagen_prefix: str, checkpoint_base: str = "checkpoints"
+) -> str | None:
+    """The exclusion group of *key*, or None. Stream checkpoints are any
+    ``checkpoints/`` segment and, when the config moves them
+    (``sustained.checkpoint_base``), that prefix too."""
+    base = checkpoint_base.strip("/")
+    if _CHECKPOINT_SEGMENT.search(key) or (base and key.startswith(f"{base}/")):
         return "stream checkpoints"
     if bucket_layer == "bronze" and key.startswith(f"{datagen_prefix}/_corpus/"):
         return "datagen markers (_corpus/)"
@@ -175,6 +180,7 @@ def measure(
     orphan_removal_ran: bool = False,
     not_measured: str | None = None,
     raw_layers: tuple[str, ...] = (),
+    checkpoint_base: str = "checkpoints",
     clock: Callable[[], float] = time.monotonic,
     budget_seconds: float = TIME_BUDGET_SECONDS,
 ) -> dict[str, Any]:
@@ -274,7 +280,14 @@ def measure(
                 size = float(obj.get("Size", 0) or 0)
                 b_total += size
                 label = next(
-                    (x for x in (_excluded_label(ly, key, datagen_prefix) for ly in layers) if x),
+                    (
+                        x
+                        for x in (
+                            _excluded_label(ly, key, datagen_prefix, checkpoint_base)
+                            for ly in layers
+                        )
+                        if x
+                    ),
                     None,
                 )
                 if label is not None:
@@ -473,6 +486,13 @@ def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:
     """``measure`` for a deployed run: the config's buckets and tables, the
     maintenance engine's pod, the S3 client's listing. Never raises."""
     try:
+        if getattr(metrics, "stage_only", None):
+            # run --stage ran one layer; the other layers' tables are an
+            # earlier run's, so a figure would mislabel them as this run's.
+            return {
+                "not_measured": "a run --stage run: the other layers are not this run's",
+                "note": OBJECTS_NOTE,
+            }
         if s3 is None:
             s3 = _s3_client(cfg)
         from lakebench.deploy.datagen import bronze_datagen_prefix
@@ -524,6 +544,7 @@ def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:
             orphan_removal_ran=orphan_removal_ran(getattr(metrics, "maintenance_outcomes", None)),
             not_measured=reason,
             raw_layers=raw_layers,
+            checkpoint_base=str(cfg.architecture.pipeline.sustained.checkpoint_base),
         )
     except Exception as e:  # noqa: BLE001 -- a measurement never fails the run
         logger.warning("storage multiple not measured: %s", e)

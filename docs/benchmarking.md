@@ -1392,7 +1392,8 @@ status.
 
 Physical bytes over logical bytes, per table, per layer and in total,
 measured once at the end of the run: after maintenance and the post-maintenance
-benchmark round (batch), or after the settle wait (continuous), and stated
+benchmark round (batch), or after the settle wait (continuous; for AML
+after the gold-refresh drain, the stream stop and the score job), and stated
 with the maintenance policy that produced it. It is a condition of that
 policy, not a system score (`storage_multiple_total` is diagnostic).
 
@@ -1406,7 +1407,9 @@ policy, not a system score (`storage_multiple_total` is diagnostic).
   `$all_entries`), "retained and unreferenced" is one figure. When orphan
   removal ran, the unreferenced share is labelled as bounded by its
   24 h 10 min floor.
-- Excluded and listed with their bytes: stream checkpoints, the datagen
+- Excluded and listed with their bytes: stream checkpoints (any
+  `checkpoints/` segment, and `sustained.checkpoint_base` when it moves
+  them), the datagen
   markers (`_corpus/`) and manifest, scoring outputs (`<gold>/scoring/`) and
   the ML loop's `<gold>/_ml_loop/`. Named without bytes, because they are not
   in object storage: the executor scratch PVCs and the dependency server's
@@ -1427,7 +1430,8 @@ policy, not a system score (`storage_multiple_total` is diagnostic).
   the bucket sizes) and has a 10-minute budget covering the listings and
   the queries; a bucket whose listing fails or runs out of time leaves its
   tables not measured, and the total says how many tables it covers. A run
-  that did not pass records the measurement as not measured.
+  that did not pass, and a `run --stage` run (the other layers' tables are
+  an earlier run's), record the measurement as not measured.
 
 The record holds it as `storage_multiple`.
 

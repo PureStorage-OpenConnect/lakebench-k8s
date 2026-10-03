@@ -149,7 +149,7 @@ def test_ml_loop_without_the_exclusion_moves_gold(monkeypatch):
     monkeypatch.setattr(
         sm,
         "_excluded_label",
-        lambda layer, key, p: None if key.startswith("_ml_loop/") else real(layer, key, p),
+        lambda layer, key, *rest: None if key.startswith("_ml_loop/") else real(layer, key, *rest),
     )
     out, _ = _measure(objects=_objects(extra_gold=loop))
     assert out["unattributed"].get("lb-gold") == 5 * GB
@@ -455,3 +455,25 @@ def test_failed_run_is_not_measured():
     record = load_record("5105a0")
     record["storage_multiple"] = {"not_measured": "the run did not pass"}
     assert "Not measured: the run did not pass." in _plain_text(_render_dict(record))
+
+
+def test_moved_checkpoint_base_is_excluded():
+    """sustained.checkpoint_base moves the stream checkpoints (and the AM-10
+    drain marker under gold-refresh): they stay excluded, not unattributed."""
+    moved = [{"Key": "streams/gold-refresh/_lb_stop", "Size": 3 * GB}]
+    base, _ = _measure(checkpoint_base="streams")
+    out, _ = _measure(objects=_objects(extra_gold=moved), checkpoint_base="streams")
+    assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 3 * GB
+    assert out["unattributed"] == base["unattributed"]
+    assert out["layers"] == base["layers"]
+
+
+def test_stage_only_run_is_not_measured():
+    """run --stage ran one layer: the other layers' tables are an earlier
+    run's, so nothing is listed or queried and the record says why."""
+
+    class Metrics:
+        stage_only = "silver-build"
+
+    out = sm.measure_run(object(), None, object(), Metrics())
+    assert out["not_measured"] == "a run --stage run: the other layers are not this run's"

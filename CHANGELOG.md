@@ -546,7 +546,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   markers and manifest, scoring outputs and the ML loop prefix are
   excluded and listed; raw datagen files are physical only. Recorded as
   `storage_multiple` and shown on the HTML report; DuckDB and `none`
-  recipes record physical bytes only. The run end adds a second listing of
+  recipes record physical bytes only, and a `run --stage` run records it
+  as not measured. The run end adds a second listing of
   each bucket and a few metadata queries per table on the maintenance
   engine, within a 10-minute budget.
 - **Customer 360 results on the HTML report.** The report shows the C360
