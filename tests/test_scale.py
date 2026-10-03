@@ -89,12 +89,14 @@ class TestFinancialDimensions:
         assert dims.approx_rows == 111_111 * 4 * 60
         assert dims.approx_bronze_gb == pytest.approx(8.47)
 
-    #: pacs.008 bytes bronze-verify read on the recorded AML batch runs (GB):
-    #: scale 1 (run-20260928-103055-de1772, run-20260929-221146-9d5345),
-    #: scale 10 (run-20260929-214442-825153), scale 100
-    #: (run-20260929-000406-85b404). LB-262: against the flat 8.4 GB of
-    #: scale 1, scales 10 and 100 read 1.114 and 1.118.
-    MEASURED = ((1, 8.475), (1, 8.471), (10, 93.596), (100, 939.45))
+    #: pacs.008 bytes bronze-verify read on the recorded AML batch runs (GB),
+    #: 64 MB files, v1.6 generator: scale 1 (run-20260928-103055-de1772,
+    #: run-20260929-221146-9d5345), scale 10 (run-20260929-214442-825153).
+    #: LB-262: against the flat 8.4 GB of scale 1, scale 10 read 1.114.
+    MEASURED = ((1, 8.475), (1, 8.471), (10, 93.596))
+    #: Scale 100 on another setup: 128 MB files (run-20260929-000406-85b404)
+    #: and an earlier generator with 64 MB files (run-20260925-104703-c02890).
+    OTHER_SETUP = ((100, 939.45), (100, 952.863))
 
     def test_the_model_reads_the_recorded_runs_as_complete(self):
         from lakebench.metrics.perf_gate import MAX_SCALE_RATIO, MIN_SCALE_RATIO
@@ -102,13 +104,16 @@ class TestFinancialDimensions:
         for scale, gb in self.MEASURED:
             ratio = gb / financial_dimensions(scale).approx_bronze_gb
             assert ratio == pytest.approx(1.0, abs=0.002), (scale, ratio)
-            assert MIN_SCALE_RATIO <= ratio <= MAX_SCALE_RATIO
+        for scale, gb in self.MEASURED + self.OTHER_SETUP:
+            ratio = gb / financial_dimensions(scale).approx_bronze_gb
+            # Inside the verdict's 1.05 and the perf gate's band.
+            assert MIN_SCALE_RATIO <= ratio <= 1.05 <= MAX_SCALE_RATIO, (scale, ratio)
 
     def test_per_unit_bytes_between_and_beyond_the_measurements(self):
         from lakebench.config.scale import financial_gb_per_scale_unit as per_unit
 
         assert per_unit(0.1) == per_unit(1) == 8.47
-        assert per_unit(1000) == per_unit(100) == 9.39
+        assert per_unit(1000) == per_unit(100) == per_unit(10) == 9.36
         values = [per_unit(s) for s in (1, 2, 3, 5, 10, 20, 50, 100)]
         assert values == sorted(values)
         # Halfway in log10 between 1 and 10 is halfway between their values.

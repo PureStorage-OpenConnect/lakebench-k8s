@@ -714,13 +714,18 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   bronze per scale unit was a flat 8.4 GB (scale 1), so complete scale-10 and
   scale-100 AML batch runs read 1.114 and 1.118 and the perf gate (1.10)
   refused them as "more data than the scale". The size is now the bytes
-  bronze-verify read at scales 1, 10 and 100 (8.47, 93.6 and 939.5 GB;
-  bytes per row grow until about scale 10), interpolated between them; those
-  runs read 1.000 to 1.001. The run record keeps the expected size to two
-  decimals (`config_snapshot.approx_bronze_gb`). Stored records keep the
-  ratio they were recorded with; they are `aml-1` records, which do not
-  compare with `aml-2` ones anyway. Datagen sizing and `--timeout auto` for
-  AML use the same, about 10% larger, size from scale 10.
+  bronze-verify read at scales 1 and 10 (8.47 and 93.6 GB; bytes per row
+  grow between them), interpolated between them and held at the scale-10
+  value above; the scale-1 and scale-10 runs read 1.000 to 1.001, and the
+  two scale-100 runs on record 1.004 and 1.018. The run record keeps the
+  expected size to two decimals (`config_snapshot.approx_bronze_gb`).
+  Stored records keep the ratio they were recorded with; they are `aml-1`
+  records, which do not compare with `aml-2` ones anyway. The same size,
+  about 11% larger from scale 10, sets a continuous AML run's automatic
+  trickle (`max_files_per_trigger`: at the default 1800 s window, scale 5
+  goes from 9 to 10 files per trigger and scale 10 from 18 to 20), the
+  raw-corpus replace limit and `generate --timeout auto`; the generator's
+  output is unchanged (it sizes AML from the scale).
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
   sides.** A side whose repeat runs differ only in in-stream rounds or
   investigator sessions (outcomes of the runs' speed) is now one

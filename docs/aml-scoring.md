@@ -552,11 +552,11 @@ SparkApplication.
 The scale factor sets bronze volume linearly. Lakebench's estimate
 (`src/lakebench/config/scale.py`) is 111,111 entities x 4 transactions a
 month x 60 months per scale unit (about 26.7M transactions). Its size is
-measured: 8.47 GB of pacs.008 at scale 1, 93.6 GB at scale 10 and 939.5 GB
-at scale 100 (bytes per row grow until about scale 10, then hold;
-[data-generation.md](data-generation.md) has the runs). Held at 9.39 GB per
-unit, scale 10000, a tier-1 universal bank's AML retention target, is about
-94 TB. The Pydantic schema accepts up to scale
+measured to scale 10: 8.47 GB of pacs.008 at scale 1 and 93.6 GB at scale 10
+(bytes per row grow between the two; [data-generation.md](data-generation.md)
+has the runs, and two scale-100 runs on other setups read within 2% of the
+scale-10 size per unit). At 9.36 GB per unit, scale 10000, a tier-1
+universal bank's AML retention target, is about 94 TB. The Pydantic schema accepts up to scale
 10000, but AML datagen is banded: supported up to scale 300, unverified up
 to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-pod memory cap (a
 Lakebench-imposed cap). The pipeline has been run end to end only up to
