@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import statistics
 from collections.abc import Collection
@@ -506,6 +507,11 @@ class PipelineMetrics:
     # None for a run outside a series.
     series: dict[str, Any] | None = None
 
+    # The one batch stage ``run --stage`` ran (bronze-verify, silver-build or
+    # gold-finalize). The verdict's record gates then judge that stage's
+    # layer only. None for a whole pipeline.
+    stage_only: str | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
@@ -526,11 +532,12 @@ class PipelineMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        # A2a: compute the Verdict alongside ``success``. This is the
-        # skeleton; no consumer of ``success`` changes yet (that is A2b).
-        from lakebench.metrics.verdict import compute_verdict
+        # The verdict is decided from the record as it is serialised
+        # (verdict_from_record, below), so the stored verdict is the one every
+        # reader recomputes: a value rounded on the way out (scale_ratio to 3
+        # places) is judged as stored, never as held in memory.
+        from lakebench.metrics.verdict import verdict_from_record
 
-        verdict = compute_verdict(self)
         d: dict[str, Any] = {
             "run_id": self.run_id,
             "deployment_name": self.deployment_name,
@@ -538,7 +545,7 @@ class PipelineMetrics:
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "total_elapsed_seconds": self.total_elapsed_seconds,
             "success": self.success,
-            "verdict": verdict.to_dict(),
+            "verdict": None,  # set last, from the finished dict
             "bronze_size_gb": self.bronze_size_gb,
             "silver_size_gb": self.silver_size_gb,
             "gold_size_gb": self.gold_size_gb,
@@ -566,6 +573,8 @@ class PipelineMetrics:
             d["abort_reason"] = self.abort_reason
         if self.series is not None:
             d["series"] = self.series
+        if self.stage_only is not None:
+            d["stage_only"] = self.stage_only
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment
@@ -593,7 +602,23 @@ class PipelineMetrics:
             d["tm_operations"] = self.tm_operations
         if self.c360_correctness is not None:
             d["c360_correctness"] = self.c360_correctness
+        d["verdict"] = verdict_from_record(d).to_dict()
         return d
+
+
+#: The completeness threshold a stored ratio is judged against (the
+#: verdict's scale_ratio gate and the badge's ingest ratio).
+RATIO_THRESHOLD = 0.95
+
+
+def ratio_out(value: float, digits: int) -> float:
+    """*value* rounded for metrics.json, never across ``RATIO_THRESHOLD``:
+    a ratio just under it (0.9496 at 3 places) is rounded down, so the
+    verdict judged from the stored record agrees with the measurement."""
+    out = round(value, digits)
+    if value < RATIO_THRESHOLD <= out:
+        return math.floor(value * 10**digits) / 10**digits
+    return out
 
 
 @dataclass
@@ -1101,8 +1126,12 @@ class PipelineBenchmark:
         expected_gb = self.config_snapshot.get("approx_bronze_gb", 0)
         if expected_gb > 0:
             bronze_stages = [s for s in self.stages if s.stage_name == "bronze"]
+            # The last bronze-verify: in a multi-cycle run each cycle's reads
+            # every cycle so far (C360: common.c360_bronze_run_path; AML: the
+            # whole pacs008 prefix, which each cycle appends to), so only the
+            # last one reads the whole corpus; the first read cycle 1 alone.
             bronze_gb = (
-                bronze_stages[0].input_size_gb if bronze_stages else self.total_data_processed_gb
+                bronze_stages[-1].input_size_gb if bronze_stages else self.total_data_processed_gb
             )
             self.scale_ratio = bronze_gb / expected_gb
 
@@ -1516,7 +1545,7 @@ class PipelineBenchmark:
                 ),
                 "total_core_hours": round(self.total_core_hours, 2),
                 "ingest_ratio": (
-                    round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                    ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
                 ),
                 "compute_efficiency_gb_per_core_hour": round(
                     self.compute_efficiency_gb_per_core_hour, 4
@@ -1614,7 +1643,7 @@ class PipelineBenchmark:
                 self.compute_efficiency_gb_per_core_hour, 4
             ),
             "composite_qph": qph,
-            "scale_ratio": round(self.scale_ratio, 3),
+            "scale_ratio": ratio_out(self.scale_ratio, 3),
         }
         if self.query_benchmark is None:
             # No benchmark ran (no query engine, --skip-benchmark, or the run
@@ -1722,10 +1751,10 @@ class PipelineBenchmark:
         }
         # Mode-specific top-level flags (spec Section 7.1)
         if self.pipeline_mode == "batch":
-            d["scale_ratio"] = round(self.scale_ratio, 3)
+            d["scale_ratio"] = ratio_out(self.scale_ratio, 3)
         else:
             d["ingest_ratio"] = (
-                round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
             )
             d["pipeline_saturated"] = self.pipeline_saturated
             d["corpus_drained"] = self.corpus_drained

@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **The verdict is decided from the record.** A PASSED verdict now also
+  needs rows in every layer (`layer_rows`), the expected AML rules with no
+  error, an allowed skip only and at least one alert (`aml_rules`; W1
+  `giant-component` or `vertex-cap` and W3 or W17 `path-cap` are allowed,
+  a cap skip labelled in `qualifiers.rule_caps`), a batch scale ratio of at least 0.95,
+  where 0 now fails (`scale_ratio`), and no successful query with 0 rows
+  unless it may return none (`query_answers`; continuous runs: the last
+  in-stream round). The stored verdict is computed from the record as
+  serialised. `run` (batch, continuous and `--local`) exits 1 when that
+  verdict is not PASSED, printing `Verdict: <reason>`; this includes
+  conditions that before only turned the report badge red: a continuous
+  ingest ratio below 0.95 that the trickle does not explain, gold stale for
+  more than half the run, and a batch scale ratio between 0 and 0.95.
+  `compare`, the perf gate, the release gate and `report --list` take the
+  strictest of a record's stored verdict and the one recomputed from it,
+  so stored records can read failed: three stored AML batch runs on a
+  corpus without a watchlist (W5 and W6 did not run) do, and the stored
+  Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
+  dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
+  records the stage (`stage_only`), is judged on that stage's layer, and is
+  refused as a perf baseline. A stored scale or ingest ratio just under
+  0.95 is rounded down, never up to 0.95.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -1149,6 +1171,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Thrift or DuckDB query stage is no longer charged Trino's cores, and the
   continuous query stage's seconds are no longer shown as milliseconds and
   summed into the latency share.
+- **Multi-cycle scale ratio.** A multi-cycle batch run's `scale_ratio` now
+  reads the last bronze-verify, which reads every cycle; it read the first,
+  so the ratio was about one over the cycle count and the run read failed.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the

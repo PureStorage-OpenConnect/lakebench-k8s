@@ -91,11 +91,18 @@ def test_batch_identity_has_no_round_key():
 def _record(rounds: int, qph: float) -> dict:
     return {
         "run_id": f"r{rounds}",
+        "start_time": "2026-09-27T01:10:43+00:00",
         "success": True,
+        "jobs": [],
+        # Rows in every layer: the verdict recomputed from the record passes.
+        "streaming": [
+            {"job_name": f"lakebench-{t}", "job_type": t, "success": True, "output_rows": 10}
+            for t in ("bronze-ingest", "silver-stream", "gold-refresh")
+        ],
         "experiment": _exp("sustained", rounds),
         "pipeline_benchmark": {
             "pipeline_mode": "sustained",
-            "scores": {"composite_qph": qph, "composite_qph_rounds": rounds},
+            "scores": {"composite_qph": qph, "composite_qph_rounds": rounds, "ingest_ratio": 1.0},
             "query_benchmark": {"query_set_id": "qs8-32043638dbc4"},
         },
     }

@@ -457,12 +457,17 @@ class MetricsStorage:
             # ``lakebench report --list`` (and any other summary consumer)
             # can prefer verdict.status over raw ``success`` (OD-6).
             verdict = data.get("verdict") if isinstance(data.get("verdict"), dict) else None
+            from lakebench.metrics.verdict import passed as _record_passed
+
             return {
                 "run_id": data.get("run_id"),
                 "deployment_name": data.get("deployment_name"),
                 "start_time": data.get("start_time"),
                 "success": data.get("success"),
                 "verdict": verdict,
+                # The strictest of the stored verdict and the one recomputed
+                # from the whole record (a summary row cannot recompute).
+                "passed": _record_passed(data),
                 "total_elapsed_seconds": data.get("total_elapsed_seconds"),
                 "job_count": len(data.get("jobs", [])),
                 "scale": data.get("config_snapshot", {}).get("scale"),
@@ -646,6 +651,7 @@ class MetricsStorage:
             interrupted=data.get("interrupted"),
             abort_reason=data.get("abort_reason"),
             series=data.get("series"),
+            stage_only=data.get("stage_only"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),

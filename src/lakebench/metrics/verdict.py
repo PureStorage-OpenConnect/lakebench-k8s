@@ -20,7 +20,7 @@ baseline.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -166,21 +166,52 @@ def verdict_status(record: Mapping[str, Any] | None) -> str | None:
     return None
 
 
-def passed(record: Mapping[str, Any] | None) -> bool:
-    """Whether *record* is a PASSED run.
+def _is_run_record(record: Mapping[str, Any]) -> bool:
+    """A whole metrics.json run record (``PipelineMetrics.to_dict`` always
+    writes ``run_id``, ``start_time`` and the ``jobs`` list), as opposed to a
+    summary row such as ``MetricsStorage.list_runs`` returns."""
+    return (
+        isinstance(record.get("run_id"), str)
+        and isinstance(record.get("start_time"), str)
+        and isinstance(record.get("jobs"), list)
+    )
 
-    Prefers ``verdict.status == "PASSED"`` when the v1.6 verdict block is
-    present. Falls back to ``record.get("success")`` for a legacy v1.5
-    record. Records loaded via ``storage._dict_to_metrics`` (PipelineMetrics
-    objects) go through the ``compute_verdict`` path in the caller, not
-    this helper; this reader is for the raw dict shape.
-    """
-    status = verdict_status(record)
-    if status is not None:
-        return status == "PASSED"
+
+def stored_passed(record: Mapping[str, Any] | None) -> bool:
+    """Whether *record* stored a pass: ``verdict.status == "PASSED"`` when it
+    has a verdict block, else its ``success`` flag (a v1.5 record). Only the
+    stored half of ``passed``; a reader that recomputes the verdict itself
+    starts here."""
     if record is None:
         return False
-    return bool(record.get("success", False))
+    status = verdict_status(record)
+    return status == "PASSED" if status is not None else bool(record.get("success", False))
+
+
+def passed(record: Mapping[str, Any] | None) -> bool:
+    """Whether *record* is a PASSED run: the strictest of what it stored and
+    what the record shows today. A reader never promotes.
+
+    The stored half prefers ``verdict.status == "PASSED"`` when the v1.6
+    verdict block is present and falls back to ``record.get("success")`` for
+    a legacy v1.5 record. For a whole run record that stored a pass, the
+    verdict is then recomputed with ``verdict_from_record``, so a v1.6
+    record that the record gates fail (rows per layer, rules, scale ratio,
+    query answers) reads failed. A record the loader cannot read reads
+    failed. A summary row (no ``jobs`` list) is judged on what it stored.
+    """
+    stored_ok = stored_passed(record)
+    if record is None or not stored_ok or not _is_run_record(record):
+        return stored_ok
+    try:
+        return _recompute(record).status == "PASSED"
+    except Exception as e:  # noqa: BLE001 -- an unreadable record never reads passed
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "run %s: verdict not recomputable (%s); read as not passed", record.get("run_id"), e
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +280,13 @@ def compute_badge_status(
             reasons.append(interrupt_reason(interrupted))
         if isinstance(abort, Mapping) and abort.get("reason"):
             reasons.append(f"Run stopped: {abort['reason']}")
-        if interrupted is None and not (isinstance(abort, Mapping) and abort.get("reason")):
+        if (
+            interrupted is None
+            and not (isinstance(abort, Mapping) and abort.get("reason"))
+            and not (getattr(metrics, "failure_reasons", None) or [])
+        ):
+            # Only when the run recorded no reason of its own (a gate the
+            # CLI or the save gate failed names itself in failure_reasons).
             reasons.append("Pipeline crashed or was interrupted")
     # Reasons the run recorded itself (e.g. "datagen timed out"), after the
     # generic one so existing reasons keep their place.
@@ -304,8 +341,6 @@ def compute_badge_status(
             warnings.append(
                 f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
             )
-        if not is_sustained and 0 < pb.scale_ratio < 0.95:
-            reasons.append(f"Scale ratio {pb.scale_ratio:.1%} < 95% (incomplete data)")
 
     # Freshness -- sustained mode only
     if is_sustained and pb is not None and pb.data_freshness_seconds is not None:
@@ -338,14 +373,19 @@ def compute_badge_status(
             reasons.append(f"Batch jobs failed: {', '.join(failed_jobs)}")
 
     # Benchmark query failures
-    if metrics.benchmark is not None and metrics.benchmark.queries:
-        n_failed = sum(
-            1
-            for q in metrics.benchmark.queries
-            if isinstance(q, dict) and not q.get("success", True)
-        )
-        if n_failed:
-            reasons.append(f"{n_failed} benchmark queries failed")
+    n_failed = len(_failed_queries(metrics))
+    if n_failed:
+        reasons.append(f"{n_failed} benchmark queries failed")
+
+    # The record gates (rows per layer, AML rules, scale ratio, query
+    # answers): their reasons fail the badge as they fail the verdict.
+    for gate in record_gates(metrics).values():
+        for r in gate.reasons:
+            if r not in reasons:
+                reasons.append(r)
+        for w in gate.warnings:
+            if w not in warnings:
+                warnings.append(w)
 
     return (len(reasons) == 0, reasons, warnings)
 
@@ -371,21 +411,52 @@ def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
     return None
 
 
+def _rounds(metrics: PipelineMetrics) -> list[Any]:
+    """A continuous run's in-stream benchmark rounds, in order ([] otherwise)."""
+    return list(metrics.benchmark_rounds or []) if _is_sustained(metrics) else []
+
+
+def _failed_queries(metrics: PipelineMetrics) -> list[str]:
+    """Names of the benchmark queries that failed. A continuous run with
+    in-stream rounds is judged round by round, as the CLI judges it: a Q9
+    that failed is left out (gold refresh replaces the table Q9 reads, so a
+    failure after its contention retries is expected in any round,
+    ``cli._sustained.tolerated_q9_results``). Otherwise the benchmark's own
+    queries; the aggregate of continuous rounds keeps only round 1's
+    outcome per query."""
+    rounds = _rounds(metrics)
+    if rounds:
+        out: list[str] = []
+        for rnd in rounds:
+            for q in rnd.queries or []:
+                if not isinstance(q, Mapping) or q.get("success", True):
+                    continue
+                name = str(q.get("name") or q.get("query_name") or "")
+                if not name.startswith("Q9") and name not in out:
+                    out.append(name)
+        return out
+    if metrics.benchmark is None:
+        return []
+    return [
+        str(q.get("name") or q.get("query_name") or "")
+        for q in metrics.benchmark.queries or []
+        if isinstance(q, Mapping) and not q.get("success", True)
+    ]
+
+
 def _benchmark_gate_outcome(metrics: PipelineMetrics) -> str | None:
     """Outcome for the aggregate ``benchmark`` gate.
 
-    "FAIL" when the benchmark raised or any query failed. "PASS" when a
-    benchmark ran with no failures. ``None`` when no benchmark was attempted
-    (a shape that scopes the benchmark out; not a gate failure).
+    "FAIL" when the benchmark raised or any query failed
+    (``_failed_queries``). "PASS" when a benchmark ran with no failures.
+    ``None`` when no benchmark was attempted (a shape that scopes the
+    benchmark out; not a gate failure).
     """
     if metrics.benchmark_error:
         return "FAIL"
-    if metrics.benchmark is None:
+    if metrics.benchmark is None and not _rounds(metrics):
         return None
-    for q in metrics.benchmark.queries or []:
-        if isinstance(q, dict) and not q.get("success", True):
-            return "FAIL"
-    return "PASS"
+    return "FAIL" if _failed_queries(metrics) else "PASS"
 
 
 def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
@@ -425,6 +496,374 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
     return f"pods ran different dependency sets ({pods})"
 
 
+# ---------------------------------------------------------------------------
+# Record gates: decided from the record alone.
+# Each reads only fields a stored metrics.json carries, so a report, compare,
+# the perf gate and the release gate recompute the outcome the run saved.
+# They apply to a run that was not interrupted: an interrupted run is never
+# PASSED, and its partial layers must not turn INTERRUPTED into FAILED.
+# ---------------------------------------------------------------------------
+
+#: The rule skips a PASSED run may carry, keyed by (workload, mode): rule ->
+#: the skip reasons allowed. Any other skip, or another reason, fails the
+#: ``aml_rules`` gate. W1's giant-component is on the stored PASSED records
+#: at scale 1 and 10; vertex-cap is W1's scale-100 skip, and path-cap is
+#: W3's and W17's (owner, 10-03). A skip whose reason is a Lakebench cap is
+#: labelled: ``limits.bound`` and ``limits.bound_kinds`` carry it (``rule <id>
+#: cap``), and the verdict lists it in the ``rule_caps`` qualifier. Continuous
+#: allows none: its mode-excluded rules
+#: (``config.support.AML_CONTINUOUS_SKIPPED_RULES``) are never in the skip
+#: list; they are left out of the expected set instead.
+EXPECTED_SKIPS: dict[tuple[str, str], dict[str, frozenset[str]]] = {
+    ("financial", "batch"): {
+        "W1_connected_components": frozenset({"giant-component", "vertex-cap"}),
+        "W3_round_tripping": frozenset({"path-cap"}),
+        "W17_layering_chain": frozenset({"path-cap"}),
+    },
+    ("financial", "continuous"): {},
+}
+
+#: Verdict qualifier listing the layers whose rows were not measured, where
+#: the ``layer_rows`` gate passed on bytes alone. Always set (possibly
+#: empty) when the gate is computed; the release gate reads it.
+LAYER_ROWS_UNMEASURED = "layer_rows_unmeasured"
+
+#: Verdict qualifier naming each AML rule a PASSED run skipped on a
+#: Lakebench cap (rule -> skip reason): the rule set is bounded by Lakebench,
+#: not by the system (invariant 6; ``limits.bound`` carries the same).
+RULE_CAPS = "rule_caps"
+
+#: The batch stage job that measures each layer.
+_BATCH_LAYER_JOBS: tuple[tuple[str, str], ...] = (
+    ("bronze", "bronze-verify"),
+    ("silver", "silver-build"),
+    ("gold", "gold-finalize"),
+)
+
+
+@dataclass
+class _GateResult:
+    """One record gate: its outcome (PASS, FAIL, or None when it does not
+    apply), FAIL reasons, badge warnings and verdict qualifiers."""
+
+    outcome: str | None = None
+    reasons: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    qualifiers: dict[str, Any] = field(default_factory=dict)
+
+
+def _workload(metrics: PipelineMetrics) -> str | None:
+    """The record's workload name: the config snapshot's schema, else the
+    experiment inputs or the stored experiment block."""
+    snap = getattr(metrics, "config_snapshot", None) or {}
+    name = snap.get("workload_schema")
+    if not name:
+        inputs = snap.get("experiment_inputs") or {}
+        name = (inputs.get("workload") or {}).get("name")
+    if not name:
+        exp = getattr(metrics, "experiment", None) or {}
+        name = (exp.get("workload") or {}).get("name")
+    return str(name) if name else None
+
+
+def _last_by_type(items: list[Any]) -> dict[str, Any]:
+    """The last job (or stream) of each job type, in record order."""
+    out: dict[str, Any] = {}
+    for item in items or []:
+        out[str(getattr(item, "job_type", ""))] = item
+    return out
+
+
+def _aml_continuous_alerts(gold: Any) -> int | None:
+    """The alerts the AML gold refresh's time-to-detect lines counted over
+    the run's ticks (matched to an arrival or not). None when not logged, or
+    when none were counted while a cycle could not measure its alerts (0
+    would then prove nothing)."""
+    if gold is None or gold.ttd_alerts is None:
+        return None
+    total = int(gold.ttd_alerts) + int(gold.ttd_unmatched or 0)
+    if total == 0 and (gold.ttd_unmeasured_cycles or 0) > 0:
+        return None
+    return total
+
+
+def _layer_rows_gate(metrics: PipelineMetrics) -> _GateResult:
+    """Rows per layer > 0.
+
+    Batch reads each layer's last stage job's ``output_rows``; a missing
+    stage job fails (the stage did not run). ``JobMetrics.output_rows``
+    defaults to 0, so a driver log that was never parsed reads as 0 rows and
+    fails: the run cannot show the layer is not empty. Continuous reads
+    ``bronze-ingest.output_rows``; ``silver-stream.output_rows`` (rows after
+    the transforms), else its ``committed_rows`` (the rows of the batches
+    that committed, which is all the AML silver stream logs); and
+    ``gold-refresh.output_rows``. AML gold refresh logs no row count: the
+    alerts it counted (``ttd_alerts`` plus ``ttd_unmatched``) stand for
+    gold's rows, so 0 alerts fails unless a cycle could not count them. A
+    continuous layer with no row figure falls back to its bytes: > 0 passes
+    with the layer listed in ``LAYER_ROWS_UNMEASURED`` and a warning, 0
+    fails. A ``run --stage`` record (``stage_only``) is checked for that
+    stage's layer only.
+    """
+    res = _GateResult()
+    unmeasured: list[str] = []
+    stage_only = getattr(metrics, "stage_only", None)
+    if _is_sustained(metrics):
+        streams = _last_by_type(metrics.streaming)
+        bronze = streams.get("bronze-ingest")
+        silver = streams.get("silver-stream")
+        gold = streams.get("gold-refresh")
+        rows: dict[str, int | None] = {
+            "bronze": getattr(bronze, "output_rows", None),
+            "silver": (
+                silver.output_rows
+                if silver is not None and silver.output_rows is not None
+                else getattr(silver, "committed_rows", None)
+            ),
+            "gold": getattr(gold, "output_rows", None),
+        }
+        if rows["gold"] is None and _workload(metrics) == "financial":
+            rows["gold"] = _aml_continuous_alerts(gold)
+        for layer, value in rows.items():
+            if value is not None:
+                if value <= 0:
+                    res.reasons.append(f"{layer} has 0 rows: the layer is empty")
+                continue
+            size = float(getattr(metrics, f"{layer}_size_gb", 0) or 0)
+            if size > 0:
+                unmeasured.append(layer)
+                res.warnings.append(f"rows not measured for {layer}; bytes > 0")
+            else:
+                res.reasons.append(f"{layer}: rows not measured and the layer holds 0 bytes")
+    else:
+        jobs = _last_by_type(metrics.jobs)
+        for layer, job_type in _BATCH_LAYER_JOBS:
+            if stage_only and stage_only != job_type:
+                continue
+            job = jobs.get(job_type)
+            if job is None:
+                res.reasons.append(f"{layer}: no {job_type} job recorded")
+            elif int(job.output_rows or 0) <= 0:
+                res.reasons.append(
+                    f"{layer} has 0 rows ({job_type} recorded 0 output rows, "
+                    "or its driver log was not read)"
+                )
+    res.outcome = "FAIL" if res.reasons else "PASS"
+    res.qualifiers[LAYER_ROWS_UNMEASURED] = unmeasured
+    return res
+
+
+def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
+    """The expected AML rules ran, none errored, and detection alerted.
+
+    Batch reads the last gold-finalize job (it re-detects over the whole
+    corpus, as the CLI's gate does): any ``rule_errors`` entry fails; zero
+    alerts fails, judged by ``financial_scoring.total_alerts`` when scoring
+    ran and by the sum of ``alerts_by_rule`` otherwise; a skip that is not
+    in ``EXPECTED_SKIPS`` with its reason fails; with per-rule counts
+    recorded, a rule of ``RULE_TARGETS`` that neither ran nor was an allowed
+    skip fails, and so does a rule outside it. With no per-rule counts the
+    rule set is not measured: a warning, as the CLI says. A ``run --stage
+    gold-finalize`` record is judged the same way; another single stage
+    runs no detection. Continuous takes the rules from the gold-refresh
+    per-rule time-to-detect lines, which exist only for rules that alerted:
+    it fails a mode-excluded rule (or one outside ``RULE_TARGETS``) that
+    ran, and zero alerts unless a cycle could not count them. The continuous
+    record carries no rule errors or skips, so neither is judged there, and
+    a rule with no alerts is not a failure.
+    """
+    from lakebench.benchmark.aml_queries import RULE_TARGETS
+    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+    res = _GateResult()
+    if getattr(metrics, "stage_only", None) not in (None, "gold-finalize"):
+        return res
+    mode = "continuous" if _is_sustained(metrics) else "batch"
+    allowed = EXPECTED_SKIPS.get(("financial", mode), {})
+    expected = set(RULE_TARGETS)
+    if mode == "continuous":
+        expected -= set(AML_CONTINUOUS_SKIPPED_RULES)
+    gold_jobs = [j for j in metrics.jobs if j.job_type == "gold-finalize"]
+    last = gold_jobs[-1] if gold_jobs else None
+    if mode == "batch" and last is None:
+        return res  # no gold stage: the layer_rows gate fails the run
+    errors = dict(getattr(last, "rule_errors", None) or {})
+    skipped = dict(getattr(last, "rules_skipped", None) or {})
+    by_rule = dict(getattr(last, "alerts_by_rule", None) or {})
+    executed = set(by_rule)
+    if mode == "continuous":
+        executed |= {r for s in metrics.streaming for r in (s.ttd_by_rule or {})}
+    executed -= set(errors)
+    for rule, err in sorted(errors.items()):
+        res.reasons.append(f"detection rule {rule} failed: {err}")
+    for rule, why in sorted(skipped.items()):
+        if str(why) not in allowed.get(rule, frozenset()):
+            res.reasons.append(f"rule {rule} skipped ({why}), not an allowed skip")
+        elif "cap" in str(why):
+            # An allowed skip on a Lakebench cap: the run passes, labelled.
+            res.qualifiers.setdefault(RULE_CAPS, {})[rule] = str(why)
+    outside = sorted(executed - expected)
+    if outside:
+        res.reasons.append(f"rules outside the expected set ran: {', '.join(outside)}")
+    if mode == "continuous":
+        streams = _last_by_type(metrics.streaming)
+        alerts = _aml_continuous_alerts(streams.get("gold-refresh"))
+        if alerts == 0:
+            res.reasons.append("AML continuous run produced zero alerts")
+    if mode == "batch":
+        scoring = getattr(metrics, "financial_scoring", None)
+        total = scoring.get("total_alerts") if isinstance(scoring, Mapping) else None
+        if total is not None:
+            if int(total) == 0:
+                res.reasons.append("AML batch run produced zero alerts (scoring total_alerts 0)")
+        elif by_rule and sum(int(v or 0) for v in by_rule.values()) == 0:
+            res.reasons.append("AML batch run produced zero alerts (every rule 0)")
+        if by_rule:
+            missing = sorted(expected - executed - set(skipped) - set(errors))
+            if missing:
+                res.reasons.append(f"expected rules did not run: {', '.join(missing)}")
+        elif not errors:
+            res.warnings.append(
+                "executed rule set not recorded: no per-rule counts in the gold-finalize log"
+            )
+    res.outcome = "FAIL" if res.reasons else "PASS"
+    return res
+
+
+def _scale_ratio_gate(metrics: PipelineMetrics) -> _GateResult:
+    """Batch: the bronze the run read is at least 95% of the scale's
+    expected volume. A ratio of 0 means bronze was not measured and fails
+    (before v1.7 it passed). Not applied to continuous runs, a record with
+    no pipeline benchmark, or a ``run --stage`` record of a stage other than
+    bronze-verify (the ratio then divides another layer's input by the
+    expected bronze)."""
+    res = _GateResult()
+    pb = metrics.pipeline_benchmark
+    stage_only = getattr(metrics, "stage_only", None)
+    if pb is None or _is_sustained(metrics) or stage_only not in (None, "bronze-verify"):
+        return res
+    ratio = float(pb.scale_ratio or 0.0)
+    if ratio <= 0:
+        res.reasons.append("Scale ratio 0: bronze input volume was not measured")
+    elif ratio < 0.95:
+        res.reasons.append(f"Scale ratio {ratio:.1%} < 95% (incomplete data)")
+    res.outcome = "FAIL" if res.reasons else "PASS"
+    return res
+
+
+def _query_answers_gate(metrics: PipelineMetrics) -> _GateResult:
+    """A successful benchmark query that returned no rows fails unless its
+    ``BenchmarkQuery.allow_empty`` declares that it may (design
+    contradiction 2). A continuous run with in-stream rounds is judged on
+    its last round only, as the CLI judges it: earlier rounds can run before
+    gold holds rows. A query absent from ``BENCHMARK_QUERIES_BY_DOMAIN`` is
+    left out with a warning, and one with no ``rows_returned`` is not
+    judged. Not applied when the record holds no benchmark queries."""
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
+
+    res = _GateResult()
+    rounds = _rounds(metrics)
+    bench = rounds[-1] if rounds else metrics.benchmark
+    if bench is None and metrics.pipeline_benchmark is not None:
+        bench = metrics.pipeline_benchmark.query_benchmark
+    queries = [q for q in (getattr(bench, "queries", None) or []) if isinstance(q, Mapping)]
+    if not queries:
+        return res
+    registry = {bq.name: bq.allow_empty for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for bq in qs}
+    empty: list[str] = []
+    unknown: list[str] = []
+    for q in queries:
+        name = str(q.get("name") or q.get("query_name") or "")
+        rows = q.get("rows_returned")
+        if not q.get("success", True) or rows is None or int(rows) != 0:
+            continue
+        if name not in registry:
+            unknown.append(name)
+        elif not registry[name]:
+            empty.append(name)
+    if empty:
+        res.reasons.append(
+            f"{len(empty)} benchmark queries returned no rows ({', '.join(empty)}); "
+            "an empty result measures nothing"
+        )
+    if unknown:
+        res.warnings.append(
+            "queries not in the registry returned no rows and were not judged: "
+            + ", ".join(unknown)
+        )
+    res.outcome = "FAIL" if res.reasons else "PASS"
+    return res
+
+
+def record_gates(metrics: PipelineMetrics) -> dict[str, _GateResult]:
+    """The record gates that apply to *metrics*, by gate id:
+    ``layer_rows``, ``aml_rules`` (financial runs), ``scale_ratio`` (batch)
+    and ``query_answers`` (runs with benchmark queries). A gate that does
+    not apply is left out. Empty for an interrupted run, and for a run whose
+    ``pipeline`` gate failed: a failed stage already fails the verdict, and
+    the empty layers after it are its consequence, not another finding."""
+    if _interrupt_record(metrics) is not None or _pipeline_gate_outcome(metrics) == "FAIL":
+        return {}
+    gates: dict[str, _GateResult] = {"layer_rows": _layer_rows_gate(metrics)}
+    if _workload(metrics) == "financial":
+        gates["aml_rules"] = _aml_rules_gate(metrics)
+    gates["scale_ratio"] = _scale_ratio_gate(metrics)
+    gates["query_answers"] = _query_answers_gate(metrics)
+    return {k: g for k, g in gates.items() if g.outcome is not None}
+
+
+def _recompute(record: Mapping[str, Any]) -> Verdict:
+    from lakebench.metrics.storage import MetricsStorage
+
+    return compute_verdict(MetricsStorage()._dict_to_metrics(dict(record)))
+
+
+def verdict_from_record(record: Mapping[str, Any]) -> Verdict:
+    """The verdict of a stored metrics.json dict, decided from the record
+    alone: the dict is loaded the way ``lakebench`` loads a stored run
+    (``MetricsStorage._dict_to_metrics``) and judged by ``compute_verdict``.
+    A save computes its verdict with the same function, so a fresh record
+    reads back the status it was saved with."""
+    return _recompute(record)
+
+
+def save_gate_problems(metrics: PipelineMetrics) -> list[str]:
+    """For the CLI, before ``save_run``: the reasons the record about to be
+    saved does not read PASSED, or ``[]`` when it does. The verdict is the
+    one ``PipelineMetrics.to_dict`` stores, which is decided from the
+    serialised record (``verdict_from_record``), so the exit code, the
+    stored verdict and every later reader apply one rule to one record. The
+    CLI's own gates print a problem as it happens. A record that cannot be
+    judged returns that as its problem."""
+    try:
+        v = metrics.to_dict()["verdict"]
+    except Exception as e:  # noqa: BLE001 -- fail closed, never a silent pass
+        return [f"the verdict could not be computed from the record ({type(e).__name__}: {e})"]
+    if v.get("status") == "PASSED":
+        return []
+    reasons = [str(r) for r in v.get("reasons") or []]
+    return [r for r in reasons if not r.startswith("Gate '")] or [f"verdict {v.get('status')}"]
+
+
+def apply_save_gate(metrics: PipelineMetrics, ok: bool, report: Callable[[str], None]) -> bool:
+    """The CLI's last gate, immediately before ``save_run``: when the run
+    has passed so far (*ok*) but the record about to be saved does not read
+    PASSED, each reason goes to *report*, ``success`` turns False and the
+    reasons are kept in ``failure_reasons`` (so the saved verdict names
+    them). Returns whether the run still passes, which sets the exit code."""
+    if not ok:
+        return False
+    problems = save_gate_problems(metrics)
+    for p in problems:
+        report(f"Verdict: {p}")
+        if p not in metrics.failure_reasons:
+            metrics.failure_reasons.append(p)
+    if problems:
+        metrics.success = False
+        return False
+    return True
+
+
 def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     """Compute a ``Verdict`` for a completed ``PipelineMetrics`` run.
 
@@ -434,7 +873,10 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     ``compute_badge_status`` helper. ``success_flag`` is ``metrics.success``.
     ``gate_outcomes`` covers, at minimum, ``pipeline`` and ``benchmark``,
     and adds ``c360`` when a check in the c360 gating list failed or did not
-    run (``c360_correctness.gating_outcome``).
+    run (``c360_correctness.gating_outcome``), ``dependency_set`` when a pod
+    ran another dependency set, and the record gates of
+    ``record_gates`` (``layer_rows``, ``aml_rules``, ``scale_ratio``,
+    ``query_answers``) that apply.
 
     An interrupted run (``metrics.interrupted``) adds ``interrupt =
     "INTERRUPTED"``. Its status is INTERRUPTED when ``prior_failure`` is
@@ -458,7 +900,11 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         gate_outcomes["c360"] = c360_outcome
     deps_reason = _deps_pods_reason(metrics)
     if deps_reason is not None:
-        gate_outcomes["deps"] = "FAIL"
+        gate_outcomes["dependency_set"] = "FAIL"
+    gates = record_gates(metrics)
+    for name, gate in gates.items():
+        if gate.outcome is not None:
+            gate_outcomes[name] = gate.outcome
 
     reasons: list[str] = []
     interrupted = _interrupt_record(metrics)
@@ -479,6 +925,11 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         # does not say): today's inputs stand, so an interrupt after a
         # failure reads FAILED.
         if not exit_ok:
+            # The run's own reasons first (a gate the CLI or the save gate
+            # failed names itself), so a reader of reasons[0] sees why.
+            for r in getattr(metrics, "failure_reasons", None) or []:
+                if r not in reasons:
+                    reasons.append(r)
             reasons.append("Process exit intent was not OK")
         for r in badge_reasons:
             if r not in reasons:
@@ -487,6 +938,10 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         reasons.append(c360_reason)
     if deps_reason is not None:
         reasons.append(deps_reason)
+    for gate in gates.values():
+        for r in gate.reasons:
+            if r not in reasons:
+                reasons.append(r)
     for name, outcome in gate_outcomes.items():
         if outcome == "FAIL":
             marker = f"Gate '{name}' FAILED"
@@ -509,6 +964,8 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         not_gating = c360_correctness.reporting_failures(metrics.c360_correctness)
         if not_gating:
             qualifiers["c360_failed_not_gating"] = not_gating
+    for gate in gates.values():
+        qualifiers.update(copy.deepcopy(gate.qualifiers))
     preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
     if preflight.get("capacity") == "skipped":
         # --skip-preflight: nothing checked that the cluster could hold it.
