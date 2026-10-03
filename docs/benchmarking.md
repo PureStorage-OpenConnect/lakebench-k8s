@@ -1207,8 +1207,9 @@ Two of these rules decide pairs that would otherwise read differently:
   means the QpH is the post-stream benchmark, another estimator, so that
   side is not one experiment (NOT COMPARABLE). Any other difference inside
   a side, in the workload, corpus, architecture, system, another condition
-  or the query results, still makes it not one experiment. Investigator
-  sessions count as an outcome only when both runs recorded a count and
+  or the query results, still makes it not one experiment. No run records
+  investigator sessions in this release (the key is reserved); when one
+  does, it counts as an outcome only when both runs recorded a count and
   neither ran none against some. Such a pair shows its medians, but no
   directional row is assessed, since it is not like-for-like.
 - **Maintenance skipped on both sides.** Effective maintenance skipped by

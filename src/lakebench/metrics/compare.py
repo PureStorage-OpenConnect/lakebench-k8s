@@ -1494,6 +1494,13 @@ def _side_doc(side: Side) -> dict[str, Any]:
     }
 
 
+def _effective_id(record: Mapping[str, Any]) -> str | None:
+    exp = record.get("experiment")
+    em = exp.get("effective_maintenance") if isinstance(exp, Mapping) else None
+    ident = em.get("id") if isinstance(em, Mapping) else None
+    return ident if isinstance(ident, str) and ident else None
+
+
 def _warnings(a: Side, b: Side) -> list[str]:
     out = list(a.warnings) + list(b.warnings)
     fa, fb = _first(a), _first(b)
@@ -1502,16 +1509,13 @@ def _warnings(a: Side, b: Side) -> list[str]:
             from lakebench.metrics.maintenance_policy import policy_mismatch, recorded_policy
 
             problem = policy_mismatch(recorded_policy(fa), recorded_policy(fb))
-            ids = [
-                ((r.get("experiment") or {}).get("effective_maintenance") or {}).get("id")
-                for r in (fa, fb)
-            ]
-            if problem and all(ids) and cmp.maintenance_equal(*ids):
-                # Both skipped every operation: the same maintenance
-                # (comparability.maintenance_equal), whatever the policy
-                # suffix says.
-                problem = None
         except Exception:  # noqa: BLE001 -- a policy that cannot be read is not a warning
+            problem = None
+        ids = [_effective_id(r) for r in (fa, fb)]
+        if problem and all(ids) and cmp.maintenance_equal(*ids):
+            # Both skipped every operation: the same maintenance
+            # (comparability.maintenance_equal), whatever the policy suffix
+            # says. A record whose id cannot be read keeps the warning.
             problem = None
         if problem:
             out.append(problem)
