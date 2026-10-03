@@ -47,8 +47,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a copy of that run's record with the new benchmark); 1.6 replaced the
   benchmark inside the run's own `metrics.json`. The copy's QpH, scores and
   query stage are the new benchmark's, `provenance.benchmark` names the code
-  and time of the benchmark, and a continuous run's in-stream rounds are not
-  copied. A benchmark record is never a deployment's latest run for `report`
+  and time of the benchmark, and a continuous run's in-stream rounds and the
+  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`
   or `compare`, nor a perf-gate candidate or baseline: read it by its run id
   (`benchmark` prints it). `lakebench query` prints and journals its result
   and no longer appends it to the latest record. `MetricsStorage.save_run`
