@@ -159,6 +159,10 @@ A PR is ready when:
       non-trivial changes
 - [ ] Performance claims cite a specific metrics.json run
 - [ ] Docs and `CHANGELOG.md` updated where the change is user-visible
+- [ ] A change that can break a 1.6 config, command line or script has an
+      entry in `docs/upgrading/breaking-1.7.yaml`, a heading in
+      `UPGRADING-1.7.md` and its one-line bullet under "Breaking changes"
+      (`python3.11 scripts/upgrading.py missing` prints a skeleton)
 - [ ] Linked issue, if the change fixes or opens a bug
 - [ ] Description leads with the answer, then the reasoning. Not a
       wall of bullets.

@@ -210,9 +210,13 @@ maintenance that actually ran, the Lakebench-imposed limits that applied
 and whether they bound, the support state, and a fingerprint of each
 query's result.
 
-Upgrading from 1.5: most earlier numbers are not comparable with 1.6 (for
-example, no Iceberg snapshot expiry or Delta VACUUM ever ran before 1.6.0).
-See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
+Upgrading from 1.6: every change that can break a 1.6 config, command line
+or script, with what to do, is in
+[UPGRADING-1.7.md](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/UPGRADING-1.7.md);
+redeploy each deployment once after upgrading. Upgrading from 1.5: most
+earlier numbers are not comparable with 1.6 (for example, no Iceberg
+snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
+[CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
 
 ## How It Works
 
