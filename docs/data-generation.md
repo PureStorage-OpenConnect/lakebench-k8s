@@ -251,7 +251,8 @@ corpus instead, run the pipeline with `run --skip-generate`, or without
 The deployer applies the same rule before the first cycle: it
 clears the datagen prefix of an owned bucket, so a smaller generate never
 inherits a larger earlier generate's `part-*` files, and refuses a non-empty
-prefix in any other bucket unless `--allow-stale-bronze` was passed. Before
+prefix in any other bucket unless the gate allowed it (`--allow-stale-bronze`
+on a prefix that already held objects). Before
 1.7 it skipped such a bucket silently and silver over-counted the stale
 files. Before the gate lists or clears the prefix, `generate`, `run
 --generate` and a multi-cycle run delete an earlier `lakebench-datagen` Job

@@ -2494,9 +2494,15 @@ def _run_once(
             drop_sidecar(cfg.get_namespace())
             _generated_here = True
             _run_fleet = None
+        # What the cycle-0 gate allowed: the cycle deployers take it, not the
+        # flag, so objects that land after the gate found the prefix empty
+        # are refused rather than written over with no stale-bronze record.
+        # No gate (none ran) allows nothing.
+        _cycle_stale_allowed = False
         if total_cycles > 1 and not (include_datagen and not skip_generate):
             stop_previous_datagen_or_exit(cfg)
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
+            _cycle_stale_allowed = bool(_gate.stale_allowed)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
@@ -2530,7 +2536,7 @@ def _run_once(
                     _stage = "datagen"
                     _cycle_engine = DeploymentEngine(cfg)
                     _cycle_datagen = DatagenDeployer(
-                        _cycle_engine, allow_stale_bronze=allow_stale_bronze
+                        _cycle_engine, allow_stale_bronze=_cycle_stale_allowed
                     )
                     _interrupt.creating("Job", "lakebench-datagen")
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
