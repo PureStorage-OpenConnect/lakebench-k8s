@@ -433,7 +433,19 @@ an evidence cap can still make an alert whose planted payments were cut read
 non-planted, which `evidence_capped_alerts_by_rule` shows) and
 `financial_scoring.customer_count` (customers in `silver.entities`). They
 feed the published limitation on how W5 and W6 non-planted alerts per
-customer grow with scale.
+customer grow with scale: `scripts/aml_screen_rates.py` reads stored AML
+batch records (never a bucket or a cluster) and writes
+`docs/benchmarks/data/aml_screening_rates.json` from four runs, seed 43 and
+the calibration seed at scale 1 and 10, each with an observed generator
+digest, scale and seed (generate in the same namespace before the run).
+It gives one n=1 row per seed role (`seed-43` or `calibration`), scale and
+rule, with the run id and generator digest, and the ratio scale 10 over
+scale 1 from the raw counts. It refuses a protected-corpus record, a verdict
+other than PASSED, a record that lacks the counts or in which W5 or W6 did
+not run, a scale pair from different generators or workload versions, and
+fewer than 50 non-planted W5 plus W6 alerts at scale 1. A row whose
+`evidence_capped_alerts` is above 0 is an upper bound, and a ratio with
+either side cut is marked `bounded_by_evidence_cap`.
 
 ## Per-alert evidence caps
 
