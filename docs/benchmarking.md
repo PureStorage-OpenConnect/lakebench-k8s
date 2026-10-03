@@ -627,8 +627,10 @@ PASSED run shows:
   `verdict.qualifiers.layer_rows_unmeasured`; release evidence refuses that.
 - **The expected AML rules ran** (`aml_rules`, financial runs). Batch: no
   rule errored, detection produced alerts, and every rule ran except an
-  allowed skip (today only `W1_connected_components` for `giant-component`
-  or `vertex-cap`; a W3 or W17 `path-cap` skip fails). A batch gold log
+  allowed skip: `W1_connected_components` for `giant-component` or
+  `vertex-cap`, and `W3_round_tripping` or `W17_layering_chain` for
+  `path-cap`. A skip on a Lakebench cap is labelled in `limits.bound` and
+  in `verdict.qualifiers.rule_caps`; any other skip fails. A batch gold log
   with no per-rule counts is a warning, not a failure. Continuous: no rule
   ran that the mode leaves out, and detection produced alerts; the
   continuous record carries no rule errors, so they are not judged there.

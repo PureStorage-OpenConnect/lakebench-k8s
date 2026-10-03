@@ -99,8 +99,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   (`stage_only`) and is judged on that layer only.
 - **The verdict is decided from the record.** A PASSED verdict now also
   needs rows in every layer (`layer_rows`), the expected AML rules with no
-  error, an allowed skip only and at least one alert (`aml_rules`; a W3 or
-  W17 `path-cap` skip now fails), a batch scale ratio of at least 0.95,
+  error, an allowed skip only and at least one alert (`aml_rules`; W1
+  `giant-component` or `vertex-cap` and W3 or W17 `path-cap` are allowed,
+  a cap skip labelled in `qualifiers.rule_caps`), a batch scale ratio of at least 0.95,
   where 0 now fails (`scale_ratio`), and no successful query with 0 rows
   unless it may return none (`query_answers`; continuous runs: the last
   in-stream round). The stored verdict is computed from the record as
