@@ -1439,6 +1439,114 @@ def _run_local_mode(
         raise typer.Exit(ExitCode.FAILED)
 
 
+def _config_windows(cfg) -> list[tuple[str, str]]:
+    from lakebench.config.c360_run import config_windows
+
+    return config_windows(cfg)
+
+
+def _cycle_series_record(cfg, *, marker: str, reused: bool) -> dict[str, Any]:
+    """``metrics.json`` ``cycle_series``: the corpus series marker as this run
+    left it (``written``, ``unwritten``) or found it (``read``, ``absent``),
+    whether the run reused the corpus, and the cycle windows."""
+    windows = _config_windows(cfg)
+    return {
+        "marker": marker,
+        "reused": reused,
+        "cycles_total": len(windows),
+        "windows": [list(w) for w in windows],
+    }
+
+
+def _record_series_cycle(cfg, cycle: int, total: int, run_id: str) -> str:
+    """Add a cycle whose datagen Job succeeded to the corpus series marker
+    (``deploy.corpus.record_cycle``), with the image digest its pods ran.
+    ``written`` or ``unwritten``; a failure only warns, and a later run that
+    reuses the corpus refuses it as unfinished."""
+    from lakebench.deploy.corpus import pod_image_digest, record_cycle
+    from lakebench.deploy.datagen import _s3_client_for
+
+    digest, why = pod_image_digest(cfg.get_namespace())
+    mark = record_cycle(cfg, _s3_client_for(cfg), cycle, total, run_id, digest, why)
+    if mark != "written":
+        print_warning(
+            f"could not record cycle {cycle + 1} in the corpus series marker: a later run "
+            "that reuses this corpus refuses it as unfinished"
+        )
+    return mark
+
+
+def _check_series_reuse(
+    cfg,
+    config_file: Path,
+    *,
+    mode: str,
+    include_datagen: bool,
+    skip_generate: bool,
+    deploy_only: bool,
+    generate_only: bool,
+) -> dict[str, Any] | None:
+    """For a batch run that reuses the corpus in bronze (``--skip-generate``,
+    or one cycle without ``--generate``): the corpus series marker must
+    describe a finished generate of this config (``deploy.corpus.
+    series_problem``), or the run is refused (exit 2) after the read-only
+    prerequisites and before anything is deployed or submitted. Returns the run's ``cycle_series`` record (with the marker's
+    ``stale_bronze`` label, if any), or None for a run that generates."""
+    from lakebench.config.c360_run import run_cycles
+    from lakebench.exit_codes import PrerequisiteError, UsageError
+
+    cycles = run_cycles(cfg)
+    reuses = (
+        mode == "batch"
+        and not deploy_only
+        and not generate_only
+        and (skip_generate or (cycles == 1 and not include_datagen))
+    )
+    if not reuses:
+        return None
+    from lakebench.deploy.corpus import read_series, series_problem
+    from lakebench.deploy.datagen import _s3_client_for
+
+    read = read_series(cfg, _s3_client_for(cfg))
+    if read.error:
+        raise PrerequisiteError(
+            f"Cannot check the corpus in bronze before reusing it: {read.error}",
+            next="check the S3 endpoint and credentials, then run again",
+        )
+    try:
+        why = series_problem(cfg, read)
+    except ValueError as e:
+        raise UsageError(
+            f"Cannot check the corpus in bronze against the config: {e}",
+            path="run.series_mismatch",
+        ) from None
+    if why:
+        fix = (
+            f"lakebench run {config_file} --regenerate"
+            if cycles > 1
+            else f"lakebench run {config_file} --generate --regenerate"
+        )
+        raise UsageError(
+            f"Cannot reuse the corpus in bronze: {why}",
+            why="a run that reuses bronze must read the corpus its config describes",
+            next=f"generate it again with `{fix}`, or run with the config it was generated with",
+            where=read.where,
+            path="run.series_mismatch",
+        )
+    if read.series is None:
+        print_info(
+            "No corpus series marker in bronze (a corpus from v1.6 or an older generate): "
+            "reusing it unchecked"
+        )
+    out = _cycle_series_record(
+        cfg, marker="read" if read.series is not None else "absent", reused=True
+    )
+    stale = (read.series or {}).get("stale_bronze")
+    if isinstance(stale, dict):
+        out["stale_bronze"] = stale
+    return out
+
+
 def _file_sha256(path: Path | None) -> str | None:
     """sha256 hex of the file's bytes, or None when it cannot be read."""
     import hashlib
@@ -1543,7 +1651,11 @@ def run(
         bool,
         typer.Option(
             "--skip-generate",
-            help="Assume data already exists in bronze bucket",
+            help=(
+                "Reuse the corpus already in bronze. Refused when its series marker "
+                "says the generate did not finish or was made for another cycle "
+                "count, window or generation than the config's (exit 2)"
+            ),
         ),
     ] = False,
     regenerate: Annotated[
@@ -1551,13 +1663,13 @@ def run(
         typer.Option(
             "--regenerate",
             help=(
-                "With --generate: clear the datagen prefix in the bronze "
-                "bucket before generating, when this deployment owns the "
-                "bucket. Without this flag, a non-empty bronze prefix is "
-                "refused (exit 3) so existing datagen output is never "
-                "overwritten silently. Never clears a bucket this deployment "
-                "does not own. A multi-cycle run clears an owned prefix before "
-                "cycle 0 without it. Refused without --generate or --generate-only."
+                "Clears the datagen prefix in a bronze bucket this deployment "
+                "created, before generating (before cycle 0 of a multi-cycle "
+                "run); refused on any other bucket. Without it, a non-empty "
+                "datagen prefix is refused (exit 3), so existing datagen output "
+                "is never overwritten silently. Takes --generate on a "
+                "single-cycle run, nothing more on a multi-cycle run, and is "
+                "refused when the run does not generate."
             ),
         ),
     ] = False,
@@ -1921,10 +2033,10 @@ def _run_once(
             _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
         elif not _use_sustained:
             # Batch creates datagen pods only in Phase 3 (--generate without
-            # --skip-generate) or per cycle of a multi-cycle run; otherwise
-            # none is counted.
-            _datagen_runs = bool(
-                (include_datagen and not skip_generate) or cfg.architecture.pipeline.cycles > 1
+            # --skip-generate) or per cycle of a multi-cycle run that does not
+            # reuse its corpus (--skip-generate); otherwise none is counted.
+            _datagen_runs = not skip_generate and bool(
+                include_datagen or cfg.architecture.pipeline.cycles > 1
             )
         # cluster_cap is what resolve_auto_sizing sized cfg against above, so
         # the preflight checks the Trino and datagen sizes this run deploys.
@@ -1948,6 +2060,21 @@ def _run_once(
         preflight_record = getattr(prereq_report, "preflight", None)
     else:
         print_info("Skipping prerequisites (--skip-preflight)")
+
+    # A batch run that reuses the corpus in bronze (--skip-generate, or one
+    # cycle without --generate) checks its series marker after the read-only
+    # prerequisites and before anything is deployed or submitted: an
+    # unfinished generate, or another cycle count, window or generation than
+    # the config's, is refused (deploy.corpus).
+    _series_reuse = _check_series_reuse(
+        cfg,
+        config_file,
+        mode=_run_mode,
+        include_datagen=include_datagen,
+        skip_generate=skip_generate,
+        deploy_only=deploy_only,
+        generate_only=generate_only,
+    )
 
     if skip_infra and not skip_deploy:
         print_info("Skipping the infrastructure readiness check (--skip-deploy)")
@@ -2196,7 +2323,9 @@ def _run_once(
                 # The gate's decision, not the flag: objects that appear after
                 # the gate saw an empty prefix are refused, not written over.
                 datagen_deployer = DatagenDeployer(
-                    dg_engine, allow_stale_bronze=_gate.stale_allowed
+                    dg_engine,
+                    allow_stale_bronze=_gate.stale_allowed,
+                    stale_record=_gate.record(),
                 )
                 _interrupt.creating("Job", "lakebench-datagen")
                 _dg_deploy = datagen_deployer.deploy()
@@ -2270,6 +2399,27 @@ def _run_once(
                         timeout_s=timeout,
                         elapsed_s=_datagen_elapsed,
                     )
+
+                # The progress loop stops when no pod is active, which is
+                # also a Job that failed after its retries: only a Job whose
+                # pods all succeeded is a corpus (invariant 3).
+                if not _dg_timed_out:
+                    _dg_final = datagen_deployer.get_progress()
+                    if _dg_final.get("error") or int(_dg_final.get("succeeded") or 0) < int(
+                        _dg_final.get("completions") or _total_pods or 1
+                    ):
+                        print_error(
+                            "Datagen did not complete: "
+                            f"{_dg_final.get('succeeded', 0)}/{_dg_final.get('completions', '?')} "
+                            f"pods succeeded, {_dg_final.get('failed', 0)} failed"
+                            + (f" ({_dg_final['error']})" if _dg_final.get("error") else "")
+                        )
+                        raise typer.Exit(ExitCode.FAILED)
+                    _series_mark = _record_series_cycle(cfg, 0, 1, run_id)
+                    if collector.current_run is not None:
+                        collector.current_run.cycle_series = _cycle_series_record(
+                            cfg, marker=_series_mark, reused=False
+                        )
 
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
@@ -2385,41 +2535,58 @@ def _run_once(
                     )
                     raise typer.Exit(ExitCode.FAILED) from e
 
-        # A multi-cycle run's cycle 0 is a fresh write; the same gate
-        # as generate, before the first cycle's datagen (unless the
-        # single-cycle --generate path above already ran it). Cycle 0 of an
-        # owned bucket is cleared as 1.6 did, so the gate runs with
-        # regenerate on: only a bucket this deployment may not empty refuses.
-        if total_cycles > 1:
-            # Every cycle generates its own bronze (cycle 0 of an owned
-            # bucket clears it; --generate is refused on a multi-cycle run):
-            # the namespace's fleet sidecar, and any fleet this run
-            # read before the cycles, describe a corpus it replaces, and the
-            # cycle pods' fleet is not read, so the record carries no fleet.
-            # Dropped before the gate, which may clear part of bronze and
-            # then fail.
-            from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-            drop_sidecar(cfg.get_namespace())
-            _generated_here = True
-            _run_fleet = None
+        # A multi-cycle run generates each cycle before its stages, unless
+        # --skip-generate reuses a finished multi-cycle corpus (checked
+        # against its series marker before Phase 1). Cycle 0 of a generate is
+        # a fresh write behind the bronze gate: an owned non-empty prefix,
+        # a leftover series marker included, is refused unless --regenerate
+        # (--generate is refused on a multi-cycle run).
+        _cycles_generate = total_cycles > 1 and not skip_generate
         # What the cycle-0 gate allowed: the cycle deployers take it, not the
         # flag, so objects that land after the gate found the prefix empty
         # are refused rather than written over with no stale-bronze record.
-        # No gate (none ran) allows nothing.
         _cycle_stale_allowed = False
-        if total_cycles > 1 and not (include_datagen and not skip_generate):
+        _cycle_stale_record: dict[str, Any] | None = None
+        if _cycles_generate:
+            # Every cycle generates its own bronze: the namespace's fleet
+            # sidecar, and any fleet this run read before the cycles, describe
+            # a corpus the run replaces, and the cycle pods' fleet is not
+            # read, so the record carries no fleet. The sidecar goes once the
+            # gate lets the generate proceed (a refused run keeps the corpus
+            # and its sidecar), or before the gate with --regenerate, which
+            # may clear part of bronze and then fail.
+            from lakebench.metrics.datagen_aggregator import drop_sidecar
+
             stop_previous_datagen_or_exit(cfg)
-            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
+            if regenerate:
+                drop_sidecar(cfg.get_namespace())
+            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
             _cycle_stale_allowed = bool(_gate.stale_allowed)
+            _cycle_stale_record = _gate.record()
             if collector.current_run is not None:
-                collector.current_run.datagen_stale_bronze = _gate.record()
+                collector.current_run.datagen_stale_bronze = _cycle_stale_record
+            if not regenerate:
+                drop_sidecar(cfg.get_namespace())
+            _generated_here = True
+            _run_fleet = None
+            if collector.current_run is not None:
+                collector.current_run.cycle_series = _cycle_series_record(
+                    cfg, marker="unwritten", reused=False
+                )
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
-            # No datagen in this run: a stale-bronze note left by the
-            # generate that made this bronze still describes it.
+            # No datagen in this run: a stale-bronze label of the generate
+            # that made this bronze still describes it (the series marker's,
+            # else the note `generate` left on this host).
             from lakebench.cli._helpers import load_stale_bronze
 
-            collector.current_run.datagen_stale_bronze = load_stale_bronze(cfg)
+            collector.current_run.datagen_stale_bronze = (
+                _series_reuse.get("stale_bronze") if _series_reuse else None
+            ) or load_stale_bronze(cfg)
+            if _series_reuse is not None:
+                collector.current_run.cycle_series = {
+                    k: v for k, v in _series_reuse.items() if k != "stale_bronze"
+                }
+        _cycle_windows = _config_windows(cfg)
 
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
@@ -2429,11 +2596,21 @@ def _run_once(
             _cycle_ts_end = ""
             _cycle_dg_elapsed = 0.0
 
+            _cycle_dg_skipped = False
             # Cycle header for multi-cycle runs
             if total_cycles > 1:
                 console.print()
                 console.print(f"[bold cyan]Cycle {cycle_idx + 1}/{total_cycles}[/bold cyan]")
 
+            if total_cycles > 1 and not _cycles_generate:
+                # --skip-generate: the series marker says every cycle's slice
+                # is in bronze; each cycle's stages read their own files.
+                _cycle_ts_start, _cycle_ts_end = _cycle_windows[cycle_idx]
+                _cycle_dg_skipped = True
+                print_info(
+                    f"Datagen skipped (reusing the corpus): {_cycle_ts_start} to {_cycle_ts_end}"
+                )
+            elif total_cycles > 1:
                 # Run datagen for this cycle's time window
                 try:
                     from lakebench.deploy import (
@@ -2445,7 +2622,9 @@ def _run_once(
                     _stage = "datagen"
                     _cycle_engine = DeploymentEngine(cfg)
                     _cycle_datagen = DatagenDeployer(
-                        _cycle_engine, allow_stale_bronze=_cycle_stale_allowed
+                        _cycle_engine,
+                        allow_stale_bronze=_cycle_stale_allowed,
+                        stale_record=_cycle_stale_record,
                     )
                     _interrupt.creating("Job", "lakebench-datagen")
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
@@ -2486,6 +2665,11 @@ def _run_once(
                             pipeline_success = False
                             break
                         _interrupt.finished("Job", "lakebench-datagen")
+                        _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
+                        if collector.current_run is not None:
+                            collector.current_run.cycle_series = _cycle_series_record(
+                                cfg, marker=_series_mark, reused=False
+                            )
                 except Exception as e:
                     print_error(f"Cycle datagen failed: {e}")
                     pipeline_success = False
@@ -2785,6 +2969,7 @@ def _run_once(
                     timestamp_start=_cycle_ts_start,
                     timestamp_end=_cycle_ts_end,
                     datagen_elapsed_seconds=_cycle_dg_elapsed,
+                    datagen_skipped=_cycle_dg_skipped,
                     jobs=list(_cycle_jobs),
                     table_health=_cycle_health,
                 )

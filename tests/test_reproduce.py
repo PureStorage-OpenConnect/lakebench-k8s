@@ -766,7 +766,11 @@ class TestNoPreRunDestroy:
             def load_run(self, rid):
                 return SimpleNamespace(run_id=rid)
 
-        fake_cfg = SimpleNamespace(name="my-config", get_namespace=lambda: "my-config")
+        fake_cfg = SimpleNamespace(
+            name="my-config",
+            get_namespace=lambda: "my-config",
+            architecture=SimpleNamespace(pipeline=SimpleNamespace(cycles=1)),
+        )
         with (
             mock.patch("lakebench.cli._destroy.destroy", track("destroy-command")),
             mock.patch("lakebench.cli._destroy._destroy_impl", track("destroy")),

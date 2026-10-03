@@ -224,10 +224,10 @@ overwritten by accident. What it does next depends on whether this
 deployment owns the bronze bucket: it carries this deployment's and this
 cluster's stamp (a tag, or on FlashBlade the `.lakebench/owner.json` marker),
 or this namespace's created-buckets record lists it (a bucket 1.6 created,
-stamped on the next deploy). A multi-cycle run clears an owned prefix before
-cycle 0 without `--regenerate`, as 1.6 did; the continuous run refuses any
-bucket it does not own before it starts (exit 3, or 4 when ownership cannot
-be checked).
+stamped on the next deploy). A multi-cycle run takes the same rule before
+cycle 0 (1.6 cleared an owned prefix silently) and takes `--regenerate`
+without `--generate`; the continuous run refuses any bucket it does not own
+before it starts (exit 3, or 4 when ownership cannot be checked).
 
 | Bucket | Prefix | Flag | Result |
 |---|---|---|---|
@@ -247,6 +247,18 @@ lakebench generate my-config.yaml --regenerate
 (stream checkpoints, another workload's prefix) stays. To keep the existing
 corpus instead, run the pipeline with `run --skip-generate`, or without
 `--generate`.
+
+Every generate writes a corpus series marker,
+`<datagen prefix>/_corpus/series.json`: the cycle count, the cycles whose
+datagen Job finished, each cycle's window, the generation parameters and the
+image digest the datagen pods ran. It is written when the generate starts,
+with no cycle finished, and updated after each cycle's Job succeeds, so an
+interrupted generate leaves a marker that says so. A run that reuses the
+corpus is refused (exit 2) when the marker is unfinished or describes
+another cycle count, window or generation than the config's; see "Reusing a
+corpus" under `run` in the [CLI reference](cli-reference.md#run). No Spark
+stage reads `_corpus/`. `lakebench generate` refuses a multi-cycle config
+(exit 2): `run` generates each cycle before its stages.
 
 The deployer applies the same rule before the first cycle: it
 clears the datagen prefix of an owned bucket, so a smaller generate never

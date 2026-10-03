@@ -116,12 +116,6 @@ SESSION_MEAN_ROWS = 12.5
 HOT_CUSTOMERS = 500
 HOT_SHARE = 0.40
 HOT_ZIPF = 1.2
-# datagen_rs bin/generate.rs default window when the config sets none; a
-# multi-cycle run splits deploy/datagen.py's window, whose default end is
-# 2025-12-31.
-DEFAULT_WINDOW_START = "2024-01-01"
-DEFAULT_WINDOW_END = "2025-01-01"
-DEFAULT_MULTI_CYCLE_WINDOW_END = "2025-12-31"
 # writer.rs customer360_bytes_per_row_default per DG_COMPRESSION codec; the
 # lakebench datagen Job sets none, so snappy.
 BYTES_PER_ROW = {"snappy": 4332.0, "zstd": 2233.0, "lz4": 4356.0, "none": 4399.0}
@@ -166,11 +160,14 @@ def parse_c360_bronze(logs: str | None) -> dict[str, int] | None:
 
 def expected_context(cfg) -> dict[str, Any]:
     """What the checks need from the config: window, customers, scale."""
+    from lakebench.config.c360_run import run_cycles, series_clock
+
     workload = cfg.architecture.workload
     dg = workload.datagen
-    cycles = int(getattr(cfg.architecture.pipeline, "cycles", 1) or 1)
-    start = dg.timestamp_start or DEFAULT_WINDOW_START
-    end = dg.timestamp_end or (DEFAULT_MULTI_CYCLE_WINDOW_END if cycles > 1 else DEFAULT_WINDOW_END)
+    cycles = run_cycles(cfg)
+    # The range every cycle's window covers (config.c360_run, the one copy
+    # of the window rule the datagen deployer also reads).
+    start, end = series_clock(cfg)
     dims = cfg.get_scale_dimensions()
     file_size_mb = _size_bytes(dg.file_size) // (1024 * 1024)
     return {
