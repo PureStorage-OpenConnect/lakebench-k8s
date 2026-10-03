@@ -1309,6 +1309,8 @@ class PipelineBenchmark:
 
         # QpH degradation: compare first-half vs second-half median QpH,
         # withheld when the rounds ran different query sets.
+        self.qph_degradation_pct = None
+        self.qph_degradation_withheld = None
         blended = bool(
             self.benchmark_rounds and composite_qph_basis(self.benchmark_rounds)[0]["blended"]
         )
