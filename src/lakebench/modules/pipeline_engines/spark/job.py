@@ -2781,7 +2781,15 @@ class SparkJobManager:
 
         Returns ``(iso_date, source_label)`` where ``source_label`` is one of
         ``datagen_timestamp_end``, ``bronze_data_clock``,
-        ``datagen_timestamp_start`` or ``fallback_default``.
+        ``datagen_timestamp_start`` or ``fallback_default``, or
+        ``cycle_series_end``.
+
+        A multi-cycle Customer 360 run takes one clock for every cycle: the
+        exclusive end of the event-time range its cycles cover
+        (``config.c360_run.series_clock``). The ladder below gave each cycle
+        its own anchor (bronze-verify rewrites ``bronze_data_clock`` every
+        cycle), so the rows of one run were scored against different days.
+        AML at any cycle count and single-cycle Customer 360 keep the ladder.
 
         The Kubernetes lookup (``lakebench-silver-state.bronze_data_clock``)
         is best-effort: any error (404, transport, missing config) falls
@@ -2791,6 +2799,11 @@ class SparkJobManager:
         """
         from datetime import datetime as _dt
         from datetime import timezone as _tz
+
+        from lakebench.config.c360_run import run_cycles, series_clock
+
+        if cfg.architecture.workload.schema_type.value == "customer360" and run_cycles(cfg) > 1:
+            return series_clock(cfg)[1], "cycle_series_end"
 
         # Rung 1: configured window end.
         _ts_end = cfg.architecture.workload.datagen.timestamp_end
