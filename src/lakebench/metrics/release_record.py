@@ -453,6 +453,11 @@ def record_problems(
     from lakebench.metrics.verdict import passed
 
     problems: list[str] = []
+    kind = record.get("record_kind") or "run"
+    if kind != "run":
+        problems.append(
+            f"a {kind} record (of run {record.get('parent_run_id') or 'unknown'}), not a run"
+        )
     if not passed(dict(record)):
         reasons = (record.get("verdict") or {}).get("reasons") or record.get("failure_reasons")
         problems.append(

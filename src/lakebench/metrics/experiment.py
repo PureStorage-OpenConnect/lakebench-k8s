@@ -996,8 +996,18 @@ def refresh_benchmark(metrics: Any) -> None:
         "benchmark_iterations"
     )
     limits["benchmark_mode"] = getattr(bench, "mode", None)
+    if "benchmark_rounds" in limits:
+        # The rounds behind the QpH, as build_experiment counts them: a
+        # benchmark record of a continuous run carries none of its rounds.
+        pb = getattr(metrics, "pipeline_benchmark", None)
+        limits["benchmark_rounds"] = sum(
+            1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0
+        )
     reps = exp.setdefault("repetitions", {})
-    reps["benchmark_samples_per_query"] = _repetitions(metrics).get("benchmark_samples_per_query")
+    now = _repetitions(metrics)
+    reps["benchmark_samples_per_query"] = now.get("benchmark_samples_per_query")
+    if "benchmark_rounds" in reps:
+        reps["benchmark_rounds"] = now.get("benchmark_rounds")
     exp["benchmark_source"] = "lakebench benchmark, after the run (replaced the run's benchmark)"
 
 
