@@ -148,6 +148,11 @@ spec:
             {% if s3_ca_cert_pem %}
             - name: S3_CA_CERT
               value: "/etc/ssl/certs/custom-ca/ca.crt"
+            # Also the trust store of rustls-native-certs, so an image that
+            # predates S3_CA_CERT trusts the configured CA too. It replaces
+            # the system store, which is why it is set only with a CA.
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/certs/custom-ca/ca.crt"
             {% elif not s3_verify_ssl %}
             - name: S3_VERIFY_SSL
               value: "false"

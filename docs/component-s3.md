@@ -177,7 +177,7 @@ When using Pure Storage FlashBlade as the S3 backend, keep the following in mind
         ca_cert: ./flashblade-ca.pem
   ```
 
-  Lakebench automatically distributes the certificate to all components (Spark, Trino, Polaris, Hive, datagen) via a Kubernetes Secret and JVM truststore injection.
+  Lakebench automatically distributes the certificate to all components (Spark, Trino, Polaris, Hive, datagen) via a Kubernetes Secret and JVM truststore injection. Datagen pods get it as `S3_CA_CERT` and as `SSL_CERT_FILE`; the second replaces the pod's system CA store, so an endpoint signed by a public CA fails while `ca_cert` is set.
 
 - **Path-style access is required.** FlashBlade does not support virtual-hosted bucket addressing. Always set `path_style: true`.
 - **Multipart upload ghost objects.** After failed or aborted uploads, FlashBlade may report non-zero object counts in its management UI even though `list_objects_v2` returns nothing. These are incomplete multipart upload artifacts that FlashBlade garbage-collects asynchronously. The `empty_bucket()` method in the S3 client handles this by aborting all incomplete multipart uploads and then entering a retry-verify loop: it re-checks both `list_objects_v2` and `list_multipart_uploads` until both return empty, waiting up to `max_wait` seconds (default 300) for FlashBlade's async GC to catch up.
