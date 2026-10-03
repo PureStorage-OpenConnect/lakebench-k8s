@@ -494,7 +494,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   then converts it with `init --from`, deploys, runs and destroys it with
   the release, checking that the 1.6 bronze and tables survive. Matrix rows
   may run extra steps before their destroy (M01: a continuous run after the
-  batch run on the same deployment). See RELEASING.md.
+  batch run on the same deployment). `harness.py expected` writes
+  `uat/expected-results-<version>.json` from reference run records, refusing
+  exp1 records, runs that did not pass, missing fingerprints or AML alert
+  sets, and runs of one entry that disagree; a rehearsal writes a draft of
+  it to its `--out`. See RELEASING.md.
 - **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
   to that file as it exits, so scripts can tell refusals that share exit 3
   apart without reading message text (docs/exit-codes.md).

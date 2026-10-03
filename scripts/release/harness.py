@@ -10,6 +10,8 @@ Usage::
     python3.11 scripts/release/harness.py scenario S-P1 --freeze SHA --context CTX --out DIR \\
         --deployments-ledger PATH [--ledger-lock PATH]
     python3.11 scripts/release/harness.py resume   --out DIR --context CTX --deployments-ledger PATH
+    python3.11 scripts/release/harness.py expected --from DIR [--from DIR ...] --version X.Y.Z \\
+        --out uat/expected-results-X.Y.Z.json
 
 It ships outside the wheel (``scripts/`` is not packaged). It runs lakebench
 only as ``env PYTHONPATH=<worktree>/src python3.11 -m lakebench ...`` and
@@ -71,7 +73,11 @@ TREE = HERE.parents[1]
 
 
 #: The harness's sibling modules, by name and tracked path.
-SIBLINGS = {"cluster": "scripts/release/cluster.py", "ledger": "scripts/release/ledger.py"}
+SIBLINGS = {
+    "cluster": "scripts/release/cluster.py",
+    "ledger": "scripts/release/ledger.py",
+    "expected": "scripts/release/expected.py",
+}
 
 
 def _sibling(name: str) -> Any:
@@ -92,6 +98,7 @@ def _sibling(name: str) -> Any:
 
 _cluster = _sibling("cluster")
 _ledger = _sibling("ledger")
+_expected = _sibling("expected")
 ActiveRow = _cluster.ActiveRow
 Candidate = _cluster.Candidate
 ClusterReader = _cluster.ClusterReader
@@ -2578,6 +2585,8 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
     def finish(self) -> int:
         path = self.write_results()
         self.write_extra_results()
+        if self.rehearsal:
+            self.write_draft_expected()
         states = self.rowlog.latest()
         open_rows = [r for r, s in states.items() if s["status"] not in TERMINAL]
         self.say(f"results: {path}")
@@ -2599,6 +2608,43 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
             )
         ]
         return 0 if not bad and not open_rows else 1
+
+    def write_draft_expected(self) -> Path | None:
+        """A rehearsal's draft expected-results file, written from its matrix
+        rows' records to ``<out>/expected-results-<version>.draft.json``
+        (never into the tree); not reviewed and never evidence. When the
+        records cannot make one, the reasons are said and any older draft
+        is removed."""
+        path = self.out / f"expected-results-{self.version}.draft.json"
+        states = self.rowlog.latest()
+        records = []
+        problems = []
+        for rid, s in states.items():
+            if rid not in self.rows:
+                continue
+            for run_id in s.get("run_ids") or []:
+                src = self.out / "rehearsal" / "runs" / run_id / "metrics.json"
+                try:
+                    records.append((run_id, json.loads(src.read_text())))
+                except (OSError, ValueError) as e:
+                    problems.append(f"{run_id}: record unreadable: {e}")
+        try:
+            if problems:
+                raise _expected.ExpectedRefused(problems)
+            data, notes = _expected.build_expected(records, self.version)
+            _expected.write(path, data, replace=True)
+        except _expected.ExpectedRefused as e:
+            path.unlink(missing_ok=True)
+            self.say("draft expected results not written:")
+            for p in e.problems:
+                self.say(f"  {p}")
+            return None
+        for line in _expected.summary(data):
+            self.say(f"draft expected results: {line}")
+        for note in notes:
+            self.say(f"draft expected results: note: {note}")
+        self.say(f"draft expected results (not reviewed, not evidence): {path}")
+        return path
 
     def write_results(self) -> Path:
         """``results.md``: one table row per matrix row; run ids only on
@@ -2851,6 +2897,20 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--matrix", type=Path, required=True)
     plan.add_argument("--freeze", required=True)
     plan.add_argument("--rows")
+    exp = sub.add_parser(
+        "expected",
+        help="write the expected-results file from reference run records; no cluster",
+    )
+    exp.add_argument(
+        "--from",
+        dest="from_dirs",
+        type=Path,
+        action="append",
+        required=True,
+        help="a directory of scrubbed run records (run-*/metrics.json); repeatable",
+    )
+    exp.add_argument("--version", required=True, help="the release version, X.Y.Z")
+    exp.add_argument("--out", type=Path, required=True, help="uat/expected-results-<version>.json")
     for name in ("run", "resume", "scenario", "upgrade"):
         sp = sub.add_parser(name)
         if name == "upgrade":
@@ -2903,7 +2963,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
 
+def expected_command(from_dirs: Sequence[Path], version: str, out: Path) -> int:
+    """``harness.py expected``: 0 written, 1 a record or entry refused
+    (nothing written), 2 a usage refusal."""
+    if not _expected.VERSION_RE.match(version):
+        raise Refused(f"--version {version!r} is not X.Y.Z")
+    if out.name != _expected.file_name(version):
+        raise Refused(
+            f"--out {out} must be named {_expected.file_name(version)} "
+            "(the file the release gate reads)"
+        )
+    try:
+        records = _expected.load_records(from_dirs)
+        data, notes = _expected.build_expected(records, version)
+        _expected.write(out, data)
+    except _expected.ExpectedRefused as e:
+        print("expected results not written:", file=sys.stderr)
+        for p in e.problems:
+            print(f"  {p}", file=sys.stderr)
+        return 1
+    for line in _expected.summary(data):
+        print(line)
+    for note in notes:
+        print(f"note: {note}")
+    print(f"wrote {out}; have a second person review it before it is committed")
+    return 0
+
+
 def _main(args: argparse.Namespace) -> int:
+    if args.cmd == "expected":
+        return expected_command(args.from_dirs, args.version, args.out)
     version, rows = load_matrix(args.matrix, KNOWN_STEPS)
     problems = matrix_problems(rows)
     if problems:

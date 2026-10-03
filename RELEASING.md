@@ -28,9 +28,25 @@ owner checklist in section 5.
 
 Run the steps in this order. Each command runs on the commit named.
 
-1. **Before the freeze**, on the commit to be frozen: commit
-   `uat/expected-results-<version>.json` (the `expected-results` check
-   refuses one whose last commit comes after the freeze), then run
+1. **Before the freeze**, write `uat/expected-results-<version>.json` from
+   reference runs of the release matrix: a harness `run --rehearsal` with
+   the release datagen image already pinned, so the corpus ids are the ones
+   the release runs will read. Every matrix row is best (an entry checks
+   that its rows agree); one row per workload, mode and scale is the least.
+
+   ```bash
+   python3.11 scripts/release/harness.py expected \
+       --from /root/lakebench-release/<version>-reference/rehearsal/runs \
+       --version X.Y.Z --out uat/expected-results-X.Y.Z.json
+   ```
+
+   It refuses (exit 1, nothing written) an exp1 record, a run that did not
+   pass, a held-out corpus, a run with a missing or unusable fingerprint
+   or, for AML batch, no alert set, and runs of one entry that disagree on
+   corpus id v2, query set, fingerprints or alert set; it never rewrites an
+   existing file. Have a second person review the file, then commit it
+   (the `expected-results` check refuses one whose last commit is the
+   freeze commit or comes after it), then run
    `make release-check VERSION=X.Y.Z DRY=1`; it must print no `pending:`
    line.
    The Makefile is not on the post-freeze allowlist, so a step still
@@ -161,6 +177,8 @@ python3.11 scripts/release/harness.py run --matrix scripts/release/matrix-1.7.ya
 python3.11 scripts/release/harness.py resume --out /root/lakebench-release/<version> \
     --context <kube context> --deployments-ledger <deployments ledger file> \
     --ledger-lock <its writers' lock file>
+python3.11 scripts/release/harness.py expected --from <records dir> [--from <dir> ...] \
+    --version <version> --out uat/expected-results-<version>.json
 ```
 
 `plan` needs no cluster: it writes each row's config with `lakebench
@@ -195,7 +213,10 @@ row that did not pass cites no run id in the table (the release gate reads
 every id there), and its runs are listed below it. The "group check"
 column reads "not checked": cross-row fingerprint equality is a separate
 check. A rehearsal writes `results-rehearsal.md` with its own heading,
-judges records against HEAD, and is never evidence. Copy `results.md` and
+judges records against HEAD, and is never evidence. It also writes
+`<out>/expected-results-<version>.draft.json` from its rows' records with
+the same code as `harness.py expected` (or says why the records cannot make
+one); the draft is never written into the tree and is not reviewed. Copy `results.md` and
 the scrubbed records into `uat/` in the post-freeze data commit.
 
 A matrix row may list `extra_steps`, run on the row's own deployment after

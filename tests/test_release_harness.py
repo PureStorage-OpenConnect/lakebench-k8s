@@ -2520,3 +2520,46 @@ def test_a_step_that_never_ran_says_why(xenv):
     xenv.h.log("M01", "not-deployed")
     text = xenv.h.write_extra_results().read_text()
     assert "MISSING | not run (the row ended not-deployed) |" in text
+
+
+# -- the rehearsal's draft -------------------------------------------------------
+
+
+def test_rehearsal_writes_a_draft_outside_the_tree(env, monkeypatch):
+    built = {"version": "1.7.0", "entries": [], "continuous": []}
+    seen: list = []
+
+    def build(records, version):
+        seen.append(([rid for rid, _ in records], version))
+        return built, []
+
+    monkeypatch.setattr(H._expected, "build_expected", build)
+    env.h.rehearsal = True
+    _go(env, _plan(env))
+    env.h.finish()
+    draft = env.out / "expected-results-1.7.0.draft.json"
+    assert json.loads(draft.read_text()) == built
+    run_ids = env.h.rowlog.latest()[ROW.id]["run_ids"]
+    assert seen == [(run_ids, "1.7.0")] and run_ids
+    assert not (H.TREE / "uat" / "expected-results-1.7.0.draft.json").exists()
+    assert any("not reviewed, not evidence" in s for s in env.said)
+
+
+def test_rehearsal_draft_refused_says_why_and_removes_an_old_one(env):
+    env.h.rehearsal = True
+    draft = env.out / "expected-results-1.7.0.draft.json"
+    _go(env, _plan(env))
+    draft.write_text("{}")
+    env.h.finish()  # the fake runs' records have no experiment block
+    assert not draft.exists()
+    assert any("draft expected results not written" in s for s in env.said)
+    assert any("no experiment block" in s for s in env.said)
+
+
+def test_a_release_run_writes_no_draft(env, monkeypatch):
+    monkeypatch.setattr(
+        H._expected, "build_expected", lambda r, v: pytest.fail("a release run built a draft")
+    )
+    _go(env, _plan(env))
+    env.h.finish()
+    assert not list(env.out.glob("expected-results-*"))
