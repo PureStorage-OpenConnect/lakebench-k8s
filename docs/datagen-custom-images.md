@@ -45,7 +45,7 @@ From the repository root, build and push the image:
 cd datagen_rs
 
 # Build the image
-podman build -t your-registry/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t your-registry/lb-datagen:custom .
 
 # Push to your registry
 podman push your-registry/lb-datagen:custom
@@ -212,7 +212,7 @@ since the build uses `--locked`).
 
 ```bash
 podman login docker.io
-podman build -t docker.io/youruser/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t docker.io/youruser/lb-datagen:custom .
 podman push docker.io/youruser/lb-datagen:custom
 ```
 
@@ -220,7 +220,7 @@ podman push docker.io/youruser/lb-datagen:custom
 
 ```bash
 podman login registry.example.com
-podman build -t registry.example.com/lakebench/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t registry.example.com/lakebench/lb-datagen:custom .
 podman push registry.example.com/lakebench/lb-datagen:custom
 ```
 
@@ -231,7 +231,7 @@ login and push commands.
 
 ```bash
 podman login -u $(oc whoami) -p $(oc whoami -t) image-registry.openshift-image-registry.svc:5000
-podman build -t image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom .
 podman push image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom
 ```
 

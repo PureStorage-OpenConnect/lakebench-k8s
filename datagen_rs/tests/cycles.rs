@@ -1004,21 +1004,6 @@ fn reference_files_are_byte_identical_across_node_counts() {
 
 /// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
 /// relative path string.
-/// The generator version every output pin below was captured under. A pin
-/// that changes needs a new MODEL_VERSION (model.rs), so readers can tell
-/// the corpora apart; changing a pin here without bumping it fails this.
-const PINNED_MODEL_VERSION: &str = "datagen-v2-rs-0.3";
-
-#[test]
-fn output_pins_are_keyed_by_model_version() {
-    assert_eq!(
-        datagen_rs::model::MODEL_VERSION,
-        PINNED_MODEL_VERSION,
-        "MODEL_VERSION moved: re-capture every output pin under the new version and \
-         update PINNED_MODEL_VERSION in the same change"
-    );
-}
-
 fn tree_digest(dir: &Path) -> (u64, usize) {
     let mut paths = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -1385,4 +1370,67 @@ fn financial_scale_defaults_to_one() {
         text.contains("\"scale\":1.000000"),
         "default scale is not 1.0"
     );
+}
+
+/// The output pins, by the generator version they were captured under: the
+/// sha256 of every pinned (digest, files) pair in this file, in order. A pin
+/// re-captured without a new MODEL_VERSION (model.rs) fails, because two
+/// corpora with different bytes would then carry one model_version in their
+/// markers' corpus_args.
+const PINS_BY_MODEL_VERSION: &[(&str, &str)] = &[(
+    "datagen-v2-rs-0.3",
+    "dd77637b7c743794752fff4c99c1472d7a83cf1775abddf4f9aa78650e328d90",
+)];
+
+/// Every pinned `(digest, files)` literal in the five pin tests, as text.
+fn pinned_pairs() -> Vec<String> {
+    let src = include_str!("cycles.rs");
+    let mut out = Vec::new();
+    for name in [
+        "fn c360_driver_output_is_pinned",
+        "fn financial_output_is_pinned_to_the_frozen_generator",
+        "fn financial_perturbed_output_is_pinned",
+        "fn financial_two_cycle_output_is_pinned",
+        "fn c360_two_cycle_output_is_pinned",
+    ] {
+        let body = &src[src.find(name).expect(name)..];
+        let body = &body[..body.find("\n#[test]").unwrap_or(body.len())];
+        let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        for part in flat.split("assert_eq!(").skip(1) {
+            let Some(rest) = part.split_once(",(").map(|(_, r)| r) else {
+                continue;
+            };
+            let pair = &rest[..rest.find(')').unwrap_or(0)];
+            let ok = pair.split(',').count() == 2
+                && pair
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '_' || c == ',');
+            if ok {
+                out.push(pair.replace('_', ""));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn output_pins_are_keyed_by_model_version() {
+    let pairs = pinned_pairs();
+    assert_eq!(
+        pairs.len(),
+        5,
+        "expected one pinned digest per pin test: {pairs:?}"
+    );
+    let got = datagen_rs::corpus::sha256_hex(&pairs.join(";"));
+    let version = datagen_rs::model::MODEL_VERSION;
+    match PINS_BY_MODEL_VERSION.iter().find(|(v, _)| *v == version) {
+        Some((_, want)) => assert_eq!(
+            &got, want,
+            "an output pin changed but MODEL_VERSION is still {version}: bump MODEL_VERSION \
+             (model.rs) and add the new pin set here"
+        ),
+        None => {
+            panic!("no pin set recorded for MODEL_VERSION {version}: add ({version:?}, {got:?})")
+        }
+    }
 }

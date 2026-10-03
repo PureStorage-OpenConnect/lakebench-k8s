@@ -68,7 +68,7 @@ def test_entrypoint_passes_version_through(monkeypatch):
     assert rc == 0 and cmd == ["/app/datagen_rs", "--version"]
     # Not as another flag's value: then it is an unknown argument.
     rc, cmd = _run(monkeypatch, [*BASE, "--prefix", "--version"])
-    assert cmd is None or "--version" not in cmd[:1]
+    assert rc == 2 and cmd is None
 
 
 DOCKERFILE = (REPO / "datagen_rs" / "Dockerfile").read_text()
@@ -90,7 +90,7 @@ def test_dockerfile_has_no_boto3_and_labels():
         assert label in DOCKERFILE, label
     assert 'LB_BUILD_COMMIT="$LB_BUILD_COMMIT" cargo build' in DOCKERFILE
     # A build without the commit is refused, so no image reports "unknown".
-    assert 'test "$LB_BUILD_COMMIT" != "unknown"' in DOCKERFILE
+    assert 'test -n "$LB_BUILD_COMMIT" && test "$LB_BUILD_COMMIT" != "unknown"' in DOCKERFILE
 
 
 def test_dockerfile_keeps_python3():

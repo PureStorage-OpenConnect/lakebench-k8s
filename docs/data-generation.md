@@ -326,7 +326,7 @@ image:
 
 ```bash
 cd datagen_rs/
-podman build -t my-registry/my-datagen:latest .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t my-registry/my-datagen:latest .
 podman push my-registry/my-datagen:latest
 ```
 
