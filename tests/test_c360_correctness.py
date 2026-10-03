@@ -150,6 +150,65 @@ def test_gating_outcome_scopes_out_what_cannot_gate(monkeypatch):
     assert c3.gating_problems(no_facts) == []
 
 
+def _drops_fail(rec, gid):
+    edited = dict(rec, checks=[c for c in rec["checks"] if c.get("id") != gid])
+    return c3.gating_outcome(edited)[0] == "FAIL"
+
+
+@pytest.mark.parametrize("shape_gated", [False, True])
+def test_judged_gating_ids_is_the_set_gating_outcome_judges(monkeypatch, shape_gated):
+    """judged_gating_ids is public for the report's chip (ER-21): dropping a
+    GATING_CHECKS id from a passing record fails gating_outcome exactly when
+    the id is in judged_gating_ids, with and without a gated benchmark
+    shape, and with and without shape checks in the record."""
+    if shape_gated:
+        monkeypatch.setattr(c3, "GATING_CHECKS", c3.GATING_CHECKS | {"benchmark_rows_Q2"})
+    # A second shape keeps the record "benchmark ran" when Q2 is dropped.
+    with_shapes = _gated_record()
+    with_shapes["checks"].append(c3._check("benchmark_rows_Q1", "shape", True, 1, 0))
+    no_shapes = dict(
+        with_shapes,
+        checks=[c for c in with_shapes["checks"] if not c["id"].startswith("benchmark_rows_")],
+    )
+    for rec in (with_shapes, no_shapes):
+        assert c3.gating_outcome(rec) == (None, None)
+        judged = c3.judged_gating_ids(rec)
+        assert judged <= c3.GATING_CHECKS
+        for gid in c3.GATING_CHECKS:
+            assert _drops_fail(rec, gid) is (gid in judged), gid
+    assert ("benchmark_rows_Q2" in c3.judged_gating_ids(with_shapes)) is shape_gated
+    assert "benchmark_rows_Q2" not in c3.judged_gating_ids(no_shapes)
+
+
+def test_judged_gating_ids_matches_gating_outcome_on_stored_records():
+    from tests.fixtures.stored_records import load_record, record_ids
+
+    seen = 0
+    for run_id in record_ids():
+        rec = load_record(run_id).get("c360_correctness")
+        if not isinstance(rec, dict) or c3.gating_outcome(rec)[0] == "FAIL":
+            continue
+        seen += 1
+        judged = c3.judged_gating_ids(rec)
+        for gid in c3.GATING_CHECKS:
+            assert _drops_fail(rec, gid) is (gid in judged), (run_id, gid)
+    assert seen >= 1
+
+
+def test_judged_gating_ids_is_empty_where_nothing_is_judged(monkeypatch):
+    bad = _gated_record(silver_to_gold_days=False)
+    assert c3.judged_gating_ids(None) == set()
+    continuous = dict(bad, reporting_only=True, mode="continuous")
+    assert c3.judged_gating_ids(continuous) == set()
+    assert c3.gating_outcome(continuous) == (None, None)
+    # Facts do not change the set; a record without facts fails outright.
+    no_facts = c3.unevaluated_record("boom")
+    assert c3.judged_gating_ids(no_facts) == c3._gated_ids(None)
+    assert c3.gating_outcome(no_facts)[0] == "FAIL"
+    monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
+    assert c3.judged_gating_ids(bad) == set()
+
+
 def test_reporting_failures_lists_only_checks_outside_the_list():
     rec = _gated_record(interaction_mix=False, silver_to_gold_days=False, dates_in_window=None)
     assert c3.reporting_failures(rec) == ["interaction_mix"]
