@@ -2333,6 +2333,7 @@ SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
         "platform.storage.s3.endpoint",
         "platform.storage.scratch.enabled",
         "platform.storage.scratch.storage_class",
+        "spark.conf",
     }
 )
 
