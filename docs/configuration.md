@@ -44,7 +44,7 @@ written to `.lakebench/state.json` in the config's directory, which every
 nameless config in that directory shared. That file is now only read, and
 nothing ties the name in it to any one config. The teardown commands
 (`destroy`, `stop`, `admin`) and the read-only commands that look at a
-deployment (`status`, `logs`, `report`, `results`) therefore refuse a
+deployment (`status`, `logs`, `report`) therefore refuse a
 nameless config in a directory that has the file, unless `--name NAME` is
 given to `destroy`, `stop`, `status` or `logs`, which then check the
 namespace's own stamps (check 3 under "Deploy state and nameless teardown"

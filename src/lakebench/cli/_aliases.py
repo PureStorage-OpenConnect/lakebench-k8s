@@ -49,7 +49,7 @@ class Refusal:
 
 ALIASES: dict[str, Alias] = {
     # Its --format passes through, table by default.
-    "results": Alias("report"),
+    "results": Alias("report --format table"),
     "admin install-spark-operator": Alias("admin install --component spark-operator"),
     "admin install-scratch-storage-class": Alias("admin install --component scratch-storage-class"),
 }
@@ -67,7 +67,7 @@ _WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see
 ALIASED_FLAGS: dict[str, dict[str, str]] = {
     "init": dict.fromkeys(("--interactive", "-i", "--advanced"), _WIZARD_REMOVED),
     "run": {"--sustained": "--continuous"},
-    "recommend": {"--extended": "--slow-datagen"},
+    "recommend": dict.fromkeys(("--extended", "-e"), "--slow-datagen"),
 }
 
 #: Hidden on purpose, not renamed or removed: the deprecated ``-f`` short

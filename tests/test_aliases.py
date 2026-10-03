@@ -190,7 +190,9 @@ def _walk(cmd, path=()):
 def test_every_hidden_command_and_flag_is_in_a_table():
     """The other direction: nothing is hidden without an entry, so the doc
     lint (which reads these tables) sees every old name."""
-    hidden_cmds, hidden_flags = [], []
+    from lakebench.cli._helpers import DEPRECATED_SHORT_F_HELP
+
+    hidden_cmds, hidden_flags, seen = [], [], set()
     for path, cmd in _walk(_tree()):
         name = " ".join(path)
         if path and cmd.hidden and name not in {**ALIASES, **REFUSED, **DEPRECATED_COMMANDS}:
@@ -202,13 +204,18 @@ def test_every_hidden_command_and_flag_is_in_a_table():
                 set(REFUSED_FLAGS.get(name, {}))
                 | set(ALIASED_FLAGS.get(name, {}))
                 | set(HIDDEN_FLAGS.get(name, ()))
-                | set(HIDDEN_FLAGS["*"])
             )
+            # The wildcard covers only the deprecated short -f (cli/_helpers.py).
+            if getattr(p, "help", None) == DEPRECATED_SHORT_F_HELP:
+                known |= set(HIDDEN_FLAGS["*"])
             for opt in [*p.opts, *getattr(p, "secondary_opts", [])]:
-                if opt not in known and not cmd.hidden:
+                seen.add((name, opt))
+                if opt not in known:
                     hidden_flags.append(f"{name} {opt}")
     assert hidden_cmds == []
     assert hidden_flags == []
+    # Not vacuous: hidden params are visible to the walk.
+    assert {("clean", "--metrics-dir"), ("compare", "--keep"), ("results", "-f")} <= seen
 
 
 @pytest.mark.parametrize("old", sorted(DEPRECATED_COMMANDS))
