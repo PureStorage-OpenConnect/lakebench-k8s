@@ -83,20 +83,27 @@ def financial_config(
     role: str | None = None,
     perturbation: bool = False,
     name: str = "lbtest-aml",
+    image: str | None = None,
 ) -> Path:
     """A minimal financial config at ``path``."""
-    lines = [f"name: {name}", "workload:", "  schema: financial", "  datagen:"]
+    lines = [f"name: {name}"]
+    if image is not None:
+        lines += ["images:", f"  datagen: {image}"]
+    lines += ["workload:", "  schema: financial", "  datagen:"]
     if seed is not None:
         lines.append(f"    seed: {seed}")
     if role is not None:
         lines.append(f"    corpus_role: {role}")
     if perturbation:
         lines.append("    robustness_perturbation: true")
-    if len(lines) == 4:
+    if lines[-1] == "  datagen:":
         lines.append("    scale: 1")
     path.write_text("\n".join(lines) + "\n")
     return path
 
+
+#: A digest-pinned datagen image (test value).
+IMAGE = "docker.io/example/lb-datagen@sha256:" + "a" * 64
 
 _INT = re.compile(r"\d+")
 

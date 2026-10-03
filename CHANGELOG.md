@@ -601,6 +601,25 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `attempted` (and `submitting` once the Job may exist). The ledger, the
   datagen sidecar and the journal name the seed by its salted hash only.
   Generating the corpus is not a look and spends nothing.
+- **bronze-verify refuses a corpus from a held-out or spent AML seed** before
+  it reads or writes anything (owner decision, 10-03). It reads every row of
+  every cycle's manifest; a held-out or spent recovered seed, a manifest the
+  corpus seed cannot be recovered from (for example one with no typology row),
+  or a batch corpus with no manifest stops the run with exit 2 on
+  `run.protected_corpus`, so a development config pointed at a bucket that
+  holds a registered corpus never reaches silver. Behaviour changes: an old
+  bucket holding a corpus from a spent seed (42) now stops at bronze-verify
+  instead of running unscored, and a batch run over a corpus without a
+  manifest stops instead of warning. The continuous preflight checks the
+  manifest when it is there, and requires one with `--skip-generate`.
+- **A registered look scores only the corpus `generate --registered-corpus`
+  wrote** (owner decision, 10-03). `scripts/aml_gate.py --registered` refuses
+  unless the corpus ledger holds a `generated` entry for that role and seed
+  whose corpus fingerprint (every data file's path and size, each manifest
+  file's sha256, recorded from S3 when the generation finishes) equals the
+  local corpus's, every datagen pod of it ran the `--generator-image` digest,
+  and no other attempt submitted a Job into that bronze prefix meanwhile.
+  `generate --registered-corpus` now needs `images.datagen` pinned by digest.
 - **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
   scored run it can find on this host: stored run records, the configs the
   journals name and the held-out tokens in them, the bronze manifests and

@@ -642,7 +642,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `run.namespace_gone`: the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
-- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none
+- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify found the corpus manifest comes from a held-out or spent seed
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
