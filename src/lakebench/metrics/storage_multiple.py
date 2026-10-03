@@ -41,6 +41,9 @@ ORPHAN_FLOOR_NOTE = "unreferenced, bounded by the 24 h 10 min orphan-removal flo
 NOT_PVC = None  # an excluded item named without bytes (not in object storage)
 
 _CHECKPOINT_SEGMENT = re.compile(r"(^|/)_?checkpoints/")
+#: The stream checkpoint directories under ``sustained.checkpoint_base``
+#: (modules/pipeline_engines/spark/job.py).
+_STREAM_CHECKPOINT_DIRS = ("bronze-ingest", "silver-stream", "gold-refresh")
 _LOCATION_TRINO = re.compile(r"location\s*=\s*'([^']+)'", re.IGNORECASE)
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
 
@@ -136,9 +139,13 @@ def _excluded_label(
 ) -> str | None:
     """The exclusion group of *key*, or None. Stream checkpoints are any
     ``checkpoints/`` segment and, when the config moves them
-    (``sustained.checkpoint_base``), that prefix too."""
+    (``sustained.checkpoint_base``), the three stream directories under that
+    base (the only paths the jobs write there, so a base that overlaps a
+    table location never hides table bytes)."""
     base = checkpoint_base.strip("/")
-    if _CHECKPOINT_SEGMENT.search(key) or (base and key.startswith(f"{base}/")):
+    if _CHECKPOINT_SEGMENT.search(key) or (
+        base and any(key.startswith(f"{base}/{s}/") for s in _STREAM_CHECKPOINT_DIRS)
+    ):
         return "stream checkpoints"
     if bucket_layer == "bronze" and key.startswith(f"{datagen_prefix}/_corpus/"):
         return "datagen markers (_corpus/)"

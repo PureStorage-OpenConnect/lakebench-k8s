@@ -1408,8 +1408,8 @@ policy, not a system score (`storage_multiple_total` is diagnostic).
   removal ran, the unreferenced share is labelled as bounded by its
   24 h 10 min floor.
 - Excluded and listed with their bytes: stream checkpoints (any
-  `checkpoints/` segment, and `sustained.checkpoint_base` when it moves
-  them), the datagen
+  `checkpoints/` segment, and the stream directories under
+  `sustained.checkpoint_base` when it moves them), the datagen
   markers (`_corpus/`) and manifest, scoring outputs (`<gold>/scoring/`) and
   the ML loop's `<gold>/_ml_loop/`. Named without bytes, because they are not
   in object storage: the executor scratch PVCs and the dependency server's

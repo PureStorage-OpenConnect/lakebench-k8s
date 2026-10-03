@@ -477,3 +477,14 @@ def test_stage_only_run_is_not_measured():
 
     out = sm.measure_run(object(), None, object(), Metrics())
     assert out["not_measured"] == "a run --stage run: the other layers are not this run's"
+
+
+def test_checkpoint_base_over_a_table_location_hides_no_table():
+    """A checkpoint_base that overlaps the table locations ("warehouse")
+    excludes only its stream directories, never the tables under it."""
+    stream = [{"Key": "warehouse/gold-refresh/offsets/0", "Size": 1 * GB}]
+    base, _ = _measure()
+    out, _ = _measure(objects=_objects(extra_gold=stream), checkpoint_base="warehouse")
+    assert out["layers"] == base["layers"]
+    assert out["total"] == base["total"]
+    assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 1 * GB
