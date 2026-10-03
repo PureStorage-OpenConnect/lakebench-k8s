@@ -166,18 +166,14 @@ EXAMPLES = sorted((ROOT / "examples").glob("*.yaml"))
 V16_INIT = sorted((FIXTURES / "v16-init").glob("*.yaml"))
 
 
-#: The seven examples unchanged since 1.6.0, by the sha256 of their 1.6.0
-#: text (`git show v1.6.0:examples/<name>`): the round trip over today's
-#: copy is the round trip over 1.6's. A change to one of them fails here;
-#: copy its 1.6.0 text into tests/fixtures/v16-examples/ first.
+#: The examples unchanged since 1.6.0, by the sha256 of their 1.6.0 text
+#: (`git show v1.6.0:examples/<name>`): the round trip over today's copy is
+#: the round trip over 1.6's. A change to one of them fails here; copy its
+#: 1.6.0 text into tests/fixtures/v16-examples/ first (the five other Hive
+#: examples moved to Spark 4.1.1 in 1.7, and their 1.6.0 text is there).
 V16_UNCHANGED = {
     "hive-delta-spark-none.yaml": "eb7b96cb3a0588c8e568d5d021f041144ca6b27f6c8766077855b6c815798297",
     "hive-delta-spark-thrift.yaml": "bb1f2bac628f7c37b5ba12f0dc4c4e9978ddb684d48cf93ea54a8667576669aa",
-    "hive-delta-spark-trino.yaml": "06e0d562869fee20fcaa4ea16e526cd276caf521436dfe72626c5aabdc0037cc",
-    "hive-iceberg-spark-duckdb.yaml": "a30d86e042e1a4822d006dc4039429b715c8ea4a6004e3b317cdf1f1ead54ca2",
-    "hive-iceberg-spark-none.yaml": "a99b836f646089bd48b6d4b6e54cf91771c7b1e94e0b9772fdfad5283b2dc327",
-    "hive-iceberg-spark-thrift.yaml": "48ced34e8e87e929a0d938200ae65dd47a01ff37e8327ae9024ec4f46c4e5f02",
-    "hive-iceberg-spark-trino.yaml": "c079c9dc9207670b0a11c210bebe680414676e0db0438f54e034a462d3508345",
 }
 
 
