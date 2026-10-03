@@ -149,6 +149,77 @@ def _check(spark):
     ]
 
 
+def _check_stage_profile(spark):
+    """AML-1: with profile_stages, each rule runs in its own job group, logs a
+    [stage-profile] line (stages, none, or unavailable) whatever its outcome,
+    and the caller's job group is back after the pass. Without it nothing
+    changes."""
+    import common
+    import detection_rules
+    import gold_finalize_financial as gf
+
+    from lakebench.metrics.stage_profile import parse_stage_profile
+
+    sc = spark.sparkContext
+    sc.setJobGroup("caller-group", "caller description", interruptOnCancel=False)
+    template = detection_rules._empty_alerts_df(spark, "x")
+    groups = {}
+
+    def ran_rule(silver_txns, run_id="unknown"):
+        groups["WX_ran"] = sc.getLocalProperty("spark.jobGroup.id")
+        # A shuffle, so the rule's group runs more than one stage.
+        silver_txns.groupBy("uetr").count().collect()
+        return template
+
+    def skip_rule(silver_txns, run_id="unknown"):
+        groups["WX_skip"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise detection_rules.RuleSkipped("test-skip")
+
+    def error_rule(silver_txns, run_id="unknown"):
+        groups["WX_error"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise RuntimeError("boom")
+
+    rules = {"WX_ran": ran_rule, "WX_skip": skip_rule, "WX_error": error_rule}
+    logged = []
+    real = (gf.log, common.log)
+
+    def capture(m):
+        logged.append(m)
+        real[1](m)
+
+    detection_rules._RULE_DISPATCH.update(rules)
+    gf.log = common.log = capture
+    try:
+        txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+        # Default (the continuous tick): no group, no profile.
+        gf.run_detection_rules(spark, txns, "run-sp", rules=("WX_ran",))
+        assert groups.pop("WX_ran") == "caller-group"
+        assert not [m for m in logged if m.startswith("[stage-profile]")], logged
+        gf.run_detection_rules(spark, txns, "run-sp", rules=tuple(rules), profile_stages=True)
+    finally:
+        gf.log, common.log = real
+        for r in rules:
+            del detection_rules._RULE_DISPATCH[r]
+
+    assert sc.getLocalProperty("spark.jobGroup.id") == "caller-group"
+    assert sc.getLocalProperty("spark.job.description") == "caller description"
+    for rule, group in groups.items():
+        assert group.startswith(f"lb-rule-{rule}-"), groups
+    assert len(set(groups.values())) == 3, groups
+    lines = [m for m in logged if m.startswith("[stage-profile]")]
+    for rule in rules:
+        assert any(f"rule={rule} group={groups[rule]} " in m for m in lines), (rule, lines)
+    profile, unavailable, _cost = parse_stage_profile("\n".join(lines))
+    assert unavailable == {}, unavailable
+    assert profile["WX_ran"], lines
+    top = profile["WX_ran"][0]
+    assert top["tasks"] >= 1 and top["exec_s"] >= 0 and top["stages"] >= 2, top
+    assert profile["WX_skip"] == [] and profile["WX_error"] == [], profile
+    sc.setLocalProperty("spark.jobGroup.id", None)
+    sc.setLocalProperty("spark.job.description", None)
+    sc.setLocalProperty("spark.job.interruptOnCancel", None)
+
+
 def _check_late_entity(spark):
     """Continuous mode: silver_stream commits a batch's transactions before its
     entities, so a gold tick can see a structuring subject's payments while the
@@ -188,13 +259,76 @@ def _check_late_entity(spark):
     assert w2_alerts() == [1]
 
 
+def _cached(df):
+    """Whether Spark's cache manager holds *df* (DataFrame.is_cached is a
+    Python-side flag that clearCache does not reset)."""
+    level = df.storageLevel
+    return bool(level.useMemory or level.useDisk)
+
+
+def _check_screen_base(spark):
+    """AML-3: when W5 and W6 both run, the driver builds their screening
+    input once, passes the same persisted frame to both, keeps it cached
+    from W5 to W6 (only W5's alerts frame is dropped), and the cache is
+    cleared after W6. silver.entities exists here (_check_late_entity made
+    it)."""
+    import detection_rules as dr
+    import gold_finalize_financial as gf
+
+    txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+    template = dr._empty_alerts_df(spark, "x")
+    built, seen = [], []
+
+    def fake_base(silver_txns, silver_entities):
+        built.append(silver_entities is not None)
+        return silver_txns.select("uetr")
+
+    def screening(rule):
+        def fn(silver_txns, silver_entities=None, run_id="unknown", screen_base=None):
+            seen.append((rule, screen_base, screen_base is not None and _cached(screen_base)))
+            return template
+
+        return fn
+
+    real = (dr.screen_base_frame, dict(dr._RULE_DISPATCH))
+    dr.screen_base_frame = fake_base
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    dr._RULE_DISPATCH["W6_pep_counterparty"] = screening("W6")
+    try:
+        gf.run_detection_rules(
+            spark, txns, "run-sb", rules=("W5_sanctions_match", "W6_pep_counterparty")
+        )
+    finally:
+        dr.screen_base_frame = real[0]
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert built == [True]
+    (r5, b5, cached5), (r6, b6, cached6) = seen
+    assert (r5, r6) == ("W5", "W6")
+    assert b5 is b6 and b5 is not None
+    assert cached5 and cached6, seen
+    assert not _cached(b5)
+
+    # One screening rule alone: no shared base.
+    seen.clear()
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    try:
+        gf.run_detection_rules(spark, txns, "run-sb", rules=("W5_sanctions_match",))
+    finally:
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert seen == [("W5", None, False)]
+
+
 if __name__ == "__main__":
     # Run by spark_subprocess (argv: <warehouse> <jars>), which puts the
     # scripts on PYTHONPATH.
     _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
+        _check_stage_profile(_spark)
         _check_late_entity(_spark)
+        _check_screen_base(_spark)
     finally:
         _spark.stop()
     print("CHECK OK")

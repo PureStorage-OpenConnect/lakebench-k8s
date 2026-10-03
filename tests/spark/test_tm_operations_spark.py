@@ -277,10 +277,46 @@ def _check(spark):
 
     txns, n_rows = _setup(spark)
     _alerts(spark, "run-x-c1")
-    inv = tm.run_tm_operations(
-        spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
-    )
+    logged = []
+    real_log = tm.log
+    tm.log = lambda m: (logged.append(m), real_log(m))
+    try:
+        inv = tm.run_tm_operations(
+            spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+    finally:
+        tm.log = real_log
     status = {n: (s, d) for n, s, d in inv}
+
+    # AML-1: the [tm-ops] summary times each stage of the pass, and the
+    # phases account for the pass's elapsed time.
+    import json as _json
+
+    ops = [_json.loads(m[len("[tm-ops] ") :]) for m in logged if m.startswith("[tm-ops] ")]
+    assert len(ops) == 1, logged
+    phases = ops[0]["phases"]
+    # The summary is logged with sorted keys, so compare as a set.
+    assert set(phases) == {
+        "pin",
+        "reconcile",
+        "prior_state",
+        "plan",
+        "inputs",
+        "simulate",
+        "write_ledger",
+        "write_dispositions",
+        "write_cases",
+        "coverage",
+        "read_back",
+        "recon_write",
+        "invariants",
+    }, phases
+    assert all(v >= 0 for v in phases.values()), phases
+    total, elapsed = sum(phases.values()), ops[0]["elapsed_seconds"]
+    # elapsed_seconds is rounded to 0.1 s and also covers the invariant log
+    # lines after the last phase.
+    assert abs(total - elapsed) <= 0.05 * elapsed + 0.1, (total, elapsed, phases)
+
     assert all(s == "pass" for s, _ in status.values()), status
     assert {
         "monitored_population",
@@ -744,6 +780,57 @@ def _check(spark):
     counts = tm.read_back(spark, "run-n-c2", date(2025, 1, 1))
     counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
     assert _st(tm.evaluate_invariants(counts))["one_row_per_alert_identity"] == "fail"
+
+    # The two persisted frames (alert inputs, the per-customer replay) are
+    # materialised at their own phase boundaries, after the cycle is taken:
+    # a replay that fails there fails the pass, as it did when the
+    # dispositions write first triggered it.
+    _alerts(spark, "run-ph-c1")
+    counted = []
+
+    class _Watch:
+        def __init__(self, df, name, fail=False):
+            self._df, self._name, self._fail = df, name, fail
+
+        def persist(self, *a, **k):
+            return _Watch(self._df.persist(*a, **k), self._name, self._fail)
+
+        def count(self):
+            counted.append(self._name)
+            if self._fail:
+                raise RuntimeError("replay lost")
+            return self._df.count()
+
+        def __getattr__(self, attr):
+            return getattr(self._df, attr)
+
+    real_inputs, real_simulate = tm.build_alert_inputs, tm.simulate
+
+    def watched(fail):
+        tm.build_alert_inputs = lambda *a, **k: _Watch(real_inputs(*a, **k), "inputs")
+
+        def sim(*a, **k):
+            d, c, tagged = real_simulate(*a, **k)
+            return d, c, _Watch(tagged, "simulate", fail)
+
+        tm.simulate = sim
+
+    try:
+        watched(fail=False)
+        inv = tm.run_tm_operations(
+            spark, txns, "run-ph-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+        assert all(s == "pass" for _, s, _ in inv), inv
+        assert counted == ["inputs", "simulate"], counted
+        _alerts(spark, "run-ph-c2")
+        watched(fail=True)
+        inv = tm.run_tm_operations(
+            spark, txns, "run-ph-c2", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+    finally:
+        tm.build_alert_inputs, tm.simulate = real_inputs, real_simulate
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "fail")], inv
+    assert "replay lost" in inv[0][2], inv
 
     # (e) No manifest: the layer reports not run, with the reason, and
     # leaves detection's alerts alone.

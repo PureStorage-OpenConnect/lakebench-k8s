@@ -2136,6 +2136,8 @@ def _run_once(
     sample_run_start(collector.current_run, cfg)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
+        # The per-job timeout every batch stage gets, for limits.headroom_pct.
+        collector.current_run.job_timeout_seconds = int(timeout) if timeout else None
         # [] from the start: a run that ends before the maintenance phase is
         # then stamped "not run", never with the policy's request.
         collector.current_run.maintenance_outcomes = []
@@ -3296,6 +3298,9 @@ def _run_once(
                 _bench_timeout = (
                     900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                 )
+                if collector.current_run is not None:
+                    # Per-query limit of the timed benchmark: its headroom.
+                    collector.current_run.benchmark_query_timeout_seconds = _bench_timeout
                 if pre_compaction_qph > 0:
                     # The pre round was measured after a warm-up pass; give
                     # this one the same, or the comparison measures the

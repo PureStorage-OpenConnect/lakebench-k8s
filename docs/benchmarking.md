@@ -375,7 +375,9 @@ pre-benchmark maintenance budget when it stopped maintenance early, and the
 trickle line when the trickle held intake (BOUNDED BY trickle, above).
 `limits.bound_kinds` names the same limits without their counts, the
 trickle excepted. A number measured under a cap that bound is a property of
-the cap, not of the infrastructure.
+the cap, not of the infrastructure. `limits.headroom_pct` (batch,
+diagnostic) gives each stage's headroom against the per-job timeout and the
+timed benchmark's against its per-query timeout; see [aml-scoring.md](aml-scoring.md#where-gold-finalize-spends-its-time).
 
 ---
 

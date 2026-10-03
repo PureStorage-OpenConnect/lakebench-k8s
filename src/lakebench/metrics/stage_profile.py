@@ -1,0 +1,120 @@
+"""Parse the AML gold driver's per-rule ``[stage-profile]`` lines.
+
+``common.rule_stage_profile`` (in the Spark driver) runs after each
+detection rule and logs, for the rule's own Spark job group, its heaviest
+stages by executor run time::
+
+    [stage-profile] rule=<id> group=<g> stage=<n> attempt=<a> status=<s>
+        tasks=<t> wall_s=<s> exec_s=<s> shuffle_read_mb=<m> max_task_s=<s>
+        stages=<k> truncated=<b> complete=<b> lossy=<b> profile_s=<s>
+        name=<stage name>
+    [stage-profile] rule=<id> group=<g> stages=0 truncated=<b> complete=<b>
+        lossy=<b> profile_s=<s>
+    [stage-profile] rule=<id> group=<g> unavailable reason=<text>
+
+The flags are common.rule_stage_profile's: ``complete=false`` the driver's
+status listener had not caught up, ``truncated=true`` the store had dropped
+some of the group's jobs or stages, ``lossy=true`` the listener queue
+dropped events during the rule (both true when they could not be
+checked). ``profile_s`` is the time the profile read took, Lakebench
+overhead inside the gold-finalize job's time.
+
+The group is unique per rule invocation. When one log holds several
+invocations of a rule (a rerun driver), the last group's lines win.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+_PREFIX = r"\[stage-profile\]\s+rule=(?P<rule>[A-Za-z0-9_]+)\s+group=(?P<group>\S+)\s+"
+_FLAGS = (
+    r"truncated=(?P<truncated>true|false)\s+complete=(?P<complete>true|false)"
+    r"\s+lossy=(?P<lossy>true|false)\s+profile_s=(?P<profile_s>[\d.]+)"
+)
+_STAGE_RE = re.compile(
+    _PREFIX + r"stage=(?P<stage>\d+)\s+attempt=(?P<attempt>\d+)\s+status=(?P<status>[A-Z]+)"
+    r"\s+tasks=(?P<tasks>\d+)\s+wall_s=(?P<wall_s>\S+)\s+exec_s=(?P<exec_s>\S+)"
+    r"\s+shuffle_read_mb=(?P<shuffle_read_mb>\S+)\s+max_task_s=(?P<max_task_s>\S+)"
+    r"\s+stages=(?P<stages>\d+)\s+" + _FLAGS + r"\s+name=(?P<name>.*?)\s*$"
+)
+_EMPTY_RE = re.compile(_PREFIX + r"stages=0\s+" + _FLAGS + r"\s*$")
+_UNAVAILABLE_RE = re.compile(_PREFIX + r"unavailable\s+reason=(?P<reason>.*?)\s*$")
+
+
+def _num(v: str) -> float | None:
+    try:
+        return float(v)
+    except ValueError:
+        return None  # "None": the stage had no completion time or task summary
+
+
+def _flags(m: re.Match[str]) -> dict[str, bool]:
+    return {k: m.group(k) == "true" for k in ("truncated", "complete", "lossy")}
+
+
+def parse_stage_profile(
+    logs: str | None,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str], dict[str, float]]:
+    """``(stage_profile, unavailable, cost_s)``.
+
+    ``stage_profile``: per rule, the stages of its last group, heaviest
+    first as logged, each with the group's ``truncated``, ``complete`` and
+    ``lossy`` flags. An empty list means the rule's group ran no stage and
+    the read was clean.
+
+    ``unavailable``: per rule whose last group gave no usable list, why:
+    the status store could not be read, or it held no stage of the group
+    while a flag says stages may be missing.
+
+    ``cost_s``: per rule, the seconds its last profile read took.
+    """
+    last_group: dict[str, str] = {}
+    profile: dict[str, list[dict[str, Any]]] = {}
+    unavailable: dict[str, str] = {}
+    cost: dict[str, float] = {}
+    for line in (logs or "").splitlines():
+        if "[stage-profile]" not in line:
+            continue
+        stage = _STAGE_RE.search(line)
+        empty = None if stage else _EMPTY_RE.search(line)
+        gone = None if stage or empty else _UNAVAILABLE_RE.search(line)
+        m = stage or empty or gone
+        if m is None:
+            continue
+        rule, group = m.group("rule"), m.group("group")
+        if last_group.get(rule) != group:
+            last_group[rule] = group
+            profile[rule] = []
+            unavailable.pop(rule, None)
+            cost.pop(rule, None)
+        if gone:
+            profile.pop(rule, None)
+            unavailable[rule] = gone.group("reason")
+        elif empty:
+            cost[rule] = float(empty.group("profile_s"))
+            flags = _flags(empty)
+            if flags["truncated"] or not flags["complete"] or flags["lossy"]:
+                profile.pop(rule, None)
+                unavailable[rule] = "no stage in the status store: " + " ".join(
+                    f"{k}={'true' if v else 'false'}" for k, v in flags.items()
+                )
+        elif stage:
+            cost[rule] = float(stage.group("profile_s"))
+            profile[rule].append(
+                {
+                    "stage": int(stage.group("stage")),
+                    "attempt": int(stage.group("attempt")),
+                    "status": stage.group("status"),
+                    "tasks": int(stage.group("tasks")),
+                    "wall_s": _num(stage.group("wall_s")),
+                    "exec_s": _num(stage.group("exec_s")),
+                    "shuffle_read_mb": _num(stage.group("shuffle_read_mb")),
+                    "max_task_s": _num(stage.group("max_task_s")),
+                    "stages": int(stage.group("stages")),
+                    **_flags(stage),
+                    "name": stage.group("name"),
+                }
+            )
+    return profile, unavailable, cost

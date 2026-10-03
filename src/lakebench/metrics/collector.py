@@ -77,6 +77,22 @@ class JobMetrics:
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
+    # Wall seconds per rule from the same ``[detection]`` lines' trailing
+    # ``elapsed=Ts``: every rule that was attempted (ran, failed or skipped
+    # for a structural reason), not mode-excluded rules, which never start.
+    rule_elapsed_s: dict[str, float] = field(default_factory=dict)
+    # Heaviest Spark stages per rule from the ``[stage-profile]`` lines
+    # (common.rule_stage_profile, metrics/stage_profile.py), heaviest first:
+    # {"stage", "attempt", "status", "tasks", "wall_s", "exec_s",
+    # "shuffle_read_mb", "max_task_s", "stages", "truncated", "complete",
+    # "lossy", "name"}. An empty list means the rule's group ran no stage.
+    # ``stage_profile_unavailable`` holds the reason when there is no usable
+    # list for a rule (store unreadable, or empty while a flag is set).
+    stage_profile: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    stage_profile_unavailable: dict[str, str] = field(default_factory=dict)
+    # Seconds each rule's profile read took (Lakebench overhead inside the
+    # job's elapsed time, never part of a rule's time).
+    stage_profile_cost_s: dict[str, float] = field(default_factory=dict)
     # TM operations layer (GOALS P10, AML gold only), from the driver's
     # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
     # by cycle (as a string, the JSON key) then invariant name, each value
@@ -416,7 +432,10 @@ class PipelineMetrics:
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",
     # "rules" (every rule's status and skip reason), "total_alerts", "fp_alerts",
-    # "fp_rate", "run_id", "computed_by"}. The scorecard reads this to render
+    # "fp_rate", "run_id", "computed_by", "evidence_capped_alerts_by_rule"
+    # (rule -> alerts an evidence cap cut), "recall_bounded_by_evidence_cap"
+    # (typology -> those of its designated rules), and per typology
+    # "bounded_by_evidence_cap"}. The scorecard reads this to render
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 
@@ -446,6 +465,14 @@ class PipelineMetrics:
     # Lakebench-imposed cuts to fit the cluster (config.autosizer), in the
     # words printed at run start. None: not recorded.
     autosize_cuts: list[str] | None = None
+
+    # The per-job timeout the batch run gave every stage (--timeout, or the
+    # scale-derived budget run computes). Headroom per stage is read against
+    # it (metrics/attribution.headroom_pct). None: not recorded.
+    job_timeout_seconds: int | None = None
+    # The per-query timeout of the run's timed benchmark: the limit that
+    # bounds the benchmark phase (no per-job timeout applies to it).
+    benchmark_query_timeout_seconds: int | None = None
 
     # What the run's table-maintenance calls actually did (cli/_sustained
     # _note_outcome): one dict per call with kind (expire, compaction),
@@ -525,6 +552,10 @@ class PipelineMetrics:
             d["provenance"] = self.provenance
         if self.autosize_cuts is not None:
             d["autosize_cuts"] = list(self.autosize_cuts)
+        if self.job_timeout_seconds is not None:
+            d["job_timeout_seconds"] = int(self.job_timeout_seconds)
+        if self.benchmark_query_timeout_seconds is not None:
+            d["benchmark_query_timeout_seconds"] = int(self.benchmark_query_timeout_seconds)
         if self.maintenance_outcomes is not None:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         if self.continuous is not None:
@@ -3032,7 +3063,7 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"alerts=(?P<n>\d+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in detection_re.finditer(logs):
@@ -3042,6 +3073,11 @@ class MetricsCollector:
             except ValueError:
                 continue
             mid = (m.group("mid") or "").strip()
+            if mid != "error=unknown-rule":  # never started
+                try:
+                    metrics.rule_elapsed_s[rule] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
             err_match = re.search(r"\berror=(.+)$", mid)
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()
@@ -3058,11 +3094,26 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in skip_re.finditer(logs):
-            metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
+            reason = m.group("reason").strip()
+            metrics.rules_skipped[m.group("rule")] = reason
+            if reason != "mode-excluded":
+                try:
+                    metrics.rule_elapsed_s[m.group("rule")] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
+
+        # AML-1: per-rule Spark stage profile (common.rule_stage_profile).
+        from lakebench.metrics.stage_profile import parse_stage_profile
+
+        (
+            metrics.stage_profile,
+            metrics.stage_profile_unavailable,
+            metrics.stage_profile_cost_s,
+        ) = parse_stage_profile(logs)
 
         # P10 TM operations lines (tm_operations.py).
         from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status

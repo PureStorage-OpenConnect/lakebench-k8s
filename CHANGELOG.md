@@ -43,6 +43,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **AML batch records attribute gold-finalize time and show stage headroom.**
+  `experiment.attribution` names gold-finalize's slowest rule, its heaviest
+  Spark stage and the TM share; `limits.headroom_pct` gives each stage's
+  headroom against the per-job timeout and the timed benchmark's headroom
+  against its per-query timeout, which the record now keeps as
+  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. Lakebench
+  now reads the whole driver log of a job that fails or times out, as it
+  did for a successful one, so the per-rule lines of a failed gold-finalize
+  reach its record. `scripts/aml_stage_attribution.py`
+  builds the same profile from a Spark event log when the driver could not
+  read its status store. Diagnostics only. See
+  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **AML gold-finalize records where its time goes.** The gold-finalize
+  job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
+  rule), `stage_profile` (each rule's three heaviest Spark stages, read
+  from the driver's status store with every rule in its own job group,
+  flagged when the store may be missing stages), `stage_profile_unavailable`
+  and `stage_profile_cost_s`, and the TM operations summary gains
+  `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
+  score changes. Reading the profile can add up to 5 seconds per rule to
+  the gold-finalize job when the driver's status listener lags, and none
+  when it keeps up; continuous gold ticks do not profile. See
+  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
@@ -495,6 +518,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The unit tests run the same guard (`tests/test_prose_style.py`). A hit
   that has to stay is listed in `scripts/prose_allowlist.txt` with a
   reason. `--only em-dashes` is now an unknown check; use `--only prose`.
+- **AML results move to workload version `aml-2`.** W4's
+  `related_txn_ids` and `related_entity_ids` are sorted and cut to 1,000
+  per alert (an evidence cap, as W2 already had), and the evidence maps of
+  W2, W4 and the W5 rescreen gain the full count and a truncation flag
+  (`txn_total`, `txns_truncated`; W4 also `entity_total`,
+  `entities_truncated`). Scoring records the cut alerts per rule and labels
+  the recall of the typologies those rules detect as bounded by the cap.
+  Every rule now builds its alert columns through one helper, and W5 and
+  W6 share one persisted screening input when both run; both are
+  results-neutral. In continuous mode a W4 hub alert over the cap is
+  raised again only when a new payment's uetr sorts into the kept 1,000,
+  and payments past the cut get no time to detect; across TM cycles a
+  capped hub that grows several times over can lose its alert identity and
+  open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
+  runs. See
+  [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

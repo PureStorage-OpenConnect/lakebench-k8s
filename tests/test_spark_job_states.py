@@ -181,3 +181,35 @@ class TestUnrecognisedStateIsLoud:
         assert status.state == JobState.UNKNOWN
         assert "TIME_TRAVELLING" in caplog.text
         assert "polled until timeout" in caplog.text
+
+
+class TestFailedOrTimedOutJobsKeepTheWholeLog:
+    """A gold job that fails or runs out of time is the one whose per-rule
+    [detection] and [stage-profile] lines say where the time went (AML-3):
+    the monitor reads its whole driver log, as on success, not a tail."""
+
+    def test_failure_reads_the_whole_log(self):
+        monitor, _ = _monitor_returning(JobState.RUNNING, JobState.FAILED)
+        with (
+            patch.object(SparkJobMonitor, "_get_driver_logs", return_value="") as logs,
+            patch("time.sleep"),
+        ):
+            monitor.wait_for_completion("lakebench-gold-finalize", timeout_seconds=60)
+        assert all(c.kwargs.get("tail_lines", "unset") is None for c in logs.call_args_list)
+        assert logs.call_args_list
+
+    def test_timeout_reads_the_whole_log(self):
+        mgr = MagicMock()
+        mgr.get_job_status.return_value = MagicMock(
+            state=JobState.RUNNING, executor_count=4, message="RUNNING"
+        )
+        monitor = SparkJobMonitor.__new__(SparkJobMonitor)
+        monitor.job_manager = mgr
+        with (
+            patch.object(SparkJobMonitor, "_get_driver_logs", return_value="") as logs,
+            patch("time.sleep"),
+        ):
+            result = monitor.wait_for_completion("lakebench-gold-finalize", timeout_seconds=-1)
+        assert "timed out" in result.message
+        assert logs.call_args_list
+        assert all(c.kwargs.get("tail_lines", "unset") is None for c in logs.call_args_list)

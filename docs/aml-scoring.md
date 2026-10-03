@@ -347,6 +347,31 @@ matching role, so accidentally scoring against them is not possible.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
+## Per-alert evidence caps
+
+Some rules cut an alert's related-transaction list so one alert row cannot
+grow with the corpus. These are Lakebench-imposed caps, set by Lakebench and
+not tuned to any result:
+
+| Rule | List | Cap | Kept |
+|---|---|---|---|
+| W1_connected_components | `related_txn_ids` | 250,000 | earliest by time |
+| W2_structuring, beneficiary kind | `related_txn_ids`, `related_entity_ids` | 1,000 each | first by uetr, first by entity id |
+| W4_risk_propagation | `related_txn_ids`, `related_entity_ids` | 1,000 | first in sorted order |
+| W5_sanctions_match, rescreen | `related_txn_ids` | 200 | first by payment time |
+
+The W2 originator kind and the other rules are not cut. Each capped alert's
+`evidence` map carries the full count (`txn_total`, and `entity_total` for
+W4) and whether the cap cut the list (`txns_truncated`, and
+`entities_truncated` for W4). W2's sender list has no such flag, and its
+narrative's sender count is the capped count. Scoring matches planted payments against
+`related_txn_ids`, so a cut alert can miss planted payments past the cut.
+When any alert of a rule was cut, the scoring summary counts them in
+`evidence_capped_alerts_by_rule`, lists the typologies the rule detects in
+`recall_bounded_by_evidence_cap`, and each such typology's entry in
+`typologies` names the rule in `bounded_by_evidence_cap`: that recall is
+bounded by a Lakebench-imposed cap, not a property of the detector alone.
+
 ## Metric-trust caveats
 
 Three places on the scorecard where the metric name suggests more
@@ -477,6 +502,76 @@ retention target, about 84 TB. The Pydantic schema accepts up to scale
 to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-pod memory cap (a
 Lakebench-imposed cap). The pipeline has been run end to end only up to
 scale 100, on the pre-freeze generator.
+
+### Where gold-finalize spends its time
+
+The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
+`gold-finalize`) records, besides `alerts_by_rule`:
+
+- `rule_elapsed_s`: wall seconds per detection rule, for every rule that
+  started (ran, failed or skipped for a structural reason such as W1's
+  vertex cap), from the rule's start to its alerts' commit.
+- `stage_profile`: per rule, its three heaviest Spark stages by summed
+  executor run time (`exec_s`), with the stage's status, task count, wall
+  time, longest task (`max_task_s`), shuffle read in MB and the number of
+  stages the rule ran. Each rule runs in its own Spark job group,
+  `lb-rule-<rule>-<id>`, which is how its stages are told apart; the
+  stages are read from the driver's status store after the rule's commit,
+  outside `rule_elapsed_s`. Three flags say how far the numbers can be
+  trusted: `complete: false` when the driver's status listener had not
+  caught up within 5 seconds, `truncated: true` when the store had already
+  dropped some of the rule's jobs or stages (it keeps the last 100 of
+  each), and `lossy: true` when the listener dropped events during the
+  rule, so task totals are low. When the starting point could not be read,
+  `truncated` and `lossy` are both true. The 5 second wait covers every
+  listener queue, so with Spark's event log turned on `complete` can read
+  false while the status store had caught up. An empty list means the rule
+  ran no stage.
+  When there is no usable list (the store could not be read, or it held no
+  stage of the rule while a flag is set), the rule is listed in
+  `stage_profile_unavailable` with the reason instead. Detection is never
+  affected. The wait for the listener adds at most 5 seconds per rule to
+  the gold-finalize job, and nothing when the listener keeps up;
+  `stage_profile_cost_s` records the seconds each rule's read took, which
+  is Lakebench overhead inside the job's time and never part of
+  `rule_elapsed_s`. The continuous gold tick does not profile, so its
+  timings are unchanged.
+- `tm_ops.phases`: wall seconds per stage of the TM operations pass, in
+  pass order `pin`, `reconcile`, `prior_state`, `plan` (building the
+  alert-input, replay and disposition plans), `write_ledger`, `inputs`
+  (the alert-input build), `simulate` (the per-customer replay),
+  `write_dispositions`, `write_cases`, `coverage`, `read_back`,
+  `recon_write`, `invariants`; together they make up
+  `tm_ops.elapsed_seconds`. The JSON keys are sorted, not in pass order.
+  Spark evaluates lazily, so a phase holds the work its own reads and
+  writes trigger; the alert inputs and the replay are materialised in
+  their own phases, after the cycle is recorded as started, so a failure
+  there fails the pass as before.
+
+The run's record derives two diagnostic blocks from the fields above (neither
+enters identity, a verdict or a comparison):
+
+- `experiment.attribution` (AML batch): the gold-finalize job's slowest
+  rule (`dominant_rule`, its `rule_elapsed_s` and `share_of_job`, the rule's
+  time over the job's), that rule's heaviest stage (`dominant_stage`: stage
+  id, name, tasks, executor seconds, wall seconds, longest task, its share
+  of the executor time of the rule's logged stages (the three heaviest),
+  and the profile's flags), and the TM pass's
+  time and share (`tm_elapsed_s`, `tm_share`). `profile` is `read`, or says
+  why the stage is missing (`unavailable: <reason>`, `no_stage`,
+  `missing`). When the status store could not be read, the same profile can
+  be built from a Spark event log of a rerun of gold-finalize with
+  `scripts/aml_stage_attribution.py EVENTLOG --record metrics.json`, which
+  marks the block `profile_source: eventlog`.
+- `limits.headroom_pct` (batch): per stage, `100 x (1 - elapsed / per-job
+  timeout)` against the per-job timeout the run gave every stage (recorded
+  as `job_timeout_seconds`); a stage that ran more than once reports its
+  slowest run, and a failed stage reads null. The benchmark phase has no
+  per-job timeout: its queries are bounded one by one, so
+  `benchmark_query` is `100 x (1 - slowest timed query sample / per-query timeout)`
+  (recorded as `benchmark_query_timeout_seconds`, 900 s for AML), null
+  when a query failed or the benchmark was replaced afterwards by
+  `lakebench benchmark`. 25 or more means at most 75% of the budget used.
 
 ## Known limitations in v1.6
 

@@ -35,6 +35,14 @@ nothing measured under this one):
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
   the strategy that ran is recorded per job (2026-10-02).
+- ``aml-2``: W4's related_txn_ids and related_entity_ids are sorted and cut
+  to 1,000 per alert, and its evidence map gains txn_total, txns_truncated,
+  entity_total and entities_truncated, so W4 alerts and possibly W4 recall,
+  false positives, continuous time to detect and TM alert identity for
+  hubs change; W2 and the W5 rescreen gain txn_total and txns_truncated,
+  and W2's beneficiary sender list is sorted before its cut (2026-10-02).
+  The first AML result change of v1.7; later ones before the release take
+  a dev suffix.
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -71,7 +79,7 @@ V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
     "customer360": "c360-2",
-    "financial": "aml-1",
+    "financial": "aml-2",
     "custom": "custom-1",
 }
 
@@ -823,6 +831,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
     limits["bound_kinds"] = _bound_kinds(limits, rules)
+    from lakebench.metrics.attribution import attribution, headroom_pct
+
+    headroom = headroom_pct(metrics) if mode == "batch" else None
+    if headroom is not None:
+        # Diagnostic: how close each stage came to the per-job timeout.
+        limits["headroom_pct"] = headroom
     if mode == "sustained":
         # The trickle is shown with the limits but is not a bound kind:
         # every continuous run sets one (metrics/bounds.py).
@@ -929,7 +943,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             else {}
         ),
     }
-    return {
+    exp: dict[str, Any] = {
         **block,
         "system": "local" if local else "cluster",
         "support": _recorded_support(inputs, schema, arch, mode, local),
@@ -947,6 +961,11 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "results": _results(metrics, mode),
         "lakebench": experiment_lakebench(metrics.provenance),
     }
+    # Diagnostic, AML batch only: where gold-finalize's time went.
+    gold_attribution = attribution(metrics) if mode == "batch" else None
+    if gold_attribution is not None:
+        exp["attribution"] = gold_attribution
+    return exp
 
 
 def refresh_benchmark(metrics: Any) -> None:
@@ -994,6 +1013,11 @@ def refresh_benchmark(metrics: Any) -> None:
         "benchmark_iterations"
     )
     limits["benchmark_mode"] = getattr(bench, "mode", None)
+    headroom = limits.get("headroom_pct")
+    if isinstance(headroom, dict) and "benchmark_query" in headroom:
+        # The run's per-query timeout does not describe the replacement
+        # benchmark: its headroom is not known.
+        headroom["benchmark_query"] = None
     reps = exp.setdefault("repetitions", {})
     reps["benchmark_samples_per_query"] = _repetitions(metrics).get("benchmark_samples_per_query")
     exp["benchmark_source"] = "lakebench benchmark, after the run (replaced the run's benchmark)"

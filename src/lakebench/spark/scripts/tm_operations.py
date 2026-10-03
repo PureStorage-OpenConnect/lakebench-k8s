@@ -2272,6 +2272,18 @@ def run_tm_operations(
     import time
 
     started = time.time()
+    # Wall seconds per stage of the pass for the [tm-ops] summary (logged
+    # with sorted keys). Spark is lazy, so a phase holds the work its own
+    # actions trigger; the two persisted frames are counted at their
+    # boundaries so their work lands in their own phase.
+    phases: dict = {}
+    phase_start = [started]
+
+    def _phase(name):
+        now = time.time()
+        phases[name] = round(phases.get(name, 0.0) + now - phase_start[0], 3)
+        phase_start[0] = now
+
     held = []
     wrote = False
     try:
@@ -2323,6 +2335,7 @@ def run_tm_operations(
             )
             _status("not_run", cycle_no, reason)
             return [("workflow", "not_run", reason)]
+        _phase("pin")
 
         # Stage 1: completeness. Bronze is pinned after silver and before
         # the source count, so silver <= bronze <= source by construction and
@@ -2347,6 +2360,7 @@ def run_tm_operations(
             # pinned epoch is written before that batch commits.
             bronze["ingested"] = ingested_source_paths(spark, BRONZE_CHECKPOINT, epoch)
         recon_rows, recon = reconcile(spark, txns, entities, source, bronze, continuous)
+        _phase("reconcile")
 
         # The last completed cycle, at the snapshots its ledger recorded.
         prior_disp, prior_cases, prev_as_of, history_note = _prior_state(
@@ -2364,6 +2378,7 @@ def run_tm_operations(
             if "txn_sketch" not in carry.columns:
                 # A table written before the sketch existed.
                 carry = carry.withColumn("txn_sketch", lit(None).cast("array<bigint>"))
+        _phase("prior_state")
 
         # Stage 6-8: triage, cases, SAR decisions.
         alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id))
@@ -2424,6 +2439,7 @@ def run_tm_operations(
             lit(None).cast("boolean").alias("qa_disagrees"),
         )
         disp = sim_rows.select(*disp_cols).unionByName(other.select(*disp_cols))
+        _phase("plan")
         # From here on tables are overwritten. The cycle number is taken in
         # the ledger first, so a crash leaves an incomplete cycle the next
         # pass skips (never reused, never carried from), and any error after
@@ -2438,15 +2454,27 @@ def run_tm_operations(
         )
         wrote = True
         _status("started", cycle_no, "writing the TM tables")
+        _phase("write_ledger")
+        # Materialise the two persisted frames here, after the cycle is taken
+        # (a failure in either fails the pass, as it did when the first write
+        # triggered them), so the alert-input build and the per-customer
+        # replay are timed as their own phases. Later reads use the cache, as
+        # they did when the write materialised it: results are unchanged.
+        inputs.count()
+        _phase("inputs")
+        tagged.count()
+        _phase("simulate")
         disp.select(*disp_cols, *run_cols).writeTo(f"{CATALOG}.{GOLD_DISPOSITIONS}").overwrite(
             lit(True)
         )
+        _phase("write_dispositions")
         activity = case_activity(txns, cases_sim)
         case_cols = [n for n, _ in ddl_columns(DDL_CASES)][:-5]
         cases = cases_sim.join(activity, "case_id", "left").withColumn(
             "activity_txn_count", _coalesce_long("activity_txn_count")
         )
         cases.select(*case_cols, *run_cols).writeTo(f"{CATALOG}.{GOLD_CASES}").overwrite(lit(True))
+        _phase("write_cases")
 
         # Scenario coverage matrix.
         try:
@@ -2467,6 +2495,7 @@ def run_tm_operations(
         ).select(
             "*", lit(run_id).alias("run_id"), current_timestamp().alias("computed_ts")
         ).writeTo(f"{CATALOG}.{GOLD_COVERAGE}").overwrite(lit(True))
+        _phase("coverage")
 
         # Read the written tables back once; the funnel rows complete the
         # cycle ledger, and the invariants read the ledger as written.
@@ -2489,6 +2518,7 @@ def run_tm_operations(
             ("funnel", "sars", "sars", counts["alert_sars"], None),
             ("funnel", "continuing_sars", "sars", counts["review_sars"], None),
         ]
+        _phase("read_back")
         _write_recon(
             spark,
             recon_rows
@@ -2514,6 +2544,7 @@ def run_tm_operations(
             cycle_run_id,
             as_of,
         )
+        _phase("recon_write")
         rec = {
             (r["section"], r["item"]): r["item_count"]
             for r in spark.table(f"{CATALOG}.{GOLD_RECON}")
@@ -2538,6 +2569,8 @@ def run_tm_operations(
         )
         invariants = evaluate_invariants(counts)
         summary = ops_summary(as_of, params, recon_rows, counts)
+        _phase("invariants")
+        summary["phases"] = phases
     except Exception as e:  # noqa: BLE001 -- reported through the gate
         err = one_line(f"{type(e).__name__}: {e}", limit=400)
         if wrote:
