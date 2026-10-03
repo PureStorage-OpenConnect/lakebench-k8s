@@ -257,6 +257,57 @@ def _drop_one(core_v1: Any, name: str, namespace: str) -> None:
         ) from None
 
 
+#: The ConfigMap that carries heldout_hashes.json to the datagen pods.
+HELDOUT_MAP_NAME = "lakebench-heldout-hashes"
+#: Where the datagen container mounts it (LB_HELDOUT_HASHES names the file).
+HELDOUT_MOUNT_DIR = "/etc/lakebench/heldout"
+
+
+class HeldoutMapError(DatagenRefused):
+    """The held-out hash ConfigMap could not be applied."""
+
+
+def ensure_heldout_map(cfg: Any, k8s: Any) -> None:
+    """Apply ``HELDOUT_MAP_NAME`` with the packaged ``heldout_hashes.json`` for
+    a financial generate: the generator refuses the financial schema without
+    it. The hashes and the salt are public. Raises :class:`HeldoutMapError`
+    before any Job is created when the file cannot be read or the apply
+    fails."""
+    from lakebench.config.datagen_seed import HELDOUT_FILENAME, heldout_path
+
+    namespace = cfg.get_namespace()
+    try:
+        text = heldout_path().read_text(encoding="utf-8")
+    except OSError as e:
+        raise HeldoutMapError(
+            f"{HELDOUT_FILENAME} cannot be read ({type(e).__name__}); a financial corpus is "
+            "never generated without it"
+        ) from None
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": HELDOUT_MAP_NAME,
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "lakebench",
+                "app.kubernetes.io/instance": cfg.name,
+                "app.kubernetes.io/component": "datagen-heldout",
+                "app.kubernetes.io/managed-by": "lakebench",
+            },
+        },
+        "data": {HELDOUT_FILENAME: text},
+    }
+    try:
+        ok = k8s.apply_manifest(manifest, namespace=namespace)
+    except Exception as e:  # noqa: BLE001
+        raise HeldoutMapError(
+            f"could not apply ConfigMap {HELDOUT_MAP_NAME} in {namespace} ({type(e).__name__})"
+        ) from None
+    if ok is False:
+        raise HeldoutMapError(f"could not apply ConfigMap {HELDOUT_MAP_NAME} in {namespace}")
+
+
 def prepare_seed_secret(cfg: Any, k8s: Any) -> None:
     """``ensure_seed_secret`` for a registered corpus; nothing for any other
     (a development generate makes no Secret call, and an earlier registered
@@ -655,6 +706,8 @@ class DatagenDeployer:
                 "datagen_seed": None if uses_seed_secret(cfg) else config_seed(cfg),
                 "datagen_seed_secret": seed_secret_name(cfg) if uses_seed_secret(cfg) else "",
                 "datagen_seed_secret_key": SEED_SECRET_KEY,
+                "datagen_heldout_map": HELDOUT_MAP_NAME,
+                "datagen_heldout_dir": HELDOUT_MOUNT_DIR,
                 # Robustness corpus flag (financial only), checked against
                 # the declared corpus role (config/datagen_seed.py).
                 "datagen_robustness_perturbation": config_perturbation(cfg),
@@ -798,7 +851,7 @@ class DatagenDeployer:
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
             self.stop_previous_job()
-            prepare_seed_secret(self.config, self.k8s)
+            self._prepare_generator_inputs()
 
             # Cycle 0 is a fresh write: clear stale files a prior generate left,
             # after the previous job's pods have stopped so nothing writes
@@ -938,7 +991,7 @@ class DatagenDeployer:
             context = self._build_datagen_context()
 
             self.stop_previous_job()
-            prepare_seed_secret(self.config, self.k8s)
+            self._prepare_generator_inputs()
 
             # A single-cycle generate is a fresh write: clear stale files after
             # the previous job's pods have stopped, so nothing writes into the
@@ -976,6 +1029,14 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
                 details=_refusal_details(e),
             )
+
+    def _prepare_generator_inputs(self) -> None:
+        """The cluster objects the Job reads, written after the previous
+        Job's pods stop and before the Job: the held-out hash ConfigMap for
+        the financial schema, and a registered corpus's seed Secret."""
+        if self.config.architecture.workload.schema_type.value == "financial":
+            ensure_heldout_map(self.config, self.k8s)
+        prepare_seed_secret(self.config, self.k8s)
 
     def stop_previous_job(self) -> None:
         """``stop_previous_datagen`` for this deployer's config."""

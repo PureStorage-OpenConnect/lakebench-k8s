@@ -856,6 +856,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   configs, seed 43 included, render exactly as before. Needs the next
   datagen image (the generator and its entrypoint read `LB_DATAGEN_SEED`); an
   older image refuses a registered corpus with exit 2.
+- **The datagen generator checks held-out seeds by hash.** It no longer
+  compiles the evaluation and robustness seeds in: it reads
+  `heldout_hashes.json` from `LB_HELDOUT_HASHES` (a financial generate
+  applies the `lakebench-heldout-hashes` ConfigMap and mounts it; `destroy`
+  removes it) plus a compiled floor of today's hashes, and refuses the
+  financial schema with exit 2 when the file is missing or malformed.
+  Robustness refusals name the role, never the seed. The file's `spent` list
+  is unioned with the compiled one. `datagen_rs/Cargo.toml` gains
+  `serde_json` and `ring` (both already in the locked dependency tree) and
+  `license = "Apache-2.0"`. Generator output is unchanged (the in-tree pins
+  pass); needs the next datagen image.
 - **`lakebench generate` fails at once when a datagen pod's Secret or
   ConfigMap does not exist** (`CreateContainerConfigError` with "not
   found") instead of waiting for the timeout. `run --generate` still waits.

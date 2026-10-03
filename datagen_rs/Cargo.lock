@@ -547,6 +547,8 @@ dependencies = [
  "object_store",
  "parquet",
  "rayon",
+ "ring",
+ "serde_json",
  "tokio",
 ]
 

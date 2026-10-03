@@ -9,6 +9,7 @@ pub mod customer360_realism;
 pub mod cycle;
 pub mod emit;
 pub mod hash;
+pub mod heldout;
 pub mod ids;
 pub mod kyc;
 pub mod metrics;
