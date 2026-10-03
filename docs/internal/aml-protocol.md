@@ -11,7 +11,7 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
 
 - The evaluation and robustness seeds are held out. They are recorded only as
   salted hashes in `src/lakebench/spark/data/aml/heldout_hashes.json`
-  (append-only; the first hashes are also compiled into the guards), never in
+  (append-only; the hashes are also compiled into the Python guard), never in
   plaintext, and a seed is checked by hashing it. Their corpora are generated and
   scored only as the registered look for their role
   (`scripts/aml_gate.py --registered`, `corpora.registered_looks_open`), once
@@ -19,21 +19,26 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
 - Spent seeds (42, 50000042) are refused for the AML schema
   (`config/datagen_seed.py`). A seed is appended to `spent_seeds` when a look
   at it is taken, voided or burned.
-- A held-out seed that becomes public, or whose corpus a void retires, is
-  burned and replaced, never reused. The owner runs
-  `oa-seed-redraw.py` (kept outside the repository, beside
-  `oa-heldout-init.py`). It draws a new uniform 63-bit seed per role with
-  Python's `secrets`, writes each to an owner-only file (mode 0600, outside
-  every git tree) and never prints it; appends its salted hash to the role
-  in `heldout_hashes.json`; records the old seed as `burned`, with the
-  owner's reason, in `aml_registered_looks.json` (`datagen_seed.burn_seed`);
-  and appends the old seed to the hash file's `spent`. The append-only rule
-  (`heldout_history_problems`) accepts that spent append only beside a
-  completed look or a burn for the same role and seed. The compiled floor
-  keeps the first hashes; a redrawn seed is protected by the file alone
-  until a later image lifts it into the floor. The evaluation and
+- A held-out seed that becomes public, or whose started look is voided, is
+  burned and replaced, never reused. The owner runs `oa-seed-redraw.py`
+  (kept outside the repository, beside `oa-heldout-init.py`). It draws a
+  new uniform 63-bit seed per role with Python's `secrets`, redrawn until
+  it passes the pre-registration's seed guard against the calibration,
+  replicate and spent seeds; writes each to an owner-only file (mode 0600,
+  in `~/.lakebench-heldout-seeds`, outside every git tree) and never prints
+  it; appends its salted hash to the role in `heldout_hashes.json` and to
+  the compiled floor in `config/datagen_seed.py`; records the old seed as
+  `burned`, with the owner's reason, in `aml_registered_looks.json`
+  (`datagen_seed.burn_seed`, beside a voided `started` entry if there is
+  one); and appends the old seed to the hash file's `spent`. The
+  append-only rule (`heldout_history_problems`) accepts that spent append
+  only beside a completed look or a burn for the same role and seed. The
+  Rust floor keeps the first hashes until the next datagen image; the
+  generator reads every hash from the mounted file. The evaluation and
   robustness seeds that appeared in public history on 2026-09-24 and
-  2026-09-25 are retired this way (OA2).
+  2026-09-25 are retired this way (OA2). Every agent on the lab host runs
+  as root, so the 0600 mode keeps the seed files from other accounts, not
+  from an agent: no agent reads that directory.
 - Calibration seeds are 43 and the replicates C1-C4
   (`corpora.calibration_replicate_seeds`). Tuning is allowed only on these.
 

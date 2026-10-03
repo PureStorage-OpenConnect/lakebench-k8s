@@ -128,9 +128,12 @@ def record(tmp_path):
     return p
 
 
-def test_tracked_record_exists_and_is_empty_before_any_look():
+def test_tracked_record_exists_and_holds_no_look_before_the_freeze():
+    # Before any registered look the record holds only burned seeds (retired
+    # without a look, OA2), each with a reason.
     assert ds.looks_path().name == ds.LOOKS_FILENAME
-    assert ds.load_looks() == []
+    for e in ds.load_looks():
+        assert e["state"] == "burned" and e["reason"].strip(), e["role"]
 
 
 def test_claim_then_complete_spends_the_seed(record):

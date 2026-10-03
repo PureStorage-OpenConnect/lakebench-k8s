@@ -1379,6 +1379,24 @@ def test_roleless_spent_seed_is_verify_only(monkeypatch):
     assert _spent_look(meta) == ("verify", None)
 
 
+def test_burned_seed_package_is_refused(monkeypatch):
+    from lakebench.cli._reproduce import _spent_look
+
+    burned = {"role": "evaluation", "seed": 555, "state": "burned", "reason": "public"}
+    _stub_looks(monkeypatch, [burned], {555})
+    _stub_protected(monkeypatch, {555: "evaluation"})
+    meta = {
+        "corpus_role": "evaluation",
+        "experiment_identity": {"workload": "financial", "seed": 555},
+    }
+    verdict = _spent_look(meta)
+    assert verdict[0] == "refuse" and "burned" in verdict[1] and "555" not in verdict[1]
+    # A completed look beside a burn (it cannot happen, but) is still verified.
+    done = {"role": "evaluation", "seed": 555, "state": "complete", "report_sha256": "a" * 64}
+    _stub_looks(monkeypatch, [burned, done], {555})
+    assert _spent_look(meta) == ("verify", done)
+
+
 def test_role_read_from_the_identity(monkeypatch):
     from lakebench.cli._reproduce import _spent_look
 

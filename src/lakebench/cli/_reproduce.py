@@ -1260,6 +1260,15 @@ def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
             )
         return None
     mine = [e for e in looks if int(e["seed"]) == seed]
+    done = [e for e in mine if e.get("state") == "complete"]
+    if done:
+        return ("verify", done[0])
+    if any(e.get("state") == "burned" for e in mine):
+        return (
+            "refuse",
+            "the package's seed was retired without a completed look (burned); its corpus is "
+            "never reproduced",
+        )
     if mine:
         return ("verify", mine[0])
     if seed in spent_set:

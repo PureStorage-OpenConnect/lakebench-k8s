@@ -27,12 +27,13 @@ def _cfg(schema: str, seed: int | None = None):
 
 def test_spent_seeds_come_from_the_preregistration():
     corpora = json.loads(PREREG.read_text())["corpora"]
-    assert ds.spent_seeds() == frozenset(corpora["spent_seeds"])
+    # The pre-registration's list plus every seed with a recorded look or burn.
+    assert ds.spent_seeds() == frozenset(corpora["spent_seeds"]) | ds.recorded_seeds()
     assert 42 in ds.spent_seeds()
     # The calibration seed is never spent; the held-out seeds are known only by
-    # hash, and none of the spent seeds hashes to one.
+    # hash, and a spent seed hashes to one only when its look or burn is recorded.
     assert corpora["calibration_seed"] not in ds.spent_seeds()
-    assert not any(ds.heldout_role(s) for s in ds.spent_seeds())
+    assert not any(ds.heldout_role(s) for s in ds.spent_seeds() - ds.recorded_seeds())
 
 
 def test_unset_seed_resolves_per_schema():

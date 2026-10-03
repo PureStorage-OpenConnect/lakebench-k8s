@@ -61,11 +61,14 @@ def test_production_file_has_a_hash_per_role():
 
 
 def test_floor_matches_file():
-    # The compiled floor is the file's first entry per role, under the file's salt.
+    # The compiled floor holds every hash of the file, in order, under the
+    # file's salt: a commit that drops a role hash from the file (or adds one
+    # without the floor) fails here, so a redrawn seed is never left
+    # protected by the file alone.
     doc = json.loads(PROD.read_text())
     assert ds._HELDOUT_FLOOR["salt"] == doc["salt"]
     for role in ds.PROTECTED_ROLES:
-        assert tuple(ds._HELDOUT_FLOOR["roles"][role]) == (doc["roles"][role][0],), role
+        assert tuple(ds._HELDOUT_FLOOR["roles"][role]) == tuple(doc["roles"][role]), role
 
 
 def test_floor_matches_rust():
@@ -74,8 +77,11 @@ def test_floor_matches_rust():
     assert salt and salt.group(1) == ds._HELDOUT_FLOOR["salt"]
     for role in ds.PROTECTED_ROLES:
         found = re.findall(rf'Role::{role.capitalize()},\s*"([0-9a-f]{{64}})"', src)
-        assert tuple(found) == tuple(ds._HELDOUT_FLOOR["roles"][role]), role
-        # ...and each is the first entry of the role's list in the tracked file.
+        # The Rust floor is a prefix of the Python one: hashes the owner
+        # appended after the image was built reach it with the next image.
+        floor = tuple(ds._HELDOUT_FLOOR["roles"][role])
+        assert found and tuple(found) == floor[: len(found)], role
+        # ...and it starts the role's list in the tracked file.
         assert found[:1] == json.loads(PROD.read_text())["roles"][role][:1], role
 
 
@@ -522,7 +528,7 @@ def test_burn_seed_records_a_spent_seed(tmp_path):
     assert entry["state"] == "burned" and entry["reason"] == "public since 09-24"
     assert entry["seed"] == EV and entry["role"] == "evaluation" and entry["burned_utc"]
     assert ds.load_looks(p) == [entry] and EV in ds.recorded_seeds(p)
-    with pytest.raises(ValueError, match="already has a recorded entry") as e:
+    with pytest.raises(ValueError, match="already has a completed, burned") as e:
         ds.burn_seed("evaluation", EV, "again", path=p)
     assert _no_seed_in(str(e.value))
     with pytest.raises(ValueError, match="already has a recorded look"):
@@ -539,6 +545,27 @@ def test_burn_seed_records_a_spent_seed(tmp_path):
     new["spent"].append(EV)
     looks = json.loads(p.read_text())
     assert ds.heldout_history_problems(old, new, looks) == []
+
+
+def test_a_void_burns_a_started_look(tmp_path):
+    p = tmp_path / ds.LOOKS_FILENAME
+    p.write_text(json.dumps({"_doc": "x", "looks": []}))
+    ds.claim_look("evaluation", EV, path=p)
+    with pytest.raises(ValueError, match="other-role"):
+        ds.burn_seed("robustness", EV, "void", path=p)
+    entry = ds.burn_seed("evaluation", EV, "void #99", path=p)
+    assert [e["state"] for e in ds.load_looks(p)] == ["started", "burned"]
+    assert entry["reason"] == "void #99"
+    with pytest.raises(ValueError, match="already complete or recorded twice"):
+        ds.complete_look("evaluation", EV, "a" * 64, "r.json", path=p)
+    old, new = _doc(), _doc()
+    new["spent"].append(EV)
+    assert ds.heldout_history_problems(old, new, json.loads(p.read_text())) == []
+    # A completed look is never burned.
+    ds.claim_look("robustness", RB, path=p)
+    ds.complete_look("robustness", RB, "b" * 64, "r.json", path=p)
+    with pytest.raises(ValueError, match="completed"):
+        ds.burn_seed("robustness", RB, "late", path=p)
 
 
 def test_burned_entry_is_not_a_completed_look(tmp_path, monkeypatch):

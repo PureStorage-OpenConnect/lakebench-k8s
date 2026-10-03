@@ -228,22 +228,24 @@ def burn_seed(
     meta: dict | None = None,
     path: str | os.PathLike | None = None,
 ) -> dict:
-    """Record that a held-out ``role`` seed is retired without a look
-    (burned: it became public, or a void needs a fresh seed). The entry has
-    state ``burned`` and the owner's ``reason``; from here the seed is spent,
-    so ``claim_look`` refuses it and heldout_hashes.json may list it in
-    ``spent`` (``heldout_history_problems``). The seed is written in
-    plaintext, which is why only a seed that is public or given up is
-    burned. Raises when the seed already has an entry or the reason is
-    empty."""
+    """Record that a held-out ``role`` seed is retired without a completed
+    look (burned: it became public, or a void retires a look that started).
+    The entry has state ``burned`` and the owner's ``reason``; from here the
+    seed is spent, so ``claim_look`` and ``complete_look`` refuse it and
+    heldout_hashes.json may list it in ``spent``
+    (``heldout_history_problems``). The seed is written in plaintext, which
+    is why only a seed that is public or given up is burned. A seed whose
+    only entries are ``started`` looks for the same role (a void) gets the
+    burn beside them; any other entry, or an empty reason, raises."""
     if role not in PROTECTED_ROLES:
         raise ValueError(f"only {PROTECTED_ROLES} seeds are burned, not {role!r}")
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("a burn needs a reason (the owner decision that retires the seed)")
 
     def update(doc):
-        if any(int(e["seed"]) == int(seed) for e in doc["looks"]):
-            raise ValueError(f"the {role} seed already has a recorded entry")
+        mine = [e for e in doc["looks"] if int(e["seed"]) == int(seed)]
+        if any(e.get("state") != "started" or e.get("role") != role for e in mine):
+            raise ValueError(f"the {role} seed already has a completed, burned or other-role entry")
         entry = {
             "role": role,
             "seed": int(seed),
@@ -430,10 +432,12 @@ def calibration_seed() -> int:
 # heldout_hashes.json (next to the pre-registration, flat next to this module
 # on the Spark driver, or LB_HELDOUT_HASHES on the datagen pod). The file may
 # only be appended to: heldout_history_problems is the rule, which the frozen
-# guard (QR-10) calls for every commit once it lands. The hashes registered
-# when the file was created are also compiled in below (_HELDOUT_FLOOR),
-# checked under their own salt, so a stripped or re-salted file still protects
-# those seeds. The salt is public: a hash hides only a seed drawn uniformly
+# guard (QR-10) calls for every commit once it lands. Every registered hash is
+# also compiled in below (_HELDOUT_FLOOR; the owner's redraw appends to both),
+# checked under its own salt, so a stripped or re-salted file still protects
+# those seeds; tests/test_heldout.py holds the two equal. The Rust floor
+# (datagen_rs/src/heldout.rs) keeps the first hashes until the next datagen
+# image lifts the rest. The salt is public: a hash hides only a seed drawn uniformly
 # from 63 bits; an 8-digit seed is recovered from its hash in seconds.
 
 HELDOUT_FILENAME = "heldout_hashes.json"
