@@ -749,6 +749,30 @@ def _exclude_c360_check_time(job_metrics) -> float:
     return secs
 
 
+def _exclude_alert_set_time(job_metrics) -> float:
+    """Take the AML alert-set fingerprint off a gold-finalize stage's time.
+
+    gold_finalize_financial prints the fingerprint last, after the stage's
+    work (EVD-10), and records the seconds it took (``alert_set_seconds``).
+    Left in, Lakebench's own scan would count as pipeline time in the
+    stage's elapsed seconds, its CPU-seconds and time to value, as the
+    c360 check would (``_exclude_c360_check_time``). Returns the seconds
+    removed (0 when there is nothing to remove).
+    """
+    from datetime import timedelta
+
+    try:
+        secs = float(getattr(job_metrics, "alert_set_seconds", None) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
+        return 0.0
+    job_metrics.elapsed_seconds -= secs
+    if job_metrics.end_time is not None:
+        job_metrics.end_time -= timedelta(seconds=secs)
+    return secs
+
+
 # Upstream failures a benchmark may carry without failing the run, as
 # (table format, query engine, query name). Each must be a documented bug
 # outside lakebench. Delta + Thrift Q2 (LB-034, Delta MIN/MAX on date partitions) left
@@ -2644,6 +2668,7 @@ def _run_once(
                     parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
                     _apply_parsed_job_metrics(job_metrics, parsed)
                     _exclude_c360_check_time(job_metrics)
+                    _exclude_alert_set_time(job_metrics)
 
                 # Populate resource metrics from job profile. Pass the schema so
                 # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)

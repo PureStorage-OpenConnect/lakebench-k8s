@@ -2289,9 +2289,10 @@ class ReportGenerator:
                 )
             fp_s = getattr(job, "alert_set_seconds", None)
             if fp_s is not None:
-                # EVD-10: Lakebench's own work inside the stage, not pipeline time.
+                # EVD-10: Lakebench's own scan ran in the stage's pod; the CLI
+                # took its seconds off the stage (cli/_run.py).
                 elapsed += (
-                    f"<br><small>includes {fp_s:.1f}s of Lakebench's alert-set fingerprint</small>"
+                    f"<br><small>excludes {fp_s:.1f}s of Lakebench's alert-set fingerprint</small>"
                 )
 
             rows.append(f"""

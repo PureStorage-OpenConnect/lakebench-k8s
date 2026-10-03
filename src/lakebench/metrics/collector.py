@@ -106,9 +106,10 @@ class JobMetrics:
     # EVD-10 (AML gold-finalize only): the alert-set fingerprint from the
     # driver's ``LB_ALERT_SET`` line (metrics/alert_set.py), copied to
     # ``experiment.results.alert_set``; the seconds it took, Lakebench work
-    # inside this stage's elapsed time that the report labels; and the
-    # reason when the line says it could not be computed or is malformed.
-    # All None when the log has no such line.
+    # in the stage's pod that the CLI takes off ``elapsed_seconds`` and
+    # ``end_time`` (cli/_run.py _exclude_alert_set_time); and the reason when
+    # the line says it could not be computed or is malformed. All None when
+    # the log has no such line.
     alert_set: dict[str, Any] | None = None
     alert_set_seconds: float | None = None
     alert_set_unavailable: str | None = None

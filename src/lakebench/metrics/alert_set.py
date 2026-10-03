@@ -16,10 +16,11 @@ with the totals beside it.
 Comparison (``diff_alert_sets``) is a results check, ladder step 5 between
 the sides and step 2 inside one: any difference in a rule's rows or hash is
 "different results". A record that should carry one and does not
-(``alert_set_missing``: an exp2 AML batch record) has results not
-established, step 4, so a failed or skipped fingerprint never lets a pair
-through unchecked. An exp1 record (1.6 and earlier) never had one; absent on
-one exp1 side is a note, not a refusal.
+(``alert_set_missing``: an AML batch record written by 1.7, exp1 or exp2)
+has results not established, step 4, so a failed or skipped fingerprint
+never lets a pair through unchecked. A 1.6 record never had one; absent on a
+1.6 side is a note, not a refusal (and such a pair is normally refused
+earlier, on its workload version).
 
 The continuous alert set is a different, diagnostic value
 (``results.alert_set_continuous``, from the covered score after the drain)
@@ -39,7 +40,9 @@ ALERT_SET_TAG = "LB_ALERT_SET"
 ALERT_SET_SPEC = "as1"
 
 _LINE_RE = re.compile(r"LB_ALERT_SET (?P<json>\{.*\})\s*$", re.MULTILINE)
-_INT_RE = re.compile(r"^-?\d+$")
+# ASCII digits, at most 40: a Spark sum of xxhash64 values has about 21, and an
+# unbounded string would make int() raise on a hostile line.
+_INT_RE = re.compile(r"^-?[0-9]{1,40}$")
 _KEYS = ("spec", "columns", "cols_sha", "rows", "h", "by_rule")
 
 
@@ -126,22 +129,25 @@ def alert_set_of(exp: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
 
 
 def alert_set_expected(exp: Mapping[str, Any] | None) -> bool:
-    """True for an exp2 AML batch block: one written by a release whose
-    gold-finalize records the alert set."""
-    from lakebench.metrics.comparability import EXP2, block_generation
+    """True for an AML batch block written by 1.7 or later, whose
+    gold-finalize records the alert set. Decided by
+    ``comparability.written_by_v17``, never by the schema string: 1.7 also
+    writes exp1 blocks (identity incomplete, ``v2_unavailable``), and a
+    failed fingerprint there must not pass as a 1.6 record's absence."""
+    from lakebench.metrics.comparability import written_by_v17
 
     exp = exp or {}
     return (
-        block_generation(exp) == EXP2
-        and (exp.get("workload") or {}).get("name") == "financial"
+        (exp.get("workload") or {}).get("name") == "financial"
         and exp.get("mode") == "batch"
+        and written_by_v17(exp)[0]
     )
 
 
 def alert_set_missing(exp: Mapping[str, Any] | None) -> str | None:
     """Why the results of *exp* are not established for want of an alert
-    set (ladder step 4), or None. Only an exp2 AML batch block must carry
-    one; a malformed one counts as missing."""
+    set (ladder step 4), or None. Only an AML batch block written by 1.7
+    must carry one; a malformed one counts as missing."""
     if not alert_set_expected(exp):
         return None
     value = alert_set_of(exp)
@@ -207,14 +213,14 @@ def alert_set_notes(
     label_b: str = "B",
 ) -> list[str]:
     """The caveat for a pair where one side recorded an alert set and the
-    other, an exp1 record, did not: the results were compared on the
-    benchmark queries only. Empty otherwise (an exp2 side without one
-    is not established, never a note)."""
+    other, a 1.6 record, did not: the results were compared on the
+    benchmark queries only. Empty otherwise (a 1.7 side without one is not
+    established, step 4, and never reaches this)."""
     sa, sb = alert_set_of(ea), alert_set_of(eb)
     if (sa is None) == (sb is None):
         return []
     lacking = label_b if sb is None else label_a
     return [
-        f"{lacking} recorded no alert-set fingerprint (an exp1 record); "
+        f"{lacking} recorded no alert-set fingerprint (a record from before 1.7); "
         "results compared on the benchmark queries only"
     ]

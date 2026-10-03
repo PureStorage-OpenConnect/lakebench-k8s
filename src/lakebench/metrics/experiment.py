@@ -1240,15 +1240,19 @@ def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
     return list(((exp or {}).get("corpus") or {}).get("problems") or [])
 
 
-def results_established(exp: Mapping[str, Any] | None) -> bool | str:
+def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True) -> bool | str:
     """True when the run recorded benchmark results that can be checked for
     equivalence, else the reason they cannot (DESIGN 6.5: comparable means
-    the results are equivalent, which needs results)."""
+    the results are equivalent, which needs results). An AML batch record
+    written by 1.7 also needs its alert set (EVD-10); *alert_set* False
+    asks about the benchmark results alone (ladder step 0's query set id)."""
     res = (exp or {}).get("results") or {}
     if res.get("not_checked"):
         return str(res["not_checked"])
     if not res.get("fingerprints"):
         return "no benchmark query results were recorded"
+    if not alert_set:
+        return True
     from lakebench.metrics.alert_set import alert_set_missing
 
     missing = alert_set_missing(exp)
@@ -1385,8 +1389,10 @@ def refusals(
     performance: (provenance refusals, result refusals, notes).
 
     Provenance refusals mean the runs are different experiments. Result
-    refusals mean the same experiment returned different query results.
-    Notes are caveats that do not refuse (results that were not checked).
+    refusals mean the same experiment returned different query results or
+    alert sets. Notes are caveats that do not refuse; a "result equivalence
+    not checked" note means the results were NOT compared (no benchmark, or
+    a missing alert set), so empty result refusals then prove nothing.
     Execution conditions are not refusals: see ``like_for_like``.
     """
     ea, eb = experiment_of(record_a), experiment_of(record_b)

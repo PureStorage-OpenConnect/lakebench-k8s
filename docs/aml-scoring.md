@@ -608,10 +608,11 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   their own phases, after the cycle is recorded as started, so a failure
   there fails the pass as before.
 - `alert_set_seconds`: the seconds the alert-set fingerprint took (next
-  section). It runs inside the gold-finalize pod after the last alert write,
-  so the stage's elapsed seconds include it; the report prints it beside the
-  stage time ("includes 1.2s of Lakebench's alert-set fingerprint"). It is
-  Lakebench's work, not the pipeline's.
+  section). It runs last in the gold-finalize pod, after the TM pass. It is
+  Lakebench's work, not the pipeline's, so the CLI takes it off the stage's
+  `elapsed_seconds` and end time, and so off CPU-seconds and time to value,
+  as it does for the Customer 360 check; the report prints it beside the
+  stage time ("excludes 1.2s of Lakebench's alert-set fingerprint").
 
 The run's record derives two diagnostic blocks from the fields above (neither
 enters identity, a verdict or a comparison):
@@ -658,12 +659,15 @@ keeps it as `experiment.results.alert_set`:
 `lakebench compare` treats a different alert set like a different query
 result: any rule whose count or hash differs makes the pair NOT
 COMPARABLE (exit 10), and the reason names the rule. An AML batch record
-written by 1.7 with a complete identity (`experiment.schema: exp2`) that
-has no alert set, because the fingerprint failed (the reason is in
+written by 1.7 (exp2, or exp1 with `v2_unavailable`) that has no alert set,
+because the fingerprint failed (the reason is in
 `results.alert_set_unavailable`) or gold-finalize did not run, has results
 not established: NOT ESTABLISHED (exit 11), never compared on its query
-results alone. A record from 1.6 has no alert set; against a record that
-has one it compares on the query results, with a note.
+results alone. The perf gate and `reproduce` refuse such a run too; they
+do not yet compare alert sets with their baseline or package. Records from
+1.6 have no alert set, and two of them compare as before. A rule that ran
+and raised no alert is absent from `by_rule`, like a rule that did not run;
+which rules ran is recorded separately (`experiment.rules`).
 
 Continuous runs never fingerprint inside a tick (that would be a full scan
 inside time to detect). Their alert set is taken once after the drain

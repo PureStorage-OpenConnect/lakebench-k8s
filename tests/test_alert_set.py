@@ -95,6 +95,13 @@ class TestParse:
         got, _s, why = als.parse_alert_set("LB_ALERT_SET {not json}")
         assert got is None and "not valid JSON" in why
 
+    def test_oversized_hash_is_malformed_not_a_crash(self):
+        body = copy.deepcopy(ASET)
+        body["by_rule"] = {"W2_structuring": {"rows": 8, "h": "9" * 5000}}
+        body["rows"], body["h"] = 8, "9" * 5000
+        got, _s, why = als.parse_alert_set(_line(body))
+        assert got is None and "malformed" in why
+
     def test_bad_seconds_dropped(self):
         _g, secs, _w = als.parse_alert_set(_line(ASET, seconds=-1))
         assert secs is None
@@ -127,13 +134,15 @@ class TestParse:
 # ---------------------------------------------------------------------------
 
 
-def _fresh(schema="financial", mode="batch", aset=ASET, unavailable=None):
-    """A v1.7 run that stamps exp2, with the alert set on gold-finalize."""
+def _fresh(schema="financial", mode="batch", aset=ASET, unavailable=None, system=True):
+    """A v1.7 run, with the alert set on gold-finalize. It stamps exp2, or
+    exp1 with ``v2_unavailable`` when *system* is False."""
     run = _metrics(_cfg(schema, mode))
     inputs = run.config_snapshot["experiment_inputs"]
     obs, _ = observe(two_nodes(), series_body())
     inputs["corpus_observation"] = obs
-    inputs["system_identity"] = copy.deepcopy(SYSID)
+    if system:
+        inputs["system_identity"] = copy.deepcopy(SYSID)
     gold = run.jobs[-1]
     assert gold.job_type == "gold-finalize"
     gold.alert_set = copy.deepcopy(aset) if aset is not None else None
@@ -252,11 +261,35 @@ class TestCompare:
         v = cmp.pair_verdict([a], [b])
         assert (v.verdict, v.step, v.code) == (cmp.NOT_ESTABLISHED, "4", 11)
         assert v.reasons == ["B run b: the alert-set fingerprint was not recorded"]
-        # The same two blocks read as exp1 (the d1 note rule) are like-for-like.
+        # A block that only 1.6 could have written (exp1, no 1.7 marker) is
+        # not required to carry one (the d1 "absent is a note" rule).
         for rec in (a, b):
             rec["experiment"]["schema"] = "exp1"
             rec["experiment"].pop("identity_version", None)
+            rec["experiment"]["lakebench"] = {"version": "1.6.0"}
         assert ex.results_established(b["experiment"]) is True
+
+    def test_v17_exp1_missing_alert_set_not_established(self):
+        """1.7 writes exp1 when its identity is incomplete (no system
+        identity sample): a failed fingerprint there is still NOT
+        ESTABLISHED, never read as a 1.6 record's absence."""
+        a = _record(_fresh(system=False), "a")
+        b = _record(_fresh(system=False, aset=None, unavailable="Py4JJavaError"), "b")
+        assert b["experiment"]["schema"] == "exp1" and "v2_unavailable" in b["experiment"]
+        v = cmp.pair_verdict([a], [b])
+        assert (v.verdict, v.step) == (cmp.NOT_ESTABLISHED, "4")
+        assert v.reasons == ["B run b: the alert-set fingerprint was not recorded (Py4JJavaError)"]
+        both = cmp.pair_verdict([_record(_fresh(system=False, aset=None), "c")], [b])
+        assert (both.verdict, both.step) == (cmp.NOT_ESTABLISHED, "4")
+
+    def test_missing_alert_set_does_not_hide_a_missing_query_set_id(self):
+        """Step 0 still requires the query set id of a run whose benchmark
+        results were checked, whatever its alert set."""
+        a = _record(_fresh(aset=None), "a")
+        a["experiment"]["results"]["query_set_id"] = None
+        v = cmp.pair_verdict([a], [_record(_fresh(), "b")])
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
+        assert any("query set id not recorded on a" in r for r in v.reasons)
 
     def test_exp2_both_present_equal_and_different(self):
         a, b = _record(_fresh(), "a"), _record(_fresh(), "b")
@@ -313,6 +346,39 @@ def test_release_record_names_the_rule():
         "in the expected set (against the expected alert set)"
     ]
     assert _fingerprint_problems({"alert_set": copy.deepcopy(ASET)}, {"alert_set": ASET}) == []
+    bad = _fingerprint_problems({"alert_set": "x"}, {"alert_set": ASET})
+    assert bad == ["alert set cannot be checked: run not an object, expected well formed"]
+
+
+def test_release_record_requires_the_alert_set():
+    """A 1.7 AML batch release row without its alert set is a problem even
+    when the expected entry carries none."""
+    from lakebench.metrics.release_record import _results_problems
+
+    exp = _fresh(aset=None, unavailable="boom").to_dict()["experiment"]
+    assert _results_problems({}, exp, {"entries": []}) == [
+        "the alert-set fingerprint was not recorded (boom)"
+    ]
+    ok = _fresh().to_dict()["experiment"]
+    assert _results_problems({}, ok, {"entries": []}) == [
+        "no expected results for this workload, corpus and scale"
+    ]
+
+
+def test_cli_takes_the_fingerprint_off_the_stage_time():
+    from datetime import datetime, timezone
+
+    from lakebench.cli._run import _exclude_alert_set_time
+
+    end = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+    jm = JobMetrics(job_name="g", job_type="gold-finalize", elapsed_seconds=100.0, end_time=end)
+    jm.alert_set_seconds = 2.5
+    assert _exclude_alert_set_time(jm) == 2.5
+    assert jm.elapsed_seconds == 97.5 and (end - jm.end_time).total_seconds() == 2.5
+    for secs in (None, 0.0, 100.0):
+        jm2 = JobMetrics(job_name="g", job_type="gold-finalize", elapsed_seconds=100.0)
+        jm2.alert_set_seconds = secs
+        assert _exclude_alert_set_time(jm2) == 0.0 and jm2.elapsed_seconds == 100.0
 
 
 def test_report_labels_the_fingerprint_seconds():
@@ -322,52 +388,61 @@ def test_report_labels_the_fingerprint_seconds():
     run.jobs[-1].elapsed_seconds = 60.0
     run.jobs[-1].alert_set_seconds = 2.5
     html = ReportGenerator.__new__(ReportGenerator)._generate_jobs_table(run)
-    assert "includes 2.5s of Lakebench's alert-set fingerprint" in html
+    assert "excludes 2.5s of Lakebench's alert-set fingerprint" in html
 
 
-def _calls_reachable(roots: list[tuple[Path, str]]) -> dict[str, set[str]]:
-    """Names called by each function reachable from *roots*, following calls
-    to functions defined in the same scripts (by bare or attribute name)."""
-    funcs: dict[str, ast.AST] = {}
-    for path in {p for p, _ in roots} | {SCRIPTS / "gold_finalize_financial.py"}:
-        for node in ast.parse(path.read_text()).body:
-            if isinstance(node, ast.FunctionDef):
-                funcs.setdefault(node.name, node)
+def _names_reachable(root: str) -> dict[str, set[str]]:
+    """Names referenced by each script function reachable from *root*.
+
+    Every function defined anywhere in spark/scripts (nested ones too; all
+    same-named definitions are followed) is a node; an edge is any
+    reference to its name, as a bare name or an attribute (``x.f``), called
+    or not, so an alias (``g = common.f``) is followed and caught too."""
+    funcs: dict[str, list[ast.AST]] = {}
+    for path in sorted(SCRIPTS.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.setdefault(node.name, []).append(node)
     seen: dict[str, set[str]] = {}
-    todo = [name for _, name in roots]
+    todo = [root]
     while todo:
         name = todo.pop()
         if name in seen or name not in funcs:
             continue
-        called = set()
-        for n in ast.walk(funcs[name]):
-            if isinstance(n, ast.Call):
-                f = n.func
-                called.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
-        seen[name] = called
-        todo += [c for c in called if c in funcs]
+        refs: set[str] = set()
+        for fn in funcs[name]:
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name):
+                    refs.add(n.id)
+                elif isinstance(n, ast.Attribute):
+                    refs.add(n.attr)
+        seen[name] = refs
+        todo += [r for r in refs if r in funcs]
     return seen
 
 
 def test_no_alert_set_in_tick():
     """S6 by analogy: a continuous tick never fingerprints gold.alerts (a
     Lakebench full scan inside time to detect). Covers run_tick and every
-    script function it reaches, including gold-finalize's detection driver."""
+    script function it can reach (gold-finalize's detection driver, the TM
+    layer, the rules, common), by any reference, called or aliased."""
     banned = {
         "frame_fingerprint",
         "frame_fingerprint_by",
+        "_fingerprint_hash",
         "alert_set_fingerprint",
         "alert_set_line",
     }
-    reach = _calls_reachable([(SCRIPTS / "gold_refresh_financial.py", "run_tick")])
-    assert "run_tick" in reach and "run_detection_rules" in reach, sorted(reach)
+    reach = _names_reachable("run_tick")
+    assert {"run_tick", "run_detection_rules", "run_tm_operations"} <= set(reach), sorted(reach)
     hits = {f: sorted(c & banned) for f, c in reach.items() if c & banned}
     assert not hits, hits
 
 
 def test_gold_finalize_prints_the_line_after_detection():
-    """The line is printed by main() after run_detection_rules, not inside
-    the detection driver (which the tick shares)."""
+    """The line is printed by main() after detection and the TM layer, last
+    in the stage (so the CLI can take its seconds off the stage's end), not
+    inside the detection driver (which the tick shares)."""
     tree = ast.parse((SCRIPTS / "gold_finalize_financial.py").read_text())
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
     calls = sorted(
@@ -375,6 +450,10 @@ def test_gold_finalize_prints_the_line_after_detection():
         for n in ast.walk(main)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Name)
-        and n.func.id in ("run_detection_rules", "alert_set_line")
+        and n.func.id in ("run_detection_rules", "run_tm_operations", "alert_set_line")
     )
-    assert [name for _, name in calls] == ["run_detection_rules", "alert_set_line"]
+    assert [name for _, name in calls] == [
+        "run_detection_rules",
+        "run_tm_operations",
+        "alert_set_line",
+    ]

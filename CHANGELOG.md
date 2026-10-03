@@ -475,11 +475,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
   generated ids and wall-clock times (`experiment.results.alert_set`, equal
   on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are NOT
-  COMPARABLE (exit 10), naming the rule; a 1.7 record with a complete
-  identity (`exp2`) and no alert set is NOT ESTABLISHED (exit 11). The
-  fingerprint runs inside the gold-finalize stage: its seconds are recorded
-  as `jobs[].alert_set_seconds` and the report labels them beside the stage
-  time. The covered continuous score uses the same definition. See
+  COMPARABLE (exit 10), naming the rule; an AML batch record written by
+  1.7 without one is NOT ESTABLISHED (exit 11), and the perf gate,
+  `reproduce` and the release record refuse it. The fingerprint runs last in
+  the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
+  off the stage's time, as the Customer 360 check's are, and the report
+  shows them beside it. The covered continuous score uses the same
+  definition. See
   [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline

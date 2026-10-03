@@ -253,6 +253,13 @@ def _results_problems(
                 return ["no expected fingerprints for this C360 continuous workload"]
             return _fingerprint_problems(exp.get("results") or {}, entry)
         return []
+    from lakebench.metrics.alert_set import alert_set_missing
+
+    # An AML batch release row carries its alert set whatever the expected
+    # entry holds (EVD-10): a failed fingerprint is never release evidence.
+    no_alert_set = alert_set_missing(exp)
+    if no_alert_set:
+        return [no_alert_set]
     entry = next(
         (
             e
@@ -290,11 +297,17 @@ def _fingerprint_problems(results: Mapping[str, Any], entry: Mapping[str, Any]) 
         if why:
             problems.append(f"query {query} result differs from the expected result: {why}")
     if entry.get("alert_set") is not None:
-        from lakebench.metrics.alert_set import diff_alert_sets
+        from lakebench.metrics.alert_set import diff_alert_sets, shape_problem
 
         alert = results.get("alert_set")
         if alert is None:
             problems.append("no alert-set fingerprint to check against the expected one")
+        elif shape_problem(alert) or shape_problem(entry["alert_set"]):
+            problems.append(
+                "alert set cannot be checked: run "
+                f"{shape_problem(alert) or 'well formed'}, expected "
+                f"{shape_problem(entry['alert_set']) or 'well formed'}"
+            )
         else:
             problems.extend(
                 f"{why} (against the expected alert set)"

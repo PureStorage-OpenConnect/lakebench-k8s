@@ -13,13 +13,15 @@ this). Steps:
    rule_id before append, so re-runs against the same silver corpus
    produce reproducible alert counts. Rule failures are isolated per
    rule -- a broken rule does not abort the pipeline; a stderr line
-   surfaces the error for postmortem. Then prints the alert-set
-   fingerprint of the run's alerts (``LB_ALERT_SET``, EVD-10).
+   surfaces the error for postmortem.
 
 4. Runs the transaction-monitoring operations layer on the alerts
    (tm_operations.py, GOALS P10 stages 1, 6, 7, 8): reconciliation,
    scenario coverage, L1 dispositions, cases and SAR decisions, then the
    workflow invariants the CLI gates on.
+
+5. Prints the alert-set fingerprint of the run's alerts (``LB_ALERT_SET``,
+   EVD-10), last, so the CLI can take its seconds off the stage's time.
 
 The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
@@ -333,16 +335,18 @@ def main() -> None:
 
         cleanup_w1_checkpoints(spark)
 
-    # EVD-10: the alert-set fingerprint, after the last write to gold.alerts
-    # (nothing below writes it). Lakebench's own work inside the stage's
-    # time: the line carries its seconds and the report labels them.
-    log(alert_set_line(spark, RUN_ID))
-
     # P10: the operations layer on this cycle's alerts. Never raises; a
     # failure is logged as the 'workflow' invariant, which fails the run.
     from tm_operations import run_tm_operations
 
     run_tm_operations(spark, txns, RUN_ID)
+
+    # EVD-10: the alert-set fingerprint, after the last write to gold.alerts
+    # (run_tm_operations only reads it) and last in the stage. It is
+    # Lakebench's work, not the pipeline's: the line carries its seconds and
+    # the CLI takes them off the stage's time (cli/_run.py
+    # _exclude_alert_set_time), as it does for the c360 check.
+    log(alert_set_line(spark, RUN_ID))
 
     elapsed = time.time() - start
     log("=" * 60)

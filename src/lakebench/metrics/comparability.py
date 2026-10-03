@@ -988,7 +988,7 @@ def pair_verdict(
             c = classify(exp, rec)
             classified[label].append(c)
             gens[label].add(c.generation)
-            checked = results_established(exp) is True
+            checked = results_established(exp, alert_set=False) is True
             for key in missing_required(c, results=checked):
                 incomplete.append(f"identity incomplete: {key} not recorded on {_rid(rec)}")
                 first_incomplete = first_incomplete or Cause(
