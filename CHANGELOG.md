@@ -69,7 +69,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
-- Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+- Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
 - The default datagen image is `lb-datagen:a592385`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
