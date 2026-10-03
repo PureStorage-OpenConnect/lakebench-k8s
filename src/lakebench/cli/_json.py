@@ -55,31 +55,33 @@ class StatusComponent(TypedDict):
 
 class StatusData(TypedDict):
     namespace: str
-    exists: bool
-    verdict: str  # ok | drift | unverified | namespace_missing
+    verdict: str  # ok | drift | unverified (a missing namespace is an error, data null)
     components: list[StatusComponent]
     datagen: dict[str, int] | None  # {"succeeded", "completions", "active"} while it runs
 
 
 class ReportStage(TypedDict):
-    stage_name: str
-    stage_type: str
-    elapsed_seconds: float
-    input_size_gb: float
-    output_size_gb: float
-    throughput_gb_per_second: float
-    executor_count: int
+    stage_name: str | None
+    stage_type: str | None
+    elapsed_seconds: float | None
+    input_size_gb: float | None
+    output_size_gb: float | None
+    throughput_gb_per_second: float | None
+    executor_count: int | None
 
 
 class ReportRun(TypedDict):
+    """As stored in the record: nothing is recomputed. A record that is
+    not readable as stored gives null verdict and scores."""
+
     run_id: str
     record_kind: str  # run | benchmark
     parent_run_id: str | None
-    deployment_name: str
-    start_time: str
+    deployment_name: str | None
+    start_time: str | None
     verdict: str | None
     pipeline_mode: str | None
-    scores: dict[str, Any]
+    scores: dict[str, Any] | None
     stages: list[ReportStage]
     delivered_report: str | None
 
@@ -99,7 +101,7 @@ class ReportListData(TypedDict):
 
 
 class ReportRenderData(TypedDict):
-    run_id: str | None
+    run_id: str | None  # None: the latest run was rendered
     report: str
 
 
@@ -134,9 +136,12 @@ class RecipeDetailData(TypedDict):
 
 class QueryData(TypedDict):
     query_name: str
-    count: int
+    engine: str  # trino | spark-thrift | duckdb
+    count: int  # rows the engine returned
     elapsed_seconds: float
-    rows: list[dict[str, str]]
+    columns: list[str] | None  # None when the engine prints no header
+    row_format: str  # csv (Trino) | tsv2 (Spark Thrift) | python-repr (DuckDB, <= 100 rows)
+    rows: list[list[str]]
 
 
 class PlanData(TypedDict):
@@ -160,6 +165,9 @@ class _Run:
 
 
 _active: _Run | None = None
+#: True while the root group runs a command: it decided from the raw
+#: arguments whether this is a JSON run, and the option callback defers.
+_root_decided = False
 
 
 def active() -> bool:
@@ -189,12 +197,40 @@ def start(command: str) -> None:
 
 
 def option_callback(ctx: Any, value: bool) -> bool:
-    """The ``--json`` option's callback (eager): enter JSON mode before the
-    command body, named by its command path."""
-    if value:
+    """The ``--json`` option's callback (eager). The root group normally
+    starts JSON mode from the raw arguments before parsing; this covers a
+    command invoked without it, named by its command path."""
+    if value and not _root_decided:
         path = ctx.command_path.split(" ", 1)
         start(path[1] if len(path) > 1 else path[0])
     return value
+
+
+def root_done() -> None:
+    global _root_decided
+    _root_decided = False
+
+
+def start_from_args(group: Any, args: list[str]) -> None:
+    """Enter JSON mode when *args* (the root group's raw arguments) ask a
+    command for ``--json``, before Click parses them, so an unknown option
+    or a bad value still gets its document. ``--help`` prints help only."""
+    global _root_decided
+    _root_decided = True
+    if "--json" not in args or "--help" in args or "-h" in args:
+        return
+    words: list[str] = []
+    cmd = group
+    for a in args:
+        if a.startswith("-") or not hasattr(cmd, "commands"):
+            break
+        sub = cmd.commands.get(a)
+        if sub is None:
+            break
+        words.append(a)
+        cmd = sub
+    if words and not hasattr(cmd, "commands"):
+        start(" ".join(words))
 
 
 def json_option() -> Any:

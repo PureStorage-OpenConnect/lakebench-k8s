@@ -4,11 +4,14 @@
   "exit_code": 0,
   "data": {
     "query_name": "custom",
+    "engine": "trino",
     "count": 2,
     "elapsed_seconds": 0.25,
+    "columns": null,
+    "row_format": "csv",
     "rows": [
-      {"channel": "web", "n": "40"},
-      {"channel": "store", "n": "2"}
+      ["web", "40"],
+      ["store", "2"]
     ]
   },
   "errors": []

@@ -39,12 +39,17 @@ every human line to stderr:
              "next": null, "where": null}]}
 ```
 
-`exit_code` is always the process's exit code. `data` is the command's
+`exit_code` is always the process's exit code, including for an unknown
+option or a bad value (`--help` prints help only). `data` is the command's
 result, kept on a verdict exit such as `status` drift, and `null` when the
 command failed; `errors` holds each error the command reported, with its
 exit-code `path` when it has one (see [Exit Codes](exit-codes.md)). The
 shape of each command's `data` is a TypedDict in `lakebench/cli/_json.py`:
-`lb-cli/1` may gain keys, and never loses or retypes one. `compare --json`
+`lb-cli/1` may gain keys, and never loses or retypes one. `query --json` names the engine and keeps
+its rows as it prints them: Trino's CSV has no header (`columns` null),
+Spark Thrift's tsv2 has one, and DuckDB returns up to 100 rows as Python
+reprs; `count` is the rows the engine returned. `report --json` gives the
+verdict and scores as stored, never recomputed. `compare --json`
 carries the `cmp2` document `--format json` writes; `--json` does not
 combine with `--format` on `report`, `compare` or `query`, nor with
 `status --local` or `query --interactive`. `plan --json` makes no cluster

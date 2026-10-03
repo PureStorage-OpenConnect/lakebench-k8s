@@ -240,6 +240,28 @@ def _rows_as_dicts(rows: list[str]) -> list[dict[str, str]]:
     return [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
 
 
+def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list[str]], str]:
+    """``(columns, rows, row_format)`` of a result as each executor prints
+    it. Trino: CSV, no header (columns None). Spark Thrift: tsv2, a header
+    line then a line per row. DuckDB: a JSON payload whose ``data`` holds up
+    to 100 rows as Python reprs (one cell each, columns None)."""
+    import csv
+    import io
+
+    text = (raw or "").strip()
+    if engine == "duckdb":
+        from lakebench.benchmark.fingerprint import last_json_line
+
+        payload = last_json_line(text) or {}
+        return None, [[str(d)] for d in payload.get("data") or []], "python-repr"
+    if not text:
+        return None, [], "tsv2" if engine == "spark-thrift" else "csv"
+    if engine == "spark-thrift":
+        lines = text.split("\n")
+        return lines[0].split("\t"), [ln.split("\t") for ln in lines[1:]], "tsv2"
+    return None, [list(r) for r in csv.reader(io.StringIO(text))], "csv"
+
+
 def query(
     config_file: Annotated[
         Path | None,
@@ -461,13 +483,17 @@ def query(
     if as_json:
         from lakebench.cli import _json
 
-        data = _rows_as_dicts(rows)
+        engine = cfg.architecture.query_engine.type.value
+        columns, cells, row_format = _query_json_rows(engine, output)
         _json.set_data(
             {
                 "query_name": query_name,
-                "count": len(data),
+                "engine": engine,
+                "count": row_count,
                 "elapsed_seconds": round(elapsed, 3),
-                "rows": data,
+                "columns": columns,
+                "row_format": row_format,
+                "rows": cells,
             }
         )
     elif rows:

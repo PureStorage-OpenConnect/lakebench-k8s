@@ -4,7 +4,6 @@
   "exit_code": 0,
   "data": {
     "namespace": "ops",
-    "exists": true,
     "verdict": "ok",
     "components": [
       {"name": "lakebench-postgres", "kind": "StatefulSet", "state": "ok", "detail": "1/1 replicas"},

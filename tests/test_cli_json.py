@@ -135,7 +135,7 @@ class _Executor:
     def execute_query(self, sql, timeout=None):
         return SimpleNamespace(
             success=True,
-            raw_output="channel\tn\nweb\t40\nstore\t2",
+            raw_output='"web","40"\n"store","2"',  # Trino's CLI: CSV, no header
             rows_returned=2,
             duration_seconds=0.25,
             error=None,
@@ -239,3 +239,83 @@ def test_without_json_nothing_changes(cluster):  # noqa: F811
     assert res.exit_code == 0
     assert "lb-cli/1" not in res.output
     assert "Components" in res.stdout  # the table stays on stdout
+
+
+@pytest.mark.parametrize(
+    ("engine", "raw", "expected"),
+    [
+        ("trino", '"web","40"\n"a, b","2"', (None, [["web", "40"], ["a, b", "2"]], "csv")),
+        ("spark-thrift", "channel\tn\nweb\t40", (["channel", "n"], [["web", "40"]], "tsv2")),
+        ("spark-thrift", "channel\tn", (["channel", "n"], [], "tsv2")),
+        (
+            "duckdb",
+            'progress\n{"rows": 2, "data": ["(\'web\', 40)", "(\'store\', 2)"]}',
+            (None, [["('web', 40)"], ["('store', 2)"]], "python-repr"),
+        ),
+        ("trino", "", (None, [], "csv")),
+    ],
+)
+def test_query_rows_per_engine(engine, raw, expected):
+    from lakebench.cli._query import _query_json_rows
+
+    assert _query_json_rows(engine, raw) == expected
+
+
+def test_report_legacy_record_keeps_its_stored_verdict(monkeypatch, tmp_path):
+    """A flat run-<id>.json record: the verdict as stored, never recomputed."""
+    runs = tmp_path / "lakebench-output" / "runs"
+    runs.mkdir(parents=True)
+    rec = json.loads((RECORDS / f"run-{RUN}" / "metrics.json").read_text())
+    rec["verdict"]["status"] = "FAILED"
+    (runs / f"run-{RUN}.json").write_text(json.dumps(rec))
+    monkeypatch.chdir(tmp_path)
+    doc = _doc(CliRunner().invoke(app, ["report", RUN, "--json"]))
+    assert doc["data"]["verdict"] == "FAILED"
+
+
+def test_unknown_option_still_gets_a_document(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    for argv in (["status", "--bogus", "--json"], ["config", "recipes", "--json", "--bogus"]):
+        res = CliRunner().invoke(app, argv)
+        doc = _doc(res)
+        assert res.exit_code == doc["exit_code"] == 2, argv
+        assert doc["data"] is None and "--bogus" in doc["errors"][0]["what"]
+
+
+def test_help_with_json_prints_help_only():
+    res = CliRunner().invoke(app, ["status", "--json", "--help"])
+    assert res.exit_code == 0
+    assert '"schema"' not in res.stdout and "Usage" in res.stdout
+
+
+def test_a_sub_app_invoked_directly_does_not_leak_json_mode():
+    from lakebench.cli._config import config_app
+
+    CliRunner().invoke(config_app, ["recipes", "--json"])
+    res = CliRunner().invoke(app, ["config", "recipes", "--local"])
+    assert res.exit_code == 0 and "lb-cli/1" not in res.stdout
+
+
+def test_every_stdout_console_is_redirected():
+    """A new module-level Console() in cli/ would print human text into
+    the document's stdout; each one must be in _json's list."""
+    import re
+
+    cli_dir = ROOT / "src" / "lakebench" / "cli"
+    declared = {
+        p.stem
+        for p in cli_dir.glob("*.py")
+        if re.search(r"^console = Console\(\)", p.read_text(), re.M)
+    }
+    import lakebench.cli as cli_pkg
+
+    redirected = {
+        name
+        for name in declared
+        if any(
+            getattr(__import__(f"lakebench.cli.{name}", fromlist=["x"]), "console", None) is c
+            for c in _json._stdout_consoles()
+        )
+    }
+    assert declared and redirected == declared
+    assert cli_pkg

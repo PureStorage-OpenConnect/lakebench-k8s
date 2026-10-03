@@ -275,6 +275,13 @@ class LakebenchGroup(TyperGroup):
         from lakebench.cli import _json
 
         quiet_urllib3()
+        # A JSON run left behind by an invocation that bypassed this group
+        # (a sub-app invoked directly) never leaks into this one.
+        _json.abandon()
+        # The subcommand's name is in the protected args (Typer's Click keeps
+        # them in ``_protected_args``), its options in ``args``.
+        protected = getattr(ctx, "_protected_args", None) or getattr(ctx, "protected_args", None)
+        _json.start_from_args(self, [*(protected or []), *ctx.args])
         try:
             rv = super().invoke(ctx)
         except BaseException as exc:
@@ -306,6 +313,8 @@ class LakebenchGroup(TyperGroup):
                 raise
             _report(exc, err)
             raise typer.Exit(int(err.code)) from exc
+        finally:
+            _json.root_done()
         if _json.active():
             _json.finish(0)
         return rv

@@ -1027,7 +1027,6 @@ def status(
     _json.set_data(
         {
             "namespace": ns,
-            "exists": True,
             "verdict": verdict,
             "components": [
                 {"name": r.name, "kind": r.kind, "state": r.state, "detail": r.detail} for r in rows
@@ -1592,25 +1591,33 @@ def _report_list_row(r: dict) -> dict:
     }
 
 
-def _report_run_data(metrics, record_path: Path, delivered: Path | None) -> dict:
+def _report_run_data(metrics, runs_dir: Path, delivered: Path | None) -> dict:
     """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
-    the record as stored: its verdict and scores are never recomputed."""
+    the record as stored (the per-run file, else the legacy flat one, as
+    ``load_run`` reads them): its verdict and scores are never recomputed;
+    a record that cannot be read as stored gives null for both."""
     import json as _json_mod
 
-    try:
-        record = _json_mod.loads(record_path.read_text())
-    except (OSError, ValueError):
-        record = metrics.to_dict()
+    record: dict = {}
+    for path in (
+        runs_dir / f"run-{metrics.run_id}" / "metrics.json",
+        runs_dir / f"run-{metrics.run_id}.json",
+    ):
+        try:
+            record = _json_mod.loads(path.read_text())
+            break
+        except (OSError, ValueError):
+            continue
     pbd = record.get("pipeline_benchmark") or {}
     return {
         "run_id": metrics.run_id,
-        "record_kind": record.get("record_kind") or "run",
-        "parent_run_id": record.get("parent_run_id"),
-        "deployment_name": record.get("deployment_name"),
+        "record_kind": record.get("record_kind") or metrics.record_kind,
+        "parent_run_id": record.get("parent_run_id", metrics.parent_run_id),
+        "deployment_name": record.get("deployment_name", metrics.deployment_name),
         "start_time": record.get("start_time"),
         "verdict": (record.get("verdict") or {}).get("status"),
         "pipeline_mode": pbd.get("pipeline_mode"),
-        "scores": pbd.get("scores") or {},
+        "scores": pbd.get("scores") if record else None,
         "stages": [
             {
                 "stage_name": st.get("stage_name"),
@@ -1898,11 +1905,7 @@ def report(
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
     _json.set_data(
-        _report_run_data(
-            metrics,
-            storage.metrics_dir / f"run-{metrics.run_id}" / "metrics.json",
-            delivered if delivered.exists() else None,
-        )
+        _report_run_data(metrics, storage.metrics_dir, delivered if delivered.exists() else None)
     )
     if delivered.exists():
         console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
