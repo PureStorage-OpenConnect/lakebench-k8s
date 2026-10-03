@@ -532,7 +532,7 @@ pub fn build_batch(
     // uniformly -- legacy_import rows are ~70x more dirty than primary_system
     // rows. We keep the source-weighted SHAPE from DIRTY_RATE_BY_SOURCE but
     // rescale so cfg.dirty_ratio is the operator-visible AGGREGATE dirty rate
-    // (LB-191, 2026-09-28): per-row rate = cfg.dirty_ratio *
+    // (so it means what the config says): per-row rate = cfg.dirty_ratio *
     // DIRTY_RATE_BY_SOURCE[src] / weighted_mean, where weighted_mean is the
     // DATA_SOURCE_WEIGHTS-weighted average of DIRTY_RATE_BY_SOURCE (~0.0735).
     // This makes cfg.dirty_ratio == 0.08 produce ~8% aggregate dirty rows on
@@ -1481,7 +1481,7 @@ mod tests {
                 dirty += 1;
             }
         }
-        // Post LB-191 fix (2026-09-28): cfg.dirty_ratio is now the aggregate
+        // cfg.dirty_ratio is the aggregate
         // per-row dirty probability across the pass; source-weighted shape is
         // preserved by rescaling to the DATA_SOURCE_WEIGHTS-weighted mean of
         // DIRTY_RATE_BY_SOURCE. At cfg.dirty_ratio = 0.08 (small_cfg default),
@@ -1492,7 +1492,7 @@ mod tests {
         let share = dirty as f64 / batch.num_rows() as f64;
         assert!(
             (0.02..=0.06).contains(&share),
-            "dirty share {} outside [0.02, 0.06] band at cfg.dirty_ratio=0.08 (LB-191)",
+            "dirty share {} outside [0.02, 0.06] band at cfg.dirty_ratio=0.08",
             share
         );
     }
@@ -1544,7 +1544,7 @@ mod tests {
                 _ => {}
             }
         }
-        // Post LB-191 rescale: aggregate per-row rate == cfg.dirty_ratio,
+        // Aggregate per-row rate == cfg.dirty_ratio,
         // per-source rate = cfg.dirty_ratio * DIRTY_RATE_BY_SOURCE[s] /
         // 0.0735. At cfg.dirty_ratio=0.08: legacy per-row = 0.381, primary
         // per-row = 0.00544. After corruptibility (~10/22 cities have

@@ -1,6 +1,6 @@
 //! Precomputed per-entity world, the Rust analogue of emit.World.
 //!
-//! LB-204 (datagen per-pod memory redesign, Tier-1): the world no longer
+//! Per-pod memory: the world no longer
 //! materialises the full-population string/attribute columns. Every one of
 //! those columns is a pure function of `(id, seed)` (and, for the amount
 //! shift, the persona perturbation), so it is recomputed on demand through the
@@ -23,14 +23,14 @@ use crate::world as W;
 /// silver_build_financial refuses to write NULL KYC for a 0.2+ corpus whose
 /// party/account files are missing. Bump on any change readers must detect.
 ///
-/// 0.3 (AML generator freeze, AML-GOALS #50 and #44): the sanctions and PEP
+/// 0.3 (the AML generator freeze): the sanctions and PEP
 /// screening track (bronze/watchlist.parquet, planted sanctions_match and
 /// pep_match instances) and the answer keys moved out of the party zone
 /// (no sanctions_status, pep_status or initial_risk_score; crr ignores PEP).
 /// A pre-freeze corpus carries 0.2 and must not pass as current.
 pub const MODEL_VERSION: &str = "datagen-v2-rs-0.3";
 
-/// The static per-entity world. After LB-204 this holds only the sampler
+/// The static per-entity world. It holds only the sampler
 /// inputs; every attribute column is recomputed on demand (see the methods
 /// below), so its size no longer scales with the population's string columns.
 pub struct World {
@@ -272,7 +272,7 @@ pub fn build_world(scale: f64, seed: i64, corpus_months: i64) -> World {
 }
 
 /// `bronze_only` is retained for API compatibility but no longer changes the
-/// built world: after LB-204 every attribute column is recomputed on demand,
+/// built world: every attribute column is recomputed on demand,
 /// so there is nothing for a dedicated-bronze pod to skip materialising.
 pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bool) -> World {
     build_world_p(scale, seed, corpus_months, bronze_only, &Perturbation::NONE)

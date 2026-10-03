@@ -6,7 +6,7 @@
 
 // mimalloc: glibc malloc fragments under the per-thread file builders and
 // grows RSS for the whole run (cluster, scale 100: pod 0 14.5 -> 7.2 GiB,
-// workers 10.8 -> 6.8 GiB with byte-identical output). LB-204.
+// workers 10.8 -> 6.8 GiB with byte-identical output).
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -178,8 +178,53 @@ const C360_FLAGS: &[&str] = &[
     "--delivery-mode",
 ];
 /// Flags that take no value, per schema.
-const FINANCIAL_BARE: &[&str] = &["--robustness-perturbation"];
-const C360_BARE: &[&str] = &[];
+const FINANCIAL_BARE: &[&str] = &[
+    "--robustness-perturbation",
+    "--print-resolved-args",
+    "--version",
+];
+const C360_BARE: &[&str] = &["--print-resolved-args", "--version"];
+
+/// `--print-resolved-args`: print the resolved corpus arguments (the marker's
+/// `corpus_args` and its hash) and exit 0, before any S3 client or file.
+fn print_resolved_args_requested() -> bool {
+    std::env::args()
+        .skip(1)
+        .any(|a| a == "--print-resolved-args")
+}
+
+/// Print the resolved arguments and exit when `--print-resolved-args` was
+/// given.
+fn maybe_print_resolved_args(corpus_args: &serde_json::Value) {
+    if print_resolved_args_requested() {
+        println!(
+            "{}",
+            datagen_rs::corpus::resolved_args_document(corpus_args)
+        );
+        std::process::exit(0);
+    }
+}
+
+/// Write this node's marker last: its presence means the node finished.
+fn write_marker(
+    sink: &S3Sink,
+    corpus_args: &serde_json::Value,
+    cycle: u64,
+    node_id: i64,
+    totals: datagen_rs::corpus::NodeTotals,
+) {
+    let doc = datagen_rs::corpus::marker_json(
+        corpus_args,
+        cycle,
+        node_id,
+        totals,
+        &datagen_rs::corpus::utc_now(),
+    );
+    sink.put(
+        &datagen_rs::corpus::marker_key(cycle, node_id),
+        doc.into_bytes(),
+    );
+}
 
 /// Refuse (exit 2) any `--flag` the schema does not know, a bare flag given a
 /// value, and any stray positional argument. The value of a stray token is
@@ -458,7 +503,7 @@ fn parse_delivery_mode() -> DeliveryMode {
 /// delivery mode. Returns the object size in bytes. Uses `writer_properties`
 /// so codec choice is uniform across every parquet emitted; row-group size
 /// is the parquet-crate default (~1M rows). Continuous mode reuses the
-/// S3Sink::put_multipart path proven for party/account since LB-107.
+/// S3Sink::put_multipart path proven for party/account (objects over 5 GiB).
 fn write_bronze_file(
     sink: &S3Sink,
     key: &str,
@@ -495,6 +540,14 @@ fn main() {
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
     // choice before invoking us, but keep a defensive check here too so a
     // typo doesn't fall through to the pacs.008 path silently.
+    if std::env::args().skip(1).any(|a| a == "--version") {
+        println!(
+            "datagen_rs {} {}",
+            datagen_rs::model::MODEL_VERSION,
+            datagen_rs::corpus::build_commit()
+        );
+        std::process::exit(0);
+    }
     let schema: String = strict_arg("--schema", "financial".to_string());
     if matches!(schema.as_str(), "financial" | "customer360") {
         check_known_flags(&schema);
@@ -685,6 +738,25 @@ fn pacs008_main() {
     // Validate S3 config + build the sink BEFORE the multi-minute world build,
     // so bad creds / missing endpoint surface in milliseconds. Building the
     // sink also proves the tokio runtime and object_store client init cleanly.
+    // The corpus arguments as resolved (defaults and parsed values, the
+    // writer settings from the environment), for the marker and for
+    // --print-resolved-args, which exits here before any S3 client.
+    let corpus_args = serde_json::json!({
+        "schema": "financial",
+        "seed_ref": held.seed_ref(seed),
+        "cycles": cycles,
+        "total_nodes": total_nodes,
+        "file_size_mb": file_size_mb,
+        "delivery_mode": delivery.name(),
+        "model_version": datagen_rs::model::MODEL_VERSION,
+        "writer": datagen_rs::writer::WriterSettings::from_env().to_json(),
+        "scale": scale,
+        "corpus_months": corpus_months,
+        "mode": mode,
+        "robustness_perturbation": perturb != Perturbation::NONE,
+        "bytes_per_row": bytes_per_row,
+    });
+    maybe_print_resolved_args(&corpus_args);
     let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
@@ -692,7 +764,7 @@ fn pacs008_main() {
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
     let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
-    // Screening track (AML-GOALS #50): the watchlist and its external
+    // Screening track: the watchlist and its external
     // counterparties, from their own salted streams. Attaching them adds
     // entities above the population and changes no population column.
     let screening = datagen_rs::screening::build(w.population, seed, start_us, end_us);
@@ -736,7 +808,7 @@ fn pacs008_main() {
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
-    // LB-204 memory: every pod schedules the whole typology/screening set (RNG
+    // Memory: every pod schedules the whole typology/screening set (RNG
     // order, inst_uids and the manifest depend on the complete schedule), but a
     // pod only ever *emits* the files it owns (`fid % total_nodes == node_id`,
     // and only in --mode all/bronze). Keep the full per-file COUNT -- n_typ_total
@@ -954,7 +1026,7 @@ fn pacs008_main() {
         lo as u64
     }
 
-    // Screening payments (AML-GOALS #50), planted after the base row count
+    // Screening payments, planted after the base row count
     // above is fixed, so they are added on top of the corpus rather than
     // taken from it: every base, scheduled and typology row keeps its content
     // and uid. Originators are activity-weighted customers outside any
@@ -1069,7 +1141,7 @@ fn pacs008_main() {
         // Party and account are the same for every cycle (the world and the
         // schedule are the one-shot ones), so only cycle 0 writes them.
         // Party and account stream through a real S3 multipart upload
-        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
+        // (objects over 5 GiB). ArrowWriter emits parquet in row-group chunks
         // into MpuWriter, which enqueues 5 MiB parts against S3 as they
         // fill. Whole-object size is no longer bounded by process RAM
         // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
@@ -1436,6 +1508,18 @@ fn pacs008_main() {
         build_s, 100.0 * build_s / cpu_tot, write_s, 100.0 * write_s / cpu_tot, up_s
     );
 
+    write_marker(
+        &sink,
+        &corpus_args,
+        cycle_n,
+        node_id,
+        datagen_rs::corpus::NodeTotals {
+            files_written,
+            rows_written,
+            bytes_written: total_bytes,
+        },
+    );
+
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
     // `LB_METRICS_JSON `.
@@ -1517,7 +1601,7 @@ fn customer360_main() {
     let seed: i64 = strict_arg("--seed", 42);
     // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
     // suffixes the keys; 0 reproduces a run without --cycle.
-    let cycle_n: u64 = cycle_arg();
+    let (cycle_n, c360_cycles) = cycle_args();
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale sizes only the customer id space (when
     // --customer-id-max is absent); target_tb drives file count.
@@ -1570,13 +1654,15 @@ fn customer360_main() {
     });
     // payload_kb was a CLI knob (--payload-kb) that had only ever been
     // calibrated at 2, so any other value silently mis-sized rows_per_file
-    // and the refuse path exited 2. Dropped 2026-09-28 (LB-191 companion,
-    // Wave 1 C3): no shipped template ever passed a different value, and a
+    // and the refuse path exited 2. Dropped 2026-09-28: no shipped template ever passed a different value, and a
     // future need for variable payload comes back with real per-payload
     // calibration in customer360_bytes_per_row_default(). Config::payload_kb
     // stays as a Rust-visible field so unit tests can build small_cfg with
     // payload_kb=1. The old --payload-kb CLI value (if any) is ignored.
     let payload_kb: usize = 2;
+    // Recorded in the corpus arguments; it sizes the id space only when
+    // --customer-id-max is absent.
+    let c360_scale: f64 = strict_arg("--scale", 1.0);
     let dirty_ratio: f64 = strict_arg("--dirty-ratio", 0.08);
     let duplicate_email_pct: f64 = strict_arg("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
@@ -1622,6 +1708,26 @@ fn customer360_main() {
     let delivery = parse_delivery_mode();
     eprintln!("delivery_mode={}", delivery.name());
 
+    // The corpus arguments as resolved, for the marker and for
+    // --print-resolved-args, which exits here before any S3 client.
+    let corpus_args = serde_json::json!({
+        "schema": "customer360",
+        "seed_ref": seed.to_string(),
+        "cycles": c360_cycles,
+        "total_nodes": total_nodes,
+        "file_size_mb": file_size_mb,
+        "delivery_mode": delivery.name(),
+        "model_version": datagen_rs::model::MODEL_VERSION,
+        "writer": datagen_rs::writer::WriterSettings::from_env().to_json(),
+        "target_tb": target_tb,
+        "customer_id_max": customer_id_max,
+        "scale": c360_scale,
+        "dirty_ratio": dirty_ratio,
+        "duplicate_email_pct": duplicate_email_pct,
+        "timestamp_start": ts_start_str,
+        "timestamp_end": ts_end_str,
+    });
+    maybe_print_resolved_args(&corpus_args);
     let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
@@ -1762,6 +1868,18 @@ fn customer360_main() {
         up_s
     );
 
+    write_marker(
+        &sink,
+        &corpus_args,
+        cycle_n,
+        node_id,
+        datagen_rs::corpus::NodeTotals {
+            files_written,
+            rows_written,
+            bytes_written: total_bytes,
+        },
+    );
+
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
     // `LB_METRICS_JSON `.
@@ -1837,5 +1955,160 @@ mod tests {
         assert_eq!(parse_date_to_us("2024-01-32"), None);
         assert_eq!(parse_date_to_us(""), None);
         assert_eq!(parse_date_to_us("abc"), None);
+    }
+}
+
+#[cfg(test)]
+mod classification {
+    //! Every generator flag and environment variable is either in the
+    //! marker's `corpus_args` or excluded for a reason, so a new knob cannot
+    //! be left out of corpus identity silently.
+    use super::{C360_BARE, C360_FLAGS, FINANCIAL_BARE, FINANCIAL_FLAGS};
+
+    /// (flag, corpus_args key it lands in, or None with the reason).
+    const FLAG_CLASS: &[(&str, Result<&str, &str>)] = &[
+        ("--schema", Ok("schema")),
+        ("--seed", Ok("seed_ref")),
+        ("--scale", Ok("scale")),
+        ("--corpus-months", Ok("corpus_months")),
+        ("--file-size-mb", Ok("file_size_mb")),
+        ("--bytes-per-row", Ok("bytes_per_row")),
+        ("--total-nodes", Ok("total_nodes")),
+        ("--mode", Ok("mode")),
+        ("--delivery-mode", Ok("delivery_mode")),
+        ("--cycles", Ok("cycles")),
+        ("--robustness-perturbation", Ok("robustness_perturbation")),
+        ("--target-tb", Ok("target_tb")),
+        ("--customer-id-max", Ok("customer_id_max")),
+        ("--dirty-ratio", Ok("dirty_ratio")),
+        ("--duplicate-email-pct", Ok("duplicate_email_pct")),
+        ("--timestamp-start", Ok("timestamp_start")),
+        ("--timestamp-end", Ok("timestamp_end")),
+        ("--bucket", Err("destination")),
+        ("--prefix", Err("destination")),
+        (
+            "--node-id",
+            Err("per node, recorded in the marker's node_id"),
+        ),
+        ("--cycle", Err("per cycle, recorded in the marker's cycle")),
+        (
+            "--threads",
+            Err("thread count; output is thread-invariant (pinned)"),
+        ),
+        ("--workers", Err("thread count alias")),
+        ("--print-resolved-args", Err("a mode that writes nothing")),
+        ("--version", Err("a mode that writes nothing")),
+    ];
+
+    /// (variable, in corpus_args, reason when not).
+    const ENV_CLASS: &[(&str, Result<&str, &str>)] = &[
+        ("DG_COMPRESSION", Ok("writer")),
+        ("DG_STATS", Ok("writer")),
+        ("DG_DICT", Ok("writer")),
+        ("DG_PAGESZ", Ok("writer")),
+        ("DG_ROW_GROUP", Ok("writer")),
+        ("LB_DATAGEN_SEED", Ok("seed_ref")),
+        ("DG_LOCAL_DIR", Err("destination")),
+        ("S3_ENDPOINT", Err("destination")),
+        ("AWS_REGION", Err("destination")),
+        ("S3_PATH_STYLE", Err("transport")),
+        ("S3_VERIFY_SSL", Err("transport")),
+        ("S3_CA_CERT", Err("transport")),
+        (
+            "DG_S3_IO_THREADS",
+            Err("upload concurrency; part boundaries do not change bytes"),
+        ),
+        ("AWS_ACCESS_KEY_ID", Err("credentials, never hashed")),
+        ("AWS_SECRET_ACCESS_KEY", Err("credentials, never hashed")),
+        ("JOB_COMPLETION_INDEX", Err("the node id's source")),
+        ("LB_RUN_ID", Err("metrics only")),
+        ("LB_PUSHGATEWAY_URL", Err("metrics only")),
+        ("LB_POD_CPU_REQUEST_MILLI", Err("metrics only")),
+        (
+            "LB_HELDOUT_HASHES",
+            Err("a check input; seed_ref carries the salted seed"),
+        ),
+    ];
+
+    fn keys(schema: &str) -> Vec<&'static str> {
+        let common = [
+            "schema",
+            "seed_ref",
+            "cycles",
+            "total_nodes",
+            "file_size_mb",
+            "delivery_mode",
+            "model_version",
+            "writer",
+        ];
+        let extra: &[&str] = if schema == "financial" {
+            &[
+                "scale",
+                "corpus_months",
+                "mode",
+                "robustness_perturbation",
+                "bytes_per_row",
+            ]
+        } else {
+            &[
+                "target_tb",
+                "customer_id_max",
+                "scale",
+                "dirty_ratio",
+                "duplicate_email_pct",
+                "timestamp_start",
+                "timestamp_end",
+            ]
+        };
+        common.iter().chain(extra.iter()).copied().collect()
+    }
+
+    #[test]
+    fn every_known_flag_is_classified() {
+        for (schema, table) in [
+            ("financial", [FINANCIAL_FLAGS, FINANCIAL_BARE].concat()),
+            ("customer360", [C360_FLAGS, C360_BARE].concat()),
+        ] {
+            for flag in table {
+                let class = FLAG_CLASS.iter().find(|(f, _)| *f == flag);
+                let Some((_, class)) = class else {
+                    panic!("{schema} flag {flag} is neither in corpus_args nor excluded");
+                };
+                if let Ok(key) = class {
+                    assert!(keys(schema).contains(key), "{schema} {flag} -> {key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_env_read_is_classified() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut names = std::collections::BTreeSet::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    for needle in ["env::var(\"", "env::var_os(\""] {
+                        for part in text.split(needle).skip(1) {
+                            if let Some(end) = part.find('"') {
+                                names.insert(part[..end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(names.len() >= 15, "the scan found too few reads: {names:?}");
+        for n in &names {
+            assert!(
+                ENV_CLASS.iter().any(|(k, _)| k == n),
+                "{n} is read but neither in corpus_args nor excluded"
+            );
+        }
     }
 }

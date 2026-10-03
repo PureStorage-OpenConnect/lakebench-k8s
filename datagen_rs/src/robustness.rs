@@ -1,4 +1,4 @@
-//! Robustness corpus perturbation (AML-GOALS R3(b), Level 2 condition 5).
+//! Robustness corpus perturbation (the Level 2 robustness condition).
 //!
 //! The robustness corpus shifts three nuisance parameters in natural units so
 //! Level 2 is shown not to depend on the exact values the calibration corpus

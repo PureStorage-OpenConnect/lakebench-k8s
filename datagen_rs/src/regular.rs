@@ -1,4 +1,4 @@
-//! Regular (scheduled) baseline sends, AML-GOALS D2.
+//! Regular (scheduled) baseline sends.
 //!
 //! Every baseline send used to be an independent draw of an originator by
 //! activity weight, so each account's sends were a memoryless process on the
@@ -17,7 +17,7 @@
 //! holds O(classes + scheduled accounts) state at any scale and every file's
 //! content still depends only on (seed, file).
 //!
-//! Parameters are self-chosen (AML-GOALS D2 anchor pending a citation).
+//! Parameters are self-chosen; no published source anchors them yet.
 
 use crate::hash::splitmix64;
 

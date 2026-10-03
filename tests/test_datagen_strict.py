@@ -50,3 +50,47 @@ def test_entrypoint_known_flags_still_run(monkeypatch):
     # forwarded; every flag the current template renders is known.
     rc, cmd = _run(monkeypatch, [*BASE, "--payload-kb", "2", "--workers", "0", "--mode", "all"])
     assert rc == 0 and "--payload-kb" not in cmd
+
+
+def test_entrypoint_hands_print_resolved_args_to_the_generator(monkeypatch, capsys):
+    # Parsed exactly as for a Job, then the generator prints the JSON; the
+    # entrypoint's own line goes to stderr so stdout is only that JSON.
+    rc, cmd = _run(monkeypatch, [*BASE, "--print-resolved-args"])
+    assert rc == 0 and cmd[-1] == "--print-resolved-args"
+    rc2, plain = _run(monkeypatch, BASE)
+    assert cmd[:-1] == plain
+    out = capsys.readouterr()
+    assert "[entrypoint]" in out.err
+
+
+def test_entrypoint_passes_version_through(monkeypatch):
+    rc, cmd = _run(monkeypatch, ["--version", "--anything-else"])
+    assert rc == 0 and cmd == ["/app/datagen_rs", "--version"]
+
+
+DOCKERFILE = (REPO / "datagen_rs" / "Dockerfile").read_text()
+
+
+def test_dockerfile_has_no_boto3_and_labels():
+    import re
+
+    assert "boto3" not in DOCKERFILE
+    model = re.search(
+        r'MODEL_VERSION: &str = "([^"]+)"', (REPO / "datagen_rs/src/model.rs").read_text()
+    ).group(1)
+    for label in (
+        "org.opencontainers.image.revision=",
+        "org.opencontainers.image.source=",
+        f'org.opencontainers.image.version="{model}"',
+        f'io.lakebench.model-version="{model}"',
+    ):
+        assert label in DOCKERFILE, label
+    assert 'LB_BUILD_COMMIT="$LB_BUILD_COMMIT" cargo build' in DOCKERFILE
+
+
+def test_dockerfile_keeps_python3():
+    # entrypoint.py is the image's entry point, so the runtime stage must
+    # stay a Python image.
+    stages = [ln for ln in DOCKERFILE.splitlines() if ln.startswith("FROM ")]
+    assert stages[-1].startswith("FROM python:3.")
+    assert 'ENTRYPOINT ["python", "entrypoint.py"]' in DOCKERFILE

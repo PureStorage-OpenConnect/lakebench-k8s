@@ -177,10 +177,27 @@ print(table.to_pandas().head())
 `datagen_rs/Dockerfile` is a two-stage build. Stage one compiles the
 `generate` binary in `rust:1.98.1-bookworm` (both base images are pinned by
 digest in the Dockerfile; `cargo build --release --locked
---bin generate`). Stage two is `python:3.14-slim` with `boto3`, the binary at
-`/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. S3
-credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
-`S3_ENDPOINT` in the pod environment.
+--bin generate`). Stage two is `python:3.14-slim` with the binary at
+`/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. The
+runtime base is part of the generator's identity: the binary uses its glibc
+math library, so another base can change corpus bytes. S3 credentials come
+from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `S3_ENDPOINT` in the pod
+environment.
+
+Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)`: the image's
+OCI labels (`org.opencontainers.image.revision`, `.source`, `.version` and
+`io.lakebench.model-version`), `generate --version` and every per-node
+marker name that commit. `podman run <image> --version` prints
+`datagen_rs <model version> <commit>`; `--print-resolved-args` added to a
+Job's arguments prints the resolved corpus arguments and their hash as JSON
+and writes nothing.
+
+After its last file, each pod writes
+`<prefix>/_corpus/c<cycle>-node-<node>.json`: the files, rows and bytes it
+wrote, the seed (salted hash for the financial schema), and `corpus_args`,
+the arguments as the generator resolved them, including the parquet writer
+settings, with their sha256. Spark never reads it as data (the directory
+starts with `_`).
 
 Add Rust dependencies to `Cargo.toml` (and commit the updated `Cargo.lock`,
 since the build uses `--locked`).

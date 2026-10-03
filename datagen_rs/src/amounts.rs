@@ -67,7 +67,7 @@ fn minor_units(ccy: &str) -> f64 {
     }
 }
 
-/// Amount in the account's own currency (LB-137). The log-normal is defined
+/// Amount in the account's own currency. The log-normal is defined
 /// in USD, where the bank model's median and tail live, and the draw is then
 /// expressed in `ccy`. Drawing every currency on the USD scale left JPY, INR
 /// and KRW baselines about 150x too small, so almost no baseline payment sat in

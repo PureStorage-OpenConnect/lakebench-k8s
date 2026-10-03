@@ -193,7 +193,13 @@ def _fnv(paths: list[str], root: Path) -> tuple[int, int]:
 
 
 def _files(root: Path) -> list[str]:
-    return [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()]
+    # The per-node marker (any ``_corpus`` directory) records build and time;
+    # it is excluded by path, as cycles.rs's digests exclude it.
+    return [
+        str(p.relative_to(root))
+        for p in root.rglob("*")
+        if p.is_file() and "_corpus" not in p.relative_to(root).parts[:-1]
+    ]
 
 
 def tree_digest(root: Path) -> tuple[int, int]:
