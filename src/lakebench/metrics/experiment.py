@@ -833,6 +833,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
     limits["bound_kinds"] = _bound_kinds(limits, rules)
+    from lakebench.metrics.attribution import attribution, headroom_pct
+
+    headroom = headroom_pct(metrics) if mode == "batch" else None
+    if headroom is not None:
+        # Diagnostic: how close each stage came to the per-job timeout.
+        limits["headroom_pct"] = headroom
     if mode == "sustained":
         # The trickle is shown with the limits but is not a bound kind:
         # every continuous run sets one (metrics/bounds.py).
@@ -939,7 +945,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
             else {}
         ),
     }
-    return {
+    exp: dict[str, Any] = {
         **block,
         "system": "local" if local else "cluster",
         "support": _recorded_support(inputs, schema, arch, mode, local),
@@ -957,6 +963,11 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "results": _results(metrics, mode),
         "lakebench": experiment_lakebench(metrics.provenance),
     }
+    # Diagnostic, AML batch only: where gold-finalize's time went.
+    gold_attribution = attribution(metrics) if mode == "batch" else None
+    if gold_attribution is not None:
+        exp["attribution"] = gold_attribution
+    return exp
 
 
 def refresh_benchmark(metrics: Any) -> None:

@@ -43,6 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **AML batch records attribute gold-finalize time and show stage headroom.**
+  `experiment.attribution` names gold-finalize's slowest rule, its heaviest
+  Spark stage and the TM share; `limits.headroom_pct` gives each stage's and
+  the benchmark phase's headroom against the per-job timeout, which the
+  record now keeps as `job_timeout_seconds`. `scripts/aml_stage_attribution.py`
+  builds the same profile from a Spark event log when the driver could not
+  read its status store. Diagnostics only. See
+  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
 - **AML gold-finalize records where its time goes.** The gold-finalize
   job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
   rule), `stage_profile` (each rule's three heaviest Spark stages, read

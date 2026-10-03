@@ -1262,6 +1262,7 @@
    "experiment",
    "financial_scoring",
    "gold_size_gb",
+   "job_timeout_seconds",
    "jobs",
    "maintenance_outcomes",
    "maintenance_policy_id",
@@ -1338,6 +1339,7 @@
   ],
   "experiment": [
    "architecture",
+   "attribution",
    "corpus",
    "effective_maintenance",
    "lakebench",

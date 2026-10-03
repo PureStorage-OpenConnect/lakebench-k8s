@@ -466,6 +466,11 @@ class PipelineMetrics:
     # words printed at run start. None: not recorded.
     autosize_cuts: list[str] | None = None
 
+    # The per-job timeout the batch run gave every stage (--timeout, or the
+    # scale-derived budget run computes). Headroom per stage is read against
+    # it (metrics/attribution.headroom_pct). None: not recorded.
+    job_timeout_seconds: int | None = None
+
     # What the run's table-maintenance calls actually did (cli/_sustained
     # _note_outcome): one dict per call with kind (expire, compaction),
     # statement counts or a skip/error reason. None: not recorded (a record
@@ -544,6 +549,8 @@ class PipelineMetrics:
             d["provenance"] = self.provenance
         if self.autosize_cuts is not None:
             d["autosize_cuts"] = list(self.autosize_cuts)
+        if self.job_timeout_seconds is not None:
+            d["job_timeout_seconds"] = int(self.job_timeout_seconds)
         if self.maintenance_outcomes is not None:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         if self.continuous is not None:

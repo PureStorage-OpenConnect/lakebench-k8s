@@ -419,6 +419,7 @@
    "end_time",
    "experiment",
    "gold_size_gb",
+   "job_timeout_seconds",
    "jobs",
    "maintenance_outcomes",
    "maintenance_policy_id",
