@@ -261,7 +261,8 @@ PATHS: tuple[ExitPath, ...] = (
         _C.USAGE,
         "a command that reads or scores data was given a protected AML corpus (a config "
         "whose role or seed is the evaluation or robustness one, or a run record from one), "
-        "or `generate --registered-corpus` a config that names none",
+        "or `generate --registered-corpus` a config that names none; or bronze-verify found "
+        "the corpus manifest comes from a held-out or spent seed",
     ),
     ExitPath(
         "alias.refused",

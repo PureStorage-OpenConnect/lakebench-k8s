@@ -56,7 +56,7 @@ the CLI down every path listed here and checks the code.
 | `config.validation` | 2 | the config fails to load or validate |
 | `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
-| `run.protected_corpus` | 2 | a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none |
+| `run.protected_corpus` | 2 | a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify found the corpus manifest comes from a held-out or spent seed |
 | `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `deploy.state_copied` | 3 | `deploy` found a state written for another directory or host (a copied directory) |

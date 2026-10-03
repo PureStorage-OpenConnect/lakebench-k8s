@@ -2811,6 +2811,17 @@ def _run_once(
                         },
                     )
                 else:
+                    from lakebench.aml.look_guard import refusal_in_log
+
+                    _refused = refusal_in_log(getattr(result, "driver_logs", None))
+                    if _refused:
+                        # bronze-verify found a corpus from a held-out or spent
+                        # AML seed and read nothing: the protected-corpus refusal.
+                        print_error(
+                            f"Refused: {stage_name} found a protected AML corpus ({_refused})"
+                        )
+                        pipeline_success = False
+                        raise typer.Exit(ExitCode.USAGE)
                     print_error(f"{stage_name} failed: {result.message}{_retry_note(job_metrics)}")
                     if result.driver_logs:
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
