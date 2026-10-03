@@ -3000,7 +3000,7 @@ class SparkJobManager:
         # A registered (held-out) corpus's seed is never in a SparkApplication
         # spec (owner, 10-03); LB_SEED feeds only the Customer 360 silver
         # sampler, so it is left out there.
-        from lakebench.config.datagen_seed import uses_seed_secret
+        from lakebench.config.seed_secret import uses_seed_secret
 
         if not uses_seed_secret(cfg):
             env.append({"name": "LB_SEED", "value": str(_lb_seed)})
@@ -3207,12 +3207,13 @@ class SparkJobManager:
         # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
         # the report scored and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
-            from lakebench.config.datagen_seed import config_seed, seed_secret_env, uses_seed_secret
+            from lakebench.config.datagen_seed import config_seed
+            from lakebench.config.seed_secret import seed_secret_env, uses_seed_secret
 
             if uses_seed_secret(cfg):
                 # A registered corpus's seed: from the Secret generate wrote,
                 # never in the SparkApplication spec (owner, 10-03).
-                env.append(seed_secret_env())
+                env.append(seed_secret_env(cfg))
             else:
                 env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
             role = cfg.architecture.workload.datagen.corpus_role

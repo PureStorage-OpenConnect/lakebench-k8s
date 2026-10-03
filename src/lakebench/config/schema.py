@@ -1708,7 +1708,8 @@ class DatagenConfig(ConfigModel):
     as the registered corpus for that role. For `evaluation` and `robustness`, `seed` must be
     set and must hash to that role's entry in `heldout_hashes.json`; an unset `seed` is
     refused. For `calibration`, an unset `seed` uses the calibration seed. Only set it for the
-    one registered gate run of that role.
+    one registered gate run of that role. For `evaluation` and `robustness` the seed reaches the
+    cluster only through a Secret in the deployment's namespace, never as a Job argument.
     """
     # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
     # nuisance parameters by corpora.robustness_perturbation in the

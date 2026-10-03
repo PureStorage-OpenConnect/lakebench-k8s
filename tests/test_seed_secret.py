@@ -21,6 +21,7 @@ import pytest
 import yaml
 
 from lakebench.config import datagen_seed as ds
+from lakebench.config import seed_secret as ss
 from tests.conftest import make_config
 from tests.fixtures import heldout_test_seeds as ts
 
@@ -74,14 +75,14 @@ def _render(cfg):
 
 
 def test_only_registered_financial_corpora_use_the_secret():
-    assert ds.uses_seed_secret(_registered())
-    assert ds.uses_seed_secret(
+    assert ss.uses_seed_secret(_registered())
+    assert ss.uses_seed_secret(
         _cfg(seed=RB, corpus_role="robustness", robustness_perturbation=True)
     )
-    assert not ds.uses_seed_secret(_cfg(seed=43))
-    assert not ds.uses_seed_secret(_cfg(seed=43, corpus_role="calibration"))
-    assert not ds.uses_seed_secret(_cfg())
-    assert not ds.uses_seed_secret(
+    assert not ss.uses_seed_secret(_cfg(seed=43))
+    assert not ss.uses_seed_secret(_cfg(seed=43, corpus_role="calibration"))
+    assert not ss.uses_seed_secret(_cfg())
+    assert not ss.uses_seed_secret(
         make_config(architecture={"workload": {"schema": "customer360", "datagen": {"seed": 7}}})
     )
 
@@ -93,7 +94,16 @@ def test_unreadable_record_uses_the_secret(monkeypatch):
         raise FileNotFoundError("heldout_hashes.json not found")
 
     monkeypatch.setattr(ds, "_heldout", gone)
-    assert ds.uses_seed_secret(cfg)
+    assert ss.uses_seed_secret(cfg)
+
+
+def test_secret_name_follows_the_seed_and_hides_it():
+    a, b = (
+        ss.seed_secret_name(_registered()),
+        ss.seed_secret_name(_cfg(seed=RB, corpus_role="robustness", robustness_perturbation=True)),
+    )
+    assert a != b and a.startswith(ss.SEED_SECRET_PREFIX) and len(a) <= 63
+    assert _no_seed_in(a + b)
 
 
 # ---------------------------------------------------------------------------
@@ -102,17 +112,19 @@ def test_unreadable_record_uses_the_secret(monkeypatch):
 
 
 def test_registered_job_has_no_seed_argument_and_reads_the_secret():
-    text, c = _render(_registered())
+    cfg = _registered()
+    text, c = _render(cfg)
     assert "--seed" not in c["args"]
     env = {e["name"]: e for e in c["env"]}
-    assert env["LB_DATAGEN_SEED"] == ds.seed_secret_env()
+    assert env["LB_DATAGEN_SEED"] == ss.seed_secret_env(cfg)
     assert "value" not in env["LB_DATAGEN_SEED"]
     assert _no_seed_in(text)
 
 
 def test_development_job_is_unchanged():
     # Seed 43 keeps --seed in the args and gets no secret env; nothing else
-    # in the container moves.
+    # in the container moves. (The seed-43 render was also compared byte for
+    # byte with the parent commit's template when this was written.)
     _, c = _render(_cfg(seed=43))
     assert c["args"][c["args"].index("--seed") + 1] == "43"
     assert "LB_DATAGEN_SEED" not in {e["name"] for e in c["env"]}
@@ -135,6 +147,15 @@ class _ApiException(Exception):
         self.status = status
 
 
+def _obj(body):
+    md = body["metadata"]
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=md["name"], labels=md.get("labels"), annotations=md.get("annotations")
+        )
+    )
+
+
 @pytest.fixture
 def core(monkeypatch):
     import kubernetes.client.rest as rest
@@ -146,10 +167,7 @@ def core(monkeypatch):
     def read(name, ns):
         if name not in store:
             raise _ApiException(404)
-        b = store[name]["metadata"]
-        return SimpleNamespace(
-            metadata=SimpleNamespace(labels=b.get("labels"), annotations=b.get("annotations"))
-        )
+        return _obj(store[name])
 
     def create(ns, body):
         if body["metadata"]["name"] in store:
@@ -157,79 +175,125 @@ def core(monkeypatch):
         store[body["metadata"]["name"]] = body
 
     def delete(name, ns):
-        store.pop(name, None)
+        if store.pop(name, None) is None:
+            raise _ApiException(404)
+
+    def listed(ns, label_selector=""):
+        return SimpleNamespace(items=[_obj(b) for b in store.values()])
 
     c.read_namespaced_secret.side_effect = read
     c.create_namespaced_secret.side_effect = create
     c.delete_namespaced_secret.side_effect = delete
+    c.list_namespaced_secret.side_effect = listed
     c.store = store
     return c
+
+
+def _foreign(name, owner="someone-else", ref="x"):
+    return {
+        "metadata": {
+            "name": name,
+            "labels": {
+                "app.kubernetes.io/instance": owner,
+                "app.kubernetes.io/component": ss.SEED_SECRET_COMPONENT,
+            },
+            "annotations": {ss.SEED_REF_ANNOTATION: ref},
+        }
+    }
 
 
 def test_secret_holds_the_seed_and_its_ref(core):
     from lakebench.deploy.datagen import ensure_seed_secret
 
     cfg = _registered()
-    ensure_seed_secret(cfg, SimpleNamespace(_core_v1=core))
-    body = core.store[ds.SEED_SECRET_NAME]
+    ensure_seed_secret(cfg, core)
+    body = core.store[ss.seed_secret_name(cfg)]
     assert body["immutable"] is True and body["type"] == "Opaque"
-    assert body["stringData"] == {ds.SEED_SECRET_KEY: str(EV)}
-    assert body["metadata"]["annotations"][ds.SEED_REF_ANNOTATION] == ds.seed_ref("financial", EV)
-    assert body["metadata"]["labels"]["app.kubernetes.io/instance"] == cfg.name
+    assert body["stringData"] == {ss.SEED_SECRET_KEY: str(EV)}
+    assert body["metadata"]["annotations"][ss.SEED_REF_ANNOTATION] == ds.seed_ref("financial", EV)
+    labels = body["metadata"]["labels"]
+    assert labels["app.kubernetes.io/instance"] == cfg.name
+    assert labels["app.kubernetes.io/component"] == ss.SEED_SECRET_COMPONENT
     # The same seed again changes nothing.
-    ensure_seed_secret(cfg, SimpleNamespace(_core_v1=core))
+    ensure_seed_secret(cfg, core)
     assert core.create_namespaced_secret.call_count == 1
     assert core.delete_namespaced_secret.call_count == 0
 
 
-def test_another_seed_replaces_the_secret(core):
+def test_another_seed_gets_another_secret_and_the_old_one_goes(core):
+    # Names are never reused for another seed, so a kubelet still caching an
+    # immutable Secret cannot serve its value to a new pod.
     from lakebench.deploy.datagen import ensure_seed_secret
 
-    ensure_seed_secret(_registered(), SimpleNamespace(_core_v1=core))
+    first = _registered()
+    ensure_seed_secret(first, core)
     other = _cfg(seed=RB, corpus_role="robustness", robustness_perturbation=True)
-    ensure_seed_secret(other, SimpleNamespace(_core_v1=core))
-    body = core.store[ds.SEED_SECRET_NAME]
-    assert body["stringData"] == {ds.SEED_SECRET_KEY: str(RB)}
-    assert core.delete_namespaced_secret.call_count == 1
+    ensure_seed_secret(other, core)
+    assert list(core.store) == [ss.seed_secret_name(other)]
+    assert core.store[ss.seed_secret_name(other)]["stringData"] == {ss.SEED_SECRET_KEY: str(RB)}
 
 
-def test_a_foreign_secret_is_never_replaced(core):
+def test_a_foreign_secret_is_never_used_or_replaced(core):
     from lakebench.deploy.datagen import SeedSecretError, ensure_seed_secret
 
-    core.store[ds.SEED_SECRET_NAME] = {
-        "metadata": {"labels": {"app.kubernetes.io/instance": "someone-else"}, "annotations": {}}
-    }
-    with pytest.raises(SeedSecretError, match="belongs to deployment") as e:
-        ensure_seed_secret(_registered(), SimpleNamespace(_core_v1=core))
+    cfg = _registered()
+    name = ss.seed_secret_name(cfg)
+    core.store[name] = _foreign(name, ref=ds.seed_ref("financial", EV))
+    with pytest.raises(SeedSecretError, match="not this deployment") as e:
+        ensure_seed_secret(cfg, core)
     assert core.delete_namespaced_secret.call_count == 0
     assert _no_seed_in(str(e.value))
+    # Ours by label but for another seed_ref under this name: refused too.
+    core.store[name] = _foreign(name, owner=cfg.name, ref="0" * 64)
+    with pytest.raises(SeedSecretError):
+        ensure_seed_secret(cfg, core)
 
 
 def test_secret_errors_never_hold_the_seed(core):
     from lakebench.deploy.datagen import SeedSecretError, ensure_seed_secret
 
-    def boom(ns, body):
+    def boom(*a, **k):
         raise _ApiException(500)
 
-    core.create_namespaced_secret.side_effect = boom
-    with pytest.raises(SeedSecretError) as e:
-        ensure_seed_secret(_registered(), SimpleNamespace(_core_v1=core))
-    assert e.value.__cause__ is None and e.value.__suppress_context__
-    assert _no_seed_in(str(e.value))
+    for call in ("read_namespaced_secret", "create_namespaced_secret", "list_namespaced_secret"):
+        saved = getattr(core, call).side_effect
+        getattr(core, call).side_effect = boom
+        with pytest.raises(SeedSecretError) as e:
+            ensure_seed_secret(_registered(), core)
+        assert e.value.__cause__ is None and e.value.__suppress_context__, call
+        assert _no_seed_in(str(e.value)), call
+        getattr(core, call).side_effect = saved
+        core.store.clear()
 
 
-def test_a_development_generate_drops_this_deployments_secret(core):
-    from lakebench.deploy.datagen import ensure_seed_secret, prepare_seed_secret
+def test_a_development_generate_drops_this_deployments_secrets(core, caplog):
+    from lakebench.deploy.datagen import drop_seed_secrets, ensure_seed_secret
 
-    ensure_seed_secret(_registered(), SimpleNamespace(_core_v1=core))
-    prepare_seed_secret(_cfg(seed=43), SimpleNamespace(_core_v1=core))
-    assert ds.SEED_SECRET_NAME not in core.store
-    # A foreign one is left alone.
-    core.store[ds.SEED_SECRET_NAME] = {
-        "metadata": {"labels": {"app.kubernetes.io/instance": "other"}, "annotations": {}}
-    }
-    prepare_seed_secret(_cfg(seed=43), SimpleNamespace(_core_v1=core))
-    assert ds.SEED_SECRET_NAME in core.store
+    ensure_seed_secret(_registered(), core)
+    core.store["lakebench-datagen-seed-other"] = _foreign("lakebench-datagen-seed-other")
+    drop_seed_secrets(_cfg(seed=43), core)
+    assert list(core.store) == ["lakebench-datagen-seed-other"]
+    # A failure is logged, not raised, and names no seed.
+    ensure_seed_secret(_registered(), core)
+
+    def boom(*a, **k):
+        raise _ApiException(403)
+
+    core.delete_namespaced_secret.side_effect = boom
+    drop_seed_secrets(_cfg(seed=43), core)
+    assert "HTTP 403" in caplog.text and _no_seed_in(caplog.text)
+
+
+def test_prepare_picks_ensure_or_drop(monkeypatch):
+    import lakebench.deploy.datagen as dg
+
+    calls = []
+    monkeypatch.setattr(dg, "ensure_seed_secret", lambda cfg, c: calls.append("ensure"))
+    monkeypatch.setattr(dg, "drop_seed_secrets", lambda cfg, c: calls.append("drop"))
+    k8s = SimpleNamespace(_core_v1=object())
+    dg.prepare_seed_secret(_registered(), k8s)
+    dg.prepare_seed_secret(_cfg(seed=43), k8s)
+    assert calls == ["ensure", "drop"]
 
 
 def _deployer(cfg, applied):
@@ -243,7 +307,7 @@ def _deployer(cfg, applied):
     engine.k8s = k8s
     d = DatagenDeployer(engine)
     d.stop_previous_job = lambda: applied.append("stopped")
-    d._clear_bronze_prefix_if_fresh = lambda *a, **k: None
+    d._clear_bronze_prefix_if_fresh = lambda *a, **k: applied.append("cleared")
     return d, k8s
 
 
@@ -256,31 +320,71 @@ def test_secret_written_after_the_old_pods_stop_and_before_the_job(monkeypatch, 
     d, _ = _deployer(_registered(), applied)
     r = d.deploy_cycle(0, 2) if cycles else d.deploy()
     assert r.status.value == "success", r.message
-    assert applied == ["stopped", "secret", "Job"]
+    assert applied == ["stopped", "secret", "cleared", "Job"]
 
 
 def test_a_secret_failure_submits_no_job(monkeypatch, caplog):
     import lakebench.deploy.datagen as dg
 
     def fail(cfg, k8s):
-        raise dg.SeedSecretError("could not create Secret lakebench-datagen-seed (HTTP 403)")
+        raise dg.SeedSecretError("could not create Secret x (HTTP 403)")
 
     monkeypatch.setattr(dg, "prepare_seed_secret", fail)
     applied: list[str] = []
     d, k8s = _deployer(_registered(), applied)
     r = d.deploy()
     assert r.status.value == "failed"
-    assert "Job" not in applied
+    assert "Job" not in applied and "cleared" not in applied
     assert _no_seed_in(r.message) and _no_seed_in(caplog.text)
 
 
-def test_missing_secret_fails_the_wait_fast():
-    # A pod whose Secret is missing waits in CreateContainerConfigError; the
-    # status poll reports it as failing instead of waiting for the timeout.
-    import lakebench.deploy.datagen as dg
+def _progress(monkeypatch, waiting):
+    import kubernetes.client as kc
 
-    src = Path(dg.__file__).read_text()
-    assert '"CreateContainerConfigError"' in src
+    from lakebench.deploy.datagen import DatagenDeployer
+    from lakebench.deploy.engine import DeploymentEngine
+
+    job = SimpleNamespace(
+        status=SimpleNamespace(succeeded=0, failed=0, active=1),
+        spec=SimpleNamespace(completions=1),
+        metadata=SimpleNamespace(uid="u1"),
+    )
+    cs = SimpleNamespace(
+        last_state=None,
+        restart_count=0,
+        state=SimpleNamespace(waiting=waiting),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="dg-0",
+            annotations={},
+            owner_references=[SimpleNamespace(uid="u1", kind="Job")],
+        ),
+        status=SimpleNamespace(phase="Pending", container_statuses=[cs]),
+    )
+    monkeypatch.setattr(
+        kc, "BatchV1Api", lambda: SimpleNamespace(read_namespaced_job_status=lambda **k: job)
+    )
+    monkeypatch.setattr(
+        kc,
+        "CoreV1Api",
+        lambda: SimpleNamespace(list_namespaced_pod=lambda *a, **k: SimpleNamespace(items=[pod])),
+    )
+    return DatagenDeployer(DeploymentEngine(_registered(), dry_run=True)).get_progress()
+
+
+def test_missing_secret_fails_the_wait_fast(monkeypatch):
+    missing = SimpleNamespace(
+        reason="CreateContainerConfigError",
+        message='secret "lakebench-datagen-seed-0123" not found',
+    )
+    p = _progress(monkeypatch, missing)
+    assert p["crash_pods"] == ["dg-0"] and "missing" in p["crash_details"]["dg-0"]
+    # A transient secret-cache timeout is left to recover.
+    flaky = SimpleNamespace(
+        reason="CreateContainerConfigError", message="failed to sync secret cache: timed out"
+    )
+    assert _progress(monkeypatch, flaky)["crash_pods"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +401,7 @@ def _scorer_env(cfg):
 
 def test_registered_scorer_reads_the_seed_from_the_secret():
     env = _scorer_env(_registered())
-    assert env["LB_DATAGEN_SEED"] == ds.seed_secret_env()
+    assert env["LB_DATAGEN_SEED"] == ss.seed_secret_env(_registered())
     assert _no_seed_in(json.dumps(env))
     assert "LB_SEED" not in env
     dev = _scorer_env(_cfg(seed=43))
@@ -432,3 +536,67 @@ def test_registered_look_refuses_a_seed_on_the_command_line(tmp_path, role):
     )
     assert r.returncode == 1
     assert "--seed-file" in r.stderr and "never from --seed" in r.stderr
+
+
+def _run_gate(monkeypatch, tmp_path, argv, stop_at="predictions"):
+    """aml_gate.main in-process with the test hash fixture; the look
+    preconditions after the seed checks are stubbed so the test sees which
+    seed reached them."""
+    g = _gate()
+    seen = {}
+    monkeypatch.setattr(g, "clean_checkout_error", lambda: None)
+
+    def recorded(seed):
+        seen["seed"] = seed
+        return None
+
+    monkeypatch.setattr(g, "seed_ever_recorded", recorded)
+    monkeypatch.setattr(g, "predictions_error", lambda image: f"stop at {stop_at}")
+    corpus = tmp_path / "c"
+    corpus.mkdir(exist_ok=True)
+    rc = g.main([str(corpus), *argv])
+    return rc, seen
+
+
+def _seed_file(tmp_path, seed, mode=0o600):
+    f = tmp_path / "seed"
+    f.write_text(f"{seed}\n")
+    os.chmod(f, mode)
+    return f
+
+
+LOOK = ["--generator-image", "repo@sha256:" + "0" * 64]
+
+
+def test_registered_look_takes_its_seed_from_the_file(monkeypatch, tmp_path, capsys):
+    f = _seed_file(tmp_path, EV)
+    rc, seen = _run_gate(
+        monkeypatch,
+        tmp_path,
+        ["--registered", "evaluation", "--seed-file", str(f), "--out", str(tmp_path / "o.json")]
+        + LOOK,
+    )
+    err = capsys.readouterr().err
+    assert rc == 1 and "stop at predictions" in err, err
+    assert seen["seed"] == EV
+    assert _no_seed_in(err)
+
+
+def test_a_heldout_seed_is_refused_on_the_command_line_in_any_mode(monkeypatch, tmp_path, capsys):
+    for extra in (["--counts-only"], [], ["--registered", "evaluation"]):
+        rc, seen = _run_gate(monkeypatch, tmp_path, ["--seed", str(EV), *extra, *LOOK])
+        err = capsys.readouterr().err
+        assert rc == 1 and "--seed-file" in err and "seed" not in seen, (extra, err)
+        assert _no_seed_in(err)
+
+
+def test_seed_given_twice_or_badly_is_refused(monkeypatch, tmp_path, capsys):
+    f = _seed_file(tmp_path, 43)
+    rc, _ = _run_gate(monkeypatch, tmp_path, ["--seed", "43", "--seed-file", str(f)])
+    assert rc == 1 and "give the seed once" in capsys.readouterr().err
+    g = _gate()
+    with pytest.raises(ValueError, match="not a regular file"):
+        g.read_seed_file(tmp_path)
+    big = _seed_file(tmp_path, 1 << 63)
+    with pytest.raises(ValueError, match="outside"):
+        g.read_seed_file(big)

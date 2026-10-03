@@ -1112,50 +1112,6 @@ def config_seed(cfg) -> int:
     return resolve_seed(dg.seed, workload.schema_type.value, getattr(dg, "corpus_role", None))
 
 
-# A registered (held-out) corpus's seed reaches the cluster only through this
-# Secret (owner, 10-03): the datagen Job and the reference scorer read it as
-# an environment variable from a secretKeyRef, so it is in no Job argument,
-# pod spec or SparkApplication spec. Development seeds stay plaintext.
-SEED_SECRET_NAME = "lakebench-datagen-seed"
-SEED_SECRET_KEY = "seed"
-#: The Secret's annotation naming its seed by seed_ref (the salted hash).
-SEED_REF_ANNOTATION = "lakebench.io/seed-ref"
-#: The environment variable the datagen entrypoint, the Rust generator and
-#: the reference scorer read the seed from.
-SEED_ENV = "LB_DATAGEN_SEED"
-
-
-def uses_seed_secret(cfg) -> bool:
-    """Whether this config's corpus seed goes to the cluster through
-    ``SEED_SECRET_NAME``: a financial config that declares the evaluation or
-    robustness role, or whose seed hashes to a held-out seed. A hash record
-    that cannot be read answers True (fail closed). Every other config,
-    seed 43 included, passes its seed in plaintext as before."""
-    workload = cfg.architecture.workload
-    if workload.schema_type.value != "financial":
-        return False
-    dg = workload.datagen
-    if getattr(dg, "corpus_role", None) in PROTECTED_ROLES:
-        return True
-    seed = getattr(dg, "seed", None)
-    if seed is None:
-        return False
-    try:
-        return heldout_role(int(seed)) is not None
-    except Exception:  # noqa: BLE001 -- unreadable record: fail closed
-        return True
-
-
-def seed_secret_env() -> dict:
-    """The container env entry that reads the seed from the Secret."""
-    return {
-        "name": SEED_ENV,
-        "valueFrom": {
-            "secretKeyRef": {"name": SEED_SECRET_NAME, "key": SEED_SECRET_KEY, "optional": False}
-        },
-    }
-
-
 # ---------------------------------------------------------------------------
 # Level-2 predictions
 # ---------------------------------------------------------------------------

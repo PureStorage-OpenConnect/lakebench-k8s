@@ -628,3 +628,36 @@ def test_two_deployments_isolated(monkeypatch, tmp_path):
         )
         first_delete = min(i for i, c in enumerate(after) if c.deleting)
         assert first_patch < first_delete
+
+
+def test_teardown_removes_the_registered_seed_secret(monkeypatch, tmp_path):
+    # A registered (held-out) corpus's generate writes a seed Secret; destroy
+    # with create_namespace false must delete it.
+    from lakebench.config import datagen_seed as ds
+    from lakebench.config import seed_secret as ss
+    from lakebench.deploy.datagen import DatagenDeployer
+    from lakebench.deploy.engine import DeploymentEngine
+    from lakebench.k8s.client import K8sClient
+    from tests.fixtures import heldout_test_seeds as ts
+
+    ts.use_fixture(monkeypatch)
+    opened = {**ds._corpora(), "registered_looks_open": True}
+    monkeypatch.setattr(ds, "_corpora", lambda: opened)
+    _instant_waits(monkeypatch)
+    cfg = _config("hive-iceberg-spark-trino", "aml-batch", tmp_path)
+    cfg.architecture.workload.datagen.seed = ts.TEST_EVALUATION_SEED
+    cfg.architecture.workload.datagen.corpus_role = "evaluation"
+    assert ss.uses_seed_secret(cfg)
+    with recording() as rec:
+        rec.for_config(cfg)
+        _seed_cluster(rec)
+        k8s = K8sClient(namespace=NS)
+        results = DeploymentEngine(cfg, k8s_client=k8s).deploy_all()
+        assert [r.component for r in results if r.status.value == "failed"] == []
+        r = DatagenDeployer(DeploymentEngine(cfg, k8s_client=k8s)).deploy()
+        assert r.status.value == "success", r.message
+        name = ss.seed_secret_name(cfg)
+        assert ("secrets", NS, name) in rec.store
+        assert _registered("secrets", name, _labels(rec.store[("secrets", NS, name)]))
+        _destroy(rec, cfg)
+        assert ("secrets", NS, name) not in rec.store

@@ -350,7 +350,13 @@ def main(argv=None) -> int:
         print(" ".join(f"{k}=={v}" for k, v in pinned_deps().items()))
         return 0
     ap.add_argument("corpus", type=Path, help="corpus root (contains bronze/ and manifest/)")
-    ap.add_argument("--seed", type=int, default=None, help="corpus seed (provenance only)")
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="corpus seed (provenance and the claim check); a held-out seed is refused here "
+        "and must come from --seed-file",
+    )
     ap.add_argument(
         "--seed-file",
         type=Path,
@@ -433,6 +439,23 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.seed is not None:
+        # A held-out seed never belongs on a command line (owner, 10-03), in
+        # any mode: it is visible to every process on the host and lands in
+        # shell history.
+        from lakebench.config.datagen_seed import heldout_role
+
+        try:
+            held = heldout_role(args.seed) is not None
+        except (OSError, ValueError):
+            held = True
+        if held:
+            print(
+                "refusing: --seed names a held-out seed (or the held-out record cannot be "
+                "read); pass a held-out seed with --seed-file",
+                file=sys.stderr,
+            )
+            return 1
     if args.seed_file is not None:
         if args.seed is not None:
             print("refusing: give the seed once (--seed or --seed-file)", file=sys.stderr)
