@@ -1148,7 +1148,12 @@ def _stub_look(monkeypatch, report_sha256=None, spent=True, seed=987654):
     )
     monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: looks)
     monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset({seed} if spent else ()))
-    monkeypatch.setattr(datagen_seed, "protected_seeds", lambda: {seed: "evaluation"})
+    monkeypatch.setattr(
+        datagen_seed, "_heldout", lambda: __import__("types").SimpleNamespace(spent=frozenset())
+    )
+    monkeypatch.setattr(
+        datagen_seed, "heldout_role", lambda s, h=None: "evaluation" if s == seed else None
+    )
 
 
 def _scenario_reproduce_verify_out_of_band(monkeypatch, tmp_path):

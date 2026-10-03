@@ -1330,9 +1330,7 @@ def test_ordinary_package_is_not_a_look(tmp_path, monkeypatch):
     from lakebench.cli._reproduce import _spent_look
 
     _stub_looks(monkeypatch, [], ())
-    monkeypatch.setattr(
-        "lakebench.config.datagen_seed.protected_seeds", lambda: {999: "evaluation"}
-    )
+    _stub_protected(monkeypatch, {999: "evaluation"})
     meta = {
         "corpus_role": "calibration",
         "experiment_identity": {"workload": "financial", "seed": 43},
@@ -1363,7 +1361,13 @@ def test_report_flag_refused_for_an_ordinary_package(tmp_path, monkeypatch):
 
 
 def _stub_protected(monkeypatch, protected):
-    monkeypatch.setattr("lakebench.config.datagen_seed.protected_seeds", lambda: dict(protected))
+    """Held-out seeds by role (test values), in place of the hash record."""
+    from lakebench.config import datagen_seed
+
+    held = dict(protected)
+    monkeypatch.setattr(datagen_seed, "_heldout", lambda: SimpleNamespace(spent=frozenset()))
+    monkeypatch.setattr(datagen_seed, "heldout_role", lambda s, h=None: held.get(s))
+    monkeypatch.setattr(datagen_seed, "recorded_seeds", lambda path=None: frozenset())
 
 
 def test_roleless_spent_seed_is_verify_only(monkeypatch):

@@ -592,6 +592,26 @@ def is_spent(seed, heldout: HeldOut | None = None) -> bool:
     return int(seed) in h.spent
 
 
+def seed_is_protected(value, heldout: HeldOut | None = None) -> bool:
+    """Whether an integer seed must not be shown: held out, spent (the hash
+    file, the pre-registration) or with a recorded look. A record that cannot
+    be read hides every seed (True). A value that is not an integer is not a
+    seed (False)."""
+    if isinstance(value, bool):
+        return False
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return False
+    try:
+        h = heldout if heldout is not None else _heldout()
+        if heldout_role(v, h) is not None or v in h.spent:
+            return True
+        return v in spent_seeds() or v in recorded_seeds()
+    except Exception:  # noqa: BLE001 -- unreadable: hide it
+        return True
+
+
 def seed_ref(schema: str, seed: int, heldout: HeldOut | None = None) -> str:
     """How a marker names a corpus seed: the plaintext decimal seed outside
     the financial schema, the salted hash under the file's salt for it, so a
