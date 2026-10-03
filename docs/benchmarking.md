@@ -1082,6 +1082,13 @@ The header shows the deployment name, run ID, and an overall status badge:
   the interrupt as its reason; its verdict is INTERRUPTED (see
   [Interrupting a run](cli-reference.md#run)).
 
+The "Read this first" panel under the header also names the provenance (the
+Lakebench version, commit, and whether its tree was dirty) and lists what
+limits interpretation: a single run (n=1), detection rules skipped or
+errored (and, for continuous AML, the rules that mode does not run), AML recall that is uncalibrated and in-sample (every run that no
+completed registered look in `aml_registered_looks.json` names), and a dirty
+tree.
+
 A one-line context banner below the header shows pipeline mode (Batch /
 Continuous), Customer360 scale factor, the recipe string
 (`catalog-format-engine-query_engine`), and wall-clock duration.
@@ -1097,28 +1104,59 @@ Job Status (pass/fail count).
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
+Pipeline throughput and compute efficiency are over stage inputs (bronze,
+silver, gold and the query stage each count the data they read), so the card
+shows the corpus size in bronze beside the stage-input total (for a
+continuous run, the bronze bucket at run end, which holds the landing files
+and the bronze table together). A run whose verdict
+is not PASSED shows no headline number: the page leads with the first
+verdict reason a reader can act on and each failed job's error, every card
+reads "-", and the pipeline summary line says the figures are not shown.
+
+The tag beside a QpH counts independent runs and, separately, the repetition
+inside the run: `n=1 run, 3 samples/query` for a batch power benchmark,
+`n=1 run, 4 rounds` for continuous in-stream rounds. Samples and rounds are
+never counted as runs.
+
 ### Bottleneck Identification (batch and continuous)
 
-A stacked bar chart showing time and compute distribution across pipeline
-stages. Each stage is color-coded (bronze = amber, silver = indigo, gold =
-gold, query = cyan). The chart identifies which stage dominates elapsed time
-or compute. In continuous mode the chart uses micro-batch latency instead of
-elapsed seconds.
+A stacked bar of each stage's share of requested core-seconds (executors x
+cores x seconds; Trino pod cores x seconds for a Trino query stage). Each
+stage is color-coded (bronze = amber, silver = indigo, gold = gold, query =
+cyan). The table beside it adds each stage's share of stage time (batch) or
+of micro-batch latency (continuous). A query stage on Spark Thrift or DuckDB
+records no cores and is left out of the core-second shares; the continuous
+query stage has no micro-batch latency and is left out of the latency
+shares.
 
 ### Data Validity (batch and continuous)
 
-Green/red status indicators for data quality checks:
+Green, amber and red status indicators for data quality checks:
 
 - **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
-  processed the expected data volume. Red when below 0.95 or above 1.05.
+  processed the expected data volume. A scale ratio is red below 0.95 and
+  amber above 1.05 (more data than the scale asks for, not shown as
+  "Complete"). An ingest ratio is red below 0.95 (amber when the trickle held
+  intake rather than the pipeline falling behind) and amber above 1.05,
+  which usually means gold re-read silver across refreshes.
 - **Job Success** -- counts of passed and failed batch and continuous jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
 
 ### Stability Over Time (continuous only)
 
-A line chart showing the QpH trend across in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
-Helps identify performance degradation over time as table state grows.
+A line chart of QpH across in-stream benchmark rounds, with the recorded QpH
+degradation (`qph_degradation_pct`: the second-half median QpH against the
+first-half median, positive when slower; recorded when at least 4 rounds
+ran). The page computes no trend of its own.
+
+### Table Maintenance
+
+The maintenance policy, file counts before and after, and QpH before and
+after maintenance, each with the number of queries its round ran. The change
+is the paired figure, over the queries both rounds ran ("QpH change, paired
+over 8 queries"); when the two rounds ran different query sets the table
+says the unpaired QpH figures are not the maintenance effect.
 
 ### Q9 Contention (continuous only)
 
@@ -1143,11 +1181,41 @@ resources.
 
 Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
 In continuous mode: rows/s, micro-batch latency, freshness.
+In continuous mode it is followed by the intake cards: the ingest ratio
+(bronze rows over the rows the trickle released, or over the generated
+corpus rows when the record has no released-row count), corpus coverage (the share
+of the generated corpus the window took in, `corpus_ingest_ratio`), the
+window, and the offered load (the trickle rate, a Lakebench-imposed limit,
+not a capacity). For AML, the rules continuous mode does not run are named,
+and the detection table reads "excluded in continuous mode" for them, not
+"no data".
+
+The AML detection table labels recall "uncalibrated, in-sample" unless a
+completed registered look names the run, shows the planted-subject customer
+check, and, when the record's scoring or detection data cannot be rendered,
+says "AML results could not be rendered" with the error instead of leaving
+the section out.
+
+### Expected results (Customer 360)
+
+The Customer 360 expected-results checks (`c360_correctness`): a chip with
+how many checks passed out of the checks the record holds (unchecked ones
+included) and the gate as the verdict applies it now (`GATING_CHECKS`):
+"N gating checks passed", or "fails the run" with the reason. Gating checks
+are tagged; a gating check absent from the record is listed as "not
+evaluated", since it fails the run. The checks that did not pass come first
+(those that fail the run, then other failures, then unchecked) with
+observed, expected and tolerance, then the passed checks grouped as pipeline
+(invariant and reconcile), benchmark shapes and statistical, in collapsed
+lists. A note stored with an older record (for example "reporting only"
+from before the gating checks were approved) is shown as recorded with the
+run, not as the current rule.
 
 ### Query Performance (batch and continuous)
 
 Performance table for the engine benchmark (8 queries for Customer 360,
-12 for AML). Columns: query name,
+12 for AML), titled with the query engine the record names ("Trino query
+benchmark", "Spark Thrift query benchmark"). Columns: query name,
 display name, category, elapsed time, rows returned, and pass/fail status.
 The benchmark mode (power, throughput, composite), stream count, and final QpH
 appear in a summary row.
@@ -1159,16 +1227,31 @@ Shows per-query times across rounds plus statistical measures (median, min,
 max). Each round header includes its QpH, gold freshness, and contention
 status.
 
+### Resources as run
+
+Per job, the executors as recorded (batch: every executor the monitor saw,
+replacements included, else the job profile's count; continuous: the count
+the stream was submitted with), cores and memory per executor from the job
+profile, and the scratch PVC size and storage class as the cluster held it
+(`provenance.scratch_as_ran`; records before 1.7 say "not recorded").
+
 ### Configuration
 
 Key configuration parameters extracted from the run: scale factor, S3 endpoint,
-executor specifications, catalog type, table format, and query engine settings.
+catalog type, table format, and query engine settings. Executor sizing is
+under Resources as run.
 
 ### Platform Metrics (when observability is enabled)
 
 Per-stage pod resource summary: CPU average/max, memory average/max, and pod
 counts. Infrastructure pods (Hive, Polaris, Trino, Postgres) are shown
-separately from pipeline pods.
+separately from pipeline pods. Each pod's figures sum its containers only:
+the pod-level cgroup series and the pause container are excluded, and a
+container scraped twice (for example by both the cluster's own kubelet
+monitor and kube-prometheus-stack's) is taken once. A stage's max columns
+are the sum of each pod's own peak, taken at different moments, not a
+concurrent peak. A record collected before these queries says its figures
+count containers more than once.
 
 ---
 

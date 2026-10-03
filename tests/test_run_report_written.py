@@ -99,8 +99,12 @@ def test_aml_continuous_renders_per_rule_alerts_without_scoring():
     assert "Detection Scorecard" in text
     assert "W2_structuring micro_structuring 17,993" in text
     assert "W17_layering_chain stack 215,296" in text
-    # A rule missing from the histogram is unknown, not zero.
-    assert re.search(r"W7_cross_border_high_risk corridor_high_risk - .* no data", text)
+    # A rule continuous mode does not run reads as excluded, not "no data"
+    # (config/support.py AML_CONTINUOUS_SKIPPED_RULES).
+    assert re.search(
+        r"W7_cross_border_high_risk corridor_high_risk - .* excluded in continuous mode", text
+    )
+    assert "W7_cross_border_high_risk corridor_high_risk - - - - - - no data" not in text
     assert "New alert versions" in text and "not gold.alerts rows" in text
     assert "Recall is not scored in continuous mode" in text
 

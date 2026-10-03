@@ -431,7 +431,7 @@ def test_report_labels_intake_cards_only():
     assert "BOUNDED BY" not in by_label["In-Stream QpH"]
     assert "BOUNDED BY" not in by_label["Data Freshness"]
     avg = re.search(
-        r"Avg Pipeline Throughput:(.*?)</span>\s*</span>|Avg Pipeline Throughput:(.*?)\n",
+        r"Avg stage-input throughput:(.*?)</span>\s*</span>|Avg stage-input throughput:(.*?)\n",
         html,
         re.S,
     )

@@ -486,7 +486,9 @@ def _continuous_report(tmp_path, pb, fmt: str) -> str:
     m.pipeline_benchmark = pb
     storage.save_run(m)
     out = ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path).generate_report(m.run_id)
-    return out.read_text()
+    from tests.fixtures.report_goldens import page_text
+
+    return page_text(out.read_text())
 
 
 def test_report_shows_the_limitation_and_the_trend(tmp_path):

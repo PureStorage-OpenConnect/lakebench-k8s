@@ -66,6 +66,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the gold-finalize job when the driver's status listener lags, and none
   when it keeps up; continuous gold ticks do not profile. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **Customer 360 results on the HTML report.** The report shows the C360
+  expected-results checks: passed out of total and the gate as the verdict
+  applies it (a gating check that failed, did not run or is absent reads
+  "fails the run"), the checks that did not pass first with observed, expected and
+  tolerance, then the passes by family (pipeline, benchmark shapes,
+  statistical). Before, the
+  34 checks a C360 run records were never shown.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
@@ -551,6 +558,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
   runs. See
   [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
+- **Every derived number on the HTML report is checked against the record.**
+  Each percentage, total and count the report computes is wrapped in a
+  `data-lb-derived` span that names the `metrics.json` paths it came from,
+  and a test recomputes each one from the stored record. The rendered text
+  is unchanged with two exceptions: the bottleneck bar's tooltip no longer
+  repeats the CPU share the legend shows, and a bottleneck share whose
+  denominator is zero (no stage recorded any time or compute) reads "-"
+  instead of "0.0%"; counts of 1,000 or more now carry a thousands
+  separator.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with
@@ -1094,6 +1110,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `-buildinfo` (and `-dirty` for a build from a modified tree); the stamp is
   left off when no commit can be read. It is still written only when the
   namespace is first stamped.
+  changes, and is left off when no checkout commit can be read (a wheel
+  install). It is still written only when the namespace is first stamped.
+- **Report numbers that misled.** Platform CPU and memory no longer count
+  containers more than once: the Prometheus queries exclude cAdvisor's
+  pod-level and pause-container series and take each (pod, container) once
+  when the kubelet is scraped twice; `platform_metrics.query_version` is 2,
+  and a report of an older record says its figures are overstated. The
+  stage table labels its max columns "sum of per-pod peaks". Table Maintenance shows each QpH with its query
+  count and the change as "QpH change, paired over N queries" (a pre round
+  of 8 queries and a post round of 12 are no longer set beside each other
+  as the effect). QpH tags read `n=1 run, 3 samples/query` or `n=1 run, 4
+  rounds` instead of counting samples or rounds as runs. The benchmark
+  section is titled with the recorded query engine, not always "Trino". A
+  batch scale ratio above 1.05 shows amber ("above the scale") instead of
+  green "Complete". The continuous stability section shows the recorded
+  `qph_degradation_pct` instead of a trend the page computed itself.
+- **Report: failed runs, resources, labels and provenance.** A run whose
+  verdict is not PASSED shows no headline number: the page leads with the
+  first verdict reason a reader can act on and the failed jobs' errors,
+  every score card reads "-", and the pipeline summary line withholds its
+  figures; an INTERRUPTED run reads INTERRUPTED in the front panel. "Resources as run" replaces the configuration's executor rows
+  (which showed the snapshot's unused `spark.executor` defaults): executors
+  per job as run, cores and memory from the job profile, and the scratch PVC
+  as the cluster held it. Continuous runs label the ingest ratio "bronze
+  rows / rows the trickle released" and show corpus coverage, the window and
+  the offered load; AML rules continuous mode does not run read "excluded in
+  continuous mode", not "no data". The front panel names the provenance
+  (version, commit, dirty or clean) and what limits interpretation (n=1,
+  skipped rules, in-sample AML recall, a dirty tree); AML recall is
+  labelled "uncalibrated, in-sample" unless a completed registered look
+  names the run, and the planted-subject customer check is shown. A
+  malformed AML record shows "AML results could not be rendered: <error>"
+  instead of an empty section. Throughput and efficiency say they are over
+  stage inputs (bronze + silver + gold + query reads) and show the corpus
+  size beside them (for a continuous run, the bronze bucket at run end,
+  named as landing files plus the bronze table). The bottleneck caption names requested core-seconds; a Spark
+  Thrift or DuckDB query stage is no longer charged Trino's cores, and the
+  continuous query stage's seconds are no longer shown as milliseconds and
+  summed into the latency share.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the

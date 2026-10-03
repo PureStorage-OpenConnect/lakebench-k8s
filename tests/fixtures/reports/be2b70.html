@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lakebench Scorecard - pipe-aml-b10</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #16a34a;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: #dcfce7;
+            color: var(--success);
+        }
+
+        .status-failed {
+            background: #fecaca;
+            color: var(--danger);
+        }
+
+        .status-warning {
+            background: #fef3c7;
+            color: var(--warning);
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .card-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .card-delta {
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+
+        .card-hint {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+            font-style: italic;
+        }
+
+        .card-hint2 {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.125rem;
+        }
+
+        .delta-positive {
+            color: var(--success);
+        }
+
+        .delta-negative {
+            color: var(--danger);
+        }
+
+        section {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        section h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .mono {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.875rem;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .config-key {
+            color: var(--text-muted);
+        }
+
+        footer {
+            text-align: center;
+            padding-top: 2rem;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
+            internal benchmark, single-owner recorded
+        </div>
+        <header>
+            <h1>Lakebench Scorecard</h1>
+            <div class="subtitle">
+                Deployment: <strong>pipe-aml-b10</strong> |
+                Run ID: <code class="mono">20260929-204947-be2b70</code> |
+                <span class="status status-failed" title="Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize">
+                    FAILED
+                </span>
+                <span class="confidence-chip" title="run-count qualifier" style="display: inline-block; margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 9999px; background: rgba(148,163,184,0.15); color: var(--warning); font-size: 0.65em; font-weight: 600; text-transform: none;">single_run</span>
+            </div>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--danger);">Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize</div>
+        </header>
+
+        
+        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--danger);">
+            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
+                Read this first
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: var(--danger);">FAILED</strong></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Pipeline crashed or was interrupted</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">none (id a80d75bfa8f3, scale 10.0)</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> 0</div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">2dafd7ef2b492636</code></div>
+                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div>
+            </div>
+            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
+        </section>
+        
+
+        
+        <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
+            <strong>Batch</strong> pipeline |
+            Financial (FinServ-Crime, AML) at scale 10.0 |
+            hive-iceberg-spark-trino |
+            48m 15s
+        </div>
+        
+
+        
+        <section class="failed-headline" style="border-left: 3px solid var(--danger);">
+            <h2 style="color: var(--danger);">Run FAILED: Pipeline crashed or was interrupted</h2>
+            <ul style='margin: 0.5rem 0 0 1.25rem;'><li><code class='mono'>lakebench-gold-finalize</code>: Job timed out after 1800s (last observed state: &#x27;RUNNING&#x27;)</li></ul>
+            <div style='margin-top: 0.5rem; font-size: 0.8rem;'>Also: Process exit intent was not OK; Batch jobs failed: lakebench-gold-finalize; Gate &#x27;pipeline&#x27; FAILED</div>
+        </section>
+        <div class="cards">
+            <div class="card">
+                <div class="card-label">Time to Value</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Pipeline Throughput</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Compute Efficiency</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>
+            <div class="card">
+                <div class="card-label">QpH</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Scale Ratio</div>
+                <div class="card-value">-</div>
+                <div class="card-hint">not shown: the run did not pass</div>
+            </div>
+        </div>
+        
+
+        
+        <section>
+            <h2>Bottleneck Identification</h2>
+            <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
+                No single bottleneck: the stages' shares of requested core-seconds are within 10 points.
+            </p>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                Bar: each stage's share of requested core-seconds (executors x cores x
+                seconds; Trino pod cores x seconds for a Trino query stage), not of time.
+            </div>
+            <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
+                <div style="flex: 0.00; background: #94a3b8; height: 28px; min-width: 0;" title="datagen: share of requested core-seconds"></div><div style="flex: 2.11; background: #f59e0b; height: 28px; min-width: 0;" title="bronze: share of requested core-seconds"></div><div style="flex: 46.40; background: #6366f1; height: 28px; min-width: 0;" title="silver: share of requested core-seconds"></div><div style="flex: 51.48; background: #eab308; height: 28px; min-width: 0;" title="gold: share of requested core-seconds"></div>
+            </div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
+                <span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #94a3b8; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>datagen (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">0%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #f59e0b; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>bronze (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">2%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #6366f1; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>silver (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">46%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #eab308; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>gold (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">51%</span>)</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stage</th>
+                        <th>Time (s)</th>
+                        <th>% of stage time</th>
+                        <th>Requested core-sec</th>
+                        <th>% of requested core-seconds</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>datagen</td><td>121s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">4.2%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds" data-lb-fmt=",.0f">0</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">0.0%</span></td></tr><tr><td>bronze</td><td>148s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">5.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds" data-lb-fmt=",.0f">1,182</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">2.1%</span></td></tr><tr><td>silver</td><td>812s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">28.2%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds" data-lb-fmt=",.0f">25,974</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">46.4%</span></td></tr><tr><td>gold</td><td>1,801s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">62.5%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=",.0f">28,817</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">51.5%</span></td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Data Validity</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fef3c7; color: var(--warning);"><strong>Scale Ratio:</strong> <span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">111.4%</span> above the scale (more data than the scale asks for)</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #fecaca; color: var(--danger);"><strong>Batch Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">2</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span> passed</div>
+            </div>
+        </section>
+        
+
+        
+        <section>
+            <h2>Table Maintenance</h2>
+            <table>
+                <thead>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Maintenance policy</td><td><code class="mono">m2-2026-09-26</code></td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Pipeline Benchmark</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                Mode: batch | headline figures not shown: the run is FAILED
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        
+                        <th>Stage</th>
+                        <th>Engine</th>
+                        <th>Time</th>
+                        <th>In (GB)</th>
+                        <th>Out (GB)</th>
+                        <th>In Rows</th>
+                        <th>Out Rows</th>
+                        <th>GB/s</th>
+                        <th>Rows/s</th>
+                        <th>Executors</th>
+                        <th>Cores x Mem</th>
+                        <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
+                        <th>QpH</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                <tr>
+                    <td><strong>datagen</strong></td>
+                    <td>datagen</td>
+                    <td>120.6s</td>
+                    <td>-</td>
+                    <td>93.739</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>- x -G</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>bronze</strong></td>
+                    <td>spark</td>
+                    <td>147.8s</td>
+                    <td>93.596</td>
+                    <td>93.739</td>
+                    <td>266,718,594</td>
+                    <td>266,718,594</td>
+                    <td>0.8889</td>
+                    <td>2,532,940<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>4</td>
+                    <td>2 x 8G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds*/3600" data-lb-fmt=".1f">0.3</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>silver</strong></td>
+                    <td>spark</td>
+                    <td>811.7s</td>
+                    <td>93.596</td>
+                    <td>86.288</td>
+                    <td>266,718,594</td>
+                    <td>266,718,594</td>
+                    <td>0.1212</td>
+                    <td>345,446<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>8</td>
+                    <td>4 x 48G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds*/3600" data-lb-fmt=".1f">7.2</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>gold</strong></td>
+                    <td>spark</td>
+                    <td>1801.1s</td>
+                    <td>86.288</td>
+                    <td>39.542</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>0.0479</td>
+                    <td>-</td>
+                    <td>4</td>
+                    <td>4 x 32G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds*/3600" data-lb-fmt=".1f">8.0</span></td>
+                    <td>-</td>
+                    <td><span class="status status-failed">FAIL</span></td>
+                </tr>
+                
+                </tbody>
+            </table>
+            
+            
+        </section>
+        
+
+        
+        <section>
+            <h2>Batch Job Performance</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Input</th>
+                        <th>Output Rows</th>
+                        <th>Throughput</th>
+                        <th>Executors</th>
+                        <th>Cores</th>
+                        <th>CPU-sec</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+            <tr>
+                <td><code class="mono">lakebench-bronze-verify</code></td>
+                <td><span class="status status-success">Passed</span></td>
+                <td>147.8s</td>
+                <td>93.60 GB</td>
+                <td>266,718,594</td>
+                <td>0.89 GB/s</td>
+                <td>4</td>
+                <td>2</td>
+                <td>1,182</td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-silver-build</code></td>
+                <td><span class="status status-success">Passed</span></td>
+                <td>811.7s</td>
+                <td>93.60 GB</td>
+                <td>266,718,594</td>
+                <td>0.12 GB/s</td>
+                <td>8</td>
+                <td>4</td>
+                <td>25,974</td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-gold-finalize</code></td>
+                <td><span class="status status-failed">Failed</span></td>
+                <td>1801.1s</td>
+                <td>86.29 GB</td>
+                <td>0</td>
+                <td>0.05 GB/s</td>
+                <td>4</td>
+                <td>4</td>
+                <td>28,817</td>
+            </tr>
+            
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+
+        
+
+        
+
+        
+
+        
+
+
+        
+
+        
+
+        
+        <section>
+            <h2>Resources as run</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th title="As recorded: batch, the executors the monitor saw (every executor that ran, replacements included), else the job profile's count; continuous, the count the stream was submitted with">Executors</th>
+                        <th>Cores per executor</th>
+                        <th>Memory per executor</th>
+                        <th>Scratch as ran</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code class='mono'>bronze-verify</code></td><td>4</td><td>2</td><td>8 GB</td><td>not recorded (this record predates it)</td></tr><tr><td><code class='mono'>silver-build</code></td><td>8</td><td>4</td><td>48 GB</td><td>not recorded (this record predates it)</td></tr><tr><td><code class='mono'>gold-finalize</code></td><td>4</td><td>4</td><td>32 GB</td><td>not recorded (this record predates it)</td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+        <section>
+            <h2>Configuration</h2>
+            <div class="config-grid">
+                
+                <div class="config-item">
+                    <span class="config-key">Name</span>
+                    <span class="mono">pipe-aml-b10</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Scale</span>
+                    <span class="mono">10.0</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Approx Bronze GB</span>
+                    <span class="mono">84.0</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Processing Pattern</span>
+                    <span class="mono">medallion</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">S3 Endpoint</span>
+                    <span class="mono">http://10.0.1.50:80</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Catalog Type</span>
+                    <span class="mono">hive</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Table Format</span>
+                    <span class="mono">iceberg</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Query Engine</span>
+                    <span class="mono">trino</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Trino Workers</span>
+                    <span class="mono">2</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Datagen Image</span>
+                    <span class="mono">docker.io/sillidata/lb-datagen:034f998</span>
+                </div>
+                
+            </div>
+        </section>
+        <section><h2>Experiment</h2><table><tbody><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>a80d75bfa8f37268</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>10.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run [m2-2026-09-26:expire_snapshots=off,remove_orphan_files=off,compaction=off; recorded outcomes] -- expire_snapshots: never reached (the run ended before maintenance); remove_orphan_files: never reached (the run ended before maintenance); compaction: never reached (the run ended before maintenance)</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;2013d&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query none</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>gold (failed), benchmark (not run)</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>none</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>no benchmark ran</p></section>
+
+        <footer>
+            Generated by Lakebench | (timestamp removed)
+        </footer>
+    </div>
+</body>
+</html>

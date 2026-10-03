@@ -1187,7 +1187,8 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" in html
+        # The title names the recorded query engine; this record names none.
+        assert "<h2>Query benchmark</h2>" in html
         assert "820.4" in html
         assert "Q1_full_aggregation_scan" in html
         assert "QpH" in html
@@ -1206,7 +1207,7 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" not in html
+        assert "query benchmark</h2>" not in html.lower()
 
     def test_generate_report_specific_nonexistent(self, tmp_path):
         metrics_dir = tmp_path / "metrics"
@@ -3719,11 +3720,16 @@ class TestSustainedPipelineScoring:
 
         generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
         report_path = generator.generate_report()
-        html = report_path.read_text()
+        report = report_path.read_text()
+        # This run's verdict fails (gold freshness 15 s over a short window),
+        # so the page leads with the failure and its cards show no number.
+        assert "Run FAILED: Gold freshness" in report
+        # The continuous cards themselves, as a passed run renders them.
+        html = generator._generate_sustained_summary(storage.load_run("cont-test"))
 
         assert "Data Freshness" in html
         assert "Sustained Throughput" in html
-        assert "Data Processed" in html
+        assert "Stage inputs processed" in html
         assert "CPU-hours" in html
         assert "worst-case gold staleness" in html
         # Batch cards should NOT appear

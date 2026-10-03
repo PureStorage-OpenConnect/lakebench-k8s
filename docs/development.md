@@ -414,6 +414,33 @@ is defined once, with unit, direction and meaning, in the metric registry
 [DESIGN.md](DESIGN.md#64-adding-a-metric) section 6.4). Changing what a
 published metric means is a product decision, not a refactor.
 
+### The HTML report: derived numbers and goldens
+
+Every percentage, total and count the HTML report computes goes through
+`src/lakebench/reports/derived.py`, which wraps the number in a span naming
+the `metrics.json` paths it came from. `tests/test_report_consistency.py`
+recomputes each one from the stored record and fails on any difference, on
+a unit its own table contradicts (a stored percentage scaled as a fraction,
+bytes shown as GiB without the conversion), on a percentage in the page text
+that is neither derived nor a stored string, and on an inline percentage or
+count format in `generator.py` or `scorecard.py`.
+
+Six stored records render into `tests/fixtures/reports/<run>.html`, and the
+test requires today's render to match them exactly. Because the renderer
+produced them, the goldens only show that a page did not move; the
+independent checks are the record recomputation and the phrases in
+`tests/expected/report_goldens.json`, each computed by hand from the record.
+There is no update flag. A change that moves the page asserts the number it
+fixes in its own test, edits the affected phrases by hand, and re-renders the
+goldens:
+
+```bash
+PYTHONPATH=src python3.11 -m tests.fixtures.report_goldens 5105a0
+```
+
+A second agent reviews the golden diff (`git show -- tests/fixtures/reports`)
+against the record before the change is ready.
+
 ## The frozen AML scope
 
 The AML measurements are pre-registered

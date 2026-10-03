@@ -179,7 +179,7 @@ class TestFinancialDetailScorecard:
         job = self._job(alerts_by_rule={"W2_structuring": 1})
         scoring = {"typologies": [], "total_alerts": 1, "run_id": "r1"}
         html = block.render_detail_html(self._metrics(jobs=[job], financial_scoring=scoring))
-        assert ">Recall (uncalibrated)</th>" in html
+        assert ">Recall (uncalibrated, in-sample)</th>" in html
 
     def test_multi_cycle_alert_counts_last_cycle_wins(self):
         # gold_finalize re-detects over the whole cumulative silver each cycle
@@ -218,14 +218,14 @@ class TestFinancialDetailScorecard:
         assert "W99_experimental" in html
 
     def test_malformed_scoring_does_not_crash(self):
-        # A hand-edited / partially-written recall.json must degrade to "",
-        # never take down the whole report (LB-123 review F2).
+        # A hand-edited / partially-written recall.json never takes down the
+        # whole report, and the section says it could not render (not "").
         block = FinancialScorecardBlock()
         job = self._job(alerts_by_rule={"W2_structuring": 3})
         bad = {"typologies": [{"typology_type": "micro_structuring", "recall": "oops"}]}
-        # float("oops") raises inside the body; the outer guard degrades to "".
+        # float("oops") raises inside the body; the outer guard shows a notice.
         html = block.render_detail_html(self._metrics(jobs=[job], financial_scoring=bad))
-        assert html == ""
+        assert "AML results could not be rendered: ValueError:" in html
 
     def test_skipped_rule_reads_not_run_not_zero(self):
         block = FinancialScorecardBlock()
