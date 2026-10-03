@@ -11,13 +11,14 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from lakebench.config.datagen_seed import (
+from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.config.seed_secret import (
     SEED_REF_ANNOTATION,
+    SEED_SECRET_COMPONENT,
     SEED_SECRET_KEY,
-    SEED_SECRET_NAME,
-    config_perturbation,
-    config_seed,
-    seed_ref,
+    config_seed_ref,
+    seed_secret_name,
+    seed_secret_selector,
     uses_seed_secret,
 )
 from lakebench.exit_codes import REFUSAL_DETAIL, ExitCode
@@ -136,121 +137,146 @@ def _secret_labels(cfg: Any) -> dict[str, str]:
     return {
         "app.kubernetes.io/name": "lakebench",
         "app.kubernetes.io/instance": cfg.name,
-        "app.kubernetes.io/component": "datagen-seed",
+        "app.kubernetes.io/component": SEED_SECRET_COMPONENT,
         "app.kubernetes.io/managed-by": "lakebench",
     }
 
 
-def _read_seed_secret(core: Any, namespace: str) -> Any:
-    """The seed Secret, or None when there is none."""
+def _seed_secret_call(what: str, namespace: str, fn: Any, *args: Any) -> Any:
+    """Run one seed-Secret API call; a failure becomes a SeedSecretError that
+    names the call and the HTTP status or exception type, never a value."""
     from kubernetes.client.rest import ApiException
 
     try:
-        return core.read_namespaced_secret(SEED_SECRET_NAME, namespace)
+        return fn(*args)
     except ApiException as e:
-        if e.status == 404:
-            return None
         raise SeedSecretError(
-            f"could not read Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
+            f"could not {what} in {namespace} (HTTP {e.status}); the registered seed "
+            "Secret is required"
         ) from None
     except Exception as e:  # noqa: BLE001 -- transport errors
         raise SeedSecretError(
-            f"could not read Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
+            f"could not {what} in {namespace} ({type(e).__name__}); the registered seed "
+            "Secret is required"
         ) from None
 
 
-def ensure_seed_secret(cfg: Any, k8s: Any) -> None:
-    """Write the registered corpus's seed into ``SEED_SECRET_NAME`` (immutable,
-    annotated with its seed_ref), the only place the cluster holds it.
+def _own_seed_secrets(core_v1: Any, cfg: Any) -> list[str]:
+    """Names of this deployment's seed Secrets (listed by label, then checked
+    again, so a fake or a lax server cannot widen the set)."""
+    namespace = cfg.get_namespace()
+    listed = _seed_secret_call(
+        "list the seed Secrets",
+        namespace,
+        lambda: core_v1.list_namespaced_secret(
+            namespace, label_selector=seed_secret_selector(cfg.name)
+        ),
+    )
+    out = []
+    for item in getattr(listed, "items", None) or []:
+        labels = item.metadata.labels or {}
+        if (
+            labels.get("app.kubernetes.io/component") == SEED_SECRET_COMPONENT
+            and labels.get("app.kubernetes.io/instance") == cfg.name
+        ):
+            out.append(item.metadata.name)
+    return out
 
-    Call after ``stop_previous_datagen``: no datagen pod is running, so a
-    replaced Secret cannot reach a restarting container of an older Job. The
-    same seed_ref already there is a no-op; another one is deleted and
-    created anew; a Secret another deployment labelled is refused. Raises
-    :class:`SeedSecretError`, whose message never holds the seed."""
+
+def ensure_seed_secret(cfg: Any, core_v1: Any) -> None:
+    """Write the registered corpus's seed into its seed Secret, the only place
+    the cluster holds it, and delete this deployment's Secrets for other seeds.
+
+    The Secret is immutable and named after the seed's seed_ref, so a name is
+    never reused for another seed. An existing Secret of that name labelled
+    for this deployment and carrying the same seed_ref is kept; one labelled
+    for another deployment is refused. Call after ``stop_previous_datagen``.
+    Raises :class:`SeedSecretError`, whose message never holds the seed."""
     from kubernetes.client.rest import ApiException
 
     namespace = cfg.get_namespace()
-    want = seed_ref("financial", config_seed(cfg))
-    core = k8s._core_v1
-    current = _read_seed_secret(core, namespace)
+    name = seed_secret_name(cfg)
+    want = config_seed_ref(cfg)
+    current = None
+    try:
+        current = core_v1.read_namespaced_secret(name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise SeedSecretError(
+                f"could not read Secret {name} in {namespace} (HTTP {e.status})"
+            ) from None
+    except Exception as e:  # noqa: BLE001
+        raise SeedSecretError(
+            f"could not read Secret {name} in {namespace} ({type(e).__name__})"
+        ) from None
     if current is not None:
         meta = current.metadata
         owner = (meta.labels or {}).get("app.kubernetes.io/instance")
-        if owner != cfg.name:
+        if owner != cfg.name or (meta.annotations or {}).get(SEED_REF_ANNOTATION) != want:
             raise SeedSecretError(
-                f"Secret {SEED_SECRET_NAME} in {namespace} belongs to deployment {owner!r}, "
-                f"not {cfg.name!r}; not replacing it"
+                f"Secret {name} in {namespace} is not this deployment's seed Secret "
+                f"(labelled for {owner!r}); not using or replacing it"
             )
-        if (meta.annotations or {}).get(SEED_REF_ANNOTATION) == want:
-            return
-        try:
-            core.delete_namespaced_secret(SEED_SECRET_NAME, namespace)
-        except ApiException as e:
-            if e.status != 404:
-                raise SeedSecretError(
-                    f"could not replace Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
-                ) from None
-        except Exception as e:  # noqa: BLE001
-            raise SeedSecretError(
-                f"could not replace Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
-            ) from None
-    body = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": SEED_SECRET_NAME,
-            "namespace": namespace,
-            "labels": _secret_labels(cfg),
-            "annotations": {SEED_REF_ANNOTATION: want},
-        },
-        "type": "Opaque",
-        "immutable": True,
-        "stringData": {SEED_SECRET_KEY: str(config_seed(cfg))},
-    }
+    else:
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": _secret_labels(cfg),
+                "annotations": {SEED_REF_ANNOTATION: want},
+            },
+            "type": "Opaque",
+            "immutable": True,
+            "stringData": {SEED_SECRET_KEY: str(config_seed(cfg))},
+        }
+        _seed_secret_call(
+            f"create Secret {name}", namespace, core_v1.create_namespaced_secret, namespace, body
+        )
+    for other in _own_seed_secrets(core_v1, cfg):
+        if other != name:
+            _drop_one(core_v1, other, namespace)
+
+
+def _drop_one(core_v1: Any, name: str, namespace: str) -> None:
+    from kubernetes.client.rest import ApiException
+
     try:
-        core.create_namespaced_secret(namespace, body)
+        core_v1.delete_namespaced_secret(name, namespace)
     except ApiException as e:
-        raise SeedSecretError(
-            f"could not create Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
-        ) from None
+        if e.status != 404:
+            raise SeedSecretError(
+                f"could not delete Secret {name} in {namespace} (HTTP {e.status})"
+            ) from None
     except Exception as e:  # noqa: BLE001
         raise SeedSecretError(
-            f"could not create Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
+            f"could not delete Secret {name} in {namespace} ({type(e).__name__})"
         ) from None
 
 
-def drop_seed_secret(cfg: Any, k8s: Any) -> None:
-    """Delete this deployment's seed Secret before a generate that does not
-    use one, so a registered seed does not stay in the namespace under a
-    development corpus. Best effort: a failure is logged (without the seed)
-    and the generate goes on, since nothing reads the Secret then."""
+def drop_seed_secrets(cfg: Any, core_v1: Any) -> None:
+    """Delete this deployment's seed Secrets before a generate that uses none,
+    so a registered seed does not stay in the namespace under a development
+    corpus. Best effort: a failure is logged (without the seed) and the
+    generate goes on, since nothing reads the Secrets then; destroy removes
+    them."""
     namespace = cfg.get_namespace()
-    core = k8s._core_v1
     try:
-        current = _read_seed_secret(core, namespace)
-        if current is None:
-            return
-        owner = (current.metadata.labels or {}).get("app.kubernetes.io/instance")
-        if owner != cfg.name:
-            return
-        core.delete_namespaced_secret(SEED_SECRET_NAME, namespace)
-    except Exception as e:  # noqa: BLE001 -- best effort
-        logger.warning(
-            "Could not delete Secret %s in %s (%s); it is removed by destroy",
-            SEED_SECRET_NAME,
-            namespace,
-            type(e).__name__,
-        )
+        for name in _own_seed_secrets(core_v1, cfg):
+            _drop_one(core_v1, name, namespace)
+    except SeedSecretError as e:
+        logger.warning("%s; destroy removes it", e)
 
 
 def prepare_seed_secret(cfg: Any, k8s: Any) -> None:
-    """``ensure_seed_secret`` for a registered corpus, ``drop_seed_secret``
+    """``ensure_seed_secret`` for a registered corpus, ``drop_seed_secrets``
     otherwise. Call after the previous datagen Job's pods have stopped."""
+    core_v1 = k8s._core_v1
     if uses_seed_secret(cfg):
-        ensure_seed_secret(cfg, k8s)
+        ensure_seed_secret(cfg, core_v1)
     else:
-        drop_seed_secret(cfg, k8s)
+        drop_seed_secrets(cfg, core_v1)
 
 
 #: Label every datagen pod carries (templates/datagen/job.yaml.j2).
@@ -640,7 +666,7 @@ class DatagenDeployer:
                 # A registered corpus's seed is in the Secret instead, never
                 # in the Job's arguments (owner, 10-03).
                 "datagen_seed": None if uses_seed_secret(cfg) else config_seed(cfg),
-                "datagen_seed_secret": SEED_SECRET_NAME if uses_seed_secret(cfg) else "",
+                "datagen_seed_secret": seed_secret_name(cfg) if uses_seed_secret(cfg) else "",
                 "datagen_seed_secret_key": SEED_SECRET_KEY,
                 # Robustness corpus flag (financial only), checked against
                 # the declared corpus role (config/datagen_seed.py).
@@ -1154,14 +1180,17 @@ class DatagenDeployer:
                                     f" ({terminated.reason})" if terminated.reason else ""
                                 )
 
-                    # A Secret or ConfigMap the container needs is missing
+                    # A Secret or ConfigMap the container needs does not exist
                     # (the registered seed Secret, the CA secret): the pod
-                    # never starts, so fail now instead of at the timeout.
+                    # never starts, so fail now instead of at the timeout. A
+                    # transient secret-cache timeout has another message and
+                    # is left to recover.
                     for cs in pod.status.container_statuses:
                         waiting = cs.state.waiting if cs.state is not None else None
                         if (
                             waiting is not None
                             and waiting.reason == "CreateContainerConfigError"
+                            and "not found" in (waiting.message or "")
                             and pod_name not in crash_pods
                         ):
                             crash_pods.append(pod_name)

@@ -179,13 +179,13 @@ fn financial_seed() -> i64 {
             };
             seed
         }
-        (None, Some(env)) => {
-            let Ok(seed) = env.trim().parse::<i64>() else {
-                eprintln!("{SEED_ENV} is not an integer (value not shown)");
+        (None, Some(env)) => match env.trim().parse::<i64>() {
+            Ok(seed) if seed >= 0 => seed,
+            _ => {
+                eprintln!("{SEED_ENV} is not a non-negative integer (value not shown)");
                 std::process::exit(2);
-            };
-            seed
-        }
+            }
+        },
     };
     if SPENT_SEEDS.contains(&seed) {
         eprintln!(

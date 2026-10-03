@@ -344,6 +344,7 @@ fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
         ("7777", vec!["--seed", "7777"]),
         ("77x77913", vec![]),
         ("", vec![]),
+        ("-7777", vec![]),
     ] {
         let st = Command::new(env!("CARGO_BIN_EXE_generate"))
             .env("DG_LOCAL_DIR", base.join("bad"))

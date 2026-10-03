@@ -72,16 +72,22 @@ the seed for its look out of band; the operator sets it as
 `workload.datagen.seed` with the matching `corpus_role`, and every guard
 checks it by hash against `heldout_hashes.json`. A wrong value is refused.
 
-On the cluster that seed is held only in the namespace's Secret
-`lakebench-datagen-seed` (written by `generate`, immutable, annotated with
-its salted hash, removed by `destroy`). The datagen Job and the reference
-scorer read it as `LB_DATAGEN_SEED` from that Secret, so it is in no Job
-argument, pod spec or SparkApplication spec, and no Spark job of that
-deployment gets `LB_SEED`. `scripts/aml_gate.py --registered <role>` reads
-it from `--seed-file PATH` (one integer, `chmod 600`) and refuses `--seed`.
-Anyone who can read the corpus bucket can still recover the seed from the
-manifest's instance seeds, by design; the Secret keeps it out of cluster
-object specs, command lines and logs.
+On the cluster that seed is held only in a Secret in the deployment's
+namespace, `lakebench-datagen-seed-<first 16 hex of its salted hash>`
+(written by `generate`, immutable, labelled `app.kubernetes.io/component=
+datagen-seed`, deleted by a later development generate and by `destroy`).
+The datagen Job and the reference scorer read it as `LB_DATAGEN_SEED` from
+that Secret, so it is in no Job argument, pod spec or SparkApplication spec,
+and no Spark job of that deployment gets `LB_SEED`. `scripts/aml_gate.py`
+reads a held-out seed only from `--seed-file PATH` (one integer, `chmod
+600`) and refuses it on `--seed` in every mode.
+
+What this does not hide: anyone who can read the corpus bucket can recover
+the seed from the manifest's instance seeds, by design; the reference
+scorer's report records it as `corpus_seed`; and the run record
+(`metrics.json`, `report.html`) still stores the configured seed until the
+run record writes the seed's salted hash instead. Do not check in the run
+output of a registered generate before its look is recorded.
 
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.

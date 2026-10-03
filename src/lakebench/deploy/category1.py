@@ -216,9 +216,18 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     # deletes do not wait; a claim still mounted by a terminating pod is held
     # by the pvc-protection finalizer until the pod is gone.
     *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-postgres"),
-    # The registered-corpus seed Secret (deploy/datagen.py ensure_seed_secret),
-    # written by generate for an evaluation or robustness corpus only.
-    *_named("core_v1", "secrets", CATEGORY1_STEP, "lakebench-datagen-seed", owner="DAT-1"),
+    # The registered-corpus seed Secrets (deploy/datagen.py ensure_seed_secret,
+    # one per seed, named lakebench-datagen-seed-<seed_ref prefix>), written by
+    # generate for an evaluation or robustness corpus only.
+    Cat1Entry(
+        "core_v1",
+        "secrets",
+        label_selector=(
+            "app.kubernetes.io/component=datagen-seed,app.kubernetes.io/instance={name}"
+        ),
+        owner_wi="DAT-1",
+        step=CATEGORY1_STEP,
+    ),
     *(
         Cat1Entry(
             api,

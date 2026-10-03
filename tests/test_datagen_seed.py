@@ -197,9 +197,11 @@ def test_reference_job_records_the_declared_role(monkeypatch, looks_open):
             for e in mgr._build_env_vars(JobType.SCORE_FINANCIAL_REFERENCE)
         }
 
+    from lakebench.config.seed_secret import seed_secret_env
+
     e = env(_cfg_role(EVAL, "evaluation"))
     # A registered corpus's seed comes from the seed Secret, never as a value.
-    assert e["LB_DATAGEN_SEED"] == ds.seed_secret_env()["valueFrom"]
+    assert e["LB_DATAGEN_SEED"] == seed_secret_env(_cfg_role(EVAL, "evaluation"))["valueFrom"]
     assert e["LB_DATAGEN_CORPUS_ROLE"] == "evaluation"
     assert env(_cfg("financial", 7777))["LB_DATAGEN_SEED"] == "7777"
     assert "LB_DATAGEN_CORPUS_ROLE" not in env(_cfg("financial", 7777))

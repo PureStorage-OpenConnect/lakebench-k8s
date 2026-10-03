@@ -333,7 +333,12 @@ used during development. The pre-registered gate constants and the rules for
 when the one-shot evaluation and robustness runs may be taken are fixed in
 `src/lakebench/spark/data/aml/aml_preregistration.json`; the evaluation and
 robustness seeds are recorded only as salted hashes in
-`src/lakebench/spark/data/aml/heldout_hashes.json`. Maintainers:
+`src/lakebench/spark/data/aml/heldout_hashes.json`. A registered look's
+seed is given to its config as `workload.datagen.seed` with the matching
+`corpus_role`; on the cluster it travels only through a Secret in the
+deployment's namespace (it is in no Job argument or Spark spec), and
+`scripts/aml_gate.py` reads it from `--seed-file`. Registered looks need the
+datagen image built for v1.7; an older image refuses a registered corpus. Maintainers:
 the full protocol is `docs/internal/aml-protocol.md` in the source repository.
 
 **Seed 43 is the calibration corpus.** If you leave
