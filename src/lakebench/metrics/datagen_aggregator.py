@@ -77,6 +77,8 @@ class PodMetrics:
     target_tb: float | None = None
     customer_id_max: int | None = None
     dirty_ratio: float | None = None
+    # "batch" or "continuous" (absent from images before v1.7).
+    delivery_mode: str | None = None
     pod_name: str = ""
 
     def effective_cores(self) -> float:
@@ -132,6 +134,7 @@ class PodMetrics:
             "target_tb",
             "customer_id_max",
             "dirty_ratio",
+            "delivery_mode",
         }
         kwargs = {k: obj[k] for k in obj if k in allowed}
         # rows_written was added later; older logs won't have it. Fall back
@@ -223,6 +226,10 @@ class FleetSummary:
     # the pods disagree (then it is listed in mixed_params).
     customer_id_max: int | None = None
     mixed_params: list[str] = field(default_factory=list)
+    # How the pods wrote bronze ("batch" or "continuous"; "mixed" when they
+    # disagree, None when no pod reported it). Delivery only: the bytes are
+    # the same either way, so it is not a corpus parameter.
+    delivery_mode: str | None = None
     # The datagen container's image as the pod spec named it, and the
     # resolved image ids (registry@sha256 digests) the kubelet reported in
     # pod status. More than one id means the pods did not all run one image.
@@ -262,6 +269,7 @@ class FleetSummary:
             "best_pod_elapsed_s": round(self.best_pod_elapsed_s, 3),
             "customer_id_max": self.customer_id_max,
             "mixed_params": list(self.mixed_params),
+            "delivery_mode": self.delivery_mode,
             "per_pod": [_pod_to_dict(p) for p in self.per_pod],
         }
 
@@ -317,6 +325,8 @@ def collect_from_pod_logs(
     images = pod_images or {}
     specs = sorted({img for img, _ in images.values() if img})
     summary.image = specs[0] if len(specs) == 1 else (", ".join(specs) or None)
+    modes = {p.delivery_mode for p in pods if p.delivery_mode}
+    summary.delivery_mode = modes.pop() if len(modes) == 1 else ("mixed" if modes else None)
     summary.image_ids = sorted({iid for _, iid in images.values() if iid})
     for key in ("seed", "scale"):
         values = {a.get(key) for a in (pod_args or {}).values() if a.get(key) is not None}

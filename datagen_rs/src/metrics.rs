@@ -35,6 +35,9 @@ pub struct PodMetrics {
     pub bucket: String,
     /// S3 key prefix (may be empty).
     pub prefix: String,
+    /// "batch" or "continuous": how the pod wrote bronze (delivery only; the
+    /// bytes are the same). Copied into `datagen_fleet.delivery_mode`.
+    pub delivery_mode: String,
 
     // ---- financial-only inputs (None on customer360) --------------------
     pub scale: Option<f64>,
@@ -144,6 +147,9 @@ impl PodMetrics {
         }
         j_str(&mut s, "bucket", &self.bucket, false);
         j_str(&mut s, "prefix", &self.prefix, false);
+        if !self.delivery_mode.is_empty() {
+            j_str(&mut s, "delivery_mode", &self.delivery_mode, false);
+        }
 
         if let Some(v) = self.scale {
             j_f64(&mut s, "scale", v, false);

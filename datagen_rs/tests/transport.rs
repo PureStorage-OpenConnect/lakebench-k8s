@@ -39,6 +39,46 @@ fn defaults_are_path_style_verified_http_for_http() {
     );
     let https = Transport::from_values("https://s3.example", Some("true"), None, None).unwrap();
     assert!(!https.allow_http);
+    let b = S3Sink::builder(&cfg(https)).unwrap();
+    assert_eq!(
+        get(&b, AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp)).as_deref(),
+        Some("false")
+    );
+}
+
+#[test]
+fn virtual_hosted_puts_the_bucket_in_the_host() {
+    // object_store uses a custom endpoint as given when virtual-hosted, so
+    // the bucket must already be in it, or every key lands under the wrong
+    // bucket.
+    let t = Transport::from_values(
+        "https://s3.us-east-1.example.com",
+        Some("false"),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut c = cfg(t);
+    c.endpoint = "https://s3.us-east-1.example.com".into();
+    let b = S3Sink::builder(&c).unwrap();
+    assert_eq!(
+        get(&b, AmazonS3ConfigKey::Endpoint).as_deref(),
+        Some("https://b.s3.us-east-1.example.com")
+    );
+    assert_eq!(
+        datagen_rs::s3sink::virtual_hosted_endpoint("https://b.s3.example", "b").unwrap(),
+        "https://b.s3.example"
+    );
+    assert!(datagen_rs::s3sink::virtual_hosted_endpoint("s3.example", "b").is_err());
+    // Path style keeps the endpoint.
+    let t = Transport::from_values("http://10.0.1.50:80", None, None, None).unwrap();
+    let mut c = cfg(t);
+    c.endpoint = "http://10.0.1.50:80".into();
+    let b = S3Sink::builder(&c).unwrap();
+    assert_eq!(
+        get(&b, AmazonS3ConfigKey::Endpoint).as_deref(),
+        Some("http://10.0.1.50:80")
+    );
 }
 
 #[test]

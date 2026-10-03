@@ -121,6 +121,51 @@ impl Transport {
     }
 }
 
+/// `scheme://host...` with the bucket as the first host label
+/// (`https://s3.example` and bucket `b` give `https://b.s3.example`); an
+/// endpoint that already starts with the bucket is kept.
+pub fn virtual_hosted_endpoint(endpoint: &str, bucket: &str) -> Result<String, String> {
+    let (scheme, rest) = endpoint
+        .split_once("://")
+        .ok_or("S3_ENDPOINT needs a scheme (http:// or https://) for virtual-hosted requests")?;
+    if rest.is_empty() || bucket.is_empty() {
+        return Err("S3_ENDPOINT and the bucket must be set for virtual-hosted requests".into());
+    }
+    if rest.starts_with(&format!("{bucket}.")) {
+        return Ok(endpoint.to_string());
+    }
+    Ok(format!("{scheme}://{bucket}.{rest}"))
+}
+
+/// Write `batch` as one parquet object through multipart uploads opened by
+/// `open`, retrying a failed upload or completion with
+/// `with_finish_retries` (each try rebuilds the file from the same batch, so
+/// the object's bytes are the same). Returns the object size.
+pub fn write_parquet_retrying(
+    what: &str,
+    mut open: impl FnMut() -> MpuWriter,
+    batch: &arrow::record_batch::RecordBatch,
+    props: impl Fn() -> parquet::file::properties::WriterProperties,
+    wait: impl FnMut(u64),
+) -> Result<u64, String> {
+    with_finish_retries(
+        what,
+        || {
+            let mut mpu = open();
+            {
+                let mut w =
+                    parquet::arrow::ArrowWriter::try_new(&mut mpu, batch.schema(), Some(props()))
+                        .map_err(|e| e.to_string())?;
+                w.write(batch).map_err(|e| e.to_string())?;
+                w.close().map_err(|e| e.to_string())?;
+            }
+            let sz = mpu.bytes_written();
+            mpu.finish().map(|_| sz)
+        },
+        wait,
+    )
+}
+
 /// Waits before each retry of a failed multipart completion: the file is
 /// rebuilt from the same batch (the bytes are deterministic) and uploaded
 /// again on the same key, so the object is unchanged.
@@ -280,10 +325,18 @@ impl S3Sink {
             retry_timeout: Duration::from_secs(30),
             ..Default::default()
         };
+        // With virtual-hosted requests object_store uses a custom endpoint
+        // as given, bucket included, so the bucket goes into the host here;
+        // otherwise every key would land under the wrong bucket.
+        let endpoint = if cfg.transport.virtual_hosted {
+            virtual_hosted_endpoint(&cfg.endpoint, &cfg.bucket)?
+        } else {
+            cfg.endpoint.clone()
+        };
         Ok(AmazonS3Builder::new()
             .with_bucket_name(&cfg.bucket)
             .with_region(&cfg.region)
-            .with_endpoint(&cfg.endpoint)
+            .with_endpoint(&endpoint)
             .with_access_key_id(&cfg.access_key)
             .with_secret_access_key(&cfg.secret_key)
             .with_virtual_hosted_style_request(cfg.transport.virtual_hosted)
@@ -461,15 +514,12 @@ impl MpuWriter {
     /// the failure to the caller (currently by panic in `generate.rs`
     /// to match the single-PUT path's fail-loud semantics).
     ///
-    /// Note (Wave 2 D5, 2026-09-28): finish() does NOT retry. The reason
-    /// is that WriteMultipart consumes itself into finish(), and on error
-    /// it internally aborts the upload -- there is no live upload state
-    /// left to retry against. A transient 5xx on the final
-    /// CompleteMultipartUpload call still surfaces to the caller (which
-    /// panics), and the retryable moments in the MPU life-cycle are
-    /// (a) begin (in `S3Sink::put_multipart`, retried) and (b) each part
-    /// upload (`WriteMultipart` handles its own part-level retries via
-    /// object_store's RetryConfig).
+    /// finish() itself does not retry: WriteMultipart consumes itself into
+    /// finish(), and on error it aborts the upload, so there is no live
+    /// upload left to retry against. A caller that can rebuild the object
+    /// retries the whole file (`write_parquet_retrying`); the other
+    /// retryable moments are begin (`S3Sink::put_multipart`) and each part
+    /// upload (object_store's RetryConfig).
     pub fn finish(mut self) -> Result<(), String> {
         let Some(w) = self.inner.take() else {
             return Err(format!("mpu writer key={} already finalized", self.key));

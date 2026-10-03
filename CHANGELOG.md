@@ -866,14 +866,20 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **A failed datagen upload completion is retried.** A continuous-delivery
   file whose multipart upload or completion fails is rebuilt from the same
   rows and uploaded again on the same key after 2, 4 and 8 s before the pod
-  fails (it used to fail at once and restart from scratch); part uploads
-  get 3 retries instead of 1. Output bytes are unchanged.
+  fails (it used to fail at once and restart from scratch); the S3 client's
+  own per-request retries go from 1 to 3 (every request, parts and single
+  PUTs included). Output bytes are unchanged. Each pod logs
+  `delivery_mode=<batch|continuous>` and reports it in its metrics line,
+  and the run record's `datagen_fleet.delivery_mode` carries it.
 - **The datagen pods honour `platform.storage.s3.path_style`, `verify_ssl`
   and `ca_cert`.** The Rust S3 client used path-style addressing, plain HTTP
   and the system CAs whatever the config said; it now reads `S3_PATH_STYLE`,
   `S3_VERIFY_SSL` and `S3_CA_CERT` (already rendered into the Job), allows
   plain HTTP only for an `http://` endpoint, and exits 2 on a value it cannot
-  read or a CA file it cannot load.
+  read or a CA file it cannot load. With `path_style: false` the bucket goes
+  into the endpoint's host (virtual-hosted requests); a FlashBlade or MinIO
+  config must keep `path_style: true`, which the datagen pods now honour
+  like Spark does.
 - **The datagen generator checks held-out seeds by hash.** It no longer
   compiles the evaluation and robustness seeds in: it reads
   `heldout_hashes.json` from `LB_HELDOUT_HASHES` (a financial generate

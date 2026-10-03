@@ -9,7 +9,9 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datagen_rs::s3sink::{with_finish_retries, MpuWriter, FINISH_RETRY_WAITS_S};
+use datagen_rs::s3sink::{
+    with_finish_retries, write_parquet_retrying, MpuWriter, FINISH_RETRY_WAITS_S,
+};
 use datagen_rs::writer::writer_properties;
 use object_store::memory::InMemory;
 use object_store::path::Path;
@@ -76,7 +78,9 @@ fn mpu_finish_retry_rewrites_same_bytes() {
     let b = batch();
     let attempts = AtomicUsize::new(0);
     let mut waits = Vec::new();
-    let size = with_finish_retries(
+    // The production writer (generate.rs's continuous path calls the same
+    // function), with an opener whose first upload fails its completion.
+    let size = write_parquet_retrying(
         "test",
         || {
             let n = attempts.fetch_add(1, Ordering::SeqCst);
@@ -86,16 +90,10 @@ fn mpu_finish_retry_rewrites_same_bytes() {
             } else {
                 upload
             };
-            let mut mpu = MpuWriter::from_upload(upload, rt.handle().clone(), key.to_string());
-            {
-                let mut w = ArrowWriter::try_new(&mut mpu, b.schema(), Some(writer_properties()))
-                    .map_err(|e| e.to_string())?;
-                w.write(&b).map_err(|e| e.to_string())?;
-                w.close().map_err(|e| e.to_string())?;
-            }
-            let sz = mpu.bytes_written();
-            mpu.finish().map(|_| sz)
+            MpuWriter::from_upload(upload, rt.handle().clone(), key.to_string())
         },
+        &b,
+        writer_properties,
         |s| waits.push(s),
     )
     .expect("the second attempt succeeds");

@@ -80,23 +80,37 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Every value given for `flag`: `--flag value` and `--flag=value`. A
-/// `--flag` with nothing after it gives None. The token after `--flag` is its
-/// value whatever it looks like, as `robustness::flag_in_argv` reads argv.
+/// `--flag` with nothing after it gives None. argv is read as
+/// `check_known_flags` and `robustness::flag_in_argv` read it: a bare flag
+/// takes no value, and any other `--name` consumes the next token as its
+/// value, so a value is never read as a flag.
 fn flag_values(args: &[String], flag: &str) -> Vec<Option<String>> {
-    let eq = format!("{flag}=");
     let mut out = Vec::new();
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
-        if a == flag {
-            out.push(args.get(i + 1).cloned());
-            i += 2;
-            continue;
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) if a.starts_with("--") => (n, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        let bare = FINANCIAL_BARE.contains(&name) || C360_BARE.contains(&name);
+        let value = match (&inline, bare || !name.starts_with("--")) {
+            (Some(_), _) => {
+                i += 1;
+                inline
+            }
+            (None, true) => {
+                i += 1;
+                None
+            }
+            (None, false) => {
+                i += 2;
+                args.get(i - 1).cloned()
+            }
+        };
+        if name == flag {
+            out.push(value);
         }
-        if let Some(v) = a.strip_prefix(eq.as_str()) {
-            out.push(Some(v.to_string()));
-        }
-        i += 1;
     }
     out
 }
@@ -410,6 +424,15 @@ enum DeliveryMode {
     Continuous,
 }
 
+impl DeliveryMode {
+    fn name(self) -> &'static str {
+        match self {
+            DeliveryMode::Batch => "batch",
+            DeliveryMode::Continuous => "continuous",
+        }
+    }
+}
+
 fn parse_delivery_mode() -> DeliveryMode {
     // Default is continuous (Wave 2 D-wave, follow-up 2026-09-28). Live smoke
     // (16 pods at scale 1 on FlashBlade) confirmed batch and continuous
@@ -455,23 +478,11 @@ fn write_bronze_file(
             // batch (deterministic bytes) and uploads it again on the same
             // key, after 2, 4 and 8 s; only then does the pod fail. Dropping
             // a failed writer aborts its upload.
-            datagen_rs::s3sink::with_finish_retries(
+            datagen_rs::s3sink::write_parquet_retrying(
                 &format!("continuous mpu key={key}"),
-                || {
-                    let mut mpu = sink.put_multipart(key);
-                    {
-                        let mut w = ArrowWriter::try_new(
-                            &mut mpu,
-                            batch.schema(),
-                            Some(writer_properties()),
-                        )
-                        .map_err(|e| e.to_string())?;
-                        w.write(batch).map_err(|e| e.to_string())?;
-                        w.close().map_err(|e| e.to_string())?;
-                    }
-                    let sz = mpu.bytes_written();
-                    mpu.finish().map(|_| sz)
-                },
+                || sink.put_multipart(key),
+                batch,
+                writer_properties,
                 |s| std::thread::sleep(std::time::Duration::from_secs(s)),
             )
             .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e))
@@ -591,6 +602,7 @@ fn pacs008_main() {
     // streams parquet row-groups through S3 multipart. Corpus content is
     // identical at fixed seed; verified by row-identity test in cycles.rs.
     let delivery = parse_delivery_mode();
+    eprintln!("delivery_mode={}", delivery.name());
     // Reject typos explicitly so an operator's `--mode brozne` does not
     // silently succeed with zero files written (previously it fell through
     // to do_bronze=false, do_reference=false and exit 0 -- caught by an
@@ -1435,6 +1447,7 @@ fn pacs008_main() {
         cpu_request_millicores: read_cpu_request_millicores(),
         bucket: bucket.clone(),
         prefix: prefix.clone(),
+        delivery_mode: delivery.name().to_string(),
         scale: Some(scale),
         corpus_months: Some(corpus_months),
         population: Some(pop as u64),
@@ -1607,6 +1620,7 @@ fn customer360_main() {
     // Delivery mode (Wave 2 D3, 2026-09-28); see the pacs008 branch for the
     // full semantic. Default batch preserves the current pinned-digest tests.
     let delivery = parse_delivery_mode();
+    eprintln!("delivery_mode={}", delivery.name());
 
     let sink = S3Sink::from_env(&bucket, &prefix);
 
@@ -1759,6 +1773,7 @@ fn customer360_main() {
         cpu_request_millicores: read_cpu_request_millicores(),
         bucket: bucket.clone(),
         prefix: prefix.clone(),
+        delivery_mode: delivery.name().to_string(),
         target_tb: Some(target_tb),
         customer_id_max: Some(customer_id_max),
         dirty_ratio: Some(dirty_ratio),

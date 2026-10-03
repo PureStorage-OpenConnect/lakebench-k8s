@@ -617,7 +617,7 @@ Container images for every deployed component. Override for air-gapped registrie
 |---|---|---|---|---|
 | `platform.storage.s3.endpoint` | string | **(required)** | first day | S3-compatible endpoint URL (e.g., `http://minio:9000` or `https://s3.example.com:443`). HTTPS endpoints with self-signed CAs require `ca_cert`. |
 | `platform.storage.s3.region` | string | `us-east-1` | advanced | AWS region. Used by boto3 for signing. |
-| `platform.storage.s3.path_style` | boolean | `true` | advanced | Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). |
+| `platform.storage.s3.path_style` | boolean | `true` | advanced | Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). Spark and the datagen pods both follow it; with `false` requests go to `<bucket>.<endpoint host>`. |
 | `platform.storage.s3.access_key` | string | `""` | first day | S3 access key. Required for deploy. |
 | `platform.storage.s3.secret_key` | string | `""` | first day | S3 secret key. Required for deploy. |
 | `platform.storage.s3.ca_cert` | string | `""` | advanced | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. Empty = use system default CAs. The PEM content is read at deploy time and embedded into a Kubernetes Secret for all components. |

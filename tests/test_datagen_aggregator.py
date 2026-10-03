@@ -312,3 +312,17 @@ def test_c360_customers_per_scale_match_rust_generator():
     per_unit = int(m.group(1).replace("_", ""))
     for scale in (0.01, 1, 10, 100):
         assert customer360_dimensions(scale).customers == max(1, round(scale * per_unit))
+
+
+def test_delivery_mode_in_metrics_json():
+    # The pods' LB_METRICS_JSON delivery_mode reaches datagen_fleet: one
+    # value when they agree, "mixed" when not, None from older images.
+    logs = {
+        f"p{i}": _emit_line(**{**_c360_pod(i, 10.0, 100), "delivery_mode": "batch"})
+        for i in range(2)
+    }
+    assert collect_from_pod_logs(logs, expected_pods=2).to_dict()["delivery_mode"] == "batch"
+    logs["p1"] = _emit_line(**{**_c360_pod(1, 10.0, 100), "delivery_mode": "continuous"})
+    assert collect_from_pod_logs(logs, expected_pods=2).delivery_mode == "mixed"
+    old = {f"p{i}": _emit_line(**_c360_pod(i, 10.0, 100)) for i in range(2)}
+    assert collect_from_pod_logs(old, expected_pods=2).delivery_mode is None
