@@ -1054,6 +1054,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **A nameless config reached through a symbolic link reads the v1.6 name
+  where v1.6 did.** The name in `.lakebench/state.json` is read beside the
+  path given, as v1.6 read it, not beside the file the link points to, so
+  `destroy`, `stop` or `status` through a link no longer check another
+  directory's deployment. When the two directories record different names,
+  a nameless load is refused unless the config sets `name:` or `--name` is
+  given, which the namespace's stamps then confirm.
 - **A fresh generate waits for an earlier datagen Job's pods to stop.**
   The previous Job is deleted in the background, so its pods kept running
   for their grace period and could land a `part-*` file in the datagen

@@ -60,6 +60,12 @@ class NameResolution:
     source: NameSource
     legacy_state_path: Path
     legacy_name: str | None = None
+    #: A config reached through a symbolic link: the v1.6 state file beside
+    #: the file the link resolves to, and the name it records, when that
+    #: names something other than the state beside the path given (which is
+    #: the one 1.6 read, ``legacy_state_path``). Name checks refuse rather
+    #: than pick one of the two.
+    resolved_legacy: tuple[Path, str] | None = None
 
     @property
     def nameless(self) -> bool:
@@ -68,17 +74,31 @@ class NameResolution:
 
 
 def legacy_state_path(config_path: str | Path) -> Path:
-    """Where v1.6 kept the auto-generated name for configs in this directory."""
+    """The v1.6 state file beside the file *config_path* resolves to
+    (symbolic links followed). Used to copy it with a config; the name 1.6
+    read is the one beside the path given (:func:`given_legacy_state_path`)."""
     return _config_file(config_path).parent / LEGACY_STATE
 
 
+def given_legacy_state_path(config_path: str | Path) -> Path:
+    """Where v1.6 read the name of a nameless config: ``.lakebench/state.json``
+    in the directory of the path it was given, symbolic links not followed,
+    so a config reached through a link used the link's directory."""
+    return Path(config_path).absolute().parent / LEGACY_STATE
+
+
 def read_legacy_name(config_path: str | Path) -> str | None:
-    """The name a v1.6 load recorded for nameless configs in this directory.
+    """The name a v1.6 load recorded for nameless configs in the directory of
+    the path given, as 1.6 read it (:func:`given_legacy_state_path`).
 
     Returned verbatim. A missing, unreadable or malformed file gives None;
     the file is never repaired or rewritten.
     """
-    path = legacy_state_path(config_path)
+    return _legacy_name_in(given_legacy_state_path(config_path))
+
+
+def _legacy_name_in(path: Path) -> str | None:
+    """The ``name`` of the v1.6 state file at *path*, or None."""
     try:
         with open(path) as f:
             state = json.load(f)
@@ -192,8 +212,14 @@ def resolve_name(
     the file's own ``name:`` is an error, because it would point the command
     at a deployment the file does not describe.
     """
-    legacy_path = legacy_state_path(config_path)
-    legacy = read_legacy_name(config_path)
+    legacy_path = given_legacy_state_path(config_path)
+    legacy = _legacy_name_in(legacy_path)
+    resolved_path = legacy_state_path(config_path)
+    resolved_legacy: tuple[Path, str] | None = None
+    if not _same_file(legacy_path, resolved_path):
+        other = _legacy_name_in(resolved_path)
+        if other is not None and other != legacy:
+            resolved_legacy = (resolved_path, other)
     configured = raw.get("name")
     if configured:
         name = str(configured)
@@ -202,12 +228,34 @@ def resolve_name(
                 f"--name {name_override!r} does not match the config's name {name!r}; "
                 "--name is only for configs that set no name"
             )
-        return NameResolution(name, "config", legacy_path, legacy)
+        return NameResolution(name, "config", legacy_path, legacy, resolved_legacy)
+    if resolved_legacy is not None and name_override is None:
+        # Through a symbolic link the two directories' v1.6 names disagree:
+        # 1.6 read the link's, while the file the link points to has another.
+        # Neither can be assumed, or one config could act on the other's
+        # deployment.
+        other_path, other = resolved_legacy
+        here = f"'{legacy}'" if legacy else "no name"
+        raise ValueError(
+            f"config has no name and is reached through a symbolic link: v1.6 recorded "
+            f"{here} in {legacy_path} and '{other}' in {other_path} (beside the file the "
+            "link points to), so which deployment it names cannot be told. Fix: add the "
+            "deployment's name to the config, or pass --name, which the namespace's "
+            "stamps then confirm"
+        )
     if name_override:
-        return NameResolution(name_override, "override", legacy_path, legacy)
+        return NameResolution(name_override, "override", legacy_path, legacy, resolved_legacy)
     if legacy:
         return NameResolution(legacy, "legacy-state", legacy_path, legacy)
     return NameResolution(suggested_name(config_path), "suggested", legacy_path, None)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether *a* and *b* are one file (or one missing path)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return a.resolve() == b.resolve()
 
 
 # ---------------------------------------------------------------------------

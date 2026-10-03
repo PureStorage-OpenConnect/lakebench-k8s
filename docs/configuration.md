@@ -61,6 +61,13 @@ commands use a suggested name, `lb-<user>-<6 hex>`, which the error for the
 other commands also offers. No command writes `.lakebench/state.json` any
 more, and the read-only commands create no files.
 
+The v1.6 name is read from `.lakebench/state.json` beside the path given,
+as v1.6 read it, with symbolic links not followed. When a nameless config
+is reached through a link and the directory of the file it points to
+records a different v1.6 name (or the link's directory records none), every
+command refuses it unless the config sets `name:` or `--name` is given, so
+one config cannot act on another directory's deployment.
+
 ### Deploy state and nameless teardown
 
 Every `deploy` (named configs included) records the per-deploy nonce it is
