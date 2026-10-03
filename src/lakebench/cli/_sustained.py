@@ -26,6 +26,7 @@ from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -3242,7 +3243,9 @@ def _run_sustained(
 
                 _refused = refusal_in_log(getattr(preflight_result, "driver_logs", None))
                 if _refused:
-                    print_error(f"Refused: bronze-verify found a protected AML corpus ({_refused})")
+                    print_error(
+                        f"Refused: bronze-verify found a protected AML corpus ({esc(_refused)})"
+                    )
                     pipeline_success = False
                     raise typer.Exit(ExitCode.USAGE)
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")

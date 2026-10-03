@@ -165,6 +165,15 @@ def generate(
         image_ids=list((fleet or {}).get("image_ids") or []) or "not_observed",
         **fingerprint,
     )
+    image_ids = (fleet or {}).get("image_ids")
+    if not isinstance(image_ids, list) or not image_ids:
+        # The pods' images were not read: the look cannot tie the corpus to
+        # its image and would refuse it.
+        print_error(
+            "The registered corpus was generated but its datagen pods' image digests could not "
+            "be read; scripts/aml_gate.py --registered refuses it. Regenerate with --regenerate."
+        )
+        raise typer.Exit(ExitCode.FAILED)
     if fingerprint.get("corpus_fingerprint") is None:
         # Generated but not identified: no registered look can take it.
         print_error(
@@ -186,6 +195,7 @@ def _s3_corpus_fingerprint(cfg) -> dict:
     from lakebench.config.datagen_seed import corpus_file, corpus_fingerprint
     from lakebench.deploy.datagen import bronze_datagen_prefix
     from lakebench.s3 import S3Client
+    from lakebench.s3.client import list_user_objects
 
     s3 = cfg.platform.storage.s3
     bucket = s3.buckets.bronze
@@ -203,17 +213,10 @@ def _s3_corpus_fingerprint(cfg) -> dict:
         if client is None:
             raise RuntimeError("the S3 client could not be built")
         files, manifests = [], {}
-        token = None
-        while True:
-            kw = {"Bucket": bucket, "Prefix": prefix}
-            if token:
-                kw["ContinuationToken"] = token
-            page = client.list_objects_v2(**kw)
-            for obj in page.get("Contents") or []:
-                files.append((obj["Key"][len(prefix) :], int(obj["Size"])))
-            if not page.get("IsTruncated"):
-                break
-            token = page.get("NextContinuationToken")
+        for obj in list_user_objects(client, bucket, prefix):
+            key = str(obj["Key"])
+            if not key.endswith("/"):  # a directory marker is not a file
+                files.append((key[len(prefix) :], int(obj["Size"])))
         for rel, _size in files:
             if corpus_file(rel) and rel.startswith("manifest/"):
                 body = client.get_object(Bucket=bucket, Key=prefix + rel)["Body"].read()

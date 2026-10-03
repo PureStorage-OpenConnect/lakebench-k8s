@@ -735,4 +735,7 @@ def test_a_financial_stage_subset_runs_the_check_before_its_stages():
     body = src[src.index("def _run_once(") :]
     check = body.index("_held_out_check_only(job_manager")
     assert body.index("stages = all_stages") < check < body.index("for cycle_idx in range")
-    assert "stages[0][0] != JobType.BRONZE_VERIFY" in body[check - 400 : check]
+    guard = body[check - 400 : check]
+    assert "stages[0][0] != JobType.BRONZE_VERIFY" in guard
+    # A multi-cycle run clears the prefix and generates each cycle's corpus.
+    assert "total_cycles == 1" in guard
