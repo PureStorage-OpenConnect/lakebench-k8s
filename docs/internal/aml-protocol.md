@@ -4,8 +4,8 @@ Maintainer material, not shipped with the package. This is the mechanism
 behind DESIGN.md invariant 7 (held-out evaluation data). The constants live in
 `src/lakebench/spark/data/aml/aml_preregistration.json`; only the copy at
 the integrate branch tip is authoritative (older lane checkouts carry stale
-versions, so rebase an AML-touching lane before using its constants); decision numbers (#NN) refer to the owner decision log kept
-locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
+versions, so rebase an AML-touching lane before using its constants); decision numbers (#NN) refer to section 9 of the owner's local decision
+log, and R-numbers to its rules.
 
 ## Seeds and corpus roles
 

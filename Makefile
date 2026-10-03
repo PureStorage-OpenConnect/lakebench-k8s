@@ -25,6 +25,10 @@ help:
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  clean            Remove build artifacts and caches"
+	@echo ""
+	@echo "Release (RELEASING.md):"
+	@echo "  release-check    Every scripted release step in order: VERSION=X.Y.Z [DRY=1]"
+	@echo "  rc-<step>        One release step alone, e.g. make rc-gate VERSION=X.Y.Z"
 
 install:
 	pip install -e .
@@ -100,3 +104,107 @@ clean:
 	rm -rf build/ dist/ *.egg-info .pytest_cache .mypy_cache .ruff_cache htmlcov/
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	@echo "Cleaned build artifacts and caches."
+
+# ---------------------------------------------------------------------------
+# Release steps (RELEASING.md section 4). release-check runs every rc-<step>
+# in RELEASE_STEPS order, in one recipe, so make -j cannot reorder them. It
+# stops at the first failure; with DRY=1 it runs every step's dry variant to
+# the end and lists the failures. A step whose command does not exist yet
+# prints "pending:" and fails. tests/test_releasing_doc.py keeps this list
+# equal to RELEASING.md's table. Nothing here merges, tags, pushes or
+# publishes.
+# ---------------------------------------------------------------------------
+RELEASE_STEPS := version local-refs generated-docs doc-readers breaking-changes \
+                 filler-words matrix uat-results support-record build package-guard gate
+.PHONY: release-check $(addprefix rc-,$(RELEASE_STEPS))
+RC_PY = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON)
+#: Where rc-build writes and rc-package-guard reads; release-check uses a
+#: fresh temporary directory unless DIST is given.
+DIST ?=
+#: NAME=RUN pairs for the gate's required perf configs, space separated.
+PERF_RUNS ?=
+#: The filler phrases and AI-voice phrases the de-LLM sweep removed.
+FILLER_WORDS := comprehensive|leverage|note that|this ensures|it is worth noting|delve
+AI_VOICE := I'll|Let me|As an AI|I hope this
+
+# -i would ignore every step's exit status and -k would run on past a
+# failure, so both are refused while the recipe is expanded, before any line
+# runs (a recipe line cannot refuse -i: make ignores its exit status too).
+RC_FLAGS = $(firstword -$(MAKEFLAGS))
+release-check:
+	$(if $(findstring i,$(RC_FLAGS)),$(error release-check: run it without -i))
+	$(if $(findstring k,$(RC_FLAGS)),$(error release-check: run it without -k))
+	@test -n "$(VERSION)" || { echo "release-check: VERSION=X.Y.Z is required"; exit 2; }
+	@test -z "$$(git status --porcelain)" || { echo "release-check: tree is dirty"; exit 2; }
+	@dist="$(DIST)"; tmp=""; if [ -z "$$dist" ]; then dist="$$(mktemp -d)"; tmp="$$dist"; fi; \
+	trap '[ -z "$$tmp" ] || rm -rf "$$tmp"' EXIT; failed=""; \
+	for s in $(RELEASE_STEPS); do \
+	  if $(MAKE) --no-print-directory rc-$$s VERSION=$(VERSION) DRY=$(DRY) DIST="$$dist"; then \
+	    echo "step $$s: PASS"; \
+	  else \
+	    echo "step $$s: FAIL"; failed="$$failed $$s"; [ -n "$(DRY)" ] || exit 1; \
+	  fi; \
+	done; \
+	if [ -n "$$failed" ]; then echo "release-check: failed:$$failed"; exit 1; fi
+
+# DRY=1: the version source and PEP 440 form only; the tag match needs the
+# release bump, which the release commit makes.
+rc-version:
+ifdef DRY
+	$(RC_PY) scripts/check_version.py
+else
+	$(RC_PY) scripts/check_version.py --tag "v$(VERSION)"
+endif
+
+rc-local-refs:
+	$(RC_PY) -m pytest -q -p no:cacheprovider tests/test_releasing_doc.py::test_no_dev_artifacts_reference
+
+rc-generated-docs:
+	$(RC_PY) scripts/gen_docs.py --check
+
+rc-doc-readers:
+	$(RC_PY) scripts/check_doc_readers.py
+
+rc-breaking-changes:
+	$(RC_PY) -m pytest -q -p no:cacheprovider tests/test_breaking_changes.py
+	@echo "pending: the CHANGELOG format test"; exit 1
+
+# git grep exits 1 when nothing matches; 2 or more is an error, not a pass.
+rc-filler-words:
+	@status=0; \
+	git grep -nIiwE '$(FILLER_WORDS)' -- . ':!Makefile'; r=$$?; [ $$r -le 1 ] || exit 2; [ $$r -eq 1 ] || status=1; \
+	git grep -nIwE "$(AI_VOICE)" -- . ':!Makefile'; r=$$?; [ $$r -le 1 ] || exit 2; [ $$r -eq 1 ] || status=1; \
+	exit $$status
+
+# The harness runs the matrix from the freeze worktree before the release
+# commit (RELEASING.md section 3); these steps verify what it wrote.
+rc-matrix:
+	@echo "pending: the release harness check of the matrix records"; exit 1
+
+rc-uat-results:
+	@echo "pending: the release harness report check"; exit 1
+
+rc-support-record:
+ifdef DRY
+	@echo "pending: a check mode for the support record"; exit 1
+else
+	$(RC_PY) -m lakebench.config.support . --from-records uat/runs \
+	  --tree "$$(cat uat/freeze-$(VERSION))" --expected uat/expected-results-$(VERSION).json --write
+	git diff --exit-code -- src/lakebench/config/validated_combinations.yaml
+endif
+
+rc-build:
+	@test -n "$(DIST)" || { echo "rc-build: DIST=<empty directory> is required"; exit 2; }
+	@test -z "$$(ls -A "$(DIST)" 2>/dev/null)" || { echo "rc-build: $(DIST) is not empty"; exit 2; }
+	$(RC_PY) -m build --outdir "$(DIST)"
+
+rc-package-guard:
+	@test -n "$(DIST)" || { echo "rc-package-guard: DIST=<build directory> is required"; exit 2; }
+	$(RC_PY) scripts/package_guard.py --dist "$(DIST)" --require-all
+
+rc-gate:
+ifdef DRY
+	$(RC_PY) scripts/release_gate.py --list
+else
+	$(RC_PY) scripts/release_gate.py --tag "v$(VERSION)" --require-all $(addprefix --perf-run ,$(PERF_RUNS))
+endif

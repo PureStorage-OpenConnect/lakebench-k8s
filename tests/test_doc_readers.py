@@ -167,7 +167,8 @@ def test_platform_files_must_exist(tmp_path):
     repo = _repo(tmp_path, {**_BASE})
     missing = cdr.platform_problems(repo)
     assert "install.sh: platform file missing" in missing
-    assert not any(m.startswith(("RELEASING.md", "UPGRADING-")) for m in missing)
+    assert "RELEASING.md: platform file missing" in missing
+    assert not any(m.startswith("UPGRADING-") for m in missing)
 
 
 def test_pending_platform_files_only_shrink():

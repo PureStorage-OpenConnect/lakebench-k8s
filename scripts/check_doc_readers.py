@@ -85,7 +85,7 @@ PLATFORM_FILES = (
 )
 #: Platform files that do not exist yet; every other non-glob PLATFORM_FILES
 #: entry must exist. The list may only shrink (the test fails once one exists).
-PENDING_PLATFORM_FILES = ("RELEASING.md",)
+PENDING_PLATFORM_FILES: tuple[str, ...] = ()
 
 #: Paths a published PyPI README links that v1.7 moved; each stays one
 #: release as a stub of at most STUB_MAX_LINES lines. The benchmark-spec move

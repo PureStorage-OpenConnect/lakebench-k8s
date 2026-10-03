@@ -603,4 +603,4 @@ in the unit tier on a `make` target the Makefile lacks.
 - [DESIGN.md](DESIGN.md) -- the product model, invariants and extension rules
 - [Operators and catalogs](operators-and-catalogs.md) -- the Spark Operator
   and the metastores in depth
-- [Releasing](releasing.md) -- how a release is cut
+- [Releasing](../RELEASING.md) -- how a release is cut
