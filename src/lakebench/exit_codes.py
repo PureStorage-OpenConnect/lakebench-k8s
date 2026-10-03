@@ -157,7 +157,8 @@ class ExitPath:
     ``planned`` is True for a path no command produces yet; the test suite
     records which change is to produce it.
     ``v16_code`` is the code Lakebench 1.6 exited with on this path, when it
-    differs; the UPGRADING table of renumbered codes is built from it.
+    differs; ``scripts/upgrading.py`` requires an UPGRADING-1.7.md entry for
+    each such path.
     """
 
     name: str

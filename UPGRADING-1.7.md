@@ -186,12 +186,6 @@ A `run` whose datagen did not finish in time exits 1 (was 5); the record says "d
 
 **What to do:** Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the `cmp2` document.
 
-### recommend exits 3 on a context conflict
-
-`recommend` exits 3 on a cluster context conflict instead of falling back to the reference table and exiting 0.
-
-**What to do:** Use `lakebench config recommend CONFIG`, with the config's context reachable.
-
 ## Comparability and identity
 
 ### Customer 360 records are workload version c360-2
@@ -344,7 +338,7 @@ A zero, negative or out-of-range count (Trino workers, generators, ports, cores)
 
 Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied or deleted by `destroy`.
 
-**What to do:** Claim such a bucket with `lakebench admin reclaim-bucket BUCKET CONFIG` (an owner action) before you rely on `destroy` to empty it.
+**What to do:** Claim it with `lakebench admin reclaim-bucket BUCKET CONFIG --force-nonempty` (an owner action; it holds the 1.6 data) before relying on `destroy`.
 
 ### The capacity preflight counts free capacity and fails closed
 

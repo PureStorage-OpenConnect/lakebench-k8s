@@ -275,7 +275,7 @@
 - id: customer-360-records-are-workload-version-c360-2
   title: Customer 360 records are workload version c360-2
   kind: identity
-  subject: workload customer360
+  subject: workload customer360 c360-2
   source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
   text: Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do
     not compare with `c360-1`.
@@ -463,8 +463,8 @@
   source: src/lakebench/deploy/ownership.py:TAG_CLUSTER
   text: Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied
     or deleted by `destroy`.
-  fix: Claim such a bucket with `lakebench admin reclaim-bucket BUCKET CONFIG` (an owner action) before
-    you rely on `destroy` to empty it.
+  fix: Claim it with `lakebench admin reclaim-bucket BUCKET CONFIG --force-nonempty` (an owner action;
+    it holds the 1.6 data) before relying on `destroy`.
 - id: the-capacity-preflight-counts-free-capacity-and-fails-closed
   title: The capacity preflight counts free capacity and fails closed
   kind: default-change
@@ -499,11 +499,3 @@
     with `scratch.size_per_job`.'
   fix: Read executor counts from `jobs[]` and scratch from `scratch.size_per_job` in scripts that parse
     records.
-- id: recommend-exits-3-on-a-context-conflict
-  title: recommend exits 3 on a context conflict
-  kind: exit-code
-  subject: recommend context conflict
-  source: src/lakebench/cli/_recommend.py:ContextConflictError
-  text: '`recommend` exits 3 on a cluster context conflict instead of falling back to the reference table
-    and exiting 0.'
-  fix: Use `lakebench config recommend CONFIG`, with the config's context reachable.
