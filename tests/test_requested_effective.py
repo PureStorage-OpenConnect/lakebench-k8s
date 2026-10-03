@@ -134,8 +134,8 @@ def test_configured_trickle_is_requested_as_set() -> None:
     assert re_.mismatches({"trickle": entry}) == []
 
 
-def test_executor_override_not_granted_is_labelled() -> None:
-    rec = sr.load_record(C360_CONT)
+def test_executor_override_run_with_fewer_is_labelled() -> None:
+    rec = sr.load_record(C360_BATCH)
     entry = rec["experiment"]["limits"]["executors"][1]
     entry.update(override=8, observed=4)
     v = V.verdict_from_record(rec)
@@ -144,7 +144,36 @@ def test_executor_override_not_granted_is_labelled() -> None:
     assert v.qualifiers["requested_effective"][key]["requested"] == 8
 
 
-def test_profile_count_under_a_budget_is_not_labelled() -> None:
+def test_executor_replaced_mid_job_is_not_labelled() -> None:
+    """The observed count counts every executor pod the operator listed, so
+    a replaced executor reads one more than asked for: not a mismatch."""
+    rec = sr.load_record(C360_BATCH)
+    rec["experiment"]["limits"]["executors"][1].update(override=8, observed=9)
+    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
+
+
+def test_executor_profile_request_is_its_count() -> None:
+    rec = sr.load_record("85b404")
+    entries = re_.derive(_metrics(rec))
+    e = next(v for k, v in entries.items() if k.startswith("executors[silver"))
+    assert isinstance(e["requested"], int) and e["source"].startswith("profile")
+    assert re_.mismatches(entries) == []
+
+
+def test_capped_executors_name_the_cap() -> None:
+    rec = sr.load_record(C360_BATCH)
+    rec["experiment"]["limits"]["executors"][1].update(scale_derived=40, cap=28, cap_hit=True)
+    e = list(re_.derive(_metrics(rec)).values())
+    assert any(x["source"] == "profile, capped at 28" and x["requested"] == 28 for x in e)
+
+
+def test_local_run_has_no_executor_entries() -> None:
+    rec = sr.load_record(C360_BATCH)
+    rec["config_snapshot"]["local"] = True
+    assert not any(k.startswith("executors[") for k in re_.derive(_metrics(rec)))
+
+
+def test_profile_count_under_a_budget_is_not_labelled_at_a_stream() -> None:
     """A concurrent budget below the profile is a Lakebench limit, labelled
     by limits.bound, not a request the run ignored."""
     rec = sr.load_record(C360_CONT)
@@ -157,11 +186,23 @@ def test_profile_count_under_a_budget_is_not_labelled() -> None:
 
 
 def test_mode_that_did_not_run_is_labelled() -> None:
+    """Asked for continuous, the record holds batch jobs and no stream."""
     rec = sr.load_record(C360_BATCH)
     rec["config_snapshot"]["experiment_inputs"]["run_mode"] = "continuous"
     label = V.verdict_from_record(rec).qualifiers["requested_effective"]
     assert label["pipeline_mode"]["requested"] == "continuous"
     assert label["pipeline_mode"]["effective"] == "batch"
+
+
+def test_run_that_stopped_before_any_stage_reads_not_recorded() -> None:
+    """A continuous run that failed before its streams started: no stage in
+    the record, so nothing says which pipeline ran (pipeline_benchmark's own
+    mode says batch for it)."""
+    rec = sr.load_record(C360_CONT)
+    rec["streaming"], rec["jobs"] = [], []
+    e = re_.derive(_metrics(rec))["pipeline_mode"]
+    assert (e["requested"], e["effective"]) == ("continuous", re_.NOT_RECORDED)
+    assert re_.mismatches({"pipeline_mode": e}) == []
 
 
 def test_mode_from_the_command_line_is_named_as_such() -> None:
@@ -189,18 +230,26 @@ def test_a_mismatch_never_fails_and_never_enters_identity() -> None:
     assert V.verdict_from_record(rec).status == "PASSED"
 
 
-def test_stored_entries_are_read_as_stored() -> None:
-    """A record that stored its entries is not re-derived by later code."""
+def test_stored_entries_are_read_as_stored_and_judged_now() -> None:
+    """A record that stored its entries is not re-derived by later code, but
+    which entries are mismatches is decided when it is read (a stored list
+    is policy of its day and is ignored)."""
     rec = sr.load_record(C360_BATCH)
+    _gold_reports(rec, "simple_agg", "auto")  # what re-deriving would read
     rec["experiment"]["requested_effective"] = {
-        "gold_strategy": {"requested": "auto", "effective": "x", "source": "auto", "stage": None}
+        "gold_strategy": {
+            "requested": "two_phase_agg",
+            "effective": "simple_agg",
+            "source": "auto",
+            "stage": "gold-finalize",
+        }
     }
     rec["experiment"]["requested_effective_mismatches"] = []
-    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
+    label = V.verdict_from_record(rec).qualifiers["requested_effective"]
+    assert label["gold_strategy"]["requested"] == "two_phase_agg"
+    rec["experiment"]["requested_effective"]["gold_strategy"]["requested"] = "auto"
     rec["experiment"]["requested_effective_mismatches"] = ["gold_strategy"]
-    assert V.verdict_from_record(rec).qualifiers["requested_effective"]["gold_strategy"][
-        "effective"
-    ] == ("x")
+    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
 
 
 def test_fresh_record_stores_the_entries() -> None:
@@ -237,3 +286,37 @@ def test_requested_gold_strategy_is_outside_the_perf_fingerprint() -> None:
     from lakebench.metrics.perf_gate import _FINGERPRINT_KEYS
 
     assert "requested" not in _FINGERPRINT_KEYS
+
+
+def test_explicit_request_with_an_unrecorded_effective_claims_nothing() -> None:
+    """An older script logged no strategy: the request cannot be judged."""
+    rec = sr.load_record(C360_BATCH)
+    _requested(rec, "two_phase_agg")
+    entry = re_.derive(_metrics(rec))["gold_strategy"]
+    assert entry["effective"] == re_.NOT_RECORDED
+    assert re_.mismatches({"gold_strategy": entry}) == []
+
+
+def test_override_seen_by_the_script_without_a_recorded_request() -> None:
+    rec = sr.load_record(C360_BATCH)
+    _gold_reports(rec, "two_phase_agg", "override")
+    entry = re_.derive(_metrics(rec))["gold_strategy"]
+    assert (entry["requested"], entry["effective"]) == ("two_phase_agg", "two_phase_agg")
+
+
+@pytest.mark.parametrize("schema", ["financial", None])
+def test_no_gold_entry_outside_customer360(schema) -> None:
+    rec = sr.load_record(C360_BATCH)
+    rec["config_snapshot"]["workload_schema"] = schema
+    assert "gold_strategy" not in re_.derive(_metrics(rec))
+
+
+def test_configured_gold_strategy_is_normalised() -> None:
+    from lakebench.metrics.collector import build_config_snapshot
+    from tests.conftest import make_config
+
+    cfg = make_config(
+        architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+        spark={"conf": {"spark.lb.gold.strategy": " Two_Phase_Agg "}},
+    )
+    assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": "two_phase_agg"}
