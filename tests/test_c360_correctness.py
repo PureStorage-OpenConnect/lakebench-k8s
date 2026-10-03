@@ -192,7 +192,8 @@ def test_judged_gating_ids_matches_gating_outcome_on_stored_records():
         judged = c3.judged_gating_ids(rec)
         for gid in c3.GATING_CHECKS:
             assert _drops_fail(rec, gid) is (gid in judged), (run_id, gid)
-    assert seen >= 1
+    # The five stored C360 records the report block's old drift guard required.
+    assert seen >= 5
 
 
 def test_judged_gating_ids_is_empty_where_nothing_is_judged(monkeypatch):
