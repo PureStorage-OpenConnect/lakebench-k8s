@@ -65,11 +65,28 @@ fn virtual_hosted_puts_the_bucket_in_the_host() {
         get(&b, AmazonS3ConfigKey::Endpoint).as_deref(),
         Some("https://b.s3.us-east-1.example.com")
     );
+    let v = |e: &str, b: &str| datagen_rs::s3sink::virtual_hosted_endpoint(e, b);
     assert_eq!(
-        datagen_rs::s3sink::virtual_hosted_endpoint("https://b.s3.example", "b").unwrap(),
+        v("https://s3.example/", "b").unwrap(),
         "https://b.s3.example"
     );
-    assert!(datagen_rs::s3sink::virtual_hosted_endpoint("s3.example", "b").is_err());
+    assert_eq!(
+        v("http://minio.local:9000", "b").unwrap(),
+        "http://b.minio.local:9000"
+    );
+    // A host that happens to start with the bucket name still gets it.
+    assert_eq!(
+        v("https://s3.example.com", "s3").unwrap(),
+        "https://s3.s3.example.com"
+    );
+    for bad in [
+        "s3.example",
+        "http://10.0.1.50:80",
+        "http://[::1]:9000",
+        "https://host/s3",
+    ] {
+        assert!(v(bad, "b").is_err(), "{bad}");
+    }
     // Path style keeps the endpoint.
     let t = Transport::from_values("http://10.0.1.50:80", None, None, None).unwrap();
     let mut c = cfg(t);
@@ -84,7 +101,9 @@ fn virtual_hosted_puts_the_bucket_in_the_host() {
 #[test]
 fn path_style_false_builds_virtual_hosted() {
     let t = Transport::from_values("http://h", Some("false"), Some("false"), None).unwrap();
-    let b = S3Sink::builder(&cfg(t)).unwrap();
+    let mut c = cfg(t);
+    c.endpoint = "http://minio.local:9000".into();
+    let b = S3Sink::builder(&c).unwrap();
     assert_eq!(
         get(&b, AmazonS3ConfigKey::VirtualHostedStyleRequest).as_deref(),
         Some("true")
