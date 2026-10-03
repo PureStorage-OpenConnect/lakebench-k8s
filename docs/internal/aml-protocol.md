@@ -64,5 +64,12 @@ The one-shot looks are already approved (#41, #42). Take them once:
 2. the paired run-to-run standard deviation is reported (#44a);
 3. per-typology predictions are committed (#46).
 
+The corpus a look scores must be the one `lakebench generate
+--registered-corpus` wrote on the look host: `scripts/aml_gate.py
+--registered` requires a `generated` corpus-ledger entry for that role and
+seed whose corpus fingerprint matches the local copy, whose datagen pods all
+ran the `--generator-image` digest, and with no other Job submitted into
+that bronze prefix meanwhile (owner, 10-03).
+
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.

@@ -167,6 +167,14 @@ def seed_ever_recorded(seed: int) -> str | None:
     return _ever(seed)
 
 
+def registered_corpus_problem(role, seed, generator_image, corpus) -> str | None:
+    """The corpus must be the bytes a recorded `generate --registered-corpus`
+    wrote, on pods running --generator-image (datagen_seed's rule)."""
+    from lakebench.config.datagen_seed import registered_corpus_problem as _problem
+
+    return _problem(role, seed, generator_image, corpus)
+
+
 def append_ledger(entry: dict) -> None:
     """Append ``entry`` to the look ledger and fsync it (raises on failure)."""
     from lakebench.config.datagen_seed import append_looks_ledger
@@ -403,7 +411,13 @@ def main(argv=None) -> int:
             print("refusing: a registered look needs --seed", file=sys.stderr)
             return 1
         try:
-            err = clean_checkout_error() or seed_ever_recorded(args.seed)
+            err = (
+                clean_checkout_error()
+                or seed_ever_recorded(args.seed)
+                or registered_corpus_problem(
+                    args.registered, args.seed, args.generator_image, args.corpus
+                )
+            )
         except (OSError, ValueError) as e:
             err = f"the look history could not be checked: {e}"
         if err:
@@ -595,6 +609,9 @@ def main(argv=None) -> int:
                 err = (
                     clean_checkout_error()
                     or seed_ever_recorded(args.seed)
+                    or registered_corpus_problem(
+                        args.registered, args.seed, args.generator_image, corpus
+                    )
                     or predictions_error(args.generator_image)
                 )
                 if err:

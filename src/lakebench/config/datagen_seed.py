@@ -1318,6 +1318,134 @@ def append_corpus_ledger(entry: dict) -> None:
     _append_jsonl(corpora_ledger_path(), entry)
 
 
+def _fingerprinted(relpath: str) -> bool:
+    """A corpus data file: a Parquet file under the prefix, not under a
+    ``_`` or ``.`` directory (markers, checksums, temporary uploads)."""
+    parts = relpath.split("/")
+    return relpath.endswith(".parquet") and not any(p.startswith(("_", ".")) for p in parts)
+
+
+def corpus_fingerprint(
+    files: Iterable[tuple[str, int]], manifest_sha256: Mapping[str, str]
+) -> dict:
+    """What a corpus is, byte for byte where it matters: every data file's
+    path (relative to the datagen prefix) and size, and the sha256 of each
+    manifest file. ``generate --registered-corpus`` records it from S3 when
+    the generation finishes; ``registered_corpus_problem`` recomputes it over
+    the corpus a registered look scores."""
+    items = sorted((str(p), int(n)) for p, n in files if _fingerprinted(str(p)))
+    listing = json.dumps(items, separators=(",", ":")).encode("utf-8")
+    return {
+        "format": 1,
+        "files": len(items),
+        "bytes": sum(n for _, n in items),
+        "listing_sha256": hashlib.sha256(listing).hexdigest(),
+        "manifest_sha256": {k: manifest_sha256[k] for k in sorted(manifest_sha256)},
+    }
+
+
+def local_corpus_fingerprint(root: str | os.PathLike) -> dict:
+    """``corpus_fingerprint`` of a corpus directory (the local copy of the
+    datagen prefix: ``bronze/...`` and ``manifest/manifest*.parquet``)."""
+    base = Path(root)
+    files, manifests = [], {}
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(base).as_posix()
+        if not _fingerprinted(rel):
+            continue
+        files.append((rel, path.stat().st_size))
+        if rel.startswith("manifest/"):
+            manifests[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return corpus_fingerprint(files, manifests)
+
+
+def _image_digest(image: str | None) -> str | None:
+    """The ``sha256:...`` part of an image reference or a kubelet imageID."""
+    text = str(image or "")
+    return text.rsplit("@", 1)[-1] if "@sha256:" in text else None
+
+
+def registered_corpus_problem(
+    role: str, seed: int, generator_image: str | None, corpus_dir: str | os.PathLike
+) -> str | None:
+    """Why a registered ``role`` look may not score the corpus at
+    ``corpus_dir`` (owner, 10-03), or None. The corpus ledger
+    (``corpora_ledger_path()``) must hold a ``generated`` entry of
+    ``generate --registered-corpus`` for this role and seed (by its salted
+    hash) whose corpus fingerprint equals the directory's, so the look
+    scores exactly the bytes that generation wrote; every datagen pod of it
+    must have run the ``--generator-image`` digest; and no other attempt on
+    the same bronze prefix may have submitted a datagen Job while it ran. An
+    unreadable ledger refuses. Names the role, never the seed."""
+    path = corpora_ledger_path()
+    if not path.is_file():
+        return f"no generation of the registered {role} corpus is recorded ({path} is absent)"
+    want = seed_hash(_heldout().salt, seed)
+    entries: list[dict] = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            raise ValueError(f"{path} line {n} is not JSON") from None
+        if not isinstance(e, dict):
+            raise ValueError(f"{path} line {n} is not an entry")
+        entries.append(e)
+    mine = [
+        (i, e)
+        for i, e in enumerate(entries)
+        if e.get("kind") == "registered_corpus"
+        and e.get("seed_hash") == want
+        and e.get("role") == role
+    ]
+    if not mine:
+        return (
+            f"no generation of the registered {role} corpus is recorded in {path} (run "
+            "`lakebench generate --registered-corpus` first)"
+        )
+    local = local_corpus_fingerprint(corpus_dir)
+    done = [(i, e) for i, e in mine if e.get("state") == "generated"]
+    match = [(i, e) for i, e in done if e.get("corpus_fingerprint") == local]
+    if not match:
+        return (
+            f"the corpus at {corpus_dir} is not the one a recorded generation of the registered "
+            f"{role} corpus wrote ({len(done)} generated entr{'y' if len(done) == 1 else 'ies'} "
+            "in the ledger; its files or manifest differ)"
+        )
+    end, gen = match[-1]
+    want_digest = _image_digest(generator_image)
+    ids = gen.get("image_ids")
+    if (
+        want_digest is None
+        or not isinstance(ids, list)
+        or not ids
+        or any(_image_digest(x) != want_digest for x in ids)
+    ):
+        return (
+            f"the recorded generation (attempt {gen.get('attempt')}) did not run only the "
+            "--generator-image digest on every datagen pod"
+        )
+    attempt = gen.get("attempt")
+    start = next(
+        (i for i, e in mine if e.get("attempt") == attempt and e.get("state") == "attempted"), end
+    )
+    for e in entries[start + 1 : end]:
+        if (
+            e.get("kind") == "registered_corpus"
+            and e.get("attempt") != attempt
+            and e.get("state") == "submitting"
+            and e.get("bronze_uri") == gen.get("bronze_uri")
+        ):
+            return (
+                f"another attempt ({e.get('attempt')}) submitted a datagen Job into the same "
+                f"bronze prefix while attempt {attempt} ran"
+            )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Level-2 predictions
 # ---------------------------------------------------------------------------

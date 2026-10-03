@@ -105,14 +105,14 @@ def test_flag_on_a_config_that_names_no_protected_corpus_is_refused(env, cluster
 
 
 def test_flag_needs_yes(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
     r = _gen(cfg, "--registered-corpus")
     assert r.exit_code == 2 and "needs --yes" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
 
 
 def test_flag_refuses_writing_over_stale_bronze(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
     r = _gen(cfg, "--registered-corpus", "--yes", "--allow-stale-bronze")
     assert r.exit_code == 2 and "never writes over objects" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
@@ -143,7 +143,7 @@ def test_a_seed_with_a_look_is_never_generated_again(env, cluster, monkeypatch):
     monkeypatch.setattr(
         ds, "seed_ever_recorded", lambda seed: "the registered evaluation seed is in the ledger"
     )
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
     r = _gen(cfg, "--registered-corpus", "--yes")
     assert r.exit_code == 2 and "never generated again" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
@@ -154,7 +154,7 @@ def test_an_unreadable_look_history_refuses(env, cluster, monkeypatch):
         raise OSError("git log over aml_registered_looks.json failed (exit 128)")
 
     monkeypatch.setattr(ds, "seed_ever_recorded", broken)
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
     r = _gen(cfg, "--registered-corpus", "--yes")
     assert r.exit_code == 2 and "cannot be checked" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
@@ -213,11 +213,45 @@ def _fake_generate(monkeypatch, env, *, deploy=None, complete=True):
         cpu_hr_per_tb=None,
     )
     monkeypatch.setattr("lakebench.metrics.datagen_aggregator.collect_from_k8s", lambda **k: fleet)
+    monkeypatch.setattr(
+        "lakebench.s3.S3Client", lambda **k: SimpleNamespace(raw_client=FakeBronze())
+    )
     return seen
 
 
+#: The registered corpus's objects under the datagen prefix (test bytes).
+CORPUS = {
+    "pacs008/bronze/pacs008/part-00000.parquet": b"p" * 100,
+    "pacs008/bronze/party.parquet": b"q" * 10,
+    "pacs008/manifest/manifest.parquet": b"manifest-bytes",
+    "pacs008/_corpus/c000/n000.json": b"{}",
+}
+
+
+class FakeBronze:
+    def list_objects_v2(self, Bucket, Prefix, **kw):  # noqa: N803 -- boto3's names
+        keys = sorted(k for k in CORPUS if k.startswith(Prefix))
+        return {
+            "Contents": [{"Key": k, "Size": len(CORPUS[k])} for k in keys],
+            "IsTruncated": False,
+        }
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        import io
+
+        return {"Body": io.BytesIO(CORPUS[Key])}
+
+
+def _local_copy(root: Path) -> Path:
+    for key, body in CORPUS.items():
+        path = root / key.split("/", 1)[1]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    return root
+
+
 def _registered(env):
-    return pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    return pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
 
 
 def test_attempted_is_written_before_the_first_cluster_call(env, monkeypatch):
@@ -402,3 +436,123 @@ def test_a_shallow_history_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "looks_path", lambda: shallow / "aml_registered_looks.json")
     with pytest.raises(OSError, match="shallow"):
         ds.seed_ever_recorded(pc.EV)
+
+
+# -- owner, 10-03: the registered look scores only the generated corpus -------
+
+
+def test_a_tag_pinned_image_is_refused(env, cluster):
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    r = _gen(cfg, "--registered-corpus", "--yes")
+    assert r.exit_code == 2 and "pinned by digest" in r.output, r.output
+    assert cluster == [] and not env.ledger.exists()
+
+
+def test_generated_entry_carries_the_corpus_fingerprint(env, monkeypatch):
+    _fake_generate(monkeypatch, env)
+    assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
+    gen = _lines(env.ledger)[-1]
+    assert gen["state"] == "generated"
+    assert gen["corpus_fingerprint"] == ds.local_corpus_fingerprint(_local_copy(env.tmp / "copy"))
+    assert gen["corpus_fingerprint"]["files"] == 3  # the marker is not data
+
+
+def _gate_problem(env, corpus, image=pc.IMAGE, role="evaluation", seed=pc.EV):
+    return ds.registered_corpus_problem(role, seed, image, corpus)
+
+
+def test_the_look_needs_a_matching_generated_entry(env, monkeypatch):
+    corpus = _local_copy(env.tmp / "copy")
+    assert "no generation" in _gate_problem(env, corpus)
+    _fake_generate(monkeypatch, env)
+    assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
+    assert _gate_problem(env, corpus) is None
+    # Another seed, role or image digest: refused.
+    assert _gate_problem(env, corpus, seed=pc.RB) is not None
+    assert _gate_problem(env, corpus, role="robustness") is not None
+    assert "digest" in _gate_problem(env, corpus, image="repo@sha256:" + "b" * 64)
+    assert "digest" in _gate_problem(env, corpus, image="repo:latest")
+    # A local copy that differs (a host-built corpus, a partial sync): refused.
+    (corpus / "bronze" / "pacs008" / "part-00001.parquet").write_bytes(b"x")
+    assert "not the one" in _gate_problem(env, corpus)
+    _no_seed(env.ledger.read_text())
+
+
+def _base(env, **kw):
+    return {
+        "kind": "registered_corpus",
+        "role": "evaluation",
+        "seed_hash": ds.seed_hash(env.held.salt, pc.EV),
+        "bronze_uri": "s3://b/pacs008/",
+        **kw,
+    }
+
+
+def test_mixed_fleet_and_unobserved_images_are_refused(env):
+    corpus = _local_copy(env.tmp / "copy")
+    fp = ds.local_corpus_fingerprint(corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(
+        _base(
+            env,
+            attempt="a1",
+            state="generated",
+            corpus_fingerprint=fp,
+            image_ids=[pc.IMAGE, "repo@sha256:" + "c" * 64],
+        )
+    )
+    assert "digest" in _gate_problem(env, corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a2", state="attempted"))
+    ds.append_corpus_ledger(
+        _base(env, attempt="a2", state="generated", corpus_fingerprint=fp, image_ids="not_observed")
+    )
+    assert "digest" in _gate_problem(env, corpus)
+
+
+def test_a_concurrent_submit_into_the_prefix_is_refused(env):
+    corpus = _local_copy(env.tmp / "copy")
+    fp = ds.local_corpus_fingerprint(corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
+    ds.append_corpus_ledger(_base(env, attempt="a2", state="submitting"))
+    ds.append_corpus_ledger(
+        _base(env, attempt="a1", state="generated", corpus_fingerprint=fp, image_ids=[pc.IMAGE])
+    )
+    assert "same bronze prefix" in _gate_problem(env, corpus)
+
+
+def test_a_torn_ledger_line_refuses(env):
+    env.ledger.write_text("garbage\n")
+    with pytest.raises(ValueError, match="line 1"):
+        _gate_problem(env, _local_copy(env.tmp / "copy"))
+
+
+def test_aml_gate_registered_preflight_requires_the_entry(env, monkeypatch, capsys):
+    """scripts/aml_gate.py --registered refuses before Spark when no
+    generation of the registered corpus matches (one small hunk there)."""
+    from tests.conftest import exec_repo_script
+
+    root = Path(__file__).resolve().parents[1]
+    gate = exec_repo_script(root / "scripts/aml_gate.py", "aml_gate_registered")
+    monkeypatch.setattr(gate, "clean_checkout_error", lambda: None)
+    monkeypatch.setattr(gate, "seed_ever_recorded", lambda seed: None)
+    looks = env.tmp / "looks.json"
+    looks.write_text('{"looks": []}')
+    monkeypatch.setattr(ds, "looks_path", lambda: looks)
+    corpus = _local_copy(env.tmp / "copy")
+    rc = gate.main(
+        [
+            str(corpus),
+            "--seed",
+            str(pc.EV),
+            "--registered",
+            "evaluation",
+            "--out",
+            str(env.tmp / "gate.json"),
+            "--generator-image",
+            pc.IMAGE,
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1 and "no generation of the registered evaluation corpus" in err, err
+    _no_seed(err)
