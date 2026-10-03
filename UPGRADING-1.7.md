@@ -252,6 +252,12 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 **What to do:** Run `lakebench deploy CONFIG` once after upgrading.
 
+### stop drains AML detection first
+
+`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+
+**What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
+
 ### Executor overrides are bounded and counted
 
 Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.

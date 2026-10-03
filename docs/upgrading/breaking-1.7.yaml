@@ -544,3 +544,10 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
+- id: stop-drains-aml-detection-first
+  title: stop drains AML detection first
+  kind: default-change
+  subject: gold-refresh drain
+  source: src/lakebench/cli/_aml_post.py:STOP_DRAIN_BUDGET_S
+  text: '`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.'
+  fix: 'Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.'
