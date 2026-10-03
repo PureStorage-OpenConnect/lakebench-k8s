@@ -178,7 +178,9 @@ def _fake_generate(monkeypatch, env, *, deploy=None, complete=True):
 
     monkeypatch.setattr(gen, "get_k8s_client", first_cluster_call)
     monkeypatch.setattr(
-        gen, "enforce_bronze_gate", lambda *a, **k: SimpleNamespace(stale_allowed=False)
+        gen,
+        "enforce_bronze_gate",
+        lambda *a, **k: SimpleNamespace(stale_allowed=False, record=lambda: None),
     )
     # generate stops an earlier datagen Job before the gate (a cluster call).
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
@@ -186,7 +188,7 @@ def _fake_generate(monkeypatch, env, *, deploy=None, complete=True):
     monkeypatch.setattr(deploy_mod, "DeploymentEngine", lambda cfg: SimpleNamespace())
 
     class Datagen:
-        def __init__(self, engine, allow_stale_bronze=False):
+        def __init__(self, engine, allow_stale_bronze=False, **kw):
             pass
 
         def deploy(self):
