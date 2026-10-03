@@ -1,8 +1,8 @@
 """The refused-key table: config values 1.6 accepted that 1.7 refuses at load.
 
 A removed key is refused whatever its value (each model's ``_removed_keys``).
-The keys here still exist; only some values are refused, by the validator
-named in each row, with the row's ``fix`` in the refusal text. Commands
+The keys here still exist; only some values are refused, by a validator in
+``config/schema.py``, with the row's ``fix`` in the refusal text. Commands
 that do not change data (``destroy``, ``status``, the read-only commands)
 still load the value, ignoring it with a note where the validator says so.
 
@@ -18,7 +18,9 @@ Two readers use the table:
 
 ``tests/test_init_from.py`` loads ``example`` at ``key`` for each row and
 checks that the commands in ``refused_by`` refuse it with ``fix`` in the
-message, so a row cannot drift from its validator.
+message, so a row cannot drift from its validator; and it maps every
+schema validator that refuses by purpose to its rows or to a stated
+exemption, so a new refusal cannot go without a row.
 """
 
 from __future__ import annotations
@@ -124,6 +126,22 @@ REFUSED_KEYS: tuple[RefusedKey, ...] = (
             "gold_refresh_executors",
             "driver_cores",
         )
+    ),
+    RefusedKey(
+        key="platform.compute.spark.driver_memory",
+        when="not a Spark size",
+        example="16Gi",
+        refused_by="deploy and run",
+        fix="write a whole number above 0 with a unit, k, m, g or t",
+        init_from="keep",
+    ),
+    RefusedKey(
+        key="spark.conf",
+        when="spark.lb.gold.strategy other than auto, simple_agg or two_phase_agg",
+        example={"spark.lb.gold.strategy": "incremental"},
+        refused_by="deploy and run",
+        fix="Delete it from spark.conf, or set auto, simple_agg or two_phase_agg",
+        init_from="keep",
     ),
     RefusedKey(
         key="spark.conf",

@@ -531,8 +531,12 @@ def init(
 # ---------------------------------------------------------------------------
 
 
-def _write_atomically(output: Path, text: str) -> Path:
-    """Write *text* to a temporary file beside *output*; the caller renames it."""
+def _write_atomically(output: Path, text: str, like: Path) -> Path:
+    """Write *text* to a temporary file beside *output*; the caller renames it.
+
+    The file is no more readable than *like* (OLD): a config kept private
+    stays private, whatever the umask allows.
+    """
     import os
     import tempfile
 
@@ -542,7 +546,7 @@ def _write_atomically(output: Path, text: str) -> Path:
             f.write(text)
         mask = os.umask(0)
         os.umask(mask)
-        os.chmod(tmp, 0o666 & ~mask)
+        os.chmod(tmp, 0o666 & ~mask & (like.stat().st_mode | 0o600))
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -565,6 +569,8 @@ def _init_from(
         convert,
         dump,
         remaining_refusals,
+        secret_vars,
+        undo_derived_recipe,
         verify,
     )
 
@@ -572,11 +578,17 @@ def _init_from(
         _refuse(f"--from {old}: no such file")
     if old.resolve() == output.resolve() or (output.exists() and os.path.samefile(old, output)):
         _refuse(f"--from {old} and -o {output} are the same file; init never writes over OLD")
+    if output.is_dir():
+        _refuse(f"-o {output} is a directory; name the new config file")
     if output.exists() and not overwrite:
         _refuse(f"{output} already exists; pass --overwrite to replace it")
     if not output.parent.is_dir():
         _refuse(f"{output.parent} is not a directory")
 
+    header = (
+        f"# Written by `lakebench init --from {old.name}`. Comments in the old file are\n"
+        "# not carried over; every key is in docs/configuration.md.\n"
+    )
     try:
         conv, old_text = convert(
             old,
@@ -584,11 +596,13 @@ def _init_from(
             name_override=name,
             fresh_name=default_name(),
         )
-        text = (
-            f"# Written by `lakebench init --from {old.name}`. Comments in the old file are\n"
-            "# not carried over; every key is in docs/configuration.md.\n" + dump(conv.data)
-        )
+        text = header + dump(conv.data)
         differ = verify(old_text, text, conv)
+        if differ and conv.derived_recipe:
+            # The recipe's defaults moved something: keep the file recipe-less.
+            undo_derived_recipe(conv, differ)
+            text = header + dump(conv.data)
+            differ = verify(old_text, text, conv)
     except InitFromError as e:
         _refuse(f"nothing written: {e}", ExitCode.REFUSED if e.refused else ExitCode.USAGE)
     if differ:
@@ -599,29 +613,10 @@ def _init_from(
         )
     still_refused = remaining_refusals(text)
 
-    tmp = _write_atomically(output, text)
+    tmp = _write_atomically(output, text, old)
     try:
         if output.is_file():
-            replaced_cfg, replaced_problem = _load_replaced(output)
-            replaced_name = (
-                replaced_cfg.name
-                if replaced_cfg is not None
-                else _name_of(_replaced_config(output))
-            )
-            if not replaced_name:
-                from lakebench.config.deploy_state import read_legacy_name
-
-                legacy = read_legacy_name(output)
-                if legacy:
-                    _refuse(
-                        f"{output} has no name, and 1.6 recorded '{legacy}' for nameless "
-                        f"configs here, so it may be the config of deployment '{legacy}': "
-                        "write the new file elsewhere",
-                        ExitCode.REFUSED,
-                    )
-            elif replaced_name == conv.name:
-                new_cfg, _ = _load_replaced(tmp)
-                _refuse_if_target_moves(output, replaced_cfg, replaced_problem, new_cfg)
+            _refuse_if_overwrite_moves(output, tmp)
         os.replace(tmp, output)
     finally:
         tmp.unlink(missing_ok=True)
@@ -635,11 +630,47 @@ def _init_from(
     if not conv.changes:
         _say("  nothing to move, drop or derive")
     for problem in still_refused:
-        _say(f"  deploy and run still refuse it: {problem}")
+        _say(f"  run still refuses it: {problem}")
     # A reference with a default needs nothing exported.
     refs = sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", text)))
+    moved = set(secret_vars(conv))
+    for var in sorted(moved & set(os.environ)):
+        _say(f"  note: {var} is already set in this shell; check it holds this config's secret")
     step = f"export {', '.join(refs)}, then " if refs else ""
     _say(f"next: {step}lakebench validate {output}")
+
+
+def _refuse_if_overwrite_moves(output: Path, new_file: Path) -> None:
+    """Refuse replacing a config that names a deployment the new file does
+    not keep: a nameless file in a directory 1.6 recorded a name for (it may
+    be that deployment's only config), or a file that resolves, with this
+    shell's variables, to the new file's name in another place."""
+    replaced_cfg, replaced_problem = _load_replaced(output)
+    replaced_name = (
+        replaced_cfg.name if replaced_cfg is not None else _name_of(_replaced_config(output))
+    )
+    if not replaced_name:
+        from lakebench.config.deploy_state import legacy_names
+
+        recorded = sorted(set(legacy_names(output).values()))
+        if recorded:
+            _refuse(
+                f"{output} has no name, and 1.6 recorded '{recorded[0]}' for nameless "
+                f"configs here, so it may be the config of deployment '{recorded[0]}': "
+                "write the new file elsewhere",
+                ExitCode.REFUSED,
+            )
+        return
+    new_cfg, new_problem = _load_replaced(new_file)
+    if new_cfg is None:
+        _refuse(
+            f"the new file cannot be read with this shell's variables ({new_problem}), so "
+            f"whether it keeps the deployment {output} names cannot be checked: set them and "
+            "re-run, or write the new file elsewhere",
+            ExitCode.REFUSED,
+        )
+    if replaced_name == new_cfg.name:
+        _refuse_if_target_moves(output, replaced_cfg, replaced_problem, new_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -797,7 +828,7 @@ def _refuse_if_target_moves(
             ExitCode.REFUSED,
         )
     if new_cfg is None:
-        return  # the caller refuses a config that does not load
+        return  # init refuses a config that does not load; --from checks first
     after = _deployment_target(new_cfg)
     if not before["endpoint"]:
         after["endpoint"] = ""

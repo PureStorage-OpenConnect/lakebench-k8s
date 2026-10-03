@@ -481,6 +481,16 @@
   text: '`run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams`
     above 1.'
   fix: Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+- id: driver_memory-and-the-gold-strategy-are-checked-at-load
+  title: driver_memory and the gold strategy are checked at load
+  kind: default-change
+  subject:
+  - driver memory and gold strategy
+  - platform.compute.spark.driver_memory not a Spark size
+  - spark.conf spark.lb.gold.strategy other than auto, simple_agg or two_phase_agg
+  source: src/lakebench/config/refused_keys.py:REFUSED_KEYS
+  text: 'A `driver_memory` Spark cannot read (`16Gi`, `1.5g`) and a `spark.lb.gold.strategy` other than `auto`, `simple_agg` or `two_phase_agg` are refused by the commands that change data.'
+  fix: 'Write `driver_memory` as a whole number with k, m, g or t (`16g`); delete the gold strategy or set one of the three.'
 - id: buckets-are-stamped-with-their-cluster
   title: Buckets are stamped with their cluster
   kind: default-change

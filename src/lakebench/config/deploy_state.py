@@ -78,7 +78,10 @@ def read_legacy_name(config_path: str | Path) -> str | None:
     Returned verbatim. A missing, unreadable or malformed file gives None;
     the file is never repaired or rewritten.
     """
-    path = legacy_state_path(config_path)
+    return _read_legacy_file(legacy_state_path(config_path))
+
+
+def _read_legacy_file(path: Path) -> str | None:
     try:
         with open(path) as f:
             state = json.load(f)
@@ -90,6 +93,24 @@ def read_legacy_name(config_path: str | Path) -> str | None:
     if isinstance(name, str) and name:
         return name
     return None
+
+
+def legacy_names(config_path: str | Path) -> dict[Path, str]:
+    """Every v1.6 name recorded for this config, by state file.
+
+    1.6 read ``.lakebench/state.json`` in the directory of the path it was
+    given, so a config reached through a symbolic link used the link's
+    directory; :func:`read_legacy_name` reads the directory of the file the
+    link resolves to. Both are read here (one file when they are the same),
+    so a caller can refuse when they disagree.
+    """
+    found: dict[Path, str] = {}
+    given = Path(config_path).absolute().parent / LEGACY_STATE
+    for path in dict.fromkeys([given, legacy_state_path(config_path)]):
+        name = _read_legacy_file(path)
+        if name:
+            found[path] = name
+    return found
 
 
 def _config_marker_keys() -> frozenset[str]:

@@ -48,12 +48,35 @@ import yaml
 #: Where ``init --from`` puts a plaintext Polaris client secret.
 POLARIS_SECRET_VAR = "LAKEBENCH_POLARIS_CLIENT_SECRET"
 
-# A key whose value is a credential: the whole key, or its last part, names
-# one. 'credentials.provider' (a class name) and 'token-refresh' do not match.
-_CREDENTIAL_KEY = re.compile(
-    r"(?i)(?:^|[._-])(secret|password|passwd|token|credentials?|access[._-]?key|"
-    r"secret[._-]?(?:access[._-]?)?key|private[._-]?key|api[._-]?key)$"
+# A key whose value is a credential, judged on its words (split at '.', '_',
+# '-' and camelCase): it ends in one of _SECRET_WORDS or one of
+# _SECRET_TAILS, or holds 'account key' (fs.azure.account.key.<host>).
+# 'credentials.provider' (a class name) and 'token-refresh-enabled' are not.
+_SECRET_WORDS = frozenset({"password", "passwd", "secret", "token", "credential", "credentials"})
+_SECRET_TAILS = (
+    ("access", "key"),
+    ("secret", "key"),
+    ("private", "key"),
+    ("api", "key"),
+    ("encryption", "key"),
+    ("account", "key"),
+    ("access", "key", "id"),
 )
+_WORD = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+
+
+def is_credential_key(key: str) -> bool:
+    """Whether a config or ``spark.conf`` key holds a credential."""
+    words = [w.lower() for w in _WORD.findall(key)]
+    if not words:
+        return False
+    if words[-1] in _SECRET_WORDS:
+        return True
+    if any(tuple(words[-len(t) :]) == t for t in _SECRET_TAILS):
+        return True
+    return any(words[i : i + 2] == ["account", "key"] for i in range(len(words) - 1))
+
+
 _REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 
 
@@ -96,6 +119,16 @@ def _construct_str(loader: yaml.SafeLoader, node: Any) -> str:
 
 
 _RawLoader.add_constructor("tag:yaml.org,2002:str", _construct_str)
+
+
+def _yaml_problem(e: Exception) -> str:
+    """A YAML error without the source snippet PyYAML quotes (it can hold a
+    secret): the problem and where."""
+    problem = getattr(e, "problem", None) or type(e).__name__
+    mark = getattr(e, "problem_mark", None)
+    if mark is not None:
+        return f"{problem} at line {mark.line + 1}, column {mark.column + 1}"
+    return str(problem)
 
 
 def read_raw(text: str) -> Any:
@@ -204,6 +237,10 @@ class Conversion:
     #: Written paths whose plaintext value became a reference; the only
     #: places the verified models may differ.
     secret_paths: list[tuple[str, ...]] = field(default_factory=list)
+    #: The recipe written for a config that had none (or ``default``), and
+    #: what OLD had there (``_ABSENT`` for no key), so it can be taken back.
+    derived_recipe: str | None = None
+    recipe_before: Any = None
 
 
 @contextmanager
@@ -261,16 +298,40 @@ def _block_models() -> dict[type, dict[str, type]]:
     return out
 
 
+def _medallion_changed_paths(data: dict[str, Any]) -> bool:
+    """Whether ``architecture.pipeline.medallion`` moved the bronze layout:
+    ``bronze.path_template`` is the one key of the block 1.6 read, and 1.7
+    has no such setting, so dropping another layout would point the run at
+    other data. The rest of the block was never read."""
+    from .schema import _drop_default_medallion
+
+    template = _get(data, ("architecture", "pipeline", "medallion", "bronze", "path_template"))
+    if template is None:
+        return False
+    probe = {"medallion": {"bronze": {"path_template": template}}}
+    with _quiet():
+        kept = _drop_default_medallion({"pipeline": probe, "workload": data.get("workload")})
+    return "medallion" in kept["pipeline"]
+
+
 def _drop_removed(data: dict[str, Any], changes: list[Change]) -> None:
-    """Drop every removed key and dead field present, with its fix text."""
+    """Drop every removed key and dead field present, with its fix text.
+
+    One is kept: a medallion block that moved the bronze layout, which 1.6
+    read. The commands that change data refuse it with its fix text, and
+    the conversion lists it.
+    """
     from .schema import LakebenchConfig
 
     blocks = _block_models()
+    keep = {("architecture", "pipeline", "medallion")} if _medallion_changed_paths(data) else set()
 
     def walk(node: dict[str, Any], model: type, path: tuple[str, ...]) -> None:
         removed: dict[str, str] = getattr(model, "_removed_keys", {}) or {}
         dead: dict[str, str] = getattr(model, "_dead_fields", {}) or {}
         for key in list(node):
+            if (*path, key) in keep:
+                continue
             if key in removed:
                 node.pop(key)
                 changes.append(Change("dropped", _dotted((*path, key)), removed[key]))
@@ -348,6 +409,60 @@ def _move_locations(data: dict[str, Any], changes: list[Change]) -> dict[str, An
             pipeline["mode"] = "continuous"
             changes.append(Change("moved", "architecture.pipeline.mode", "sustained -> continuous"))
     return data
+
+
+_ABSENT = object()
+
+
+def _derive_recipe(data: dict[str, Any], changes: list[Change]) -> tuple[str | None, Any]:
+    """Write the recipe a config with none (or ``recipe: default``) resolves
+    to: the components it writes, else the default resolution. Returns the
+    recipe and what was there before. 1.8 requires ``recipe:``; the caller
+    takes it back when the verified models then differ."""
+    from .loader import DEFAULT_RECIPE_RESOLUTION
+    from .recipes import RECIPE_OWNED_KEYS, recipe_components
+    from .support import recipe_for
+
+    before = data.get("recipe", _ABSENT)
+    if before not in (_ABSENT, None, "", "default"):
+        return None, before
+    resolved = recipe_components(DEFAULT_RECIPE_RESOLUTION)
+    for dotted in RECIPE_OWNED_KEYS:
+        value = _get(data, tuple(dotted.split(".")))
+        if value is None:
+            continue
+        if not isinstance(value, (str, int, float)) or "${" in str(value):
+            return None, before  # resolved only at load; leave it for the user
+        resolved[dotted] = str(value)
+    recipe = recipe_for(*(resolved[k].lower() for k in RECIPE_OWNED_KEYS))
+    if recipe is None:
+        return None, before
+    data["recipe"] = recipe
+    changes.append(
+        Change("derived", "recipe", f"{recipe}: what the config resolves to (1.8 requires recipe:)")
+    )
+    return recipe, before
+
+
+def undo_derived_recipe(conv: Conversion, differ: list[str]) -> None:
+    """Take back a derived recipe whose defaults changed the settings."""
+    recipe = conv.derived_recipe
+    if recipe is None:
+        return
+    if conv.recipe_before is _ABSENT:
+        conv.data.pop("recipe", None)
+    else:
+        conv.data["recipe"] = conv.recipe_before
+    conv.changes = [c for c in conv.changes if not (c.kind == "derived" and c.path == "recipe")]
+    conv.changes.append(
+        Change(
+            "derived",
+            "recipe",
+            f"not written: recipe {recipe} would also change {', '.join(differ)}; add "
+            "recipe: by hand once those are set",
+        )
+    )
+    conv.derived_recipe = None
 
 
 def _resolve_recipe_conflict(data: dict[str, Any], changes: list[Change]) -> None:
@@ -470,8 +585,15 @@ def _set_name(
     fresh_name: str,
     changes: list[Change],
 ) -> tuple[str, str]:
-    """The name NEW carries and where it came from; written into *data*."""
-    from .deploy_state import legacy_state_path, other_nameless_configs, read_legacy_name
+    """The name NEW carries and where it came from; written into *data*.
+
+    OLD's own name wins. A nameless OLD takes the name 1.6 recorded in
+    ``.lakebench/state.json`` beside it, read where 1.6 read it (beside the
+    path as given, a link or not) and beside the file a link resolves to:
+    two different names, or another nameless config in the directory (1.6
+    gave all of them the one name), need ``--name``.
+    """
+    from .deploy_state import legacy_names, other_nameless_configs
 
     own = data.get("name")
     if own not in (None, ""):
@@ -481,56 +603,88 @@ def _set_name(
                 f"{old_path.name}; --name is only for a config that sets none"
             )
         return str(own), "config"
-    legacy = read_legacy_name(old_path)
+    found = legacy_names(old_path)
+    recorded = sorted(set(found.values()))
     if name_override:
         name, source = name_override, "override"
         text = f"'{name}', from --name"
-    elif legacy:
-        others = other_nameless_configs(old_path)
-        if others is None or others:
-            listed = (
-                "its directory could not be listed"
-                if others is None
-                else "its directory also holds nameless " + ", ".join(p.name for p in others)
+        others = [n for n in recorded if n != name]
+        if others:
+            text += (
+                f"; 1.6 recorded {', '.join(repr(n) for n in others)} for nameless configs "
+                "here, and the new file does not address that deployment or its buckets"
             )
-            raise InitFromError(
-                f"{old_path.name} has no name, and {listed}; 1.6 gave every nameless config "
-                f"there the name '{legacy}', so which one deployed it cannot be told from the "
-                f"files. Pass --name {legacy} if this file deployed it, or --name with a new "
-                "name",
-                refused=True,
-            )
+    elif len(recorded) > 1:
+        where = "; ".join(f"'{n}' in {p}" for p, n in found.items())
+        raise InitFromError(
+            f"{old_path} has no name, and 1.6 recorded two names for it ({where}): pass "
+            "--name with the deployment this file made",
+            refused=True,
+        )
+    elif recorded:
+        legacy = recorded[0]
+        # The config as named in each directory that holds a state file:
+        # the path as given, and the file a link resolves to.
+        state_dirs = {state.parent.parent for state in found}
+        for config in dict.fromkeys([old_path.absolute(), old_path.resolve()]):
+            if config.parent not in state_dirs:
+                continue
+            others_there = other_nameless_configs(config)
+            if others_there is None or others_there:
+                listed = (
+                    "its directory could not be listed"
+                    if others_there is None
+                    else "its directory also holds nameless "
+                    + ", ".join(p.name for p in others_there)
+                )
+                raise InitFromError(
+                    f"{old_path.name} has no name, and {listed}; 1.6 gave every nameless "
+                    f"config there the name '{legacy}', so which one deployed it cannot be "
+                    f"told from the files. Pass --name {legacy} if this file deployed it, or "
+                    "--name with a new name",
+                    refused=True,
+                )
         name, source = legacy, "legacy-state"
-        text = f"'{name}', read from {legacy_state_path(old_path)} (1.6 recorded it there)"
+        text = f"'{name}', read from {next(iter(found))} (1.6 recorded it there)"
     else:
         name, source = fresh_name, "new"
-        text = f"'{name}': no deployment was recorded for this config"
+        text = (
+            f"'{name}', new: the config has no name and no .lakebench/state.json beside it. "
+            "If it deployed something, convert again with --name and that deployment's name "
+            "(its namespace's lakebench.deployment/name annotation)"
+        )
     data["name"] = name
     changes.append(Change("derived", "name", text))
     return name, source
 
 
 def _set_buckets(data: dict[str, Any], name: Any, changes: list[Change]) -> None:
-    """Write the bucket names a load derives from the name (``<name>-<layer>``)."""
+    """Write the bucket names a load derives from the name (``<name>-<layer>``).
+
+    1.6 and 1.7 derive them; 1.5 and earlier used ``lakebench-bronze`` and
+    so on for a config that named none (docs/configuration.md says so).
+    """
     if not isinstance(name, str) or not name:
         return  # a name that is not text fails the load; nothing to derive
-    s3 = data.setdefault("platform", {}).setdefault("storage", {}).setdefault("s3", {})
-    if not isinstance(s3, dict):
-        return
-    buckets = s3.setdefault("buckets", {})
-    if not isinstance(buckets, dict):
-        return
+    node: Any = data
+    for key in ("platform", "storage", "s3", "buckets"):
+        if node.get(key) is None:  # absent, or an empty block ('platform:')
+            node[key] = {}
+        node = node[key]
+        if not isinstance(node, dict):
+            return  # not a mapping: the load fails on it, nothing to derive
+    why = (
+        f"follows the name's reference ({name}), as before"
+        if "${" in name
+        else "written out, so a later rename cannot move it"
+    )
     for layer in ("bronze", "silver", "gold"):
-        if layer in buckets:
+        if layer in node:
             continue
         value = f"{name}-{layer}"
-        buckets[layer] = PlainRef(value) if isinstance(name, PlainRef) else value
+        node[layer] = PlainRef(value) if isinstance(name, PlainRef) else value
         changes.append(
-            Change(
-                "derived",
-                f"platform.storage.s3.buckets.{layer}",
-                f"{value} (written out, so a rename cannot move it)",
-            )
+            Change("derived", f"platform.storage.s3.buckets.{layer}", f"{value} ({why})")
         )
 
 
@@ -561,7 +715,7 @@ def _move_secrets(
         for key, value in node.items():
             if isinstance(value, dict):
                 yield from leaves(value, (*path, str(key)))
-            elif isinstance(key, str) and _CREDENTIAL_KEY.search(key):
+            elif isinstance(key, str) and is_credential_key(key):
                 yield (*path, key)
 
     for path in list(leaves(data, ())):
@@ -596,6 +750,16 @@ def _move_secrets(
     return moved
 
 
+def secret_vars(conv: Conversion) -> list[str]:
+    """The variables the moved secrets now reference."""
+    out: list[str] = []
+    for path in conv.secret_paths:
+        value = _get(conv.data, path)
+        if isinstance(value, str):
+            out += [m.group(1) for m in _REF.finditer(value)]
+    return sorted(set(out))
+
+
 def convert(
     old_path: Path,
     *,
@@ -615,14 +779,15 @@ def convert(
         raise InitFromError(f"cannot read {old_path}: {e}") from None
     try:
         raw = read_raw(text)
-    except yaml.YAMLError as e:
-        raise InitFromError(f"{old_path} is not YAML: {e}") from None
+    except (yaml.YAMLError, ValueError) as e:
+        raise InitFromError(f"{old_path} is not YAML: {_yaml_problem(e)}") from None
     if not isinstance(raw, dict) or not raw:
         raise InitFromError(f"{old_path} is not a config: its top level is not a mapping of keys")
 
     changes: list[Change] = []
     data = _move_locations(dict(raw), changes)
     _resolve_recipe_conflict(data, changes)
+    derived_recipe, recipe_before = _derive_recipe(data, changes)
     _drop_removed(data, changes)
     _drop_refused(data, changes)
     name, source = _set_name(data, old_path, name_override, fresh_name, changes)
@@ -634,7 +799,13 @@ def convert(
         **{k: v for k, v in data.items() if k not in ("name", "recipe")},
     }
     conv = Conversion(
-        data=data, name=name, name_source=source, changes=changes, secret_paths=secrets
+        data=data,
+        name=name,
+        name_source=source,
+        changes=changes,
+        secret_paths=secrets,
+        derived_recipe=derived_recipe,
+        recipe_before=recipe_before,
     )
     return conv, text
 
@@ -643,20 +814,27 @@ def convert(
 
 
 @contextmanager
-def _placeholder_env(*texts: str) -> Iterator[None]:
-    """Every variable *texts* reference set to a placeholder, or unset where
-    every reference has a default; the environment is restored after."""
+def _placeholder_env(*texts: str, real: bool = False) -> Iterator[list[str]]:
+    """Each variable *texts* reference without a default set to its own
+    placeholder (or, with *real*, kept at its value when this shell sets
+    it), and unset where every reference has a default, as a load with
+    nothing exported would see it. Yields the variables that got a
+    placeholder; the environment is restored after."""
     refs: dict[str, bool] = {}
     for text in texts:
         for m in _REF.finditer(text):
             refs[m.group(1)] = refs.get(m.group(1), False) or m.group(2) is None
     saved = {var: os.environ.get(var) for var in refs}
+    placed: list[str] = []
     try:
         for i, (var, needs_value) in enumerate(sorted(refs.items())):
+            if real and saved[var] is not None:
+                continue
             os.environ.pop(var, None)
             if needs_value:
                 os.environ[var] = f"lbplaceholder{i}"
-        yield
+                placed.append(var)
+        yield placed
     finally:
         for var, value in saved.items():
             if value is None:
@@ -693,8 +871,8 @@ def load_text(text: str, purpose: Any, *, name: str | None = None) -> tuple[Any,
     loader = _EnvLoader(text)
     try:
         data = loader.get_single_data()
-    except yaml.YAMLError as e:
-        return None, [f"not YAML: {e}"]
+    except (yaml.YAMLError, ValueError) as e:
+        return None, [f"not YAML: {_yaml_problem(e)}"]
     finally:
         loader.dispose()
     if loader.malformed or loader.unresolved:
@@ -743,34 +921,41 @@ def verify(old_text: str, new_text: str, conv: Conversion) -> list[str]:
 
     from ._load_context import LoadPurpose
 
-    with _placeholder_env(old_text, new_text):
-        old_cfg, old_problems = load_text(old_text, LoadPurpose.READ, name=conv.name)
-        if old_cfg is None:
-            raise InitFromError(
-                "the old config does not load (fix it, then convert): " + "; ".join(old_problems)
+    # Distinct placeholders first, so a reference renamed on the way cannot
+    # compare equal; a typed field (scale: ${SCALE}) needs a real value, so
+    # a failed load is retried with the variables this shell sets.
+    for real in (False, True):
+        with _placeholder_env(old_text, new_text, real=real) as placed:
+            old_cfg, old_problems = load_text(old_text, LoadPurpose.READ, name=conv.name)
+            if old_cfg is None:
+                continue
+            new_cfg, new_problems = load_text(new_text, LoadPurpose.READ)
+            if new_cfg is None:
+                return ["the converted config does not load: " + "; ".join(new_problems)]
+            skip = {_model_path(p) for p in conv.secret_paths}
+            if conv.derived_recipe:
+                skip.add(("recipe",))  # the value itself; what it sets is compared
+            old = _flatten(old_cfg.model_dump(mode="json"))
+            new = _flatten(new_cfg.model_dump(mode="json"))
+            differ = sorted(
+                _dotted(p)
+                for p in set(old) | set(new)
+                if p not in skip and (p not in old or p not in new or old[p] != new[p])
             )
-        new_cfg, new_problems = load_text(new_text, LoadPurpose.READ)
-        if new_cfg is None:
-            return ["the converted config does not load: " + "; ".join(new_problems)]
-        skip = {_model_path(p) for p in conv.secret_paths}
-        old = _flatten(old_cfg.model_dump(mode="json"))
-        new = _flatten(new_cfg.model_dump(mode="json"))
-        differ = sorted(
-            _dotted(p)
-            for p in set(old) | set(new)
-            if p not in skip and (p not in old or p not in new or old[p] != new[p])
-        )
-        old_id = json.dumps(planned_experiment(old_cfg), sort_keys=True, default=str)
-        new_id = json.dumps(planned_experiment(new_cfg), sort_keys=True, default=str)
-    if old_id != new_id:
-        differ.append("the planned experiment identity")
-    return differ
+            old_id = json.dumps(planned_experiment(old_cfg), sort_keys=True, default=str)
+            new_id = json.dumps(planned_experiment(new_cfg), sort_keys=True, default=str)
+            if old_id != new_id:
+                differ.append("the planned experiment identity")
+            return differ
+    unset = f" with placeholder values for {', '.join(placed)} (export them)" if placed else ""
+    raise InitFromError(f"the old config does not load{unset}: " + "; ".join(old_problems))
 
 
 def remaining_refusals(new_text: str) -> list[str]:
-    """What ``run`` (and so ``deploy``) still refuses in the new text."""
+    """What ``run`` still refuses in the new text (``deploy`` refuses all
+    but the benchmark settings), with this shell's variables."""
     from ._load_context import LoadPurpose
 
-    with _placeholder_env(new_text):
+    with _placeholder_env(new_text, real=True):
         cfg, problems = load_text(new_text, LoadPurpose.RUN)
     return [] if cfg is not None else problems
