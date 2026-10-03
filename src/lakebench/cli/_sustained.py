@@ -1884,13 +1884,26 @@ def _run_benchmark_round(
     except Exception as e:  # noqa: BLE001
         print_warning(f"Gold event-age probe failed: {e}")
 
-    # 3. Run the full 8-query power benchmark
+    # 3. Run the power benchmark: the 8-query set, plus the investigator
+    # queries once this run has a case (AML with TM operations).
     # One sample per query: gold refreshes under the round, so repeats would
     # time different snapshots. The rounds themselves are the repeats, and
     # the scores take their median (qph_degradation_pct, composite_qph).
     # No result fingerprints: each round reads tables still being written.
+    tm_run = (
+        bench_runner.tm_run_id
+        if isinstance(getattr(bench_runner, "tm_run_id", None), str)
+        else None
+    )
+    investigator_queries = _investigator_state(bench_runner, tm_run) if tm_run else None
+    if tm_run and investigator_queries != "included":
+        bench_runner.tm_run_id = None  # this round runs without IQ1 to IQ4
     round_started = utc_now()
-    bench_result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=False)
+    try:
+        bench_result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=False)
+    finally:
+        if tm_run:
+            bench_runner.tm_run_id = tm_run
 
     # 4. Check Q9 for contention (gold-table query)
     q9_failed = False
@@ -1951,7 +1964,12 @@ def _run_benchmark_round(
     )
 
     # 6. Record the round (the one writer of the round record)
-    collector.record_round(bench_metrics, started_at=round_started, ended_at=utc_now())
+    collector.record_round(
+        bench_metrics,
+        started_at=round_started,
+        ended_at=utc_now(),
+        investigator_queries=investigator_queries,
+    )
 
     # 7. Print inline result
     freshness_str = (
@@ -1962,9 +1980,13 @@ def _run_benchmark_round(
     q9_str = ""
     if round_meta.q9_contention_observed:
         q9_str = " | Q9: retry" if round_meta.q9_retry_used else " | Q9: contention"
+    iq_str = {
+        "absent_no_cases": " | investigator queries: no case yet",
+        "probe_failed": " | investigator queries: case probe failed",
+    }.get(investigator_queries or "", "")
     console.print(
         f"  Round {round_index}: {passed}/{total} passed "
-        f"| QpH: {bench_result.qph:.1f}{freshness_str}{q9_str}"
+        f"| QpH: {bench_result.qph:.1f}{freshness_str}{q9_str}{iq_str}"
     )
 
     _journal_safe(
@@ -1982,8 +2004,31 @@ def _run_benchmark_round(
                 else None
             ),
             "q9_contention": round_meta.q9_contention_observed,
+            "investigator_queries": investigator_queries,
         },
     )
+
+
+def _investigator_state(bench_runner, run_id: str) -> str:
+    """Whether this run has a case yet, for the investigator queries: an
+    untimed ``SELECT 1`` on the cases table for the run's ``base_run_id``
+    (``collector.INVESTIGATOR_QUERY_STATES``). ``included`` when a row
+    comes back, ``absent_no_cases`` when none does, ``probe_failed`` when
+    the probe errors (that round runs without the investigator queries)."""
+    try:
+        cases = bench_runner._extra_tables["gold_cases"]
+        sql = (
+            f"SELECT 1 FROM {bench_runner.catalog}.{cases} "
+            f"WHERE base_run_id = '{run_id.replace(chr(39), chr(39) * 2)}' LIMIT 1"
+        )
+        result = bench_runner.executor.execute_query(
+            bench_runner.executor.adapt_query(sql), timeout=60
+        )
+    except Exception:  # noqa: BLE001 -- the probe never fails the round
+        return "probe_failed"
+    if not result.success:
+        return "probe_failed"
+    return "included" if (result.rows_returned or 0) > 0 else "absent_no_cases"
 
 
 def event_age_label(seconds: float | None) -> str:
@@ -3064,7 +3109,14 @@ def _run_sustained(
             try:
                 from lakebench.benchmark import BenchmarkRunner
 
-                bench_runner = BenchmarkRunner(cfg)
+                # AML with the TM operations layer: the investigator queries
+                # (IQ1 to IQ4) read this run's cases, so each round runs
+                # them once a case exists (_run_benchmark_round's probe).
+                workload = cfg.architecture.workload
+                investigators = (
+                    workload.schema_type.value == "financial" and workload.tm_operations.enabled
+                )
+                bench_runner = BenchmarkRunner(cfg, tm_run_id=run_id if investigators else None)
             except Exception as e:  # noqa: BLE001
                 print_error(f"Could not create the benchmark runner: {e}")
                 pipeline_success = False

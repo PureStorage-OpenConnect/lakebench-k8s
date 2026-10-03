@@ -31,6 +31,10 @@ nothing measured under this one):
   entity never used, as batch always did, instead of 0.00. No detection
   rule, score, gold table or query reads these two columns, so no result
   changes and the version is not bumped.
+- ``aml-2``: AML continuous in-stream rounds run the investigator queries
+  (IQ1 to IQ4) once the run has a case, so the continuous query set changes
+  from 8 queries to 12; a round before the first TM pass runs the 8 and is
+  labelled (2026-10-02).
 - ``c360-2``: gold-finalize no longer switches to the incremental strategy
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
