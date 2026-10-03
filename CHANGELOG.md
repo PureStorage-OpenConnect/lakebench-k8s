@@ -724,8 +724,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   about 11% larger from scale 10, sets a continuous AML run's automatic
   trickle (`max_files_per_trigger`: at the default 1800 s window, scale 5
   goes from 9 to 10 files per trigger and scale 10 from 18 to 20), the
-  raw-corpus replace limit and `generate --timeout auto`; the generator's
-  output is unchanged (it sizes AML from the scale).
+  raw-corpus replace limit and `generate --timeout auto`. The datagen Job's
+  arguments do not change: its `--target-tb` keeps the old 8.4 GB per unit
+  (the AML generator sizes from `--scale` and ignores it).
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
   sides.** A side whose repeat runs differ only in in-stream rounds or
   investigator sessions (outcomes of the runs' speed) is now one

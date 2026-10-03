@@ -331,7 +331,7 @@ def render_runs(case: str) -> list[list[str]]:
             datagen_timestamp_end=ts_end,
             datagen_cycle=n,
             datagen_cycles=2,
-            datagen_target_tb=f"{(dims.approx_bronze_gb / 2) / 1024.0:.6f}",
+            datagen_target_tb=f"{(dims.datagen_target_gb / 2) / 1024.0:.6f}",
         )
         runs.append(_rendered_args(renderer, ctx))
     return runs
