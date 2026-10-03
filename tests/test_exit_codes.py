@@ -15,6 +15,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -146,12 +147,7 @@ PLANNED_BY = {
     "alias.refused": "CC-28",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
-    "logs.no_pod": "CC-27",
     "run.protected_corpus": "AM-22",
-    "status.drift": "CC-27",
-    "status.namespace_missing": "CC-27",
-    "status.ok": "CC-27",
-    "stop.api_error": "CC-27",
 }
 
 
@@ -1177,6 +1173,70 @@ def _scenario_reproduce_nonce_changed(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(pkg)])
 
 
+def _ops_cluster(monkeypatch, tmp_path):
+    """The CC-27 fakes (tests/test_cli_cluster_ops.py) on the real commands."""
+    import lakebench.cli as cli
+    from tests import test_cli_cluster_ops as co
+
+    state = SimpleNamespace(
+        k8s=co.FakeK8s(),
+        core=co.FakeCore(),
+        apps=co.FakeApps(),
+        batch=co.FakeBatch(),
+        custom=co.FakeCustom(),
+    )
+    monkeypatch.setattr(cli, "get_k8s_client", lambda **_k: state.k8s)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda: state.core)
+    monkeypatch.setattr("kubernetes.client.AppsV1Api", lambda: state.apps)
+    monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: state.batch)
+    monkeypatch.setattr("kubernetes.client.CustomObjectsApi", lambda: state.custom)
+    state.config = co._config(tmp_path)
+    state.co = co
+    return state
+
+
+def _scenario_status_ok(monkeypatch, tmp_path):
+    st = _ops_cluster(monkeypatch, tmp_path)
+    st.apps.objects = dict(st.co._TRINO_HIVE)
+    return _runner().invoke(app, ["status", str(st.config)])
+
+
+def _scenario_status_drift(monkeypatch, tmp_path):
+    st = _ops_cluster(monkeypatch, tmp_path)
+    st.apps.objects = dict(st.co._TRINO_HIVE, **{"lakebench-trino-worker": (1, 2)})
+    return _runner().invoke(app, ["status", str(st.config)])
+
+
+def _scenario_status_namespace_missing(monkeypatch, tmp_path):
+    st = _ops_cluster(monkeypatch, tmp_path)
+    st.core.ns_exists = False
+    return _runner().invoke(app, ["status", str(st.config)])
+
+
+def _scenario_stop_api_error(monkeypatch, tmp_path):
+    from kubernetes.client.rest import ApiException
+
+    st = _ops_cluster(monkeypatch, tmp_path)
+    st.custom.apps = ["lakebench-gold-refresh"]
+    st.custom.delete_errors = {
+        "lakebench-gold-refresh": ApiException(status=403, reason="Forbidden")
+    }
+    return _runner().invoke(app, ["stop", str(st.config)])
+
+
+def _scenario_logs_no_pod(monkeypatch, tmp_path):
+    st = _ops_cluster(monkeypatch, tmp_path)
+    return _runner().invoke(app, ["logs", str(st.config), "silver-build"])
+
+
+def _scenario_k8s_api_error(monkeypatch, tmp_path):
+    from kubernetes.client.rest import ApiException
+
+    st = _ops_cluster(monkeypatch, tmp_path)
+    st.core.list_error = ApiException(status=403, reason="Forbidden")
+    return _runner().invoke(app, ["logs", str(st.config), "trino"])
+
+
 def _config_name(path: Path) -> str:
     for line in path.read_text().splitlines():
         if line.startswith("name:"):
@@ -1482,6 +1542,12 @@ SCENARIOS = {
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
     "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
+    "status.ok": _scenario_status_ok,
+    "status.drift": _scenario_status_drift,
+    "status.namespace_missing": _scenario_status_namespace_missing,
+    "stop.api_error": _scenario_stop_api_error,
+    "logs.no_pod": _scenario_logs_no_pod,
+    "k8s.api_error": _scenario_k8s_api_error,
 }
 
 # The line each path must print on stderr, where it prints one.
@@ -1502,6 +1568,11 @@ EXPECTED_STDERR = {
     "run.namespace_missing_no_yes": "does not exist",
     "cli.bad_argument": "ERROR Unknown recipe: no-such-recipe",
     "config.unsupported": "Unsupported combination, refused",
+    "status.drift": "ERROR Drift: lakebench-trino-worker",
+    "status.namespace_missing": "ERROR  namespace ops does not exist",
+    "stop.api_error": "ERROR deleting SparkApplication/lakebench-gold-refresh: 403",
+    "logs.no_pod": "ERROR  no pod for silver-build",
+    "k8s.api_error": "ERROR Kubernetes API error: listing pods",
 }
 
 

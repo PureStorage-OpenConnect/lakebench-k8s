@@ -13,11 +13,11 @@ path yet says so.
 
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
-| 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `plan.ok` |
-| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus` |
+| 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `status.ok`, `plan.ok` |
+| 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod` |
 | 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
-| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
+| 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `s3.unreachable`, `financial.k8s_unreachable`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
 | 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | `compare.not_comparable` |
@@ -37,11 +37,16 @@ the CLI down every path listed here and checks the code.
 | `compare.like_for_like` | 0 | `compare` finds the sides like-for-like |
 | `plan.ok` | 0 | `plan` finds every prerequisite and enough capacity |
 | `run.pass` | 0 | `run` finished and its verdict passed |
+| `status.ok` | 0 | `status` finds every listed component ready |
 | `version.ok` | 0 | `lakebench version` prints the version |
+| `logs.no_pod` | 1 | `logs` found no pod for the component, or none with a log to read yet (a container still starting, no previous container for `--previous`) |
 | `repeat.no_verified_corpus` | 1 | `run --repeat` found no verified corpus to reuse after repetition 1 |
 | `run.datagen_timeout` | 1 | datagen did not finish in time; the record says "datagen timed out" in verdict.reasons |
 | `run.namespace_gone` | 1 | the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason |
 | `run.verdict_failed` | 1 | `run` finished with a failing verdict |
+| `status.drift` | 1 | `status` finds a component of the config not ready or not found (with only `--namespace`: one not ready, or none found) |
+| `status.namespace_missing` | 1 | `status` finds no namespace |
+| `stop.api_error` | 1 | `stop` could not list or delete a job; it still tried every other deletion |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
@@ -81,6 +86,7 @@ the CLI down every path listed here and checks the code.
 | `capacity.unknown` | 4 | the run's capacity check could not read the nodes or pods (the check fails closed) |
 | `deploy.state_unrecordable` | 4 | `deploy` could not read the namespace or write the nonce to the directory's state |
 | `financial.k8s_unreachable` | 4 | a `financial` command cannot reach the Kubernetes API |
+| `k8s.api_error` | 4 | `logs` or `status` got an API error reading the deployment, or `stop` reading its namespace (a permission gap, a server error); nothing changed |
 | `k8s.unreachable` | 4 | the Kubernetes config does not load or the API is unreachable; nothing ran |
 | `nameless.namespace_unreadable` | 4 | a nameless config's namespace could not be read for its check |
 | `plan.missing_storage_class` | 4 | `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, finds too little free capacity, or cannot read a config value the sizing needs |
