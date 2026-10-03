@@ -41,6 +41,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
 - `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+- `financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 every time (it could not reproduce).
 - An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
 - `run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
 - Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
@@ -705,6 +706,22 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   table|json|csv`. `results` is an alias of `report --format table`, with the
   same argument and `--format` passing through. `report --list` shows each
   record's kind.
+- **`financial reproduce` reproduces a real batch alert.** AML batch
+  gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, the batch
+  scorer fingerprints every column of each before maintenance, and the run
+  record keeps them as `financial_scoring.read_snapshots`. `lakebench
+  financial reproduce CONFIG --alert-id ID [--run RUN_ID]` reads that
+  record (refusing before any cluster call, exit 4, when it has none),
+  reruns the alert's rule on those snapshots (or on content-equal current
+  tables once they expired) with gold's parameters and the batches sealed
+  when gold read, and matches the alert on rule, entity, `alert_ts` and its
+  related transactions: exit 0 reproduced, 1 not reproduced or not found,
+  4 when a snapshot is gone and the content changed. The job runs once (no
+  driver retries) and writes `scoring/reproduce/<alert_id>/result.json`.
+  `financial replay` now passes `silver.entities` and the configured W1
+  vertex cap to the rule as gold-finalize does (one shared parameter
+  builder), so the customer-scoped rules run under replay.
 - **A protected AML corpus is never read or scored outside its registered
   look.** `run`, `benchmark`, `query`, `compare`, `reproduce` and every
   `financial` subcommand refuse a config that declares the evaluation or

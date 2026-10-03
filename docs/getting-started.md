@@ -815,8 +815,9 @@ Two additional operator subcommands cover the retention scenarios:
 
 - `lakebench financial replay CONFIG --rule W2_structuring --depth-months 60`
   reruns one rule against a historical Iceberg snapshot.
-- `lakebench financial reproduce CONFIG --alert-id <id>` reproduces a specific
-  past alert via Iceberg time-travel.
+- `lakebench financial reproduce CONFIG --alert-id <id>` reruns one batch
+  alert's rule on the snapshots its run's gold read (see
+  [AML Scoring](aml-scoring.md)).
 
 `CONFIG` in both cases is the same YAML you passed to `deploy`.
 

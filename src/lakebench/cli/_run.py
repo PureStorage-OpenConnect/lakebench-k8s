@@ -2299,6 +2299,9 @@ def _run_once(
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
+    # The silver snapshots the last gold-finalize read ([read-snapshot]
+    # lines), fingerprinted by the scorer for financial reproduce.
+    _gold_read_snapshots: list = []
     # Set when this run's TM layer ran (verdict pass or fail); the benchmark
     # includes the investigator queries only then.
     _tm_run_id: str | None = None
@@ -2944,6 +2947,10 @@ def _run_once(
                     _apply_parsed_job_metrics(job_metrics, parsed)
                     _exclude_c360_check_time(job_metrics)
                     _exclude_alert_set_time(job_metrics)
+                    if stage_name == "gold-finalize":
+                        from lakebench.metrics.read_snapshots import parse_read_snapshots
+
+                        _gold_read_snapshots = parse_read_snapshots(result.driver_logs)
 
                 # Populate resource metrics from job profile. Pass the schema so
                 # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
@@ -3144,7 +3151,13 @@ def _run_once(
         ):
             _stage = "score-financial"
             _financial_scoring = _run_financial_scoring(
-                cfg, run_id, job_manager, monitor, timeout, interrupt=_interrupt
+                cfg,
+                run_id,
+                job_manager,
+                monitor,
+                timeout,
+                interrupt=_interrupt,
+                read_snapshots=_gold_read_snapshots,
             )
             _stage = "pipeline"
 

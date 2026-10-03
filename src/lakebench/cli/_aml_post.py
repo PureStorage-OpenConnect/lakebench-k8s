@@ -270,7 +270,14 @@ def scoring_count_line(summary: dict) -> str:
 
 
 def run_financial_scoring(
-    cfg, run_id, job_manager, monitor, timeout, interrupt=None, covered: dict | None = None
+    cfg,
+    run_id,
+    job_manager,
+    monitor,
+    timeout,
+    interrupt=None,
+    covered: dict | None = None,
+    read_snapshots: list | None = None,
 ):
     """Score recall against the datagen manifest and return the
     recall.json summary, or None when scoring did not complete.
@@ -280,6 +287,9 @@ def run_financial_scoring(
     scorer runs in covered mode over exactly the snapshots that tick read.
     Best-effort: a scoring failure never fails the pipeline (the pipeline
     result is still valid), it just leaves the record without recall.
+    *read_snapshots* (batch) are the silver snapshots gold-finalize read; the
+    scorer fingerprints them for financial reproduce
+    (``financial_scoring.read_snapshots``).
     """
     # Whole body is best-effort: NOTHING here (imports, config access, submit,
     # wait, S3 read) may propagate and fail a pipeline that already reported
@@ -306,6 +316,10 @@ def run_financial_scoring(
         if covered is not None:
             for option, key in COVERED_OPTIONS:
                 arguments += [f"--covered-{option}-snapshot", str(covered[key])]
+        elif read_snapshots:
+            from lakebench.metrics.read_snapshots import score_arguments
+
+            arguments += score_arguments(read_snapshots)
 
         console.print()
         console.print("[bold]Stage: financial score[/bold]")

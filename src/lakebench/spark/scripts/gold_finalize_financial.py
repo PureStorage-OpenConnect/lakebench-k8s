@@ -81,17 +81,10 @@ GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 
-# W1 connected-components vertex cap. Defaults above the scale-10 vertex
-# count (1.1M entities) so W1 runs cleanly at scale 10 out of the box;
-# raise it via the `financial.w1_max_vertices` config field for larger
-# scales that have the executor budget. Whether W1 completes in
-# acceptable wall-clock above the cap is a measured question (LB-120),
-# not a config guarantee. A value <= 0 means "use the rule's own
-# default" so a mis-set env var cannot silently disable W1.
-try:
-    _W1_MAX_VERTICES = int(env("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
-except ValueError:
-    _W1_MAX_VERTICES = 8_000_000
+# W1 connected-components vertex cap: detection_rules.rule_params reads
+# LB_FINANCIAL_W1_MAX_VERTICES (default 8,000,000, above the scale-10 vertex
+# count of 1.1M entities; raise it via the `financial.w1_max_vertices` config
+# field for larger scales). A value <= 0 keeps the rule's own default.
 
 # Which W-rules to invoke as part of gold_finalize. Ordering is
 # intentional (cheapest first) so a failure in an expensive rule does
@@ -267,6 +260,41 @@ def build_baseline_dashboards(txns, run_id: str):
     )
 
 
+def read_snapshot_line(table: str, snapshot, total_records) -> str:
+    """One ``[read-snapshot]`` line (metrics/read_snapshots.py parses it):
+    the snapshot of *table* gold read, ``none`` when the table has no
+    snapshot and ``unknown`` when the lookup failed; ``null`` for an unknown
+    record count."""
+    snap = "none" if snapshot is None else str(snapshot)
+    count = "null" if total_records is None else str(int(total_records))
+    return f"[read-snapshot] table={table} snapshot={snap} total_records={count}"
+
+
+def log_read_snapshots(spark) -> None:
+    """Log the current snapshot of silver.transactions, silver.entities and
+    the versions table (it decides which batches are sealed) with its
+    summary record count, from ``.history`` and ``.snapshots`` only."""
+    for table in (SILVER_TXNS, SILVER_ENTITIES, SILVER_BATCH_VERSIONS):
+        fq = f"{CATALOG}.{table}"
+        snapshot = total = None
+        try:
+            rows = spark.sql(
+                f"SELECT snapshot_id FROM {fq}.history "
+                "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
+            ).collect()
+            snapshot = int(rows[0][0]) if rows else None
+            if snapshot is not None:
+                r = spark.sql(
+                    f"SELECT summary['total-records'] AS n FROM {fq}.snapshots "
+                    f"WHERE snapshot_id = {snapshot}"
+                ).collect()
+                total = int(r[0]["n"]) if r and r[0]["n"] is not None else None
+        except Exception as e:  # noqa: BLE001 -- recorded as unknown
+            log(f"[read-snapshot] {table} lookup failed: {one_line(e)}")
+            snapshot = "unknown" if snapshot is None else snapshot
+        log(read_snapshot_line(table, snapshot, total))
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-gold-finalize-financial").getOrCreate()
     # UTC pin (same rationale as silver_build): to_date(txn_timestamp) uses
@@ -308,6 +336,11 @@ def main() -> None:
 
     # Earlier runs' alerts are cleared inside run_detection_rules, after this
     # run's 'pending' status is written (see there for why the order matters).
+
+    # The snapshots gold reads, before its first silver read, so financial
+    # reproduce can read exactly them later (batch has no concurrent writer:
+    # silver-build refuses to run beside a stream). Metadata only.
+    log_read_snapshots(spark)
 
     # I10: read silver.transactions through the sealed-batch filter so a
     # driver crash between the stream's transactions/edges commits and the
@@ -451,6 +484,7 @@ def run_detection_rules(
         RuleSkipped,
         cleanup_path_search_spill,
         get_rule,
+        rule_params,
         sweep_stale_path_spill,
     )
 
@@ -562,15 +596,12 @@ def run_detection_rules(
             # the correct primitive for "does this function accept X
             # as a parameter".
             sig = inspect.signature(fn)
-            params = {"run_id": run_id}
-            if "silver_entities" in sig.parameters:
-                params["silver_entities"] = silver_entities
-            # Thread the configured W1 vertex cap through to any rule that
-            # accepts it (W1 today). A non-positive override means "leave
-            # the rule default in place" so a mis-set env var cannot
-            # silently disable the rule by capping it at zero.
-            if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
-                params["max_vertices"] = _W1_MAX_VERTICES
+            # The parameters replay and reproduce use too (run_id, entities,
+            # the configured W1 vertex cap), so a reproduction runs the rule
+            # as gold did.
+            params = rule_params(fn, run_id, silver_entities)
+            if "silver_entities" in sig.parameters and "silver_entities" not in params:
+                params["silver_entities"] = None  # the rule decides (it skips)
             if "screen_base" in sig.parameters and screen_base is not None:
                 params["screen_base"] = screen_base
             alerts = fn(txns, **params)

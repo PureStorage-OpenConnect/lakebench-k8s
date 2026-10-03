@@ -2800,5 +2800,36 @@ def known_rules() -> list[str]:
     return list(_RULE_DISPATCH.keys())
 
 
+def w1_max_vertices() -> int:
+    """The configured W1 vertex cap (``LB_FINANCIAL_W1_MAX_VERTICES``,
+    default 8,000,000; an unparseable value reads as the default)."""
+    import os
+
+    try:
+        return int(os.environ.get("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
+    except ValueError:
+        return 8_000_000
+
+
+def rule_params(fn, run_id: str, silver_entities=None) -> dict:
+    """The keyword arguments a rule is called with, the same in gold-finalize,
+    replay and reproduce: ``run_id``; ``silver_entities`` when the rule
+    accepts it and a frame is given; and ``max_vertices`` from the
+    configured W1 cap when the rule accepts it and the cap is positive (a
+    non-positive value keeps the rule's own default, so a mis-set variable
+    cannot disable W1). Parameters come from the rule's signature, never its
+    local names."""
+    import inspect
+
+    sig = inspect.signature(fn).parameters
+    params: dict = {"run_id": run_id}
+    if "silver_entities" in sig and silver_entities is not None:
+        params["silver_entities"] = silver_entities
+    cap = w1_max_vertices()
+    if "max_vertices" in sig and cap > 0:
+        params["max_vertices"] = cap
+    return params
+
+
 # Guard against ruff unused-import warnings for symbols exported for callers.
 _ = (row_number, to_timestamp, explode, Window)

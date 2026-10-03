@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 from common import env, log
 from pyspark.sql import SparkSession
@@ -967,6 +968,58 @@ def _write_not_scored(spark, output: str, reason: str, ids: dict | None) -> None
     log(f"Wrote recall.json sidecar: {_json_uri(output)}")
 
 
+_READ_SNAPSHOT_ARG = re.compile(
+    r"^(?P<table>[A-Za-z0-9_.]+)=(?P<snapshot>-?\d+|none|unknown):(?P<total>\d+|null)$"
+)
+
+
+def read_snapshot_fingerprints(spark, values) -> list[dict]:
+    """Fingerprint every column of each snapshot gold-finalize read
+    (``--read-snapshot <table>=<snapshot>:<records>``, metrics/read_snapshots.py),
+    for financial reproduce: ``[{table, snapshot, total_records, rows, fp,
+    cols_sha}]``, with ``error`` instead of a fingerprint when the snapshot
+    is not known or cannot be read. Runs before maintenance, so the snapshots
+    are still there; never raises. Logs one ``[read-snapshot-fp]`` line per
+    snapshot."""
+    from common import frame_fingerprint
+
+    out: list[dict] = []
+    for value in values or []:
+        m = _READ_SNAPSHOT_ARG.match(value or "")
+        if not m:
+            log(f"[read-snapshot-fp] ignored a malformed value {value!r}")
+            continue
+        snap = m["snapshot"]
+        entry = {
+            "table": m["table"],
+            "snapshot": int(snap) if snap.lstrip("-").isdigit() else snap,
+            "total_records": None if m["total"] == "null" else int(m["total"]),
+            "rows": None,
+            "fp": None,
+            "cols_sha": None,
+        }
+        if not isinstance(entry["snapshot"], int):
+            entry["error"] = f"gold read no known snapshot ({snap})"
+            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error=unknown snapshot")
+            out.append(entry)
+            continue
+        try:
+            df = spark.sql(
+                f"SELECT * FROM {CATALOG}.{m['table']} VERSION AS OF {entry['snapshot']}"
+            )
+            rows, fp, cols_sha = frame_fingerprint(df, df.columns)
+            entry.update(rows=int(rows), fp=str(fp), cols_sha=str(cols_sha))
+            log(
+                f"[read-snapshot-fp] table={m['table']} snapshot={entry['snapshot']} "
+                f"rows={rows} fp={fp} cols={cols_sha}"
+            )
+        except Exception as e:  # noqa: BLE001 -- recorded; scoring goes on
+            entry["error"] = f"{type(e).__name__}: {e}"[:300]
+            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error={entry['error']}")
+        out.append(entry)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute recall + FP rate from manifest + alerts")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
@@ -977,6 +1030,13 @@ def main() -> None:
             default=None,
             help=f"Covered mode: {table} snapshot of the last completed tick",
         )
+    parser.add_argument(
+        "--read-snapshot",
+        action="append",
+        default=[],
+        help="Batch: <table>=<snapshot>:<records> gold-finalize read; fingerprinted for "
+        "financial reproduce (repeatable)",
+    )
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial").getOrCreate()
@@ -1059,6 +1119,9 @@ def main() -> None:
 
     per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
     summary["run_id"] = current_run_id
+    # What gold read, fingerprinted for financial reproduce (before the
+    # run's maintenance expires anything).
+    summary["read_snapshots"] = read_snapshot_fingerprints(spark, args.read_snapshot)
     # Loud on purpose: a subject silver does not call a customer has its
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)

@@ -1332,7 +1332,7 @@ whether the command waits for it.
 | `financial score` | Compute rule recall from the datagen manifest and `gold.alerts` |
 | `financial reference-score` | Run the reference detector and leakage gate over silver and the manifest |
 | `financial replay` | Rerun one detection rule against a historical Iceberg snapshot (the output defaults to the gold alerts table with an `_replay` suffix) |
-| `financial reproduce` | Reproduce one past alert via Iceberg time travel |
+| `financial reproduce` | Rerun one batch alert's rule on the snapshots its run's gold read |
 
 See [AML Scoring](aml-scoring.md).
 
@@ -1359,7 +1359,7 @@ lakebench financial replay CONFIG [OPTIONS]
 
 #### `financial reproduce`
 
-Reproduce a specific past alert via Iceberg time-travel (W10).
+Reproduce one batch alert from the snapshots its run's gold read.
 
 ```
 lakebench financial reproduce CONFIG [OPTIONS]
@@ -1371,8 +1371,16 @@ lakebench financial reproduce CONFIG [OPTIONS]
 
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
-| `--alert-id` |  | text |  | Alert id to reproduce |
-| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+| `--alert-id` |  | text |  | Alert id (gold.alerts.alert_id) to reproduce |
+| `--run` |  | text |  | Run id whose record holds the snapshots gold read; default: the latest AML batch run of this deployment |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for the result |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `1` `financial.reproduce.mismatch`: `financial reproduce` ran the alert's rule on the snapshots its run's gold read and did not reproduce the alert (no match, several, different related transactions), or the rule declined to run
+- `1` `financial.reproduce.not_found`: `financial reproduce` found no such alert in gold.alerts, or one another run wrote
+- `2` `financial.reproduce.no_record`: `financial reproduce` found no AML batch run record of the deployment on this host (or none for `--run`)
+- `4` `financial.reproduce.snapshot_gone`: `financial reproduce` cannot read what the alert's run read: the run recorded no read snapshots (before 1.7), or a snapshot expired and the table's content changed
 
 #### `financial score`
 

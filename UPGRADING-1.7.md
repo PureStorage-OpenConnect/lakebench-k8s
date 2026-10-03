@@ -264,6 +264,12 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 **What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
 
+### financial reproduce reruns the alert's rule on what gold read
+
+`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 every time (it could not reproduce).
+
+**What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
+
 ### AML bronze-verify stops on a spent or unverifiable corpus
 
 An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.

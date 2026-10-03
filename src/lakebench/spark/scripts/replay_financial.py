@@ -31,14 +31,7 @@ from pyspark.sql import SparkSession
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
-# Same W1 vertex cap the batch gold_finalize path honours (LB-119). Threaded
-# into rules that accept it so replaying W1 uses the configured cap, not the
-# rule's hard-coded default -- otherwise replay and gold_finalize disagree on
-# whether W1 runs for a 5M-8M-vertex snapshot.
-try:
-    _W1_MAX_VERTICES = int(env("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
-except ValueError:
-    _W1_MAX_VERTICES = 8_000_000
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 
 
 def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> int:
@@ -151,7 +144,13 @@ def main() -> None:
 
     # Rule dispatch. Rule functions in detection_rules.py accept a silver
     # DataFrame + params and return a gold.alerts-shaped DataFrame.
-    from detection_rules import RuleSkipped, cleanup_w1_checkpoints, get_rule, known_rules
+    from detection_rules import (
+        RuleSkipped,
+        cleanup_w1_checkpoints,
+        get_rule,
+        known_rules,
+        rule_params,
+    )
 
     rule_fn = get_rule(args.rule)
     if rule_fn is None:
@@ -161,21 +160,19 @@ def main() -> None:
     replay_run_id = str(uuid.uuid4())
     log(f"Running {args.rule} with run_id={replay_run_id}")
 
-    # Rule functions accept keyword args -- pass threshold when provided
-    # (rule signature varies but all accept run_id).
-    kwargs = {"run_id": replay_run_id}
+    # The parameters gold-finalize uses (detection_rules.rule_params: run_id,
+    # silver.entities for the customer-scoped rules, the configured W1
+    # vertex cap), plus the threshold override when given. Filtered by the
+    # rule's real signature, never its local names.
+    try:
+        silver_entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
+    except Exception as e:  # noqa: BLE001 -- customer-scoped rules then skip
+        log(f"silver.entities not readable ({e}); customer-scoped rules will skip")
+        silver_entities = None
+    kwargs = rule_params(rule_fn, replay_run_id, silver_entities)
     if args.threshold is not None:
         # w2_structuring interprets threshold as count. Others may ignore.
         kwargs["threshold_count"] = int(args.threshold)
-    # Thread the configured W1 vertex cap; the signature filter below drops
-    # it for rules that don't accept it, so this is safe for every rule.
-    if _W1_MAX_VERTICES > 0:
-        kwargs["max_vertices"] = _W1_MAX_VERTICES
-    # Filter by the rule's real SIGNATURE parameters, not the code object's
-    # local-variable names (which also include function-body locals).
-    # Matches the primitive gold_finalize deliberately uses, so a future
-    # rule whose internal local collides with a kwarg name can't get the
-    # value mis-injected here.
     import inspect
 
     _params = inspect.signature(rule_fn).parameters

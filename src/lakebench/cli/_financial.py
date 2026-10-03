@@ -201,30 +201,179 @@ def replay(
             raise typer.Exit(ExitCode.FAILED)
 
 
+#: Characters an alert id may hold (uuids and their prefixes): the id goes
+#: into the job's SQL and an S3 key.
+_ALERT_ID_ALLOWED = set("0123456789abcdefABCDEF-_")
+
+#: Each determined reproduce outcome and its exit path.
+REPRODUCE_PATHS = {
+    "not_found": "financial.reproduce.not_found",
+    "snapshot_gone": "financial.reproduce.snapshot_gone",
+    "mismatch": "financial.reproduce.mismatch",
+    "rule_skipped": "financial.reproduce.mismatch",
+}
+
+
+def _s3(cfg):
+    from lakebench.s3 import S3Client
+
+    s3 = cfg.platform.storage.s3
+    return S3Client(
+        endpoint=s3.endpoint,
+        access_key=s3.access_key,
+        secret_key=s3.secret_key,
+        region=s3.region,
+        path_style=s3.path_style,
+        ca_cert=s3.ca_cert,
+        verify_ssl=s3.verify_ssl,
+    )
+
+
+def reproduce_record(cfg, run_id: str | None, metrics_dir: Path) -> tuple[dict | None, str]:
+    """The run record a reproduction reads, and where it was looked for:
+    ``--run``'s record, else the latest AML batch run record of this
+    deployment in *metrics_dir*. None when there is none (the record may be
+    on another host: nothing is guessed from the cluster)."""
+    import json
+
+    def load(path: Path) -> dict | None:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    if run_id:
+        rec = load(metrics_dir / f"run-{run_id}" / "metrics.json")
+        return rec, str(metrics_dir / f"run-{run_id}" / "metrics.json")
+    best: tuple[str, dict] | None = None
+    for path in sorted(metrics_dir.glob("run-*/metrics.json")):
+        rec = load(path)
+        if rec is None or rec.get("deployment_name") != cfg.name:
+            continue
+        if (rec.get("record_kind") or "run") != "run":
+            continue
+        exp = rec.get("experiment") or {}
+        workload = (exp.get("workload") or {}).get("name") or (
+            rec.get("config_snapshot") or {}
+        ).get("schema_type")
+        if workload != "financial" or exp.get("mode", "batch") != "batch":
+            continue
+        start = str(rec.get("start_time") or "")
+        if best is None or start > best[0]:
+            best = (start, rec)
+    return (best[1] if best else None), str(metrics_dir)
+
+
 @financial_app.command("reproduce")
 def reproduce(
     config: Annotated[Path, typer.Argument(help="Lakebench config YAML")],
-    alert_id: Annotated[str, typer.Option(help="Alert id to reproduce")],
-    wait: Annotated[bool, typer.Option(help="Wait for job completion")] = True,
+    alert_id: Annotated[str, typer.Option(help="Alert id (gold.alerts.alert_id) to reproduce")],
+    run: Annotated[
+        str | None,
+        typer.Option(
+            "--run",
+            help="Run id whose record holds the snapshots gold read; default: the latest "
+            "AML batch run of this deployment",
+        ),
+    ] = None,
+    wait: Annotated[bool, typer.Option(help="Wait for the result")] = True,
 ) -> None:
-    """Reproduce a specific past alert via Iceberg time-travel (W10)."""
+    """Reproduce one batch alert from the snapshots its run's gold read.
+
+    Reads the run record's ``financial_scoring.read_snapshots`` (before any
+    cluster call), then runs the alert's rule on those snapshots (or on
+    content-equal current tables when they expired) with gold's parameters,
+    and compares the alert. Exit 0 when reproduced; 1 when not found or not
+    reproduced; 4 when the snapshots are gone (or the run recorded none).
+    """
+    from lakebench.exit_codes import UsageError, path_code
+    from lakebench.metrics.read_snapshots import usable
+    from lakebench.metrics.storage import MetricsStorage
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
+    if not alert_id or len(alert_id) > 128 or set(alert_id) - _ALERT_ID_ALLOWED:
+        raise UsageError(
+            "--alert-id must be 1 to 128 characters of hex digits, dashes and underscores",
+            path="click.usage",
+        )
     cfg = _load_config(config, "financial reproduce")
-    console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id}")
+    record, where = reproduce_record(cfg, run, MetricsStorage().metrics_dir)
+    if record is None:
+        raise UsageError(
+            f"No AML batch run record of {cfg.name} to reproduce from",
+            where=where,
+            next="pass --run RUN_ID with a record on this host",
+            path="financial.reproduce.no_record",
+        )
+    run_id = str(record.get("run_id") or "")
+    snapshots = (record.get("financial_scoring") or {}).get("read_snapshots")
+    problem = usable(snapshots)
+    if problem:
+        raise LakebenchError(
+            f"Run {run_id} cannot be reproduced: {problem}",
+            next="reproduce an alert of a 1.7 AML batch run",
+            path="financial.reproduce.snapshot_gone",
+            code=path_code("financial.reproduce.snapshot_gone"),
+        )
+
+    gold = cfg.platform.storage.s3.buckets.gold
+    prefix = f"scoring/reproduce/{alert_id}"
+    console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id} run={run_id}")
     job_manager = _get_job_manager(cfg)
+    import json
+
+    client = _s3(cfg)
+    client.raw_client.put_object(
+        Bucket=gold,
+        Key=f"{prefix}/input.json",
+        Body=json.dumps({"run_id": run_id, "read_snapshots": snapshots}).encode(),
+    )
+    try:  # a result left by an earlier reproduction of this alert is not this one's
+        client.raw_client.delete_object(Bucket=gold, Key=f"{prefix}/result.json")
+    except Exception:  # noqa: BLE001 -- absent is fine; a stale one is caught below
+        pass
     status = job_manager.submit_job(
         JobType.REPRODUCE_FINANCIAL,
-        arguments=["--alert-id", alert_id],
+        arguments=[
+            "--alert-id",
+            alert_id,
+            "--input",
+            f"s3a://{gold}/{prefix}/input.json",
+            "--output",
+            f"s3a://{gold}/{prefix}/result.json",
+        ],
     )
-    console.print(f"  submitted: {status.message}")
+    console.print(f"  submitted: {esc(status.message)}")
     _require_submitted(status)
+    if not wait:
+        console.print(f"  result: s3://{esc(gold)}/{esc(prefix)}/result.json")
+        return
 
-    if wait:
-        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
-        console.print(f"[bold]reproduce result:[/bold] {result}")
-        if result != "COMPLETED":
-            raise typer.Exit(ExitCode.FAILED)
+    state = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
+    result = None
+    try:
+        body = client.raw_client.get_object(Bucket=gold, Key=f"{prefix}/result.json")["Body"]
+        result = json.loads(body.read())
+    except Exception as e:  # noqa: BLE001 -- no result: a crash
+        print_error(f"reproduce wrote no result ({state}): {e}")
+        raise typer.Exit(ExitCode.FAILED) from None
+    if not isinstance(result, dict) or result.get("run_id") != run_id:
+        print_error(f"reproduce result is not this reproduction's ({state})")
+        raise typer.Exit(ExitCode.FAILED)
+    outcome = result.get("outcome")
+    console.print(
+        f"[bold]reproduce:[/bold] {esc(outcome)} rule={esc(result.get('rule_id'))} "
+        f"basis={esc(result.get('basis'))} matched={esc(result.get('matched'))} "
+        f"diff={esc(result.get('diff_size'))}"
+        + (f" ({esc(result.get('reason'))})" if result.get("reason") else "")
+    )
+    if outcome == "reproduced":
+        return
+    path = REPRODUCE_PATHS.get(str(outcome))
+    if path is None:
+        raise typer.Exit(ExitCode.FAILED)
+    raise typer.Exit(path_code(path))
 
 
 @financial_app.command("score")
