@@ -551,7 +551,19 @@ version listed a prior counterparty. A code that reads the HIGH cut
    case of this run (an untimed query, 60 s timeout). Once a case exists the
    round runs all twelve queries; before that it runs FQ1 to FQ8 and is
    labelled (`investigator_queries`: `included`, `absent_no_cases` or
-   `probe_failed`). Rounds are not fingerprinted.
+   `probe_failed`). Rounds are not fingerprinted. With
+   `architecture.benchmark.investigator_sessions` set (1 to 32; financial,
+   TM operations on, Trino or Spark Thrift; refused otherwise), one extra
+   round right after the first round that ran the investigator queries runs
+   that many concurrent sessions, each working one case of this run: IQ1 to
+   IQ3 bound to that case and IQ4 unchanged
+   (`benchmark/investigator_sessions.py`). It is not a benchmark
+   round (QpH and the round count leave it out) and is recorded in
+   `continuous.investigators` with per-query latency, the detection ticks
+   it overlapped (`tick_delta`, `load_label`) and its Lakebench-set query
+   timeout; the number of sessions that ran is an outcome condition, so two
+   runs that ran different numbers compare as not like-for-like
+   (`docs/aml-scoring.md`).
 6. Maintains tables inside the window: expire snapshots and orphan removal
    every `retention_interval` (default `run_duration / 3`, within 300 to
    7,200 s), and compaction every `compaction_interval` (default twice

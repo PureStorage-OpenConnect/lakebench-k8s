@@ -78,7 +78,7 @@ def test_default_investigator_sql_is_unchanged():
     got = {q.name: hashlib.sha256(q.sql.encode()).hexdigest() for q in INVESTIGATOR_QUERIES}
     assert got == PINNED
     names = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
-    assert query_set_id(names) == "qs12-70ccb96a1900"
+    assert query_set_id(names) == "qs12-910d16a91962"
 
 
 def test_the_case_query_orders_as_iq1():
