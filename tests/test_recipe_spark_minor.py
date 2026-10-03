@@ -79,3 +79,62 @@ def test_matches_the_release_matrix_table_when_present():
         major, minor = _parse_spark_major_minor(RECIPES[recipe]["images"]["spark"])
         assert f"{major}.{minor}" == spark, recipe
         assert _format_version(make_config(recipe=recipe)) == version, recipe
+
+
+@pytest.mark.parametrize("recipe", [None, "hive-delta-spark-trino"])
+def test_a_written_delta_400_keeps_spark_40_so_old_configs_still_load(tmp_path, recipe):
+    """A v1.6 config that writes delta.version 4.0.0 and no image ran Spark
+    4.0.2; it still does, under every purpose, so it can be torn down."""
+    import yaml
+
+    from lakebench.config._load_context import LoadPurpose
+    from lakebench.config.loader import load_config
+
+    raw = {
+        "name": "old-delta",
+        "platform": {
+            "storage": {
+                "s3": {"endpoint": "http://10.0.1.50:80", "access_key": "a", "secret_key": "b"}
+            }
+        },
+        "architecture": {"table_format": {"type": "delta", "delta": {"version": "4.0.0"}}},
+    }
+    if recipe:
+        raw["recipe"] = recipe
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    for purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.RUN):
+        cfg = load_config(path, purpose=purpose, print_notes=False)
+        assert cfg.images.spark == "apache/spark:4.0.2-python3", purpose
+        assert cfg.architecture.table_format.delta.version == "4.0.0"
+
+
+def test_a_recipe_image_is_not_user_set():
+    from lakebench.config.recipes import user_set
+
+    assert not user_set(make_config(recipe="hive-iceberg-spark-trino"), "images.spark")
+    assert not user_set(make_config(recipe="polaris-iceberg-spark-trino"), "images.spark")
+    assert user_set(make_config(images={"spark": "apache/spark:4.0.2-python3"}), "images.spark")
+
+
+def test_a_local_run_records_the_local_image():
+    from lakebench.metrics.experiment import experiment_inputs
+    from lakebench.modules.pipeline_engines.spark.local_job import DEFAULT_SPARK_IMAGE
+
+    arch = experiment_inputs(make_config(), run_mode="batch", system="local")["architecture"]
+    assert arch["pipeline_engine"]["image"] == DEFAULT_SPARK_IMAGE
+    arch = experiment_inputs(make_config(), run_mode="batch")["architecture"]
+    assert arch["pipeline_engine"]["image"] == "apache/spark:4.1.1-python3"
+
+
+@pytest.mark.parametrize(
+    ("architecture", "minor"),
+    [
+        ({}, (4, 1)),
+        ({"catalog": {"type": "polaris"}}, (4, 0)),
+        ({"table_format": {"type": "delta"}, "query_engine": {"type": "spark-thrift"}}, (4, 0)),
+    ],
+)
+def test_recipe_default_resolves_like_no_recipe(architecture, minor):
+    cfg = make_config(recipe="default", architecture=architecture)
+    assert _parse_spark_major_minor(cfg.images.spark) == minor

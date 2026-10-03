@@ -10,7 +10,7 @@ name: hive-iceberg-thrift
 recipe: hive-iceberg-spark-thrift
 
 images:
-  spark: apache/spark:4.0.2-python3
+  spark: apache/spark:4.1.1-python3
   postgres: postgres:17
   pull_policy: Always
 

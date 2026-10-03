@@ -175,7 +175,7 @@ def test_request_hash_covers_resolver_image_and_versions():
     )
     assert (
         req.select_request(
-            _cfg(SPARK40, "iceberg", "1.10.1", recipe="hive-iceberg-spark-trino"), tools_digest="t"
+            _cfg(SPARK41, "iceberg", "1.10.1", recipe="hive-iceberg-spark-trino"), tools_digest="t"
         ).request_sha256
         != base
     )

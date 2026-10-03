@@ -444,7 +444,11 @@ class ImagesConfig(ConfigModel):
     (`datagen-v2-rs-0.3`); this build cuts datagen pod memory.
     """
     spark: str = "apache/spark:4.1.1-python3"
-    """Spark runtime image. Spark 4.x images are auto-detected."""
+    """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
+    components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris
+    recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the
+    config writes a table format version Spark 4.1 cannot run (Delta 4.0.0).
+    """
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     """PostgreSQL image (metadata backend)."""
     polaris: str = "apache/polaris:1.6.0"
@@ -2968,26 +2972,64 @@ def _is_recipe_shaped(name: str, recipes: Any) -> bool:
     return len(parts) == 4 and all(p in slots[i] for i, p in enumerate(parts))
 
 
-def _default_spark_image_for_components(data: dict) -> None:
-    """A config with no recipe and no ``images.spark`` takes the Spark image of
-    the recipe its components name (catalog, table format, query engine, with
-    the schema's defaults for the ones it leaves out), so it runs the Spark
-    minor that recipe's release-matrix row is proven on. Components that no
-    recipe names keep the schema default."""
+#: The Spark image a default falls back to when the config writes a table
+#: format version the Spark 4.1 default cannot run (Delta 4.0.0, written by a
+#: v1.6 config), so such a config still loads, deploys and tears down.
+_SPARK40_IMAGE = "apache/spark:4.0.2-python3"
+
+
+def _default_spark_image(data: dict, injected: list[str], *, recipe_set: bool) -> None:
+    """Choose the Spark image of a config that does not write ``images.spark``.
+
+    With no recipe, it is the image of the recipe the config's components
+    name (catalog, table format, query engine, the schema's defaults for the
+    ones it leaves out), so it runs the Spark minor that recipe's
+    release-matrix row is proven on; components no recipe names keep the
+    schema default. With a recipe, the recipe already injected its image.
+    Either way, when the config writes a table format version that image
+    cannot run (Delta 4.0.0 on Spark 4.1), the Spark 4.0 image is taken
+    instead, as v1.6 ran it."""
     from lakebench.config.recipes import RECIPES, written_recipe
+    from lakebench.modules.pipeline_engines.spark.job import validate_format_version
 
     images = data.get("images")
-    if isinstance(images, dict) and images.get("spark") is not None:
-        return
     if images is not None and not isinstance(images, dict):
         return
-    try:
-        matched = written_recipe(data, "hive-iceberg-spark-trino")
-    except Exception:  # noqa: BLE001 -- a malformed block is refused by validation
-        return
-    image = (RECIPES.get(matched or "", {}).get("images") or {}).get("spark")
-    if image:
-        data["images"] = {**(images or {}), "spark": image}
+    if (
+        isinstance(images, dict)
+        and images.get("spark") is not None
+        and "images.spark" not in injected
+    ):
+        return  # the config wrote it
+    if recipe_set:
+        image = (images or {}).get("spark")
+    else:
+        try:
+            matched = written_recipe(data, "hive-iceberg-spark-trino")
+        except Exception:  # noqa: BLE001 -- a malformed block is refused by validation
+            return
+        image = (RECIPES.get(matched or "", {}).get("images") or {}).get("spark")
+    image = image or ImagesConfig.model_fields["spark"].default
+    arch = data.get("architecture")
+    fmt_block = arch.get("table_format") if isinstance(arch, dict) else None
+    if isinstance(fmt_block, dict):
+        fmt = fmt_block.get("type") or "iceberg"
+        fmt = str(getattr(fmt, "value", fmt))
+        sub = fmt_block.get(fmt)
+        version = sub.get("version") if isinstance(sub, dict) else None
+        if isinstance(version, str) and version not in ("", "auto"):
+            try:
+                validate_format_version(image, fmt, version)
+            except ValueError:
+                try:
+                    validate_format_version(_SPARK40_IMAGE, fmt, version)
+                    image = _SPARK40_IMAGE
+                except ValueError:
+                    pass  # refused at validation, naming the version
+    data["images"] = {**(images or {}), "spark": image}
+    # A recipe's image already counts as filled in (``recipes.user_set``). A
+    # recipe-less config's derived image is not recorded: the model must
+    # round-trip through model_dump equal to itself, and the dump writes it.
 
 
 class LakebenchConfig(ConfigModel):
@@ -3133,8 +3175,10 @@ class LakebenchConfig(ConfigModel):
                     data["recipe"] = written
                     defaults = RECIPES[written]
             _deep_setdefault(data, defaults, injected)
-        else:
-            _default_spark_image_for_components(data)
+        # "default" resolves like no recipe (to the components it sets).
+        _default_spark_image(
+            data, injected, recipe_set=bool(recipe_name) and recipe_name != "default"
+        )
         model = handler(data)
         model._recipe_injected = frozenset(injected)
         return model

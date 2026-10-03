@@ -12,7 +12,7 @@ name: hive-iceberg-trino
 recipe: hive-iceberg-spark-trino
 
 images:
-  spark: apache/spark:4.0.2-python3
+  spark: apache/spark:4.1.1-python3
   postgres: postgres:17
   trino: trinodb/trino:483
   pull_policy: Always
