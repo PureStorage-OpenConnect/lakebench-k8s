@@ -78,8 +78,8 @@ def test_the_baseline_copy_is_the_parent_function():
         if isinstance(n, ast.FunctionDef) and n.name in ("_match_label", "aml_seed_error")
     ]
     assert [f.name for f in fns] == ["_match_label", "aml_seed_error"]
-    body = ast.Module(body=fns, type_ignores=[])
-    assert hashlib.sha256(ast.dump(body).encode()).hexdigest() == v0.BASELINE_AST_SHA256
+    text = "\n\n".join(ast.get_source_segment(src, f) for f in fns)
+    assert hashlib.sha256(text.encode()).hexdigest() == v0.BASELINE_SOURCE_SHA256
 
 
 def test_aml_seed_error_verdicts_unchanged():
