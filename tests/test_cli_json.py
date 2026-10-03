@@ -108,6 +108,7 @@ def test_report_list_json(monkeypatch, tmp_path):
     (row,) = doc["data"]["runs"]
     assert set(row) == _keys(_json.ReportListRow)
     assert (row["run_id"], row["record_kind"], row["verdict"]) == (RUN, "run", "PASSED")
+    assert (row["verdict_stored"], row["verdict_recomputed"]) == ("PASSED", "PASSED")
 
 
 def test_report_unknown_run_is_an_error_document(monkeypatch, tmp_path):
@@ -270,7 +271,9 @@ def test_query_rows_per_engine(engine, raw, expected):
 
 
 def test_report_legacy_record_keeps_its_stored_verdict(monkeypatch, tmp_path):
-    """A flat run-<id>.json record: the verdict as stored, never recomputed."""
+    """A flat run-<id>.json record that stored FAILED: the stored verdict is
+    reported and heads the document, though the record recomputes PASSED (a
+    reader never promotes)."""
     runs = tmp_path / "lakebench-output" / "runs"
     runs.mkdir(parents=True)
     rec = json.loads((RECORDS / f"run-{RUN}" / "metrics.json").read_text())
@@ -278,7 +281,36 @@ def test_report_legacy_record_keeps_its_stored_verdict(monkeypatch, tmp_path):
     (runs / f"run-{RUN}.json").write_text(json.dumps(rec))
     monkeypatch.chdir(tmp_path)
     doc = _doc(CliRunner().invoke(app, ["report", RUN, "--json"]))
-    assert doc["data"]["verdict"] == "FAILED"
+    data = doc["data"]
+    assert (data["verdict"], data["verdict_stored"], data["verdict_recomputed"]) == (
+        "FAILED",
+        "FAILED",
+        "PASSED",
+    )
+
+
+def test_report_json_heads_with_a_recomputed_failure(monkeypatch, tmp_path):
+    """A record that stored PASSED and that the record gates now fail (silver
+    wrote no rows): both halves are shown and the headline is the failure,
+    in the document and in the --list row, as compare and the gates read it."""
+    runs = tmp_path / "lakebench-output" / "runs" / f"run-{RUN}"
+    runs.mkdir(parents=True)
+    rec = json.loads((RECORDS / f"run-{RUN}" / "metrics.json").read_text())
+    next(j for j in rec["jobs"] if j["job_type"] == "silver-build")["output_rows"] = 0
+    (runs / "metrics.json").write_text(json.dumps(rec))
+    monkeypatch.chdir(tmp_path)
+    data = _doc(CliRunner().invoke(app, ["report", RUN, "--json"]))["data"]
+    assert (data["verdict"], data["verdict_stored"], data["verdict_recomputed"]) == (
+        "FAILED",
+        "PASSED",
+        "FAILED",
+    )
+    (row,) = _doc(CliRunner().invoke(app, ["report", "--list", "--json"]))["data"]["runs"]
+    assert (row["verdict"], row["verdict_stored"], row["verdict_recomputed"]) == (
+        "FAILED",
+        "PASSED",
+        "FAILED",
+    )
 
 
 def test_unknown_option_still_gets_a_document(monkeypatch, tmp_path):

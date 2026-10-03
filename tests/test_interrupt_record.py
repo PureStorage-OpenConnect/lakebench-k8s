@@ -123,7 +123,10 @@ def test_interrupted_is_never_passed(success):
 
 
 def test_not_interrupted_is_unchanged():
-    m = _metrics(None, [_job("bronze-verify")], success=True)
+    jobs = [_job(s) for s in ("bronze-verify", "silver-build", "gold-finalize")]
+    for j in jobs:
+        j.output_rows = 100  # rows in every layer: the layer_rows gate passes
+    m = _metrics(None, jobs, success=True)
     assert compute_verdict(m).status == "PASSED"
     m = _metrics(None, [_job("silver-build", False, "interrupted")], success=False)
     assert compute_verdict(m).status == "FAILED"

@@ -49,7 +49,11 @@ shape of each command's `data` is a TypedDict in `lakebench/cli/_json.py`:
 its rows as it prints them: Trino's CSV has no header (`columns` null),
 Spark Thrift's tsv2 has one, and DuckDB returns up to 100 rows as Python
 reprs; `count` is the rows the engine returned. `report --json` gives the
-verdict and scores as stored, never recomputed. `compare --json`
+scores as stored and the verdict three ways: `verdict_stored` as the
+record holds it, `verdict_recomputed` from the record's own fields, and
+`verdict`, the stricter of the two, which is what `compare`, the perf gate
+and the release gate read (`report --list --json` rows carry the same
+three). `compare --json`
 carries the `cmp2` document `--format json` writes; `--json` does not
 combine with `--format` on `report`, `compare` or `query`, nor with
 `status --local` or `query --interactive`. `plan --json` makes no cluster

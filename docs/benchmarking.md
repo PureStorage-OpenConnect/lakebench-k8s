@@ -606,6 +606,92 @@ with a warning and no QpH score is produced.
 
 ## Interpreting Scores
 
+### What a PASSED verdict asserts
+
+The verdict in `metrics.json` (`verdict.status`, with each gate in
+`verdict.gates`) is decided from the record as it is saved, so `run`,
+`compare`, the perf gate and the release gate read the same outcome from
+the same record. Besides the stages succeeding and no query failing, a
+PASSED run shows:
+
+- **Rows in every layer** (`layer_rows`). Batch: the last bronze-verify,
+  silver-build and gold-finalize job each recorded more than 0 output rows
+  (a driver log that was not read counts as 0); a missing stage job fails.
+  Continuous: bronze-ingest's output rows, silver-stream's rows after its
+  transforms (the AML stream logs only the rows of its committed batches,
+  which stand for them) and gold-refresh's output rows are above 0. AML
+  gold-refresh logs no row count; the alerts its time-to-detect lines
+  counted stand for it, so a run with no alerts fails. A continuous layer with no row
+  count passes on its bytes alone, with the warning "rows not measured for
+  gold; bytes > 0" and the layer listed in
+  `verdict.qualifiers.layer_rows_unmeasured`; release evidence refuses that.
+- **The expected AML rules ran** (`aml_rules`, financial runs). Batch: no
+  rule errored, detection produced alerts, and every rule ran except an
+  allowed skip: `W1_connected_components` for `giant-component` or
+  `vertex-cap`, and `W3_round_tripping` or `W17_layering_chain` for
+  `path-cap`. A skip on a Lakebench cap is labelled in `limits.bound` and
+  in `verdict.qualifiers.rule_caps`; any other skip fails. A batch gold log
+  with no per-rule counts is a warning, not a failure. Continuous: no rule
+  ran that the mode leaves out, and detection produced alerts; the
+  continuous record carries no rule errors, so they are not judged there.
+- **The scale's data** (`scale_ratio`, batch). The bronze read is at least
+  95% of the scale's expected volume, as stored (3 places, never rounded
+  up to 0.95); a ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
+  last bronze-verify's, which reads every cycle.
+- **Answers** (`query_answers`). No successful benchmark query returned 0
+  rows unless the query is declared to allow an empty result. A continuous
+  run is held to this in its last in-stream round only, and a Q9 that
+  failed in a round is tolerated (gold refresh replaces the table it
+  reads), as the run itself reports them.
+
+A run whose stage failed, or that was interrupted, is not judged on these;
+it already did not pass. A `run --stage` run is judged on its stage's
+layer, on the rules when the stage is gold-finalize, and on the scale ratio
+only when the stage is bronze-verify. When the record does not read PASSED
+although every check the run printed passed, `run` prints `Verdict:
+<reason>` and exits 1. `compare`, the perf gate and the release gate take
+the strictest of the stored verdict and the one recomputed from the
+record, so a record saved by an earlier Lakebench can read failed now.
+
+### Requested and effective values
+
+A run can ask for one thing and do another, so the record keeps both for
+each decision Lakebench or a Spark job makes on the run's behalf, in
+`experiment.requested_effective` (each entry `{requested, effective,
+source, stage}`):
+
+- `gold_strategy` (Customer 360): the `spark.lb.gold.strategy` the config
+  names (`auto` when unset) against the strategy each gold-finalize job
+  reports it ran and why (`auto`, `override`, or `cycle` for cycles 2+ of a
+  multi-cycle run). With several gold jobs the keys are
+  `gold_strategy[cycle=N]`.
+- `pipeline_mode`: the mode the command asked for against the pipeline
+  the record shows ran (`not recorded` when the record holds no stage, for
+  example a run that stopped before its first one).
+- `executors[<job>]` (cluster runs): the executor override, else the job
+  profile's count at this scale under its cap, against the count observed:
+  for a batch job the most executor pods the operator listed while it ran,
+  sampled every few seconds (a replaced executor counts again), for a
+  stream the count submitted. The source
+  names the executor cap or a concurrent budget when one applied. Only an
+  override that ran with fewer executors than it asked for is a mismatch.
+- `trickle` (continuous): `max_files_per_trigger` as configured, or `auto`,
+  against the value the run resolved.
+
+The other Lakebench caps are in `experiment.limits` as configured and, when
+one bounds the run, in `limits.bound`. A request that was not met is a
+verdict qualifier (`verdict.qualifiers.requested_effective`) and a report
+warning such as
+"gold_strategy: requested two_phase_agg, ran simple_agg (auto)" when a
+configured strategy did not reach the gold job. Incremental gold that a gold
+job reports it chose automatically would be labelled even though the
+request was `auto`, because it aggregates only part of silver (the gold
+jobs no longer make that choice); incremental gold for a multi-cycle cycle
+is by design and is not. Which entries are mismatches is decided when the
+record is read; `experiment.requested_effective_mismatches` keeps the list
+as the run saw it. A mismatch never fails a run and never enters the
+experiment identity.
+
 ### Batch Mode
 
 **Time to Value** is the primary score. It measures wall-clock time from when
@@ -1091,8 +1177,11 @@ Some sections only appear in batch or continuous mode as noted below.
 
 The header shows the deployment name, run ID, and an overall status badge:
 
-- **PASSED** (green) -- pipeline completed, data complete (scale/ingest ratio
-  0.95--1.05), all jobs succeeded, no failed queries.
+- **PASSED** (green) -- pipeline completed, data complete (batch scale
+  ratio at least 0.95, continuous ingest ratio at least 0.95), all jobs
+  succeeded, no failed queries, and the record shows rows in every layer,
+  the expected rules and non-empty answers (see
+  [What a PASSED verdict asserts](#what-a-passed-verdict-asserts)).
 - **WARNING** (amber) -- pipeline completed but a ratio or job raised a
   non-fatal flag.
 - **FAILED** (red) -- a stage or query failed, or data completeness is below

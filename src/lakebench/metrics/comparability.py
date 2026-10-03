@@ -895,23 +895,38 @@ def _results_differences(
     return out + fingerprint_differences(ea, eb, la, lb)
 
 
-def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
-    """Whether a record is a passed run, and the status it reads. The
-    strictest of the stored verdict (or ``success`` for a record without
-    one) and, once the tree has it, the verdict recomputed from the record
-    (``metrics.verdict.verdict_from_record``); a reader never promotes."""
+def _member_verdict(record: Mapping[str, Any]) -> tuple[bool, str | None, str | None]:
+    """``(passed, status, why)`` of a side member. *status* is the
+    verdict every reader takes (``metrics.verdict.verdict_of``: the
+    strictest of the stored verdict, or ``success`` for a record without
+    one, and the verdict recomputed from the record; a reader never
+    promotes). *why* explains a refusal the stored reasons do not: a
+    benchmark record, a stored pass the record no longer shows, or a record
+    that cannot be recomputed."""
     from lakebench.metrics import verdict as verdict_mod
 
-    status = verdict_mod.verdict_status(record)
-    ok = status not in _EXCLUDED_STATUSES and verdict_mod.passed(record)
-    recompute = getattr(verdict_mod, "verdict_from_record", None)
-    if ok and recompute is not None:
-        again = recompute(record)
-        again_status = getattr(again, "status", None) or (
-            again.get("status") if isinstance(again, Mapping) else None
-        )
-        if again_status != "PASSED":
-            return False, f"recomputed {again_status}"
+    judged = verdict_mod.judge(record)
+    status = judged["status"]
+    kind = record.get("record_kind") or "run"
+    if kind != "run":
+        # A `lakebench benchmark` record re-measures another run's query
+        # stage; it is not a run, whatever its verdict.
+        return False, status, f"a {kind} record of run {record.get('parent_run_id') or 'unknown'}"
+    stored = judged["stored"]
+    ok = status == "PASSED" and stored not in _EXCLUDED_STATUSES
+    why = None
+    if not ok and verdict_mod.stored_passed(record):
+        if judged["error"]:
+            why = f"the verdict could not be recomputed ({judged['error']})"
+        else:
+            first = next(iter(judged["reasons"]), None)
+            why = f"recomputed {judged['recomputed']}" + (f": {first}" if first else "")
+    return ok, status, why
+
+
+def _member_passed(record: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """``(passed, status)`` of a side member (``_member_verdict``)."""
+    ok, status, _why = _member_verdict(record)
     return ok, status
 
 
@@ -1023,10 +1038,9 @@ def pair_verdict(
                     detail=str(schema) if schema else None,
                 )
                 continue
-            ok, status = _member_passed(rec)
+            ok, status, why = _member_verdict(rec)
             if not ok:
-                why = _first_reason(rec)
-                detail = why if why else (status or "success false")
+                detail = why or _first_reason(rec) or status or "success false"
                 failed.append(f"{label} run {_rid(rec)} did not pass ({detail}); fix it and re-run")
                 first_failed = first_failed or Cause(
                     "failed", side=label, run=_rid(rec), detail=detail

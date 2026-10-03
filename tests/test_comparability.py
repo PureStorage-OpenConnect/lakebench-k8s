@@ -803,10 +803,12 @@ class TestLadder:
     def test_recomputed_verdict_never_promotes(self, monkeypatch):
         """The seam for the verdict recomputed from the record: a stored
         PASSED that recomputes FAILED is refused."""
+        from types import SimpleNamespace
+
         from lakebench.metrics import verdict as verdict_mod
 
         monkeypatch.setattr(
-            verdict_mod, "verdict_from_record", lambda rec: {"status": "FAILED"}, raising=False
+            verdict_mod, "_recompute", lambda rec: SimpleNamespace(status="FAILED", reasons=[])
         )
         v = _verdict(_rec(), _rec(new_id="b"))
         assert v.step == "1" and "(recomputed FAILED)" in v.reasons[0]

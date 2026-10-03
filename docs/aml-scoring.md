@@ -132,7 +132,10 @@ W9-W16 are workload ids the spec reserves (writeback, reproduce, ingest, the
 ML workloads), which is why the layering-chain rule is W17. W3 and W17 skip
 with "not run" (`path-cap`) when their path search would not fit the job's
 scratch; the budget is read from `LB_PATH_SEARCH_MAX_ROWS` or derived from
-the executor count and scratch size.
+the executor count and scratch size. A `path-cap` skip, like W1's
+`vertex-cap`, is a Lakebench cap: the run can still pass, and the skip is
+labelled in `limits.bound` and in the verdict's `rule_caps` qualifier (see
+"What a PASSED verdict asserts" in [benchmarking.md](benchmarking.md)).
 
 Every planted typology that no shipped rule targets is documented in
 `UNMAPPED_TYPOLOGIES` in `aml_queries.py` with a one-line reason. That

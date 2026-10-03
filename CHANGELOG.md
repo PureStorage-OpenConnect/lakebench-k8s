@@ -84,6 +84,32 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   so it still loads and tears down. The Hive examples now pin 4.1.1; the
   perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
   runs keep their own 4.0.2 image, and their record now names it.
+- **The verdict is decided from the record.** A PASSED verdict now also
+  needs rows in every layer (`layer_rows`), the expected AML rules with no
+  error, an allowed skip only and at least one alert (`aml_rules`; W1
+  `giant-component` or `vertex-cap` and W3 or W17 `path-cap` are allowed,
+  a cap skip labelled in `qualifiers.rule_caps`), a batch scale ratio of at least 0.95,
+  where 0 now fails (`scale_ratio`), and no successful query with 0 rows
+  unless it may return none (`query_answers`; continuous runs: the last
+  in-stream round). The stored verdict is computed from the record as
+  serialised. `run` (batch, continuous and `--local`) exits 1 when that
+  verdict is not PASSED, printing `Verdict: <reason>`; this includes
+  conditions that before only turned the report badge red: a continuous
+  ingest ratio below 0.95 that the trickle does not explain, gold stale for
+  more than half the run, and a batch scale ratio between 0 and 0.95.
+  `compare`, the perf gate, the release gate and `report` take the
+  strictest of a record's stored verdict and the one recomputed from it
+  (`report --json` and its `--list` rows show `verdict_stored`,
+  `verdict_recomputed` and that strictest one as `verdict`), so stored
+  records can read failed: three stored AML batch runs on a
+  corpus without a watchlist (W5 and W6 did not run) do, and the stored
+  Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
+  dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
+  records the stage (`stage_only`), is judged on that stage's layer, and is
+  refused as a perf baseline. A stored scale or ingest ratio just under
+  0.95 is rounded down, never up to 0.95. `compare` refuses a `lakebench
+  benchmark` record even when it is named by id, and such a record's
+  `success` follows its verdict (the command's exit code does not change).
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -441,6 +467,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **Requested and effective values.** Each run records what it asked for
+  against what it did, for the gold strategy (Customer 360), the pipeline
+  mode, each job's executors and the continuous trickle, in
+  `experiment.requested_effective`. A request that was not met (a
+  configured gold strategy the gold job did not run, an executor override
+  that ran with fewer executors, a mode that did not run), or incremental
+  gold chosen automatically outside a multi-cycle cycle, is labelled in
+  the verdict (`qualifiers.requested_effective`) and the report, decided
+  when the record is read (`experiment.requested_effective_mismatches`
+  keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
+  strategy (`requested.gold_strategy`).
 - **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
   deployment's name (OLD's, or the one 1.6 recorded in
   `.lakebench/state.json` for a nameless config) and writes the bucket names
@@ -1460,6 +1497,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   Thrift or DuckDB query stage is no longer charged Trino's cores, and the
   continuous query stage's seconds are no longer shown as milliseconds and
   summed into the latency share.
+  changes, and is left off when no checkout commit can be read (a wheel
+  install). It is still written only when the namespace is first stamped.
+- **Multi-cycle scale ratio.** A multi-cycle batch run's `scale_ratio` now
+  reads the last bronze-verify, which reads every cycle; it read the first,
+  so the ratio was about one over the cycle count and the run read failed.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
