@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -212,7 +213,35 @@ def test_compare_still_reads_ordinary_records(tmp_path, monkeypatch, held, no_cl
         ["compare", "20261002-000001-aaaaaa", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
     )
     assert "protected AML corpus" not in result.output
-    assert result.exit_code != 2, result.output
+    assert result.exit_code in (0, 10, 11, 12, 13), result.output
+
+
+def test_compare_reads_records_when_the_held_out_record_is_unreadable(
+    tmp_path, monkeypatch, no_cluster
+):
+    """compare spends nothing and hides every integer seed then: an ordinary
+    AML record is not refused because the hash file or floor cannot be read."""
+    pc.use_heldout(monkeypatch)
+
+    def gone():
+        raise ValueError("the compiled held-out floor (_HELDOUT_FLOOR) is not initialised")
+
+    monkeypatch.setattr(ds, "_heldout", gone)
+    monkeypatch.chdir(tmp_path)
+    runs = tmp_path / "runs"
+    _write_record(runs, "20261002-000001-aaaaaa")
+    _write_record(runs, "20261002-000002-bbbbbb")
+    result = _invoke(
+        ["compare", "20261002-000001-aaaaaa", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
+    )
+    assert "protected AML corpus" not in result.output
+    assert result.exit_code in (0, 10, 11, 12, 13), result.output
+    # A record shown to be protected is still refused.
+    _write_record(runs, "20261002-000003-cccccc", role="evaluation")
+    result = _invoke(
+        ["compare", "20261002-000003-cccccc", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
+    )
+    assert result.exit_code == 2 and no_cluster == []
 
 
 # -- refused at load ---------------------------------------------------------
@@ -329,6 +358,55 @@ def test_protected_record_reason(held):
         assert pc.seed_tokens(lg.protected_record_reason(rec)) == []
 
 
+@pytest.mark.parametrize(
+    "form",
+    [
+        lambda h: f"+{pc.EV}",
+        lambda h: f" {pc.EV} ",
+        lambda h: f"{pc.EV}.0",
+        lambda h: [pc.CALIBRATION, pc.EV],
+        lambda h: ds.seed_hash(h.salt, pc.EV).upper(),
+        lambda h: {"seed_ref": f"+{pc.EV}"},
+        lambda h: {"seed_ref": [ds.seed_hash(h.salt, pc.EV)]},
+    ],
+    ids=["plus", "spaces", "dot-zero", "list", "upper-hex", "ref-plus", "ref-list"],
+)
+def test_every_recorded_seed_form_is_read(held, form):
+    assert lg.protected_record_reason(_rec(seed=form(held)))
+
+
+def test_ledger_bucket_of_a_registered_corpus_is_refused(tmp_path, monkeypatch, held, no_cluster):
+    """A development config pointed at the bronze prefix a registered corpus
+    was generated into (this host's corpus ledger) is refused before any
+    cluster call: it would read the registered corpus."""
+    ledger = tmp_path / "corpora.jsonl"
+    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(ledger))
+    monkeypatch.chdir(tmp_path)
+    dev = pc.financial_config(tmp_path / "dev.yaml", seed=pc.CALIBRATION)
+    from lakebench.config import LoadPurpose, load_config
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    cfg = load_config(dev, purpose=LoadPurpose.RUN)
+    uri = f"s3://{cfg.platform.storage.s3.buckets.bronze}/{bronze_datagen_prefix(cfg)}/"
+    assert lg.protected_corpus_reason(cfg) is None
+    ds.append_corpus_ledger(
+        {
+            "kind": "registered_corpus",
+            "state": "generated",
+            "role": "evaluation",
+            "bronze_uri": uri,
+            "attempt": "a1",
+        }
+    )
+    assert "holds a registered evaluation corpus" in lg.protected_corpus_reason(cfg)
+    _assert_refused(_invoke(["run", str(dev), "--yes"]), no_cluster, "run")
+    ledger.write_text("not json\n" + ledger.read_text())
+    assert "cannot be read" in lg.protected_corpus_reason(cfg)
+    c360 = tmp_path / "c360.yaml"
+    c360.write_text("name: lbtest-c360\n")
+    assert lg.protected_corpus_reason(load_config(c360, purpose=LoadPurpose.RUN)) is None
+
+
 def test_protected_record_reason_fails_closed_for_aml_only(monkeypatch):
     def gone():
         raise ValueError("unreadable")
@@ -337,6 +415,8 @@ def test_protected_record_reason_fails_closed_for_aml_only(monkeypatch):
     assert "cannot be read" in lg.protected_record_reason(_rec(seed=pc.CALIBRATION))
     c360 = {"experiment": {"corpus": {"schema": "customer360", "seed": 42}}}
     assert lg.protected_record_reason(c360) is None
+    # compare's setting: refuse only what is shown to be protected.
+    assert lg.protected_record_reason(_rec(seed=pc.CALIBRATION), fail_closed=False) is None
 
 
 # -- the manifest check: every row (S2, L3) ----------------------------------
@@ -481,6 +561,37 @@ def test_allowlist_names_real_functions():
             if isinstance(fn, ast.FunctionDef):
                 names.add((path.name, fn.name))
     assert ALLOWED <= names, ALLOWED - names
+
+
+def test_flat_driver_copy_finds_its_records(tmp_path):
+    """On the Spark driver datagen_seed.py and the AML JSON files sit flat in
+    one directory, with no lakebench package: the paths still resolve."""
+    import subprocess
+    import sys
+
+    flat = tmp_path / "scripts"
+    flat.mkdir()
+    shutil.copy(ROOT / "src/lakebench/config/datagen_seed.py", flat)
+    data = ROOT / "src/lakebench/spark/data/aml"
+    for name in ("aml_preregistration.json", "aml_registered_looks.json", "heldout_hashes.json"):
+        shutil.copy(data / name, flat)
+    probe = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import datagen_seed as d\n"
+        "assert d.heldout_path().parent == d.Path(sys.argv[1]).resolve()\n"
+        "assert d.looks_path().parent == d.Path(sys.argv[1]).resolve()\n"
+        "assert isinstance(d.prereg_spent_seeds(), frozenset)\n"
+        "print('ok')\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(flat)],
+        cwd=flat,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]
 
 
 def test_fixture_values_are_not_production(held):
