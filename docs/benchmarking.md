@@ -335,7 +335,13 @@ actually got (`experiment.effective_maintenance`), one label per operation
 | `not_run` | The run ended before the maintenance phase. |
 
 Two runs whose effective maintenance differs are comparable at best, not
-like-for-like.
+like-for-like. The one exception: two runs that each skipped every
+operation by the user's choice (`--skip-maintenance`, or
+`pre_benchmark_maintenance: false`) under one maintenance policy count as
+the same maintenance, even across table formats, where the labels name
+different operations: no maintenance ran on either side. A `not_supported`
+label is not a skip, so a DuckDB run never matches a skipped Trino run on
+this key.
 
 Compaction differs by engine: Trino runs `optimize` with a 128 MB file size
 threshold, Spark Thrift runs Iceberg `rewrite_data_files` with its defaults.
@@ -1183,7 +1189,25 @@ operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
 `rewrite_data_files` are different operations), maintenance settings,
 benchmark iterations and mode, in-stream rounds (continuous), and the
 Lakebench limits that bound. A delta between runs whose conditions differ
-may come from those conditions rather than the architecture. Each verdict
+may come from those conditions rather than the architecture.
+
+Two of these rules decide pairs that would otherwise read differently:
+
+- **Outcome keys inside a side.** The in-stream round count and the
+  investigator sessions are outcomes of a run's own speed. When the
+  repeats on one side differ in them, the side is still one experiment and
+  the pair is NOT LIKE-FOR-LIKE (exit 12), as when the two sides differ in
+  them. A round count of 0 against more than 0 is not such an outcome: 0
+  means the QpH is the post-stream benchmark, another estimator, so that
+  side is not one experiment (NOT COMPARABLE). Any other difference inside
+  a side, in the workload, corpus, architecture, system, another condition
+  or the query results, still makes it not one experiment.
+- **Maintenance skipped on both sides.** Effective maintenance skipped by
+  the user on every operation, on both sides, is the same maintenance
+  (above), so an Iceberg and a Delta run with `--skip-maintenance` can be
+  LIKE-FOR-LIKE, attributed to the architecture. With maintenance on, an
+  Iceberg and a Delta run always differ on this key, and the hint says to
+  run both with `--skip-maintenance`. Each verdict
 is printed with the one condition the pair is missing and, where one
 exists, the command that supplies it. Medians, ranges and n are shown for every score, with the
 delta of medians where the pair is comparable; no winner is named in this

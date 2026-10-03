@@ -1009,9 +1009,9 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
                 None,
                 f"effective maintenance differs ({va} vs {vb}): {fa.capitalize()} and "
                 f"{fb.capitalize()} run different "
-                "maintenance operations. Missing: the same maintenance. No setting aligns "
-                "them (with maintenance off the two still record different operations); "
-                "compare compositions of one table format",
+                "maintenance operations. Missing: the same maintenance. Only no maintenance "
+                "aligns them (skipped on both sides counts as the same): run both with "
+                "`--skip-maintenance`, then compare",
             )
         want_a, want_b = _maintenance_setting(a), _maintenance_setting(b)
         if not continuous and want_a is not None and want_a != want_b:
@@ -1087,14 +1087,6 @@ def _side_not_one_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
     side, other = _sides(a, b, cause.side)
     lb = side.label
     key = cause.key or "identity"
-    if key in cmp.OUTCOME_CONDITION_KEYS:
-        what = "in-stream rounds" if key == "benchmark rounds" else key
-        return MissingCondition(
-            "one experiment per side",
-            None,
-            f"{what} differ inside side {lb} ({_val(cause.a)} vs {_val(cause.b)}), an outcome "
-            "of speed. Missing: one experiment per side. Compare single runs",
-        )
     if cause.a is None and cause.b is None and cause.detail:
         what = f"{key} ({cause.detail})"
     else:
@@ -1251,6 +1243,15 @@ def missing_condition(pair: cmp.PairVerdict, a: Side, b: Side) -> MissingConditi
         )
     if kind == "condition":
         return _condition_hint(c, a, b)
+    if kind == "side_outcome":
+        what = "in-stream rounds" if c.key == "benchmark rounds" else (c.key or "an outcome")
+        return MissingCondition(
+            f"equal {what}",
+            None,
+            f"{c.side}: run {c.other_run} differs from {c.run} in {what} ({_val(c.a)} vs "
+            f"{_val(c.b)}), an outcome of speed. Missing: equal {what}. No setting makes them "
+            "equal; the side's figures combine runs that differ in it",
+        )
     if kind == "pinset":
         older = _older(a, b)
         cmd = f"lakebench deploy {_cfg(older)}"

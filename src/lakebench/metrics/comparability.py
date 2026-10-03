@@ -84,7 +84,8 @@ CONDITION_KEYS = (
 )
 
 #: Conditions that are also outcomes of the run: compare reports a
-#: difference (not like-for-like); the perf gate and reproduce do not refuse
+#: difference (not like-for-like), between the sides and inside one side
+#: (``is_outcome_difference``); the perf gate and reproduce do not refuse
 #: on it.
 OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"})
 
@@ -626,6 +627,59 @@ def observed_images_note(a: Any, b: Any) -> str | None:
     return None
 
 
+def is_outcome_difference(d: Difference) -> bool:
+    """Whether *d*, found between two runs of ONE side, is an outcome of
+    the runs rather than a sign that they are different experiments (owner
+    decision 10-03 (a)). An outcome key (``OUTCOME_CONDITION_KEYS``: the
+    in-stream round count, investigator sessions) is decided by the run's
+    own speed, so a side whose repeats differ in it is still one
+    experiment; the pair is NOT LIKE-FOR-LIKE, as when the sides differ in
+    it, not NOT COMPARABLE. Every other key, and the query results, still
+    make the side not one experiment, and so does an outcome key that only
+    one run recorded, or a round count of 0 against more than 0: with no
+    in-stream round the QpH is the post-stream benchmark, another
+    estimator (the perf gate refuses the same switch,
+    ``experiment.stored_identity_refusals``)."""
+    if d.group != CONDITIONS or d.key not in OUTCOME_CONDITION_KEYS:
+        return False
+    if d.a is None or d.b is None:
+        return False
+    if d.key == "benchmark rounds":
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (d.a, d.b)):
+            return False
+        return (d.a > 0) == (d.b > 0)
+    return True
+
+
+def _all_skipped_policy(effective_id: Any) -> str | None:
+    """The maintenance policy (without ``+skipped``) of an
+    effective-maintenance id in which every operation was
+    ``skipped_by_user``, else None."""
+    from lakebench.metrics.maintenance_policy import SKIPPED_BY_USER, SKIPPED_SUFFIX
+
+    if not isinstance(effective_id, str) or ":" not in effective_id:
+        return None
+    policy, _, ops = effective_id.partition(":")
+    classes = [tok.partition("=")[2] for tok in ops.split(",")]
+    if not policy or not classes or any(c != SKIPPED_BY_USER for c in classes):
+        return None
+    return policy.removesuffix(SKIPPED_SUFFIX)
+
+
+def maintenance_equal(a: Any, b: Any) -> bool:
+    """Whether two effective-maintenance ids are the same maintenance
+    (owner decision 10-03 (b)): the same id, or both runs skipped every
+    operation by the user's choice (``--skip-maintenance``, or
+    ``pre_benchmark_maintenance`` off) under one maintenance policy. No
+    maintenance ran on either side, so an Iceberg run and a Delta run, whose
+    ids name different operations, are equal here. ``not_supported`` (the
+    composition cannot run it) is not a skip and stays a difference."""
+    if a == b:
+        return True
+    pa = _all_skipped_policy(a)
+    return pa is not None and pa == _all_skipped_policy(b)
+
+
 def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> list[Difference]:
     """Key-by-key differences of one group (System is compared by
     ``system_relation``, not here). A key present on one side only differs;
@@ -646,6 +700,8 @@ def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> l
         if key == OBSERVED_IMAGES_KEY:
             if observed_images_equal(va, vb) is False:
                 out.append(Difference(group, key, va, vb))
+            continue
+        if key == "effective maintenance" and key in ka and key in kb and maintenance_equal(va, vb):
             continue
         if (key in ka) != (key in kb) or va != vb:
             out.append(Difference(group, key, va, vb))
@@ -740,7 +796,8 @@ class Cause:
     ``newer_schema``, ``generation``, ``mixed_generation``, ``required_key``,
     ``seed_withheld``, ``legacy``, ``failed``, ``no_run``, ``side_not_one``,
     ``identity``, ``corpus_problem``, ``not_established``, ``results``,
-    ``confounded``, ``condition``, ``pinset`` or ``none``."""
+    ``confounded``, ``condition``, ``side_outcome`` (an outcome key differs
+    inside one side), ``pinset`` or ``none``."""
 
     kind: str
     side: str | None = None
@@ -868,14 +925,17 @@ def pair_verdict(
     1. a side with a legacy, FAILED, INTERRUPTED or void member, or no
        member: NOT COMPARABLE;
     2. a side whose members differ in a Workload, Corpus, Architecture,
-       System or Conditions key, in their generator digests, or in
+       System or Conditions key other than an outcome key
+       (``is_outcome_difference``), in their generator digests, or in
        results: NOT COMPARABLE, the side is not one experiment;
     3. Workload or Corpus differs between the sides (generator digests over
        every member), or a member has corpus problems: NOT COMPARABLE;
     4. results not established on a member: NOT ESTABLISHED;
     5. different query sets or results: NOT COMPARABLE;
     6. Architecture and System both differ: CONFOUNDED;
-    7. Conditions differ: NOT LIKE-FOR-LIKE;
+    7. Conditions differ between the sides (effective maintenance compared
+       by ``maintenance_equal``), or an outcome key differs inside a side:
+       NOT LIKE-FOR-LIKE;
     7a. only the dependency pinset differs in Architecture: NOT
        LIKE-FOR-LIKE, same composition on different dependency sets;
     8. LIKE-FOR-LIKE, attributed to the architecture, the system, a
@@ -1000,6 +1060,9 @@ def pair_verdict(
                     )
                 if pair_why and pair_why not in notes:
                     notes.append(pair_why)
+    # Outcome-key differences inside a side, by side and member pair
+    # (is_outcome_difference): one experiment, not like-for-like (step 7).
+    side_outcomes: list[tuple[str, str, str, Difference]] = []
     for label, members in sides:
         first, first_rec = classified[label][0], members[0]
         for c, rec in zip(classified[label][1:], members[1:], strict=True):
@@ -1007,6 +1070,10 @@ def pair_verdict(
             first_diff: Difference | None = None
             for group in (WORKLOAD, CORPUS, ARCHITECTURE, CONDITIONS):
                 ds = diff_group(first, c, group)
+                side_outcomes += [
+                    (label, _rid(first_rec), _rid(rec), d) for d in ds if is_outcome_difference(d)
+                ]
+                ds = [d for d in ds if not is_outcome_difference(d)]
                 first_diff = first_diff or (ds[0] if ds else None)
                 within += [str(d) for d in ds]
             res = _results_differences(
@@ -1181,14 +1248,28 @@ def pair_verdict(
                 detail=why,
             ),
         )
-    # Step 7: conditions differ.
-    if cond:
-        return verdict(
-            NOT_LIKE_FOR_LIKE,
-            "7",
-            [str(d) for d in cond],
-            cause=Cause("condition", group=CONDITIONS, key=cond[0].key, a=cond[0].a, b=cond[0].b),
-        )
+    # Step 7: conditions differ, between the sides or, in an outcome key,
+    # inside one.
+    if cond or side_outcomes:
+        inside = [
+            f"side {lb}: {d.key} differs inside the side ({r} {d.a!r} vs {o} {d.b!r})"
+            for lb, r, o, d in side_outcomes
+        ]
+        if cond:
+            cause = Cause("condition", group=CONDITIONS, key=cond[0].key, a=cond[0].a, b=cond[0].b)
+        else:
+            lb, r, o, d = side_outcomes[0]
+            cause = Cause(
+                "side_outcome",
+                side=lb,
+                run=r,
+                other_run=o,
+                group=CONDITIONS,
+                key=d.key,
+                a=d.a,
+                b=d.b,
+            )
+        return verdict(NOT_LIKE_FOR_LIKE, "7", [str(d) for d in cond] + inside, cause=cause)
     # Step 7a: same composition, different dependency sets.
     if [d.key for d in arch] == ["dependency pinset"]:
         unrecorded = [

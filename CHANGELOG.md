@@ -460,6 +460,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only the namespace incarnation it checked.
 
 ### Changed
+- **`compare`: outcome keys inside a side, and maintenance skipped on both
+  sides.** A side whose repeat runs differ only in in-stream rounds or
+  investigator sessions (outcomes of the runs' speed) is now one
+  experiment, and the pair is NOT LIKE-FOR-LIKE (exit 12) instead of NOT
+  COMPARABLE (exit 10); a continuous side of three runs, whose round counts
+  almost always differ, can now be compared. A round count of 0 (the
+  post-stream estimator) against more than 0 inside a side, and every other
+  difference inside a side, still read NOT COMPARABLE. Two runs that each
+  skipped every maintenance operation by the user's choice under one policy
+  now have the same effective maintenance, across table formats, so an
+  Iceberg and a Delta run with `--skip-maintenance` can be LIKE-FOR-LIKE;
+  the hint for an Iceberg-Delta maintenance difference now names that
+  remedy.
 - **Support is keyed by Spark minor and table format version, and the record
   is generated from run records.** A `validated_combinations.yaml` entry now
   names `spark` (the Spark minor of the image tag) and

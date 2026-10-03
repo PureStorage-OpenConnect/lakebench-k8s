@@ -170,7 +170,7 @@
         "exit_code": 12,
         "condition": "the same maintenance",
         "command": null,
-        "hint": "effective maintenance differs (m2-2026-09-26:expire=not_run,compaction=not_run vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=not_run,compaction=not_run vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. Only no maintenance aligns them (skipped on both sides counts as the same): run both with `--skip-maintenance`, then compare"
       }
     },
     "P5": {
@@ -255,7 +255,7 @@
         "exit_code": 12,
         "condition": "the same maintenance",
         "command": null,
-        "hint": "effective maintenance differs (m2-2026-09-26:expire=ran,compaction=ran vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. No setting aligns them (with maintenance off the two still record different operations); compare compositions of one table format"
+        "hint": "effective maintenance differs (m2-2026-09-26:expire=ran,compaction=ran vs m2-2026-09-26:vacuum=not_supported,compaction=not_supported): Iceberg and Delta run different maintenance operations. Missing: the same maintenance. Only no maintenance aligns them (skipped on both sides counts as the same): run both with `--skip-maintenance`, then compare"
       }
     },
     "P7": {

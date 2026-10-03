@@ -686,20 +686,56 @@ class TestLadder:
         assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
         assert any(name in r for r in v.reasons)
 
-    @pytest.mark.parametrize("order", [(4, 4, 0), (0, 4, 4)])
-    def test_outcome_condition_within_a_side_refuses_in_any_order(self, order):
-        """A side whose runs ran different round counts (0 is the post-stream
-        estimator) is not one experiment, whatever the member order."""
-        side_a = []
-        for i, rounds in enumerate(order):
-            rec = _rec("204941-1d17f4", new_id=f"a{i}")
+    @staticmethod
+    def _rounds_side(prefix, counts):
+        side = []
+        for i, rounds in enumerate(counts):
+            rec = _rec("204941-1d17f4", new_id=f"{prefix}{i}")
             rec["experiment"]["limits"]["benchmark_rounds"] = rounds
-            side_a.append(rec)
-        side_b = [_rec("204941-1d17f4", new_id=f"b{i}") for i in range(3)]
-        for rec in side_b:
-            rec["experiment"]["limits"]["benchmark_rounds"] = 4
-        v = _verdict(side_a, side_b)
+            side.append(rec)
+        return side
+
+    @pytest.mark.parametrize("order", [(4, 4, 5), (5, 4, 4)])
+    def test_outcome_condition_within_a_side_is_not_like_for_like(self, order):
+        """Owner decision 10-03 (a): a side whose repeats ran different
+        in-stream round counts is one experiment; the pair is NOT
+        LIKE-FOR-LIKE (step 7), not NOT COMPARABLE, whatever the order."""
+        v = _verdict(self._rounds_side("a", order), self._rounds_side("b", (4, 4, 4)))
+        assert (v.verdict, v.step) == (cmp.NOT_LIKE_FOR_LIKE, "7"), v.reasons
+        # With A's first run at 5 the sides differ too, and that cross-side
+        # condition is the cause; otherwise the side's own outcome is.
+        want = "condition" if order[0] != 4 else "side_outcome"
+        assert v.cause.kind == want and v.cause.key == "benchmark rounds"
+        assert any(r.startswith("side A: benchmark rounds differs inside") for r in v.reasons)
+
+    @pytest.mark.parametrize("order", [(4, 4, 0), (0, 4, 4)])
+    def test_post_stream_estimator_within_a_side_still_refuses(self, order):
+        """0 rounds is the post-stream estimator, not a round count: a side
+        mixing it with in-stream medians is not one experiment."""
+        v = _verdict(self._rounds_side("a", order), self._rounds_side("b", (4, 4, 4)))
         assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
+
+    def test_outcome_inside_a_side_does_not_hide_a_stronger_rung(self):
+        """Results, identity and confounding still decide first: a side with
+        an outcome difference whose other side returned other results is
+        NOT COMPARABLE at step 5."""
+        side_b = self._rounds_side("b", (4, 4))
+        for rec in side_b:
+            fps = rec["experiment"]["results"]["fingerprints"]
+            name = sorted(fps)[0]
+            fps[name] = {**fps[name], "exact": "0" * 16}
+        v = _verdict(self._rounds_side("a", (4, 5)), side_b)
+        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
+
+    def test_is_outcome_difference_predicate(self):
+        d = cmp.Difference
+        assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", 4, 5))
+        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", 0, 5))
+        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", None, 5))
+        assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", 2, 3))
+        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", None, 3))
+        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark mode", "power", "x"))
+        assert not cmp.is_outcome_difference(d(cmp.CORPUS, "scale", 1.0, 2.0))
 
     def test_within_side_system_difference_refuses(self):
         v = _verdict(
@@ -1121,3 +1157,49 @@ def test_derived_rounds_zero_and_odd_values():
     assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 0
     rec["pipeline_benchmark"]["benchmark_rounds"] = [{"qph": "12.5"}, {"qph": "x"}, "bad"]
     assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 1
+
+
+class TestSkippedMaintenance:
+    """Owner decision 10-03 (b): maintenance skipped on both sides is the
+    same maintenance, across table formats."""
+
+    ICE = "m2-2026-09-26:expire_snapshots=skipped_by_user,remove_orphan_files=skipped_by_user,compaction=skipped_by_user"
+    DELTA = "m2-2026-09-26+skipped:vacuum=skipped_by_user,compaction=skipped_by_user"
+
+    def test_predicate(self):
+        assert cmp.maintenance_equal(self.ICE, self.DELTA)
+        assert cmp.maintenance_equal(self.ICE, self.ICE)
+        assert cmp.maintenance_equal(None, None)
+        # One operation ran: not skipped.
+        assert not cmp.maintenance_equal(
+            self.ICE, "m2-2026-09-26:vacuum=ran,compaction=skipped_by_user"
+        )
+        # The composition could not run it: not a user skip.
+        assert not cmp.maintenance_equal(
+            self.ICE, "m2-2026-09-26:vacuum=not_supported,compaction=not_supported"
+        )
+        # Another maintenance policy.
+        assert not cmp.maintenance_equal(
+            self.ICE, "m1-legacy:vacuum=skipped_by_user,compaction=skipped_by_user"
+        )
+        assert not cmp.maintenance_equal(self.ICE, None)
+
+    def _pair(self, ice_id, delta_id):
+        a = _rec(new_id="a")
+        b = _rec(new_id="b")
+        b["experiment"]["architecture"]["table_format"] = {"type": "delta", "version": "4.0.0"}
+        b["experiment"]["architecture"]["recipe"] = "hive-delta-spark-trino"
+        a["experiment"]["effective_maintenance"] = {"id": ice_id}
+        b["experiment"]["effective_maintenance"] = {"id": delta_id}
+        return a, b
+
+    def test_iceberg_and_delta_both_skipped_are_like_for_like(self):
+        v = _verdict(*self._pair(self.ICE, self.DELTA))
+        assert "effective maintenance" not in v.keys(cmp.CONDITIONS), v.reasons
+        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "architecture differential")
+
+    def test_one_side_ran_maintenance_is_not_like_for_like(self):
+        ran = "m2-2026-09-26:vacuum=ran,compaction=not_supported"
+        v = _verdict(*self._pair(self.ICE, ran))
+        assert v.verdict == cmp.NOT_LIKE_FOR_LIKE
+        assert v.keys(cmp.CONDITIONS)[0] == "effective maintenance"

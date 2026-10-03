@@ -609,15 +609,39 @@ def test_batch_side_not_one_experiment_says_repeat() -> None:
 
 
 def test_within_side_rounds_are_an_outcome_hint() -> None:
+    # Owner decision 10-03 (a): different round counts inside a side are an
+    # outcome; the pair is NOT LIKE-FOR-LIKE (exit 12), not NOT COMPARABLE.
     a1 = sr.load_record("011043-e338c5")
+    a1["experiment"]["limits"]["benchmark_rounds"] = 5
     a2 = _with_id(a1, "20261001-000000-r0a002")
     a2["experiment"]["limits"]["benchmark_rounds"] = 99
     b = _with_id(a1, "20261001-000000-r0b001")
     doc = cm.compare_records([a1, a2], [b])
-    assert doc["verdict"] == cmp.NOT_COMPARABLE and doc["step"] == "2"
-    assert "an outcome of speed" in doc["missing"]["hint"]
-    assert "--duration" not in doc["missing"]["hint"]
+    assert (doc["verdict"], doc["step"], doc["exit_code"]) == (cmp.NOT_LIKE_FOR_LIKE, "7", 12)
+    hint = doc["missing"]["hint"]
+    assert hint.startswith(f"A: run {a2['run_id']} differs from {a1['run_id']} in in-stream rounds")
+    assert "an outcome of speed" in hint and "--duration" not in hint
     assert doc["missing"]["command"] is None
+
+
+def test_maintenance_skipped_on_both_formats_is_like_for_like() -> None:
+    # Owner decision 10-03 (b), through the compare document: P6's Iceberg
+    # and Delta runs with every operation skipped by the user.
+    spec = PAIRS["P6"]
+    a, b = sr.load_record(spec["a"]), sr.load_record(spec["b"])
+    a["experiment"]["effective_maintenance"]["id"] = (
+        "m2-2026-09-26+skipped:expire_snapshots=skipped_by_user,"
+        "remove_orphan_files=skipped_by_user,compaction=skipped_by_user"
+    )
+    b["experiment"]["effective_maintenance"]["id"] = (
+        "m2-2026-09-26+skipped:vacuum=skipped_by_user,compaction=skipped_by_user"
+    )
+    for rec in (a, b):
+        detail = rec["experiment"]["effective_maintenance"].get("detail") or {}
+        (detail.get("operations") or {}).pop("compaction", None)
+    doc = cm.compare_records([a], [b])
+    assert (doc["verdict"], doc["step"], doc["exit_code"]) == (cmp.LIKE_FOR_LIKE, "8", 0)
+    assert doc["reasons"] == []
 
 
 def test_newer_schema_says_upgrade() -> None:
