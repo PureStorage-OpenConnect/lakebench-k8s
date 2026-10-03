@@ -478,9 +478,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The Spark scripts ConfigMap is scanned for held-out seeds before it is
   applied.** Every integer token, every 6 to 19 digit window of a longer
   digit run and every comma- or space-grouped number is hashed and compared
-  with the held-out hashes. Until the pre-registration drops its plaintext
-  seeds the scan logs a warning (`absence_check: report`); after that it
-  refuses the deploy.
+  with the held-out hashes. A hit refuses the deploy (`absence_check:
+  enforce`), naming the map and key, never the value.
+- **No tracked file holds a held-out seed in plaintext.** The
+  pre-registration drops `corpora.evaluation_seed` and
+  `corpora.robustness_seed` and names those seeds by role in its notes, and
+  `heldout_hashes.json` moves its absence check from `report` to `enforce`.
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
   `scripts/gen_config_reference.py` from `LakebenchConfig`: every key with

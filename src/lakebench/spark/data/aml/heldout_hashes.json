@@ -15,5 +15,5 @@
     42,
     50000042
   ],
-  "absence_check": "report"
+  "absence_check": "enforce"
 }

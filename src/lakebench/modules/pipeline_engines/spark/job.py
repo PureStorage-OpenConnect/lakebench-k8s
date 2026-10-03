@@ -3398,9 +3398,9 @@ class SparkJobManager:
         """Scan a ConfigMap's data for an integer token that hashes to a
         held-out AML seed before it is applied. Every token is hashed and
         compared with heldout_hashes.json; no value is printed. With the
-        file's ``absence_check: enforce`` a hit refuses the apply; with
-        ``report`` (until the pre-registration's plaintext seeds are removed)
-        it is logged. A hash file that cannot be read refuses the apply."""
+        file's ``absence_check: enforce`` (the shipped setting) a hit refuses
+        the apply; with ``report`` it is logged. A hash file that cannot be
+        read refuses the apply."""
         from lakebench.config.datagen_seed import absence_problems, load_heldout
 
         try:
