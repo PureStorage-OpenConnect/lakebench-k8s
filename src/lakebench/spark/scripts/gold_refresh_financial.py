@@ -94,6 +94,7 @@ import signal
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 
 from bronze_verify_financial import MANIFEST_TABLE, register_manifest
 from common import (
@@ -491,6 +492,12 @@ def _pin_silver(spark):
     ``unknown``, so a tick record never carries an id detection did not use.
     Without a transactions snapshot (empty table, or the lookup failed) the
     table is read as it is and the probes fall back to the live table.
+
+    The sixth element is the time-travel record of the transactions snapshot
+    (``snapshot_record``), from the snapshot metadata only; None without a
+    snapshot. The row count falls back to ``iceberg_table_stats`` for the
+    tick's ``silver_rows`` log when the summary has no count, but that value
+    is the current table's, not the snapshot's, so the record never takes it.
     """
     fq = f"{CATALOG}.{SILVER_TXNS}"
     sid = _current_snapshot(spark, fq)
@@ -504,6 +511,7 @@ def _pin_silver(spark):
             _token(sid),
             rows,
             _newest_ingest_epoch_s(spark, fq),
+            None,
         )
     vsid = _current_snapshot(spark, f"{CATALOG}.{SILVER_BATCH_VERSIONS}")
     pinned = read_at_snapshot(spark, fq, sid)
@@ -521,14 +529,8 @@ def _pin_silver(spark):
         # I10: today's current-state filter; a batch sealed after this pin
         # but before the filter runs becomes visible on the next tick.
         txns = sealed_txns_filter(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS)
-    rows = None
-    try:
-        r = spark.sql(
-            f"SELECT summary['total-records'] AS n FROM {fq}.snapshots WHERE snapshot_id = {sid}"
-        ).collect()
-        rows = int(r[0]["n"]) if r and r[0]["n"] is not None else None
-    except Exception as e:  # noqa: BLE001
-        log(f"[metrics] row count of {fq} at {sid} unavailable: {one_line(e)}")
+    tt = snapshot_record(spark, fq, sid)
+    rows = tt["total_records"]
     if rows is None:
         rows, _ = iceberg_table_stats(spark, fq)
     try:
@@ -537,7 +539,81 @@ def _pin_silver(spark):
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] newest ingest_ts of {fq} unavailable: {one_line(e)}")
         newest = None
-    return txns, sid, versions_used, rows, newest
+    return txns, sid, versions_used, rows, newest, tt
+
+
+def _summary_int(value):
+    """A snapshot summary value (a string in Iceberg's summary map) as an int,
+    or None when it is absent or not an integer."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot_record(spark, fq, sid):
+    """The time-travel record of ``fq`` at snapshot ``sid``, read from the
+    snapshot's metadata only (one query on ``{fq}.snapshots``, no data scan):
+    ``{snapshot, committed_at, total_records, pos_deletes, eq_deletes,
+    count_source}``. ``committed_at`` is ISO 8601 UTC. ``total_records`` is
+    the summary's ``total-records`` (Iceberg's live row count at ``sid``),
+    and ``count_source`` is ``summary`` when that is present, else
+    ``unavailable`` with every field None: a failed or empty lookup is never
+    filled in from the current table."""
+    rec = {
+        "snapshot": sid,
+        "committed_at": None,
+        "total_records": None,
+        "pos_deletes": None,
+        "eq_deletes": None,
+        "count_source": "unavailable",
+    }
+    try:
+        r = spark.sql(
+            "SELECT unix_micros(committed_at) AS committed_us, "
+            "summary['total-records'] AS n, "
+            "summary['total-position-deletes'] AS pos, "
+            "summary['total-equality-deletes'] AS eq "
+            f"FROM {fq}.snapshots WHERE snapshot_id = {sid}"
+        ).collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] snapshot summary of {fq} at {sid} unavailable: {one_line(e)}")
+        return rec
+    if not r:
+        log(f"[metrics] snapshot {sid} of {fq} not in its snapshots table")
+        return rec
+    row = r[0]
+    us = _summary_int(row["committed_us"])
+    if us is not None:
+        stamp = datetime.fromtimestamp(us // 1_000_000, timezone.utc)
+        rec["committed_at"] = stamp.replace(microsecond=us % 1_000_000).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+    rec["total_records"] = _summary_int(row["n"])
+    rec["pos_deletes"] = _summary_int(row["pos"])
+    rec["eq_deletes"] = _summary_int(row["eq"])
+    if rec["total_records"] is not None:
+        rec["count_source"] = "summary"
+    return rec
+
+
+def tt_record_line(cycle, table, rec):
+    """The tick's time-travel record line (metrics/tick_records.py
+    parse_tick_records): the snapshot detection read and its metadata
+    counts, for the post-run time-travel read. ``null`` for an unknown
+    value."""
+
+    def v(x):
+        return "null" if x is None else x
+
+    return (
+        f"Cycle {cycle}: tt-record table={table} snapshot={_token(rec['snapshot'])} "
+        f"committed_at={v(rec['committed_at'])} total_records={v(rec['total_records'])} "
+        f"pos_deletes={v(rec['pos_deletes'])} eq_deletes={v(rec['eq_deletes'])} "
+        f"count_source={rec['count_source']} run={RUN_ID}"
+    )
 
 
 def tick_pinned_line(cycle, sid, entities_sid, accounts_sid, versions_used, at_s):
@@ -657,7 +733,7 @@ def run_tick(spark, state, cycle) -> dict:
         state.manifest_ready = register_manifest(spark)
     # Pinned before anything reads silver, so every reader sees this corpus.
     pinned_at = time.time()
-    txns, sid, versions_used, silver_rows, newest_ingest_s = _pin_silver(spark)
+    txns, sid, versions_used, silver_rows, newest_ingest_s, tt = _pin_silver(spark)
     # The tick record: the snapshots this tick read (entities and accounts by
     # metadata only; W2 still reads entities live), for the covered scorer.
     log(
@@ -670,6 +746,10 @@ def run_tick(spark, state, cycle) -> dict:
             pinned_at,
         )
     )
+    if tt is not None:
+        # Metadata counts of the pinned snapshot, for the time-travel read
+        # after the window; nothing on the tick path scans it.
+        log(tt_record_line(cycle, SILVER_TXNS, tt))
     newest_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
     if silver_rows == 0:
         log(f"Cycle {cycle}: Silver table is empty, skipping")

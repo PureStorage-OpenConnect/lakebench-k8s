@@ -623,6 +623,41 @@ def test_window_drain_records_ticks_and_the_scored_tick(monkeypatch):
     assert cont["drain"]["state"] == "drained" and cont["drain"]["log_from_driver_start"] is True
     assert cont["drain"]["ticks_scope"] == "current driver pod log"
     assert cont["gate_problems"] == []
+    # No tick in this fixture logged a time-travel record.
+    assert cont["time_travel"] == {"ticks": []}
+
+
+def test_window_drain_records_the_time_travel_ticks(monkeypatch):
+    """AML-9: each tick's tt-record line becomes continuous.time_travel.ticks[]
+    (metadata counts, never the live table's), beside continuous.ticks."""
+    lines = [BANNER]
+    for c in (1, 2):
+        pinned, *rest = _tick_lines(c, pins=(str(10 + c), "12", "13", "14"))
+        count = "null" if c == 2 else "40"
+        source = "unavailable" if c == 2 else "summary"
+        lines += [
+            pinned,
+            _lb(
+                f"Cycle {c}: tt-record table=silver.transactions snapshot={10 + c} "
+                f"committed_at=2026-10-03T12:0{c}:00.000000Z total_records={count} "
+                f"pos_deletes=0 eq_deletes=0 count_source={source} run={RUN}"
+            ),
+            *rest,
+        ]
+    lines.append(_lb(f"Drain complete: last completed cycle 2 run={RUN}"))
+    (_d, tick, _why, problem), cont = _window_drain(
+        monkeypatch, post.DrainResult("drained", 5.0, logs="\n".join(lines), last_cycle=2)
+    )
+    assert problem == "" and tick["cycle"] == 2
+    tt = cont["time_travel"]["ticks"]
+    assert [(t["cycle"], t["snapshot"], t["total_records"]) for t in tt] == [
+        (1, 11, 40),
+        (2, 12, None),
+    ]
+    assert tt[1]["count_source"] == "unavailable" and tt[0]["start"] == 0
+    assert tt[0]["committed_at"] == "2026-10-03T12:01:00.000000Z"
+    # continuous.ticks keeps its own keys.
+    assert "tt" not in cont["ticks"][0]
 
 
 @pytest.mark.parametrize(
@@ -660,7 +695,7 @@ def test_window_drain_without_a_marker_is_not_a_gate_problem(monkeypatch):
         monkeypatch, post.DrainResult("no_marker", reason="403")
     )
     assert got == "" and tick is None and cont["drain"]["state"] == "no_marker"
-    assert "ticks" not in cont
+    assert "ticks" not in cont and "time_travel" not in cont
 
 
 def test_pre_stop_ctrl_c_still_lets_stop_delete(monkeypatch):
