@@ -194,6 +194,12 @@ Customer 360 gold is never silently incremental; records carry workload version 
 
 **What to do:** Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental` is refused.
 
+### AML records are workload version aml-2
+
+AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
+
+**What to do:** Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+
 ### System and access path are not execution conditions
 
 Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.

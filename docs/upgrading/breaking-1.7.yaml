@@ -281,6 +281,14 @@
     not compare with `c360-1`.
   fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
     is refused.
+- id: aml-records-are-workload-version-aml-2
+  title: AML records are workload version aml-2
+  kind: identity
+  subject: workload financial aml-2
+  source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
+  text: AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version
+    `aml-2` and do not compare with `aml-1`.
+  fix: Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
 - id: system-and-access-path-are-not-execution-conditions
   title: System and access path are not execution conditions
   kind: identity
