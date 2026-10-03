@@ -904,6 +904,7 @@ def test_benchmark_record_is_never_the_latest_run(tmp_path: Path) -> None:
         (None, True, "PASSED", "PASSED"),
         (None, False, "PASSED", "FAILED"),
         ("VOID", True, "PASSED", "VOID"),
+        ("", True, "PASSED", "FAILED"),
     ],
 )
 def test_verdict_of_takes_the_strictest(monkeypatch, stored, success, recomputed, want) -> None:
@@ -973,8 +974,8 @@ def test_text_report_heads_with_the_strictest_verdict(monkeypatch, tmp_path: Pat
 def test_benchmark_record_success_follows_its_verdict(tmp_path: Path) -> None:
     """A benchmark record copies its parent's pipeline: when that record
     reads FAILED (a stored pass the record no longer shows), its success is
-    False too; the parent's benchmark error does not survive the new
-    benchmark."""
+    False too. The parent's benchmark error stays: it is why the parent
+    failed, and the copy keeps the parent's success."""
     import shutil
 
     from lakebench.cli._query import _save_benchmark_record
@@ -985,7 +986,6 @@ def test_benchmark_record_success_follows_its_verdict(tmp_path: Path) -> None:
     runs.mkdir()
     rec = sr.load_record(C360_BATCH)
     _silver_zero(rec)
-    rec["benchmark_error"] = "an earlier failure"
     d = runs / f"run-{rec['run_id']}"
     d.mkdir()
     (d / "metrics.json").write_text(json.dumps(rec))
@@ -993,7 +993,6 @@ def test_benchmark_record_success_follows_its_verdict(tmp_path: Path) -> None:
     path = _save_benchmark_record(storage, storage.load_run(rec["run_id"]), _bench_result())
     saved = json.loads(Path(path).read_text())
     assert saved["record_kind"] == "benchmark"
-    assert "benchmark_error" not in saved
     assert saved["success"] is False and saved["verdict"]["status"] == "FAILED"
     assert any("silver has 0 rows" in r for r in saved["verdict"]["reasons"])
     shutil.rmtree(runs)

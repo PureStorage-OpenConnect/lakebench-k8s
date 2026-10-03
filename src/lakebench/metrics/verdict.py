@@ -214,8 +214,10 @@ def judge(record: Mapping[str, Any]) -> dict[str, Any]:
     reasons, without the gate markers) and ``error`` (why the record could
     not be recomputed, else None). Readers that explain a refusal (compare)
     use this; everything else uses ``verdict_of`` or ``passed``."""
-    stored = verdict_status(record) or None
+    stored = verdict_status(record)
     base = stored if stored is not None else ("PASSED" if record.get("success") else "FAILED")
+    if not base:
+        base = "FAILED"  # an empty stored status is no pass
     recomputed: str | None = None
     reasons: list[str] = []
     error: str | None = None

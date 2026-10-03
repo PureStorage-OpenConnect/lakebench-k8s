@@ -122,7 +122,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   refused as a perf baseline. A stored scale or ingest ratio just under
   0.95 is rounded down, never up to 0.95. `compare` refuses a `lakebench
   benchmark` record even when it is named by id, and such a record's
-  `success` follows its verdict.
+  `success` follows its verdict (the command's exit code does not change).
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6

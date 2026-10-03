@@ -640,8 +640,6 @@ def _save_benchmark_record(
         engine=result.engine,
     )
     record.benchmark = bench
-    # The parent's benchmark failure describes the benchmark this replaces.
-    record.benchmark_error = None
     record.benchmark_rounds = []
     pb = record.pipeline_benchmark
     if pb is not None:
