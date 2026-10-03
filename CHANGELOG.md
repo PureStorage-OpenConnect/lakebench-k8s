@@ -739,6 +739,17 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- **Datagen pods also get `SSL_CERT_FILE` when `platform.storage.s3.ca_cert`
+  is set**, pointing at the same mounted CA as `S3_CA_CERT`, so an image
+  that predates `S3_CA_CERT` (1.6.0) trusts the configured CA through
+  rustls-native-certs. It replaces the pod's system CA store, so it is set
+  only with a CA.
+- **The two manual datagen Job manifests (`job-scale1.yaml` and
+  `job-scale1-8core.yaml` under `datagen_rs`) are removed**: they named the deleted
+  `lb-datagen-rs:latest` image. A unit test now fails on any tracked
+  reference to a datagen image that is not the default, 1.6.0 or an
+  allowlisted history entry. `docs/data-generation.md` drops the unsupported
+  batch-versus-continuous speed figures.
 - **The default datagen image is `lb-datagen:a592385`, pinned by digest**
   (`ImagesConfig.datagen` is
   `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`;
