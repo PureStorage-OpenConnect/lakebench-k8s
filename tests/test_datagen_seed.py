@@ -369,11 +369,33 @@ def test_looks_open_only_when_literally_true(flag):
         [],  # no --out
     ],
 )
-def test_registered_look_runs_only_as_registered(extra, looks_open):
+def test_registered_look_runs_only_as_registered(extra, looks_open, tmp_path, capsys):
     g = _gate()
     out = [] if extra == [] else ["--out", "/nonexistent/r.json"]
-    argv = ["/nonexistent", "--seed", str(EVAL), "--registered", "evaluation", *out, *extra]
+    argv = [
+        "/nonexistent",
+        "--seed-file",
+        str(_seed_file(tmp_path, EVAL)),
+        "--generator-image",
+        "repo@sha256:" + "0" * 64,
+        "--registered",
+        "evaluation",
+        *out,
+        *extra,
+    ]
     assert g.main(argv) == 1
+    err = capsys.readouterr().err
+    assert ("needs --out" if extra == [] else "cannot run with") in err, err
+
+
+def _seed_file(tmp_path, seed):
+    """The owner-only seed file a registered look reads its seed from."""
+    import os
+
+    f = tmp_path / "seed"
+    f.write_text(f"{seed}\n")
+    os.chmod(f, 0o600)
+    return f
 
 
 def test_registered_look_gets_no_operator_retry(looks_open):
@@ -412,13 +434,31 @@ def test_entrypoint_requires_a_financial_seed():
     assert r.returncode == 2 and "--seed is required" in r.stderr
 
 
-def test_registered_look_claims_out_before_spark(tmp_path, looks_open):
+def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypatch, capsys):
     g = _gate()
+    # The look preconditions before the claim are met (a clean checkout, no
+    # earlier look of this seed, committed predictions), so the claim decides.
+    monkeypatch.setattr(g, "clean_checkout_error", lambda: None)
+    monkeypatch.setattr(g, "seed_ever_recorded", lambda seed: None)
+    monkeypatch.setattr(g, "predictions_error", lambda image: None)
+    monkeypatch.setattr(ds, "load_predictions", lambda *a, **k: ({}, "0" * 64))
     out = tmp_path / "look.json"
     out.write_text("{}")  # an earlier look's record
-    argv = ["/nonexistent", "--seed", str(EVAL), "--registered", "evaluation", "--out", str(out)]
+    argv = [
+        "/nonexistent",
+        "--seed-file",
+        str(_seed_file(tmp_path, EVAL)),
+        "--generator-image",
+        "repo@sha256:" + "0" * 64,
+        "--registered",
+        "evaluation",
+        "--out",
+        str(out),
+    ]
     assert g.main(argv) == 1
+    assert "cannot claim --out" in capsys.readouterr().err
     assert out.read_text() == "{}"
     missing = tmp_path / "no-such-dir" / "look.json"
     argv[-1] = str(missing)
     assert g.main(argv) == 1
+    assert "cannot claim --out" in capsys.readouterr().err
