@@ -18,7 +18,8 @@ Three kinds of check:
 Gating (owner decision D6, approved 2026-09-27): the checks named in
 ``GATING_CHECKS`` fail the run when they fail or do not run. The CLI reads
 ``gating_problems`` and the verdict's ``c360`` gate reads ``gating_outcome``;
-both apply the same rule. Every other check is recorded in the run's metrics
+both apply the same rule, and ``judged_gating_ids`` names the ids the
+verdict's gate judges on a record. Every other check is recorded in the run's metrics
 and printed but does not change the run's success.
 """
 
@@ -904,39 +905,56 @@ def gating_problems(
     return out
 
 
+def _judges_nothing(record: Mapping[str, Any]) -> bool:
+    """True when the verdict's ``c360`` gate judges no check on *record*:
+    ``GATING_CHECKS`` is empty, or a continuous record is ``reporting_only``."""
+    if not GATING_CHECKS:
+        return True
+    return record.get("reporting_only") is True and record.get("mode") == "continuous"
+
+
+def judged_gating_ids(record: Mapping[str, Any] | None) -> set[str]:
+    """The ``GATING_CHECKS`` ids the verdict's ``c360`` gate judges on
+    *record*; ``gating_outcome`` applies exactly this set.
+
+    Empty when there is no record, when ``GATING_CHECKS`` is empty and for a
+    continuous ``reporting_only`` record. Otherwise the pipeline ids, plus
+    the gated benchmark shapes when the record holds a benchmark shape check
+    (the CLI judges shapes only after the benchmark ran). Whether the record
+    has facts does not change the set: a record without facts fails the gate
+    on every id in it.
+    """
+    if not isinstance(record, Mapping) or _judges_nothing(record):
+        return set()
+    judged = _gated_ids(None)
+    if any(
+        isinstance(c, Mapping) and str(c.get("id", "")).startswith("benchmark_rows_")
+        for c in record.get("checks") or []
+    ):
+        judged |= _gated_ids(("benchmark_rows_",))
+    return judged
+
+
 def gating_outcome(record: Mapping[str, Any] | None) -> tuple[str | None, str | None]:
     """The verdict's ``c360`` gate for a stored record: ``("FAIL", reason)``
     or ``(None, None)``.
 
-    The rule is ``gating_problems``'s: FAIL when a check in
-    ``GATING_CHECKS`` failed, is ``unchecked`` or is absent, or when the
-    record has no facts (``facts_present`` not true). A gated benchmark
-    shape is judged only when the record holds benchmark shape checks, as
-    the CLI judges it only after the benchmark ran. ``(None, None)`` when
-    there is no record, when ``GATING_CHECKS`` is empty, when only checks
-    outside it failed (``reporting_failures`` lists those), and for a
-    continuous record marked ``reporting_only``. A record is absent when
-    the run made no check (``--local``, ``--stage``, continuous) or stopped
-    before the check (a failed or interrupted stage, which other gates
-    judge); a check that raised leaves an ``unevaluated_record``.
+    The rule is ``gating_problems``'s, over the ids ``judged_gating_ids``
+    returns: FAIL when one of them failed, is ``unchecked`` or is absent, or
+    when the record has no facts (``facts_present`` not true). ``(None,
+    None)`` when there is no record, when ``GATING_CHECKS`` is empty, when
+    only checks outside it failed (``reporting_failures`` lists those), and
+    for a continuous record marked ``reporting_only``. A record is absent
+    when the run made no check (``--local``, ``--stage``, continuous) or
+    stopped before the check (a failed or interrupted stage, which other
+    gates judge); a check that raised leaves an ``unevaluated_record``.
     """
-    if not isinstance(record, Mapping):
-        return None, None
-    if record.get("reporting_only") is True and record.get("mode") == "continuous":
-        return None, None
-    if not GATING_CHECKS:
+    if not isinstance(record, Mapping) or _judges_nothing(record):
         return None, None
     if record.get("facts_present") is not True:
         why = record.get("reason") or "the check did not run"
         return "FAIL", f"Customer 360 correctness gate failed: no expected-result facts ({why})"
-    gating = _gated_ids(None)
-    checks = record.get("checks") or []
-    if any(
-        isinstance(c, Mapping) and str(c.get("id", "")).startswith("benchmark_rows_")
-        for c in checks
-    ):
-        gating |= _gated_ids(("benchmark_rows_",))
-    misses = _gated_misses(record, gating)
+    misses = _gated_misses(record, judged_gating_ids(record))
     if not misses:
         return None, None
     detail = ", ".join(
