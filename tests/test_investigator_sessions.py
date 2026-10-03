@@ -45,11 +45,10 @@ def test_aml_continuous_on_trino_or_thrift_accepts_the_key():
     ("kw", "names"),
     [
         ({"schema": "customer360"}, "the workload is customer360, not financial"),
-        ({"mode": "batch"}, "the run is batch, not continuous"),
         ({"tm": False}, "workload.tm_operations.enabled is false"),
         ({"recipe": "hive-iceberg-spark-duckdb"}, "the query engine is duckdb"),
     ],
-    ids=["c360", "batch", "tm-off", "duckdb"],
+    ids=["c360", "tm-off", "duckdb"],
 )
 def test_the_key_is_refused_outside_aml_continuous(kw, names):
     """Each refusal names the condition that fails."""
@@ -65,15 +64,21 @@ def test_the_key_is_bounded(bad):
         _aml(bad)
 
 
-def test_run_rechecks_with_its_resolved_mode():
-    """The RUN_RULES row reads the same predicate with the run's mode."""
+def test_the_mode_is_runs_to_check():
+    """A batch AML config with the key loads; run refuses it in batch (the
+    RUN_RULES row, the same predicate with the run's mode) and accepts it
+    with --continuous."""
     from lakebench.cli._run_args import RunArgs, run_args_problems
 
-    cfg = _aml()
-    assert run_args_problems(RunArgs(), cfg) == []
-    arch = cfg.architecture
-    assert investigator_sessions_problem(arch, "continuous") is None
+    batch = _aml(mode="batch")
+    (rule,) = run_args_problems(RunArgs(), batch)
+    assert "investigator_sessions runs only on an AML continuous run" in rule.text(RunArgs())
+    assert run_args_problems(RunArgs(continuous=True), batch) == []
+    assert run_args_problems(RunArgs(), _aml()) == []
+    arch = batch.architecture
     assert "the run is batch" in investigator_sessions_problem(arch, "batch")
+    assert investigator_sessions_problem(arch, "continuous") is None
+    assert investigator_sessions_problem(arch, check_mode=False) is None
     # A default config never reaches the predicate's conditions.
     assert investigator_sessions_problem(make_config().architecture, "batch") is None
 
@@ -121,12 +126,37 @@ def test_a_skipped_round_against_a_default_run_is_not_like_for_like():
     assert v.keys(cmp.CONDITIONS) == ["investigator sessions"]
 
 
-def test_the_perf_gate_does_not_refuse_on_sessions_run():
-    """An outcome condition: a regression that costs sessions reads as a
-    regression, not as a different experiment."""
-    base = _with_sessions("a", 8)["experiment"]
-    run = _with_sessions("b", 3)["experiment"]
-    refusals = ex.stored_identity_refusals(
+def _exp2(run=None):
+    """A v1.7 (exp2) experiment block, with investigator sessions when *run*
+    is not None."""
+    from tests.test_comparability import _fresh
+
+    e = _fresh().to_dict()["experiment"]
+    assert e["schema"] == "exp2"
+    if run is not None:
+        e["investigators"] = {"requested": 8, "run": run}
+    return e
+
+
+def _gate(base, run):
+    return ex.stored_identity_refusals(
         ex.identity(base), ex.result_fingerprints(base), run, "baseline"
     )
-    assert not any("investigator sessions" in r for r in refusals), refusals
+
+
+def test_the_perf_gate_does_not_refuse_on_the_sessions_that_ran():
+    """An outcome condition: a regression that costs sessions (8 to 3, or to
+    0 when the round was skipped) reads as a regression, not as a different
+    experiment. On exp2 records, whose identity carries the key."""
+    assert ex.identity(_exp2(8))["investigator sessions"] == 8
+    for ran in (3, 0):
+        assert _gate(_exp2(8), _exp2(ran)) == [], ran
+
+
+def test_the_perf_gate_refuses_load_against_no_load():
+    """A run with the sessions configured is never matched to a baseline
+    without them, nor the other way round."""
+    for base, run in ((_exp2(None), _exp2(8)), (_exp2(8), _exp2(None)), (_exp2(None), _exp2(0))):
+        refusals = _gate(base, run)
+        assert any("investigator load differs" in r for r in refusals), refusals
+    assert _gate(_exp2(None), _exp2(None)) == []

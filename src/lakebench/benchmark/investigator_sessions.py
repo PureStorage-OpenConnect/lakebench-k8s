@@ -3,22 +3,31 @@
 With ``architecture.benchmark.investigator_sessions`` set to N, an AML
 continuous run runs one extra round right after its first in-stream round
 that included the investigator queries (the baseline): N concurrent
-sessions, each working one open case, picked in IQ1's queue order. Session k
+sessions, each working one case of this run, picked in IQ1's queue order
+(open cases first, by priority, oldest first). Session k
 runs IQ1, IQ2 and IQ3 bound to its case (``queries.bind_case``) and IQ4
 unchanged, once each, through ``BenchmarkRunner.run_throughput``. The round
 is recorded as ``continuous.investigators``, never as a benchmark round, so
 in-stream QpH and the round count do not move.
 
-The record says how many sessions ran (``sessions_run``, fewer than N when
-fewer cases are open), each session's row counts, the nearest-rank p50 and
-p95 latency per query over the sessions, the baseline round's time per
-query, the session window on the CLI clock, the failed queries and a status:
+The record says how many sessions ran (``sessions_run``: the sessions
+started, fewer than N when the run has fewer cases; a session whose queries
+failed still counts, and its failures are in ``failed`` and ``status``),
+each session's row counts and seconds, the nearest-rank p50 and p95 latency
+per query over the sessions whose query succeeded (with the failed count),
+the baseline round's time per query, the session window on this host's
+clock, the failed queries and a status:
 ``pass``; ``fail`` (any session's IQ1 or IQ3 returned 0 rows, or a session
 query failed; it fails the investigators check, never the run);
-``no_cases``; ``no_time`` (less than twice the baseline round's time left in
-the window); ``case_query_failed``. The overlap of the detection ticks with
+``no_cases``; ``no_rounds`` (no in-stream round ran); ``no_time`` (less
+than twice the baseline round's time left in the window, or too little for
+the per-query timeout); ``case_query_failed``. A query that failed on the
+per-query timeout or on memory carries the matching BOUNDED BY label
+(Lakebench sets both). The overlap of the detection ticks with
 the session window is added after the window closes
-(``tick_overlap``), and labels time to detect and continuous throughput.
+(``metrics.tick_records.investigator_tick_overlap``) and labels time to
+detect and continuous throughput through the verdict's ``investigators``
+qualifier.
 
 Pure where it can be: the cluster is reached only through the runner's
 executor.
@@ -27,9 +36,8 @@ executor.
 from __future__ import annotations
 
 import math
-import statistics
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from .queries import (
@@ -51,8 +59,43 @@ TIME_FACTOR = 2.0
 #: Labels every investigators record carries.
 LABELS = ("n=1 per arm", "shared S3 contention")
 
-#: The memory limit Lakebench sets on Trino (templates/trino/configmap.yaml.j2).
-TRINO_MEMORY_BOUND = "BOUNDED BY Trino query.max-memory (Lakebench-set)"
+#: The longest a session query may run (Lakebench-imposed), in seconds; less
+#: when the window has less left (``query_timeout``).
+MAX_QUERY_TIMEOUT_S = 300
+
+#: Below this per-query timeout the sessions are not started (``no_time``).
+MIN_QUERY_TIMEOUT_S = 30
+
+#: The memory limits Lakebench sets on each engine (Trino:
+#: templates/trino/configmap.yaml.j2; Spark Thrift: its server sizing).
+MEMORY_BOUNDS = {
+    "trino": "BOUNDED BY Trino query.max-memory (Lakebench-set)",
+    "spark-thrift": "BOUNDED BY Spark Thrift server memory (Lakebench-set)",
+}
+
+
+def query_timeout(remaining_s: float) -> int:
+    """The per-query timeout for the sessions: at most
+    ``MAX_QUERY_TIMEOUT_S``, and small enough that a stream's four queries
+    end inside the window's *remaining_s* even if each runs to the limit, so
+    the round never stretches the window."""
+    return int(min(MAX_QUERY_TIMEOUT_S, max(0.0, remaining_s) // len(INVESTIGATOR_QUERIES)))
+
+
+def timeout_bound(timeout_s: int) -> str:
+    return f"BOUNDED BY Lakebench per-query timeout ({timeout_s}s)"
+
+
+def session_sql_ids() -> dict[str, str]:
+    """``{IQ: sha256[:12]}`` of each session query's SQL template (bound to a
+    placeholder case id), so a record says which SQL its sessions ran."""
+    import hashlib
+
+    placeholder = "case-" + "0" * 24
+    return {
+        q.name: hashlib.sha256(bind_case(q, placeholder).sql.encode()).hexdigest()[:12]
+        for q in INVESTIGATOR_QUERIES
+    }
 
 
 def nearest_rank(values: Iterable[float], pct: float) -> float | None:
@@ -130,28 +173,39 @@ def run_sessions(
     baseline: Mapping[str, float],
     *,
     now: Callable[[], datetime],
-    query_timeout: int = 300,
+    remaining_s: float,
 ) -> dict[str, Any]:
     """Pick the cases, run the sessions concurrently and return the record
-    (``continuous.investigators``). Never raises for a query or case
+    (``continuous.investigators``). The per-query timeout keeps the round
+    inside the *remaining_s* of the window. Never raises for a query or case
     failure: those are the record's ``status``."""
+    timeout = query_timeout(remaining_s)
+    if timeout < MIN_QUERY_TIMEOUT_S:
+        return skipped(
+            requested,
+            "no_time",
+            f"{remaining_s:.0f}s left in the window: under {MIN_QUERY_TIMEOUT_S}s per query",
+        )
     try:
         cases = select_cases(runner, requested)
     except Exception as e:  # noqa: BLE001 -- recorded, never fails the run
         return skipped(requested, "case_query_failed", f"case query failed: {e}")
     if not cases:
-        return skipped(requested, "no_cases", "no case of this run was open")
+        return skipped(requested, "no_cases", "the run has no case")
     start = now()
     result = runner.run_throughput(
         cache="hot",
         iterations=1,
         fingerprint=False,
-        query_timeout=query_timeout,
+        query_timeout=timeout,
         stream_queries=[session_queries(c) for c in cases],
         shuffle=False,
     )
     end = now()
-    return session_record(requested, cases, result, baseline, start, end)
+    engine = runner._engine_name() if hasattr(runner, "_engine_name") else None
+    return session_record(
+        requested, cases, result, baseline, start, end, timeout_s=timeout, engine=engine
+    )
 
 
 def session_record(
@@ -161,23 +215,32 @@ def session_record(
     baseline: Mapping[str, float],
     start: datetime,
     end: datetime,
+    *,
+    timeout_s: int = MAX_QUERY_TIMEOUT_S,
+    engine: str | None = None,
 ) -> dict[str, Any]:
     """The record of a sessions round that ran (one stream per case)."""
     rows: dict[str, dict[str, int]] = {}
+    seconds: dict[str, dict[str, float]] = {}
     times: dict[str, list[float]] = {q.name: [] for q in INVESTIGATOR_QUERIES}
+    failed_n: dict[str, int] = {q.name: 0 for q in INVESTIGATOR_QUERIES}
     failed: list[dict[str, Any]] = []
-    memory = False
+    memory = timed_out = False
     for stream in getattr(result, "stream_results", None) or []:
         case = cases[stream.stream_id]
         per = rows.setdefault(case, {})
+        secs = seconds.setdefault(case, {})
         for qr in stream.queries:
             name = _base_name(qr.query.name)
             per[name] = int(qr.rows_returned or 0)
+            secs[name] = round(float(qr.elapsed_seconds), 3)
             if qr.success:
                 times.setdefault(name, []).append(float(qr.elapsed_seconds))
             else:
                 err = str(qr.error_message or "")
                 memory = memory or _memory_error(err)
+                timed_out = timed_out or "timed out" in err.lower()
+                failed_n[name] = failed_n.get(name, 0) + 1
                 failed.append({"case_id": case, "query": name, "error": err[:300]})
     empty = [
         {"case_id": c, "query": q}
@@ -192,21 +255,27 @@ def session_record(
             "p50_s": _round(nearest_rank(ts, 50)),
             "p95_s": _round(nearest_rank(ts, 95)),
             "n": len(ts),
+            "failed": failed_n.get(name, 0),
         }
         for name, ts in times.items()
     }
     labels = list(LABELS)
     if memory:
-        labels.append(TRINO_MEMORY_BOUND)
+        labels.append(MEMORY_BOUNDS.get(engine or "", "BOUNDED BY engine memory (Lakebench-set)"))
+    if timed_out:
+        labels.append(timeout_bound(timeout_s))
     return {
         "sessions_requested": requested,
         "sessions_run": len(cases),
         "lowered_reason": "fewer cases than sessions" if len(cases) < requested else None,
         "case_ids": list(cases),
         "rows_per_session": rows,
+        "seconds_per_session": seconds,
         "latency": latency,
         "baseline": dict(baseline),
-        "window": {"start": _iso(start), "end": _iso(end)},
+        "window": {"start": _iso(start), "end": _iso(end), "clock": "lakebench host (UTC)"},
+        "query_timeout_s": timeout_s,
+        "session_sql": session_sql_ids(),
         "failed": failed,
         "empty": empty,
         "status": "fail" if failed or empty else "pass",
@@ -225,68 +294,3 @@ def _round(v: float | None) -> float | None:
 
 def _iso(t: datetime) -> str:
     return t.replace(tzinfo=None).isoformat() + "Z"
-
-
-def _parse_iso(text: str | None) -> datetime | None:
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(str(text).rstrip("Z"))
-    except ValueError:
-        return None
-
-
-def tick_overlap(
-    record: Mapping[str, Any],
-    ticks: Iterable[Mapping[str, Any]],
-    clock_offset_s: float | None,
-) -> dict[str, Any] | None:
-    """How the detection ticks met the session window: ``{tick_delta,
-    load_label}``, or None when the sessions did not run or no tick carries
-    a time. A tick (its ``ended_at`` on the cluster clock, minus its
-    ``total`` phase) is shifted to the CLI clock by *clock_offset_s*; it
-    overlaps when at least half of it lies inside the window, and is clean
-    when none of it does (a tick partly inside but under half is neither)."""
-    window = record.get("window") or {}
-    w0, w1 = _parse_iso(window.get("start")), _parse_iso(window.get("end"))
-    if w0 is None or w1 is None:
-        return None
-    shift = timedelta(seconds=clock_offset_s or 0.0)
-    over: list[float] = []
-    clean: list[float] = []
-    timed = 0
-    for t in ticks:
-        end = _parse_iso(t.get("ended_at"))
-        total = (t.get("phases") or {}).get("total")
-        if end is None or total is None:
-            continue
-        timed += 1
-        end = end - shift
-        begin = end - timedelta(seconds=float(total))
-        span = (end - begin).total_seconds()
-        inside = (min(end, w1) - max(begin, w0)).total_seconds()
-        inside = max(0.0, inside)
-        if span <= 0:
-            share = 1.0 if w0 <= end <= w1 else 0.0
-        else:
-            share = inside / span
-        if share >= 0.5:
-            over.append(float(total))
-        elif inside == 0:
-            clean.append(float(total))
-    if timed == 0:
-        return None
-    return {
-        "tick_delta": {
-            "overlapping": {"n": len(over), "median_total_s": _median(over)},
-            "clean": {"n": len(clean), "median_total_s": _median(clean)},
-        },
-        "load_label": (
-            f"investigator load {window.get('start')}-{window.get('end')}: "
-            f"{len(over)} of {timed} ticks overlap"
-        ),
-    }
-
-
-def _median(xs: list[float]) -> float | None:
-    return round(statistics.median(xs), 3) if xs else None

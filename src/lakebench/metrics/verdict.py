@@ -940,6 +940,32 @@ def apply_save_gate(metrics: PipelineMetrics, ok: bool, report: Callable[[str], 
     return True
 
 
+def investigators_qualifier(sessions: Mapping[str, Any]) -> str:
+    """One line for ``continuous.investigators``: the investigators check's
+    status (never a run FAIL) and, when the sessions ran, the load label that
+    goes with time to detect and continuous throughput."""
+    status = str(sessions.get("status") or "unknown")
+    ran, req = sessions.get("sessions_run"), sessions.get("sessions_requested")
+    if status == "pass":
+        text = f"investigators check: pass ({ran} of {req} sessions)"
+    elif status == "fail":
+        failed = len(sessions.get("failed") or [])
+        empty = len(sessions.get("empty") or [])
+        text = (
+            f"investigators check: FAIL ({ran} of {req} sessions; {failed} failed and "
+            f"{empty} empty IQ1/IQ3 queries; not a run FAIL)"
+        )
+    else:
+        text = f"investigators check: {status} ({sessions.get('reason') or 'no reason recorded'})"
+    label = sessions.get("load_label")
+    if label:
+        text += f"; {label}: time to detect and continuous throughput include these ticks"
+    bounds = [b for b in sessions.get("labels") or [] if str(b).startswith("BOUNDED BY")]
+    if bounds:
+        text += "; " + "; ".join(bounds)
+    return text
+
+
 def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     """Compute a ``Verdict`` for a completed ``PipelineMetrics`` run.
 
@@ -1046,6 +1072,11 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     if mismatched:
         # A request the run did not meet: labelled, never a FAIL.
         qualifiers["requested_effective"] = mismatched
+    sessions = (getattr(metrics, "continuous", None) or {}).get("investigators")
+    if isinstance(sessions, Mapping):
+        # The investigators check and the load it put on the ticks: shown
+        # beside the verdict, never a run FAIL.
+        qualifiers["investigators"] = investigators_qualifier(sessions)
     preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
     if preflight.get("capacity") == "skipped":
         # --skip-preflight: nothing checked that the cluster could hold it.

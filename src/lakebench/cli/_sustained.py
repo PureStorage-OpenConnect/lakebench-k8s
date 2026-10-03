@@ -2046,6 +2046,7 @@ def investigator_sessions_after_round(
             requested,
             inv.baseline_seconds(getattr(last, "queries", None) or []),
             now=utc_now,
+            remaining_s=remaining_s,
         )
     if run is not None:
         if run.continuous is None:
@@ -2076,20 +2077,31 @@ def finish_investigator_sessions(
     clock_offset_s: float | None,
 ) -> None:
     """At window close: a sessions round that never found a case is
-    recorded as ``no_cases``; one that ran gets the overlap of the detection
-    ticks with its window (``tick_delta``, ``load_label``)."""
+    recorded as ``no_cases`` (``no_rounds`` when no in-stream round ran at
+    all, e.g. --skip-benchmark); one that ran gets the overlap of the
+    detection ticks inside the window with its own window (``tick_delta``,
+    ``load_label``)."""
     from lakebench.benchmark import investigator_sessions as inv
+    from lakebench.metrics.tick_records import investigator_tick_overlap
 
     if pending or "investigators" not in continuous:
-        why = (
-            "no in-stream round found a case of this run"
-            if rounds_ran
-            else "no in-stream round ran"
-        )
-        continuous["investigators"] = inv.skipped(requested, "no_cases", why)
+        if rounds_ran:
+            record = inv.skipped(
+                requested, "no_cases", "no in-stream round found a case of this run"
+            )
+        else:
+            record = inv.skipped(
+                requested,
+                "no_rounds",
+                "no in-stream round ran (--skip-benchmark, no query engine, or a warm-up "
+                "longer than the window)",
+            )
+        continuous["investigators"] = record
         return
     record = continuous["investigators"]
-    overlap = inv.tick_overlap(record, ticks, clock_offset_s)
+    overlap = investigator_tick_overlap(
+        record, ticks, clock_offset_s, window=continuous.get("window")
+    )
     if overlap is not None:
         record.update(overlap)
 

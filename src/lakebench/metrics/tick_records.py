@@ -20,6 +20,9 @@ Pure parsing: no cluster or Spark access.
 from __future__ import annotations
 
 import re
+import statistics
+from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta
 from typing import Any
 
 _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
@@ -194,3 +197,78 @@ def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "start",
     )
     return [{k: t.get(k) for k in keys} for t in ticks]
+
+
+def _parse_utc(text: Any) -> datetime | None:
+    """A recorded UTC time (``...Z`` or naive ISO) as a naive datetime."""
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(str(text).rstrip("Z"))
+    except ValueError:
+        return None
+
+
+def investigator_tick_overlap(
+    sessions: Mapping[str, Any],
+    ticks: Iterable[Mapping[str, Any]],
+    clock_offset_s: float | None,
+    window: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """How the detection ticks met the investigator sessions' window
+    (``continuous.investigators.window``, on this host's clock):
+    ``{tick_delta, load_label}``, or None when the sessions did not run or no
+    tick carries a time. A tick timing entry (``ended_at`` on the cluster
+    clock, minus its ``total`` phase) is shifted to this host's clock by
+    *clock_offset_s* (cluster minus host). Only ticks that ended inside the
+    continuous *window* (``continuous.window``, cluster clock) count, so
+    warm-up ticks before it are not the clean baseline. A tick overlaps when
+    at least half of it lies inside the sessions' window, and is clean when
+    none of it does; one partly inside but under half is neither, and is
+    counted only in m of "k of m"."""
+    w = sessions.get("window") or {}
+    w0, w1 = _parse_utc(w.get("start")), _parse_utc(w.get("end"))
+    if w0 is None or w1 is None:
+        return None
+    c0 = _parse_utc((window or {}).get("start"))
+    c1 = _parse_utc((window or {}).get("end"))
+    shift = timedelta(seconds=clock_offset_s or 0.0)
+    over: list[float] = []
+    clean: list[float] = []
+    timed = 0
+    for t in ticks:
+        end = _parse_utc(t.get("ended_at"))
+        total = (t.get("phases") or {}).get("total")
+        if end is None or total is None:
+            continue
+        if (c0 is not None and end < c0) or (c1 is not None and end > c1):
+            continue
+        timed += 1
+        end = end - shift
+        begin = end - timedelta(seconds=float(total))
+        span = (end - begin).total_seconds()
+        inside = max(0.0, (min(end, w1) - max(begin, w0)).total_seconds())
+        if span <= 0:
+            share = 1.0 if w0 <= end <= w1 else 0.0
+        else:
+            share = inside / span
+        if share >= 0.5:
+            over.append(float(total))
+        elif inside == 0:
+            clean.append(float(total))
+    if timed == 0:
+        return None
+    return {
+        "tick_delta": {
+            "overlapping": {"n": len(over), "median_total_s": _median(over)},
+            "clean": {"n": len(clean), "median_total_s": _median(clean)},
+        },
+        "load_label": (
+            f"investigator load {w.get('start')}-{w.get('end')}: "
+            f"{len(over)} of {timed} ticks overlap"
+        ),
+    }
+
+
+def _median(xs: list[float]) -> float | None:
+    return round(statistics.median(xs), 3) if xs else None

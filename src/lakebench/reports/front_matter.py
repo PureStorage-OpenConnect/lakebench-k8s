@@ -277,7 +277,7 @@ def _qualifier_lines(qualifiers: Mapping[str, Any]) -> list[str]:
             "C360 checks failed outside the gating set (not a verdict FAIL): "
             + ", ".join(str(x) for x in not_gating)
         )
-    for key in ("capacity", "scratch_capacity"):
+    for key in ("capacity", "scratch_capacity", "investigators"):
         if qualifiers.get(key):
             out.append(str(qualifiers[key]))
     return out

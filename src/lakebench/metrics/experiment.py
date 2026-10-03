@@ -1512,6 +1512,19 @@ def stored_identity_refusals(
             f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
             f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
         )
+    # The number of investigator sessions that ran may differ (an outcome),
+    # but not whether the run put investigator load on the pipeline at all:
+    # a run with the sessions configured is never matched to one without.
+    s_ref = expected_identity.get("investigator sessions")
+    s_run = full_actual.get("investigator sessions")
+    if (s_ref is None) != (s_run is None):
+        reasons.append(
+            f"investigator load differs: the {what} "
+            + ("ran no investigator sessions" if s_ref is None else f"ran {s_ref} session(s)")
+            + ", the run "
+            + ("none" if s_run is None else f"{s_run}")
+            + " (architecture.benchmark.investigator_sessions)"
+        )
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)
     if established is not True:

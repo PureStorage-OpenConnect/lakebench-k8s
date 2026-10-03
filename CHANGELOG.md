@@ -484,22 +484,26 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **`architecture.benchmark.investigator_sessions` (AML continuous).** A
   new optional key, 1 to 32, for concurrent investigator sessions on an AML
   continuous run. It is refused when the config loads unless the workload
-  is `financial`, the run is continuous, `tm_operations.enabled` is true and
-  the query engine is `trino` or `spark-thrift` (the message names each
-  condition that fails), and `run` refuses it again with the mode it
-  resolves. The record gains `experiment.investigators = {requested, run}`,
-  and the identity key `investigator sessions` takes the sessions that ran,
-  not the configured number, so a run whose round was lowered or skipped
-  compares as not like-for-like with one that ran at N (an outcome
-  condition: the perf gate and `reproduce` do not refuse on it). A config
-  without the key records and identifies exactly as before. With the key,
-  the run adds one round after its first in-stream round with a case: N
-  concurrent sessions, one open case each in IQ1's queue order, run IQ1 to
-  IQ3 bound to their case and IQ4, once each, recorded as
-  `continuous.investigators` (sessions run, per-session rows, p50 and p95
-  per query, the baseline round's times, status, and the overlap of the
-  detection ticks with the session window as `tick_delta` and
-  `load_label`); it never counts as a benchmark round. See
+  is `financial`, `tm_operations.enabled` is true and the query engine is
+  `trino` or `spark-thrift` (the message names each condition that fails),
+  and `run` refuses it unless the run is continuous (`run --continuous` on
+  a batch config takes it). The record gains `experiment.investigators =
+  {requested, run}`, and the identity key `investigator sessions` takes the
+  sessions that ran, not the configured number, so a run whose round was
+  lowered or skipped compares as not like-for-like with one that ran at N
+  (an outcome condition: the perf gate and `reproduce` do not refuse on the
+  number; the perf gate refuses a run with sessions against a baseline
+  without them). A config without the key records and identifies exactly
+  as before. With the key, the run adds one round after its first
+  in-stream round with a case: N concurrent sessions, one case each in
+  IQ1's queue order, run IQ1 to IQ3 bound to their case and IQ4, once each,
+  with a per-query timeout that keeps the round inside the window, recorded
+  as `continuous.investigators` (sessions run, per-session rows and
+  seconds, p50 and p95 per query, the baseline round's times, status, the
+  timeout and memory bounds when hit, and the overlap of the detection ticks
+  with the session window as `tick_delta` and `load_label`); it never counts
+  as a benchmark round. The verdict shows the check and the load label as
+  its `investigators` qualifier; it never fails the run. See
   [aml-scoring.md](docs/aml-scoring.md).
 - **AML continuous runs drain the last detection tick and score
   `recall_covered`.** At window end the CLI asks gold-refresh to finish its
