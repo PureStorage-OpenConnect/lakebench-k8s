@@ -76,8 +76,12 @@ def test_perf_configs_pin_the_default_image():
 
 
 # sha256 over the datagen image inputs (length-prefixed relative path and bytes,
-# sorted by path) at the commit the default image was built from (a5923850).
-IMAGE_INPUTS_SHA256 = "3c22971237072732412f06754d64545594e334ebb6bf8b0614a1bc744a90c122"
+# sorted by path) at the commit each image was built from, keyed by the image's
+# commit tag: a new hash needs a new tag, and a new tag needs its lineage row
+# and byte-compare evidence (test_default_is_pinned_by_digest_with_lineage_evidence).
+IMAGE_INPUTS_SHA256 = {
+    "a592385": "3c22971237072732412f06754d64545594e334ebb6bf8b0614a1bc744a90c122",
+}
 
 
 def _image_inputs_sha256() -> str:
@@ -98,7 +102,8 @@ def test_image_inputs_are_those_the_default_image_was_built_from():
     """A change to datagen_rs/src, Cargo.*, the Dockerfile or entrypoint.py
     means the default image no longer holds the tree's generator: build a new
     image, byte-compare it and re-pin (then update the hash here)."""
-    assert _image_inputs_sha256() == IMAGE_INPUTS_SHA256
+    tag, _digest = _default_parts()
+    assert _image_inputs_sha256() == IMAGE_INPUTS_SHA256[tag]
 
 
 def test_job_template_default_is_the_schema_default():

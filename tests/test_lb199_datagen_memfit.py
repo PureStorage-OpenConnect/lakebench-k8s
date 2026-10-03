@@ -149,9 +149,9 @@ def test_model_was_fitted_for_the_pinned_image():
     4.00 GiB (n=1 vs n=2), customer360 continuous 2.00 -> 2.04 GiB. The
     a592385 generator peaks about 0.3 GiB higher on financial at scale 10; the
     model (5.44 GiB at scale 10, before the 1.25x headroom) covers it there.
-    The fitted points (scale 100 to 500) were not re-measured: if the delta is
-    constant, scale 300 batch is about 0.1 GiB above the model, inside the
-    headroom (autosizer.py comment)."""
+    The fitted points (scale 100 to 500) were not re-measured: carried to scale
+    300 batch, constant or proportional, the peak is up to about 0.5 GiB above
+    the model and inside the 1.25x headroom (autosizer.py comment)."""
     from lakebench.config.schema import ImagesConfig
 
     assert ImagesConfig().datagen == (

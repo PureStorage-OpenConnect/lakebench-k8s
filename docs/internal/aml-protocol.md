@@ -95,12 +95,15 @@ use one datagen image, named by digest:
   (`docker.io/sillidata/lb-datagen:a592385@sha256:<digest above>`). A look
   config must pin `images.datagen` to that string explicitly, and the
   calibration scoring, the predictions and every look pass the same string to
-  `aml_gate.py --generator-image`, which compares it with the predictions'
-  `generator_image` as a string. What is not enforced yet: no look config is
-  in the tree, and nothing checks that a scored corpus was written by this
-  image (its markers' build commit against the lineage row's), so the
-  operator checks the corpus markers' `build_commit` by hand until the look
-  preflight does.
+  `aml_gate.py --generator-image`. What is not enforced yet: no look config
+  is in the tree; `aml_gate.py` requires `--generator-image` only for a D8
+  shard or a registered look and compares it with the predictions'
+  `generator_image` (as a string) only on a registered look, so calibration
+  scoring and the predictions accept any image; and `aml_gate.py` does not
+  check that the scored corpus was written by this image (the corpus
+  markers' `build_commit` against the lineage row's, which
+  `corpus_identity.resolve_lineage` does for run records). Until the look
+  preflight does these checks, the operator checks them by hand.
 - **Output neutrality:** the five-case byte-compare against the v1.6 release
   image (`sha256:5fda9025...`; F0, F1, C0, F2, C2 on development seeds 43 and
   42, `_corpus/` excluded) is equal:
