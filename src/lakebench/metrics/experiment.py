@@ -37,9 +37,12 @@ nothing measured under this one):
   the strategy that ran is recorded per job (2026-10-02).
 - ``aml-2``: W4's related_txn_ids and related_entity_ids are sorted and cut
   to 1,000 per alert, and its evidence map gains txn_total, txns_truncated,
-  entity_total and entities_truncated, so W4 alerts and possibly W4 recall
-  change (2026-10-02). The first AML result change of v1.7; later
-  ones before the release take a dev suffix.
+  entity_total and entities_truncated, so W4 alerts and possibly W4 recall,
+  false positives, continuous time to detect and TM alert identity for
+  hubs change; W2 and the W5 rescreen gain txn_total and txns_truncated,
+  and W2's beneficiary sender list is sorted before its cut (2026-10-02).
+  The first AML result change of v1.7; later ones before the release take
+  a dev suffix.
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is

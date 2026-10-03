@@ -94,8 +94,9 @@ def test_hub_alert_is_capped_sorted_and_says_so(spark):
 
 
 def test_cap_is_a_rule_parameter(spark):
-    """The cap is a keyword of the rule, so callers that pass a rule's own
-    parameters (replay, reproduction) see it."""
+    """The cap is a keyword of the rule, visible to a caller that builds
+    the rule's arguments from its signature (gold_finalize today, and the
+    shared rule parameters of reproduction later)."""
     from detection_rules import w4_risk_propagation
 
     rows = [("a1", 1, 2, 1, 1000), ("a2", 3, 2, 1, 1000), ("b1", 2, 4, 2, 990)]

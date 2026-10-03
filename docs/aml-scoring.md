@@ -356,14 +356,15 @@ not tuned to any result:
 | Rule | List | Cap | Kept |
 |---|---|---|---|
 | W1_connected_components | `related_txn_ids` | 250,000 | earliest by time |
-| W2_structuring, beneficiary kind | `related_txn_ids`, `related_entity_ids` | 1,000 | first by uetr order |
+| W2_structuring, beneficiary kind | `related_txn_ids`, `related_entity_ids` | 1,000 each | first by uetr, first by entity id |
 | W4_risk_propagation | `related_txn_ids`, `related_entity_ids` | 1,000 | first in sorted order |
 | W5_sanctions_match, rescreen | `related_txn_ids` | 200 | first by payment time |
 
 The W2 originator kind and the other rules are not cut. Each capped alert's
 `evidence` map carries the full count (`txn_total`, and `entity_total` for
 W4) and whether the cap cut the list (`txns_truncated`, and
-`entities_truncated` for W4). Scoring matches planted payments against
+`entities_truncated` for W4). W2's sender list has no such flag, and its
+narrative's sender count is the capped count. Scoring matches planted payments against
 `related_txn_ids`, so a cut alert can miss planted payments past the cut.
 When any alert of a rule was cut, the scoring summary counts them in
 `evidence_capped_alerts_by_rule`, lists the typologies the rule detects in

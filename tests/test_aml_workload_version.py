@@ -1,7 +1,8 @@
 """AML-2 changes W4's alerts (sorted, capped related lists) and adds
 truncation evidence to W2, W4 and the W5 rescreen, so AML results change:
-the financial workload version moves to aml-2 (SPEC section 9, K17), and a
-stored aml-1 record never compares with an aml-2 one."""
+the financial workload version moves to aml-2 (SPEC section 9, K17). The
+workload version is a comparability key, so aml-1 and aml-2 records do not
+compare (tested with the comparability rules, not here)."""
 
 from __future__ import annotations
 

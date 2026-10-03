@@ -432,7 +432,10 @@ class PipelineMetrics:
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",
     # "rules" (every rule's status and skip reason), "total_alerts", "fp_alerts",
-    # "fp_rate", "run_id", "computed_by"}. The scorecard reads this to render
+    # "fp_rate", "run_id", "computed_by", "evidence_capped_alerts_by_rule"
+    # (rule -> alerts an evidence cap cut), "recall_bounded_by_evidence_cap"
+    # (typology -> those of its designated rules), and per typology
+    # "bounded_by_evidence_cap"}. The scorecard reads this to render
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 

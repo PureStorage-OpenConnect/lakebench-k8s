@@ -136,6 +136,8 @@ def test_steady_stream_is_one_alert(spark):
         total = int(a["evidence"]["txn_total"])
         assert a["evidence"]["txns_truncated"] == ("true" if total > 10 else "false"), a
     assert any(a["evidence"]["txns_truncated"] == "true" for a in bene)
+    # The sender list is sorted before its cut, so the kept ids are stable.
+    assert all(a["related_entity_ids"] == sorted(a["related_entity_ids"]) for a in bene)
     orig = [a for a in out if a["alert_type"] == "structuring"]
     assert orig and all(a["evidence"]["txns_truncated"] == "false" for a in orig)
     assert all(int(a["evidence"]["txn_total"]) == len(a["related_txn_ids"]) for a in orig)

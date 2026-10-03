@@ -218,19 +218,20 @@ def test_gold_alerts_ddl_renders_the_v16_column_block():
     assert "{_alerts_ddl_columns()}" in gf
 
 
-# Source of the module-level imports and bare expressions, and of each pinned
+# Source of the module-level statements a frozen importer runs (all but the
+# docstring, defs, classes and literal assignments), and of each pinned
 # symbol, at integrate dfc8afa7 (sha256, first 16 hex). Moving one needs a
 # Freeze-cost trailer and must land before the Level-2 predictions lock.
 _FROZEN_BASELINE = {
     "detection_rules.py": (
-        "1c6fe7fe7949215d",
+        "4fa6b8481121ad61",
         {
             "_STRUCTURING_THRESHOLDS": "e18c54a588b8bba4",
             "_suspicious_amount_expr": "da2b4aacf24873ac",
         },
     ),
     "tm_operations.py": (
-        "5e43f7b21087b85c",
+        "19f4b629ec8d28db",
         {
             "DDL_CASES": "9af3891f8d999a59",
             "DDL_COVERAGE": "09dfc38fe7854f4c",
@@ -250,7 +251,24 @@ def _h(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _is_literal_assign(n: ast.stmt) -> bool:
+    if not isinstance(n, (ast.Assign, ast.AnnAssign)) or n.value is None:
+        return False
+    targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+    if not all(isinstance(t, ast.Name) for t in targets):
+        return False  # x[k] = 1 or x.a = 1 mutates an existing object
+    try:
+        ast.literal_eval(n.value)
+    except ValueError:
+        return False
+    return True
+
+
 def _frozen_signature(path: Path, pinned: set[str]) -> tuple[str, dict[str, str]]:
+    """Hash of every module-level statement other than the docstring, a def,
+    a class or a literal assignment (imports, expressions, computed or
+    augmented assignments: what a frozen importer runs), and per pinned name
+    the hash of the statement that defines it."""
     src = path.read_text()
     tree = ast.parse(src)
     top = []
@@ -262,8 +280,10 @@ def _frozen_signature(path: Path, pinned: set[str]) -> tuple[str, dict[str, str]
             and isinstance(n.value, ast.Constant)
             and isinstance(n.value.value, str)
         )
-        if isinstance(n, (ast.Import, ast.ImportFrom)) or (
-            isinstance(n, ast.Expr) and not docstring
+        if not (
+            docstring
+            or isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            or _is_literal_assign(n)
         ):
             top.append(ast.get_source_segment(src, n) or "")
         names: list[str] = []
@@ -281,6 +301,40 @@ def test_frozen_import_targets_top_level_unchanged():
     for name, (top, pinned) in _FROZEN_BASELINE.items():
         got_top, got_pinned = _frozen_signature(SCRIPTS / name, set(pinned))
         assert got_top == top, (
-            f"{name}: a module-level import or expression changed; frozen scripts run it"
+            f"{name}: a module-level statement other than a def, class or literal "
+            "assignment changed; frozen scripts run it"
         )
         assert got_pinned == pinned, f"{name}: a pinned symbol changed"
+
+
+def _ddl_column_names(text: str) -> list[str]:
+    """Column names of the first CREATE TABLE ... ( ... ) block in *text*."""
+    body = text.split("(", 1)[1]
+    names = []
+    for line in body.splitlines():
+        line = line.split("--", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(")"):
+            break
+        names.append(line.split()[0])
+    return names
+
+
+def test_other_alert_ddl_copies_match_alert_columns():
+    """Two gold.alerts column lists are not built from ALERT_COLUMNS yet
+    (replay's target table, deploy's DDL). A column appended to
+    ALERT_COLUMNS without them fails here, not at run time."""
+    names = [c[0] for c in _alert_columns()]
+    rp = (SCRIPTS / "replay_financial.py").read_text()
+    replay_ddl = rp[rp.index("CREATE TABLE IF NOT EXISTS {args.output_alerts}") :]
+    assert _ddl_column_names(replay_ddl) == names
+    empty = rp[rp.index("def _empty_alerts_df") :]
+    empty = empty[: empty.index("return spark.createDataFrame")]
+    import re
+
+    assert re.findall(r'"(\w+) [A-Z]', empty) == names
+    fd = (SCRIPTS.parent.parent / "deploy" / "financial_ddl.py").read_text()
+    i = fd.index("related_txn_ids    ARRAY<STRING>")
+    start = fd.rindex("CREATE TABLE", 0, i)
+    assert _ddl_column_names(fd[start:]) == names

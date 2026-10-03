@@ -490,9 +490,11 @@ def w2_structuring(
                 array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
                     "_all_txns"
                 ),
+                # Sorted before the cut, so the kept senders are the same on
+                # every run.
                 expr(
-                    f"slice(array_distinct(flatten(collect_list(_related_entity_ids))), "
-                    f"1, {int(max_txns_per_alert)})"
+                    f"slice(array_sort(array_distinct(flatten(collect_list("
+                    f"_related_entity_ids)))), 1, {int(max_txns_per_alert)})"
                 ).alias("_related_entity_ids"),
                 min_("first_ts").alias("first_ts"),
                 max_("last_ts").alias("last_ts"),

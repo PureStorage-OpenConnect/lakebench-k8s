@@ -478,9 +478,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `entities_truncated`). Scoring records the cut alerts per rule and labels
   the recall of the typologies those rules detect as bounded by the cap.
   Every rule now builds its alert columns through one helper, which is
-  results-neutral. A saturated W4 hub alert in continuous mode keeps the
-  same capped list and so is not raised again, which can move W4's time to
-  detect. Records stamped `aml-1` do not compare with `aml-2` runs. See
+  results-neutral. In continuous mode a W4 hub alert over the cap is
+  raised again only when a new payment's uetr sorts into the kept 1,000,
+  and payments past the cut get no time to detect; across TM cycles a
+  capped hub that grows several times over can lose its alert identity and
+  open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
+  runs. See
   [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
 - **The configuration reference is generated from the schema.** The field
   tables and the removed-keys table in `docs/configuration.md` are written by
