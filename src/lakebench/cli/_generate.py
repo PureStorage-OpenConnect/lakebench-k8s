@@ -438,18 +438,18 @@ def generate(
             from lakebench.deploy.datagen import _s3_client_for
 
             _digest, _why = pod_image_digest(cfg.get_namespace())
-            if (
-                record_cycle(
-                    cfg,
-                    _s3_client_for(cfg),
-                    0,
-                    1,
-                    os.environ.get("LB_RUN_ID", ""),
-                    _digest,
-                    _why,
+            _mark = record_cycle(
+                cfg, _s3_client_for(cfg), 0, 1, os.environ.get("LB_RUN_ID", ""), _digest, _why
+            )
+            if _mark == "conflict":
+                print_error(
+                    "Another generate replaced this corpus: the corpus series marker in bronze "
+                    "was written by another run since this one began. Two generates in one "
+                    "namespace are not supported; run again once the other has finished."
                 )
-                != "written"
-            ):
+                _journal_safe(j.end_command, success=False, message="series marker conflict")
+                raise typer.Exit(ExitCode.REFUSED)
+            if _mark != "written":
                 print_warning(
                     "could not record the corpus series marker: a later run that reuses "
                     "this corpus refuses it as unfinished; regenerate to record it"

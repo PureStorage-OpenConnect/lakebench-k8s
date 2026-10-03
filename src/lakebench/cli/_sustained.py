@@ -372,7 +372,16 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
         targets.append((b.bronze, bronze_datagen_prefix(cfg).strip("/")))
     for bucket, prefix in targets:
         try:
-            n = client.delete_prefix(bucket, prefix)
+            keep: frozenset[str] = frozenset()
+            if clear_raw and (bucket, prefix) == targets[-1]:
+                # The datagen prefix: the corpus series marker says a clear is
+                # under way until the run's datagen begins (deploy/corpus.py),
+                # so a reset that stops part way never leaves part of a corpus
+                # a batch run would reuse unmarked.
+                from lakebench.deploy.datagen import _mark_clearing
+
+                keep = _mark_clearing(cfg, client)
+            n = client.delete_prefix(bucket, prefix, keep_keys=keep)
         except Exception as e:
             print_error(f"Could not clear {bucket}/{prefix}: {e}")
             raise typer.Exit(ExitCode.FAILED) from e

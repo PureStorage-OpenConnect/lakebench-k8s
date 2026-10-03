@@ -2679,11 +2679,6 @@ def _run_once(
                 drop_sidecar(cfg.get_namespace())
             _generated_here = True
             _run_fleet = None
-            if collector.current_run is not None:
-                # The deployer writes the marker unfinished before cycle 0.
-                collector.current_run.cycle_series = _cycle_series_record(
-                    cfg, marker="begun", reused=False
-                )
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
             # No datagen in this run: a stale-bronze label of the generate
             # that made this bronze still describes it (the series marker's,
@@ -2741,6 +2736,9 @@ def _run_once(
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
                     if datagen_result.status == DeploymentStatus.SUCCESS:
                         _interrupt.datagen_created()
+                        if cycle_idx == 0:
+                            # The deployer wrote the marker unfinished.
+                            _cycle_series_after(collector.current_run, cfg, "begun")
                     else:
                         _interrupt.not_created("Job", "lakebench-datagen")
                     if datagen_result.status != DeploymentStatus.SUCCESS:
