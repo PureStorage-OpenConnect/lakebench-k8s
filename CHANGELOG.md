@@ -61,7 +61,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
 - A new shared observability install gets a generated Grafana password; an existing install keeps `admin`/`lakebench`.
 - `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
-- `recommend` exits 3 on a cluster context conflict instead of falling back to the reference table and exiting 0.
 
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to

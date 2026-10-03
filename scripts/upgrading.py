@@ -214,7 +214,8 @@ def code_items() -> list[dict[str, str]]:
             items.append(
                 {
                     "kind": "version-bump",
-                    "subject": f"images.{name}",
+                    # The value too: a second bump in one release needs its own entry.
+                    "subject": f"images.{name} {value}",
                     "hint": f"{old_images.get(name)} -> {value}",
                 }
             )
@@ -224,7 +225,7 @@ def code_items() -> list[dict[str, str]]:
             items.append(
                 {
                     "kind": "identity",
-                    "subject": f"workload {schema}",
+                    "subject": f"workload {schema} {version}",
                     "hint": f"{WORKLOAD_VERSIONS_1_6.get(schema)} -> {version}",
                 }
             )

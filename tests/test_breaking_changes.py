@@ -65,8 +65,11 @@ def _changelog_breaking_bullets(text: str | None = None) -> list[str]:
 
 
 def _upgrading_sections() -> dict[str, str]:
-    """{heading slug: the text under that heading, up to the next heading}."""
+    """{heading slug: the text under that heading, up to the next heading}.
+    Two headings with one slug fail: the second would hide the first."""
     parts = re.split(r"^#{2,3} (.+)$", UPGRADING.read_text(), flags=re.M)
+    slugs = [slug(parts[i]) for i in range(1, len(parts) - 1, 2)]
+    assert len(slugs) == len(set(slugs)), "duplicate headings in UPGRADING-1.7.md"
     return {slug(parts[i]): parts[i + 1] for i in range(1, len(parts) - 1, 2)}
 
 
@@ -148,7 +151,9 @@ def test_image_default_bumps_listed(up, monkeypatch):
     real = up.image_defaults
     monkeypatch.setattr(up, "image_defaults", lambda: {**real(), "trino": "trinodb/trino:999"})
     missing = up.missing_entries(LIST)
-    assert [(m["kind"], m["subject"]) for m in missing] == [("version-bump", "images.trino")]
+    assert [(m["kind"], m["subject"]) for m in missing] == [
+        ("version-bump", "images.trino trinodb/trino:999")
+    ]
 
 
 def test_a_new_alias_and_exit_code_are_missing(up, monkeypatch):
@@ -171,7 +176,7 @@ def test_a_workload_version_bump_is_missing(up, monkeypatch):
         "aml-999",
     )
     subjects = {(m["kind"], m["subject"]) for m in up.missing_entries(LIST)}
-    assert subjects == {("identity", "workload financial")}
+    assert subjects == {("identity", "workload financial aml-999")}
 
 
 def test_a_tableless_entry_is_required_by_id(up, tmp_path):
