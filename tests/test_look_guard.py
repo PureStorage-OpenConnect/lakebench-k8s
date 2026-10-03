@@ -344,6 +344,9 @@ def test_protected_record_reason(held):
     assert "evaluation" in lg.protected_record_reason(_rec(seed={"seed_ref": ref, "role": None}))
     assert lg.protected_record_reason(_rec(seed={"seed_ref": "x", "role": "evaluation"}))
     assert "withheld" in lg.protected_record_reason(_rec(seed={"seed_ref": None}))
+    for form in ({}, {"role": "calibration"}, {"role": None}):
+        assert "withheld" in lg.protected_record_reason(_rec(seed=form))
+    assert lg.recorded_seed_role("9e999999999") is None  # no enormous int is built
     assert lg.protected_record_reason(_rec(seed=pc.CALIBRATION)) is None
     # A spent seed has been looked at or voided: nothing left to protect.
     assert lg.protected_record_reason(_rec(seed=pc.SPENT)) is None
@@ -400,8 +403,13 @@ def test_ledger_bucket_of_a_registered_corpus_is_refused(tmp_path, monkeypatch, 
     )
     assert "holds a registered evaluation corpus" in lg.protected_corpus_reason(cfg)
     _assert_refused(_invoke(["run", str(dev), "--yes"]), no_cluster, "run")
+    # A config that sets no seed is checked against the ledger too.
+    unset = pc.financial_config(tmp_path / "unset.yaml")
+    unset_cfg = load_config(unset, purpose=LoadPurpose.RUN)
+    assert unset_cfg.architecture.workload.datagen.seed is None
+    assert "holds a registered evaluation corpus" in lg.protected_corpus_reason(unset_cfg)
     ledger.write_text("not json\n" + ledger.read_text())
-    assert "cannot be read" in lg.protected_corpus_reason(cfg)
+    assert "line 1 of the corpus ledger" in lg.protected_corpus_reason(cfg)
     c360 = tmp_path / "c360.yaml"
     c360.write_text("name: lbtest-c360\n")
     assert lg.protected_corpus_reason(load_config(c360, purpose=LoadPurpose.RUN)) is None
@@ -488,6 +496,22 @@ def test_seed_is_protected_hides_on_an_unreadable_record(monkeypatch, held):
 
     monkeypatch.setattr(ds, "_heldout", gone)
     assert ds.seed_is_protected(pc.CALIBRATION)
+
+
+def test_compare_redaction_hides_every_integer_form_when_unreadable(monkeypatch):
+    from lakebench.metrics import compare as cm
+
+    def gone():
+        raise ValueError("unreadable")
+
+    monkeypatch.setattr(ds, "_heldout", gone)
+    hidden = cm._hidden_seeds()
+    assert hidden is None
+    for v in (pc.EV, f"+{pc.EV}", f"{pc.EV}.0", float(43), f" {pc.EV} ", "1_234"):
+        assert cm._seed_out(v, hidden) == "<protected seed>", v
+    assert cm._seed_out({"seed_ref": str(pc.EV)}, hidden) == {"seed_ref": "<protected seed>"}
+    doc = cm.redact({"note": f"corpus seed differs ({pc.EV}.0 vs +{pc.RB})"}, hidden)
+    assert pc.seed_tokens(json.dumps(doc)) == []
 
 
 def test_compare_redaction_hides_held_out_seeds(held):
