@@ -115,3 +115,46 @@ def test_default_overrides_name_real_keys(gen):
 def test_every_key_has_a_description(gen):
     missing = [p for p, f in gen.leaves() if not (f.description or "").strip()]
     assert missing == []
+
+
+def _undocumented_fields(module) -> list[str]:
+    import inspect
+
+    out = []
+    for name, obj in vars(module).items():
+        if (
+            inspect.isclass(obj)
+            and issubclass(obj, BaseModel)
+            and obj.__module__ == module.__name__
+        ):
+            for field_name, field in obj.model_fields.items():
+                if not (field.description or "").strip():
+                    out.append(f"{name}.{field_name}")
+    return out
+
+
+def test_every_schema_field_has_a_description():
+    """Section fields too (``platform``, ``architecture.catalog`` and the
+    rest), not only the leaves the reference tables list: the JSON schema and
+    editor tooltips read the description of every field."""
+    import lakebench.config.schema as schema
+
+    assert _undocumented_fields(schema) == []
+
+
+def test_an_undocumented_section_field_is_found():
+    import types
+
+    from lakebench.config.schema import ConfigModel
+
+    class Leaf(ConfigModel):
+        a: int = 1
+        """Documented."""
+
+    class Section(ConfigModel):
+        leaf: Leaf = Field(default_factory=Leaf)
+
+    probe = types.ModuleType("probe")
+    Leaf.__module__ = Section.__module__ = "probe"
+    probe.Leaf, probe.Section = Leaf, Section
+    assert _undocumented_fields(probe) == ["Section.leaf"]

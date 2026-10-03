@@ -351,12 +351,11 @@ To add one:
 4. For a new component version, add its entries to the compatibility tables
    in `job.py`. Verify each Maven artifact by fetching its POM, not through
    the search API.
-5. Regenerate the generated doc blocks:
-   `PYTHONPATH=src python -m lakebench.config.support .` for the support
-   states and recipe components tables in the README and the docs, and
-   `python scripts/gen_config_reference.py` and
-   `python scripts/gen_sizing_tables.py` where the change moves their
-   inputs. The drift tests fail on a stale block.
+5. Regenerate the generated doc blocks with `python scripts/gen_docs.py`,
+   which runs every generator in `scripts/gen_*.py` and the support-state
+   and recipe-components blocks
+   (`PYTHONPATH=src python -m lakebench.config.support .`). `--check`
+   writes nothing and exits 1 on a stale block, as the drift tests do.
 6. Leave `src/lakebench/config/validated_combinations.yaml` alone: it is
    filled only from live runs on the release tree, so the new recipe starts
    as unverified.

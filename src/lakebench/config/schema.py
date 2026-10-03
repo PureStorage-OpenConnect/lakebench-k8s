@@ -563,6 +563,7 @@ class S3Config(ConfigModel):
     )
 
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
+    """Bronze, silver and gold bucket names."""
     create_buckets: bool = True
     """Create buckets if they do not exist. `reproduce` refuses `false`."""
 
@@ -615,7 +616,9 @@ class StorageConfig(ConfigModel):
     """Storage configuration including S3 and scratch volumes."""
 
     s3: S3Config = Field(default_factory=S3Config)
+    """S3-compatible object storage: endpoint, credentials and buckets."""
     scratch: ScratchStorageConfig = Field(default_factory=ScratchStorageConfig)
+    """Scratch storage for Spark shuffle."""
 
 
 def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str, fix: str) -> None:
@@ -737,6 +740,7 @@ class SparkComputeConfig(ConfigModel):
     }
 
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
+    """The shared Kubeflow Spark Operator that runs the stage jobs."""
 
     # Per-job executor count overrides (None = auto from scale).
     # When set, these override the auto-scaled executor count for that job.
@@ -853,7 +857,9 @@ class ComputeConfig(ConfigModel):
     """Compute resource configuration."""
 
     spark: SparkComputeConfig = Field(default_factory=SparkComputeConfig)
+    """Spark executor counts per job, driver resources and the Spark Operator."""
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
+    """PostgreSQL metadata backend."""
 
 
 _DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
@@ -956,9 +962,13 @@ class PlatformConfig(ConfigModel):
     """Layer 1: Platform configuration."""
 
     kubernetes: KubernetesConfig = Field(default_factory=KubernetesConfig)
+    """Kubernetes context and namespace."""
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    """Object storage and scratch storage."""
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
+    """Spark and PostgreSQL compute settings."""
     deps: DepsConfig = Field(default_factory=DepsConfig)
+    """The deployment's dependency server, `lb-deps`."""
 
 
 # =============================================================================
@@ -1017,7 +1027,9 @@ class HiveConfig(ConfigModel):
     }
 
     operator: StackableOperatorConfig = Field(default_factory=StackableOperatorConfig)
+    """Where the shared Stackable operators run and the SDP version a fresh install uses."""
     resources: HiveResourcesConfig = Field(default_factory=HiveResourcesConfig)
+    """Hive Metastore CPU and memory."""
 
 
 class PolarisResourcesConfig(ConfigModel):
@@ -1051,6 +1063,7 @@ class PolarisConfig(ConfigModel):
     on the first deploy. Use a `${VAR}` reference rather than a literal.
     """
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
+    """Polaris server CPU and memory."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "version": "the Polaris that runs, and is recorded, is the tag of images.polaris.",
@@ -1070,6 +1083,7 @@ class UnityConfig(ConfigModel):
     port: int = Field(default=8080, ge=1, le=65535)
     """Unity Catalog REST API port."""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
+    """Unity Catalog server CPU and memory."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "version": "the Unity Catalog that runs is the tag of images.unity.",
@@ -1083,8 +1097,11 @@ class CatalogConfig(ConfigModel):
     type: CatalogType = CatalogType.HIVE
     """Catalog service: `hive`, `polaris`, or `none`."""
     hive: HiveConfig = Field(default_factory=HiveConfig)
+    """Hive Metastore settings, used when `type` is `hive`."""
     polaris: PolarisConfig = Field(default_factory=PolarisConfig)
+    """Polaris settings, used when `type` is `polaris`."""
     unity: UnityConfig = Field(default_factory=UnityConfig)
+    """Unity Catalog settings, used when `type` is `unity`."""
 
 
 class PolarisClientSecretMissing(ValueError):
@@ -1134,7 +1151,9 @@ class TableFormatConfig(ConfigModel):
     (AML) workload refuses Delta.
     """
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
+    """Iceberg settings, used when `type` is `iceberg`."""
     delta: DeltaConfig = Field(default_factory=DeltaConfig)
+    """Delta Lake settings, used when `type` is `delta`."""
 
 
 class TrinoCoordinatorConfig(ConfigModel):
@@ -1220,7 +1239,9 @@ class TrinoConfig(ConfigModel):
     """Trino query engine configuration."""
 
     coordinator: TrinoCoordinatorConfig = Field(default_factory=TrinoCoordinatorConfig)
+    """Trino coordinator resources."""
     worker: TrinoWorkerConfig = Field(default_factory=TrinoWorkerConfig)
+    """Trino worker replicas, resources and spill."""
     catalog_name: str = "lakehouse"
     """Trino catalog name for the Iceberg connector."""
 
@@ -1265,8 +1286,11 @@ class QueryEngineConfig(ConfigModel):
     type: QueryEngineType = QueryEngineType.TRINO
     """Query engine: `trino`, `spark-thrift`, `duckdb`, or `none`."""
     trino: TrinoConfig = Field(default_factory=TrinoConfig)
+    """Trino settings, used when `type` is `trino`."""
     spark_thrift: SparkThriftConfig = Field(default_factory=SparkThriftConfig)
+    """Spark Thrift Server settings, used when `type` is `spark-thrift`."""
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
+    """DuckDB settings, used when `type` is `duckdb`."""
 
 
 # The v1.6 medallion block, at its defaults. Nothing read it except
@@ -1559,6 +1583,7 @@ class ProcessingConfig(ConfigModel):
         ),
     )
     sustained: SustainedConfig = Field(default_factory=SustainedConfig)
+    """Continuous-mode settings, written as `architecture.pipeline.continuous`."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "medallion": (
@@ -1956,7 +1981,9 @@ class WorkloadConfig(ConfigModel):
     different values is an error.
     """
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
+    """Data generation: scale, seed, delivery mode, pod sizing and event window."""
     customer360: Customer360Config = Field(default_factory=Customer360Config)
+    """Customer 360 workload parameters."""
 
     # Snapshot-retention policy. Set retention_workload=True on Financial
     # recipes whose workload set includes historical replay (W8) or
@@ -1987,6 +2014,7 @@ class WorkloadConfig(ConfigModel):
 
     # Financial transaction-monitoring operations layer (GOALS P10).
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
+    """AML: the simulated transaction-monitoring operations on top of the alerts."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -2475,6 +2503,7 @@ class BenchmarkConfig(ConfigModel):
         ),
     )
     maintenance_settle: MaintenanceSettleConfig = Field(default_factory=MaintenanceSettleConfig)
+    """Batch: the storage settle wait between maintenance and the scored round."""
 
     @model_validator(mode="after")
     def _refuse_what_run_does_not_do(self, info: ValidationInfo) -> BenchmarkConfig:
@@ -2557,14 +2586,21 @@ class ArchitectureConfig(ConfigModel):
     """Layer 2: Data architecture configuration."""
 
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
+    """Table catalog."""
     table_format: TableFormatConfig = Field(default_factory=TableFormatConfig)
+    """Table format."""
     pipeline_engine: PipelineEngineType = PipelineEngineType.SPARK
     """Pipeline engine; `spark` is the only one."""
     query_engine: QueryEngineConfig = Field(default_factory=QueryEngineConfig)
+    """Query engine that runs the benchmark."""
     pipeline: ProcessingConfig = Field(default_factory=ProcessingConfig)
+    """Pipeline mode, cycles, maintenance and continuous settings."""
     workload: WorkloadConfig = Field(default_factory=WorkloadConfig)
+    """Workload and data generation, written as the top-level `workload` block."""
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
+    """Benchmark settings."""
     tables: TableNamesConfig = Field(default_factory=TableNamesConfig)
+    """Table names for each layer."""
 
     @model_validator(mode="before")
     @classmethod
@@ -3073,18 +3109,24 @@ class LakebenchConfig(ConfigModel):
 
     # Container images
     images: ImagesConfig = Field(default_factory=ImagesConfig)
+    """Container images of the components Lakebench renders; Hive, Prometheus,
+    Grafana and the Pushgateway are set elsewhere."""
 
     # Layer 1: Platform
     platform: PlatformConfig = Field(default_factory=PlatformConfig)
+    """Layer 1: Kubernetes, storage and compute."""
 
     # Layer 2: Data Architecture
     architecture: ArchitectureConfig = Field(default_factory=ArchitectureConfig)
+    """Layer 2: catalog, table format, engines, pipeline and benchmark."""
 
     # Layer 3: Observability
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    """Layer 3: the Prometheus stack, dashboards and the Pushgateway."""
 
     # Spark configuration overrides
     spark: SparkConfOverrides = Field(default_factory=SparkConfOverrides)
+    """The user's Spark conf, merged over the job defaults."""
 
     # Set by load_config: the notes the load collected and how the name was
     # resolved (config/loader.py load_notes, name_resolution).

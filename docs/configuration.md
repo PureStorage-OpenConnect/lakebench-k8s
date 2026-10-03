@@ -937,15 +937,12 @@ it (they were overwritten then too).
 
 ## Scale Factors
 
-The `datagen.scale` field is an abstract multiplier. One scale unit produces
-approximately 10 GB of on-disk bronze Parquet data. The table below shows the
-Customer360 workload schema mapping (the default):
-
-| Scale | Customers | Approximate Rows | Bronze Size |
-|---|---|---|---|
-| 1 | 100,000 | 2.4 M | ~10 GB |
-| 10 | 1,000,000 | 24 M | ~100 GB |
-| 100 | 10,000,000 | 240 M | ~1 TB |
+The `datagen.scale` field is an abstract multiplier: one scale unit is about
+10 GB of bronze Parquet. What a scale unit generates is per workload: for
+Customer 360 the customer id space, file count and row count at each scale
+are in [the Customer 360 spec, section 3](benchmarks/C360.md#3-data-generation),
+and [Data Generation](data-generation.md) covers the `generate` command and
+both workloads.
 
 Datagen scale is banded per workload. Customer 360 is supported up to scale
 300 and unverified up to 600; AML (financial) is supported up to 300 and
@@ -953,10 +950,6 @@ unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
 config, because a datagen pod would exceed the 16 GiB per-pod memory cap
 (a Lakebench-imposed cap); in the unverified range they warn. The run's
 support state records the band.
-
-Each customer generates approximately 24 events across a 365-day date range.
-Scaling is linear: doubling the scale factor doubles customers, rows, and data
-volume.
 
 `spark.lb.gold.strategy` picks how Customer 360 gold-finalize aggregates
 silver: `auto` (the default: `simple_agg` below 500 GB of silver, else
@@ -978,64 +971,21 @@ does not change with scale.
 
 ## Multi-Cycle Batch
 
-The `pipeline.cycles` field (v1.1.0) runs N batch iterations to simulate
-multi-day lakehouse behavior. Cycle 1 creates tables via full overwrite.
-Cycles 2-N use incremental append/merge, accumulating snapshots and data
-files like a production table that receives daily loads.
-
-```yaml
-architecture:
-  pipeline:
-    cycles: 3                         # 3 batch iterations
-    pre_benchmark_maintenance: true   # compact before benchmark
-```
-
-### How it works
-
-1. The configured datagen timestamp range is split evenly across cycles.
-   Each cycle generates data for its portion of the range.
-2. Cycle 1 runs standard `createOrReplace` for silver and gold tables.
-3. Cycles 2+ set `LB_SILVER_INCREMENTAL=true` and `LB_GOLD_INCREMENTAL=true`,
-   switching silver-build to `.append()` and gold-finalize to incremental
-   merge based on a watermark on `max(interaction_date)`. This is the only
-   case gold-finalize runs incrementally: a single-cycle run, or a repeat
-   run over a gold table that already has rows, rebuilds every gold day.
-4. After all cycles, if `pre_benchmark_maintenance` is true, Lakebench runs
-   `expire_snapshots` (with `retention_threshold='0s'`, or the retention
-   horizon when `workload.retention_workload` is set),
-   `remove_orphan_files` (at least 24 h 10 min, so recent orphans survive),
-   and Iceberg compaction (`optimize` on Trino or `rewrite_data_files` on
-   Spark Thrift) before the benchmark phase, all inside one 30-minute budget.
-   If stream apps are still present, expiry is floored at 1 h, AML gold is
-   not compacted, and the run is flagged `maintenance_live_streams`, so the
-   perf gate does not treat its post-maintenance QpH as a measurement.
-
-### Table health tracking
-
-At each cycle boundary, Lakebench probes Iceberg system tables to capture:
-- `silver_data_file_count` / `gold_data_file_count` -- number of data files
-- `silver_snapshot_count` / `gold_snapshot_count` -- number of snapshots
-
-These appear in the `cycles[].table_health` section of `metrics.json` and
-in the `cycle_progression` score when `cycles > 1`.
-
-### When to use multi-cycle
-
-- **Measuring QpH degradation.** After 5+ cycles, compare QpH against a
-  single-cycle run at the same scale. The `cycle_progression` score shows
-  per-cycle elapsed time and table health growth.
-- **Testing compaction effectiveness.** Run with and without
-  `pre_benchmark_maintenance` to measure how much compaction improves QpH.
-- **Simulating production table growth.** Multi-cycle runs produce realistic
-  table metadata bloat (many snapshots, small data files) that single-cycle
-  batch runs never exercise.
-
-### Limitations
-
-- `cycles > 1` requires `mode: batch`. Continuous mode has its own iteration
-  model via streaming micro-batches.
-- DuckDB cannot run Iceberg maintenance or compaction (read-only). Table
-  health is still probed but compaction is skipped.
+`architecture.pipeline.cycles` (1 to 50) runs a batch run as N cycles, each
+over its own slice of the event window, to model a table that receives daily
+loads. It is refused with continuous mode, and `run --generate` is refused
+with it (except with `--local`), because each cycle generates its own slice. Cycle 1 creates silver
+and gold; cycles 2 and later append to silver and run gold-finalize
+incrementally (`LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL`), the only
+case in which gold-finalize runs incrementally. Table health is probed after
+each cycle and recorded in `cycles[].table_health` as
+`silver_data_file_count`, `gold_data_file_count`, `silver_snapshot_count`
+and `gold_snapshot_count`. Delta records the file counts only; the record
+is empty on DuckDB, with no query engine, or where the engine cannot count
+Delta files, and a probe query that fails leaves its key out. How a multi-cycle run proceeds and what it records
+is in [Running Pipelines](running-pipelines.md#multi-cycle-batch); what it
+does to the corpus is in
+[the Customer 360 spec, section 3](benchmarks/C360.md#3-data-generation).
 
 ## Timestamp Range Impact
 
@@ -1203,61 +1153,24 @@ platform:
 
 ## Supported Component Combinations
 
-Not every catalog, table format, and query engine combination is valid.
-Lakebench validates at config load and rejects unsupported combinations with a
-clear error message.
-
-| Catalog | Table Format | Query Engine | Supported |
-|---|---|---|---|
-| hive | iceberg | trino | Yes |
-| hive | iceberg | spark-thrift | Yes |
-| hive | iceberg | duckdb | Yes |
-| hive | iceberg | none | Yes |
-| polaris | iceberg | trino | Yes |
-| polaris | iceberg | spark-thrift | Yes |
-| polaris | iceberg | duckdb | Yes |
-| polaris | iceberg | none | Yes |
-| hive | delta | trino | Yes |
-| hive | delta | spark-thrift | Yes |
-| hive | delta | none | Yes |
-
-Delta is not supported with Polaris or with DuckDB. The `financial` (AML)
-workload runs on Iceberg only and refuses a Delta config at load.
+Config load refuses a catalog, table format and query engine combination
+that is not supported. The valid recipes are in [Recipes](recipes.md), and
+each one's support state per workload and mode, with the refused
+combinations and why, is in the
+[Compatibility Matrix](compatibility-matrix.md).
 
 ## Image Overrides
 
-All container images are configurable under the `images` section. This is
-useful for air-gapped environments or when running custom builds:
-
-```yaml
-images:
-  datagen: my-registry.internal/lakebench/datagen:v2
-  spark: my-registry.internal/apache/spark:4.1.1-python3
-  trino: my-registry.internal/trinodb/trino:483
-  pull_policy: Always
-```
-
-Private registries need an `imagePullSecret` on the service accounts in the
-namespace; lakebench does not set one.
-
-Set `pull_policy: Always` after pushing a new image tag to ensure Kubernetes
-pulls the latest version.
+Every image is set under `images` (see the [field reference](#images));
+the limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
+[Overriding Versions](supported-components.md#overriding-versions).
 
 ## Generating a Starter Config
 
-Use `lakebench init` to write a starter configuration file:
-
-```bash
-lakebench init --output my-config.yaml
-```
-
-It writes 12 lines of settings: a unique name (`lb-<user>-<4 hex>` unless
-`--name` is given), `recipe:` once (`polaris-iceberg-spark-trino` unless
-`--recipe` is given), the workload and scale (1), the S3 endpoint and the
-two credentials as `${LAKEBENCH_S3_ACCESS_KEY}` and
-`${LAKEBENCH_S3_SECRET_KEY}` (`--credentials-env PREFIX` renames them).
-Every other key keeps its default and is described on this page. See
-[cli-reference.md](cli-reference.md#init) for the flags.
+`lakebench init` writes a starter config: see
+[Getting Started, step 1](getting-started.md#1-generate-a-configuration-file) for what it writes and
+[CLI Reference](cli-reference.md#init) for the flags. Every key it leaves
+out keeps its default and is described on this page.
 
 ### Converting an older config
 

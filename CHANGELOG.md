@@ -470,6 +470,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **`scripts/gen_docs.py`** regenerates every generated docs block in one
+  command (support states, configuration and CLI references, sizing tables,
+  exit codes, prerequisites); `--check` exits 1 when any is stale. Every
+  config schema field, section blocks included, now has a description.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
