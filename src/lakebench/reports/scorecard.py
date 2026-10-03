@@ -82,26 +82,6 @@ class Customer360ScorecardBlock:
                 f"{escape(type(exc).__name__)}: {escape(first)}</p></section>"
             )
 
-    @staticmethod
-    def judged_gating_ids(record: dict) -> set[str]:
-        """The GATING_CHECKS ids the verdict's c360 gate judges on *record*:
-        the rule of ``c360_correctness.gating_outcome`` (continuous
-        reporting-only records judge none; benchmark shapes are judged only
-        when the record holds shape checks). A test drops each id from every
-        stored record and asserts gating_outcome fails exactly for these, so
-        a change to that rule fails here rather than drifting."""
-        from lakebench.metrics import c360_correctness as cc
-
-        if not cc.GATING_CHECKS or (
-            record.get("reporting_only") is True and record.get("mode") == "continuous"
-        ):
-            return set()
-        gated = cc._gated_ids(None)
-        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
-        if any(str(c.get("id", "")).startswith("benchmark_rows_") for c in checks):
-            gated |= cc._gated_ids(("benchmark_rows_",))
-        return gated
-
     @classmethod
     def _family(cls, kind: str) -> str:
         for name, kinds in cls.FAMILIES:
@@ -119,11 +99,11 @@ class Customer360ScorecardBlock:
         checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
 
         # The gate exactly as the verdict's c360 gate applies it today
-        # (c360_correctness.gating_outcome over GATING_CHECKS), never the
-        # record's stored gating flag, which predates the owner's approval
-        # on older records.
+        # (c360_correctness.gating_outcome over the ids judged_gating_ids
+        # returns, one rule), never the record's stored gating flag, which
+        # predates the owner's approval on older records.
         outcome, why = cc.gating_outcome(record)
-        gated = self.judged_gating_ids(record)
+        gated = cc.judged_gating_ids(record)
         present = {str(c.get("id")) for c in checks}
         absent = sorted(g for g in gated if g not in present)
 

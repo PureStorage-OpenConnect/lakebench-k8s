@@ -161,30 +161,6 @@ def test_c360_malformed_record_never_breaks_the_page():
     assert "Expected results (Customer 360)" in html or "C360 results could not be rendered" in html
 
 
-def test_block_gating_ids_match_gating_outcome_on_every_record():
-    """Drift guard for the copied gating rule: on every stored C360 record,
-    dropping a GATING_CHECKS id fails gating_outcome exactly when the block
-    counts that id as judged."""
-    import copy
-
-    from lakebench.metrics.c360_correctness import GATING_CHECKS, gating_outcome
-    from lakebench.reports.scorecard import Customer360ScorecardBlock
-    from tests.fixtures.stored_records import record_ids
-
-    seen = 0
-    for run_id in record_ids():
-        rec = load_record(run_id).get("c360_correctness")
-        if not isinstance(rec, dict) or gating_outcome(rec)[0] == "FAIL":
-            continue
-        seen += 1
-        judged = Customer360ScorecardBlock.judged_gating_ids(rec)
-        for gid in GATING_CHECKS:
-            edited = copy.deepcopy(rec)
-            edited["checks"] = [c for c in edited["checks"] if c.get("id") != gid]
-            assert (gating_outcome(edited)[0] == "FAIL") == (gid in judged), (run_id, gid)
-    assert seen >= 5
-
-
 def test_c360_render_error_shows_a_notice(monkeypatch):
     from lakebench.reports.scorecard import Customer360ScorecardBlock
 
@@ -206,8 +182,25 @@ def test_c360_without_gating_checks_reads_reporting_only(monkeypatch):
     assert "(gating)" not in block
 
 
-def test_c360_continuous_reporting_only_judges_nothing():
-    from lakebench.reports.scorecard import Customer360ScorecardBlock
+def test_c360_block_judges_the_ids_c360_correctness_judges(monkeypatch):
+    """The block takes its gated set from c360_correctness.judged_gating_ids
+    (one rule with the verdict's gate), not a copy: an id that function adds
+    is tagged and, absent from the record, listed as not evaluated."""
+    from lakebench.metrics import c360_correctness
 
-    rec = {"reporting_only": True, "mode": "continuous", "checks": []}
-    assert Customer360ScorecardBlock.judged_gating_ids(rec) == set()
+    real = c360_correctness.judged_gating_ids
+    monkeypatch.setattr(
+        c360_correctness, "judged_gating_ids", lambda rec: real(rec) | {"probe_gate_id"}
+    )
+    block = _block(_render_dict(load_record("5105a0")))
+    # The row, not only the chip's reason (gating_outcome names the id too).
+    assert "<code class='mono'>probe_gate_id</code> <small>(gating)</small>" in block
+    assert "<td>not evaluated</td>" in block
+
+
+def test_c360_continuous_reporting_only_reads_reporting_only():
+    record = load_record("5105a0")
+    record["c360_correctness"].update({"reporting_only": True, "mode": "continuous"})
+    block = _block(_render_dict(record))
+    assert "gate: reporting only" in _plain(block)
+    assert "(gating)" not in block
