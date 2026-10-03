@@ -164,6 +164,8 @@ def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
     args = seen[0]
     i = args.index("img")
     assert all(a in args[:i] for a in bc.HELDOUT_ARGS)
+    # A shared SELinux label: a private one (Z) would deny the next container.
+    assert bc.HELDOUT_ARGS[1].endswith(":ro,z")
 
 
 def test_python_and_rust_refuse_a_non_integer_format(tmp_path):

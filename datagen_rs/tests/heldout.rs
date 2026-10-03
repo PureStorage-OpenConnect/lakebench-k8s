@@ -207,7 +207,7 @@ fn a_spent_seed_in_the_file_is_refused() {
 }
 
 #[test]
-fn customer360_never_reads_the_file() {
+fn customer360_runs_without_the_file() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-heldout-c360");
     let _ = std::fs::remove_dir_all(&dir);
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
@@ -234,4 +234,15 @@ fn customer360_never_reads_the_file() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn env_names_match_the_literals_the_generator_reads() {
+    // generate.rs reads both variables by literal name (so a source scan sees
+    // every environment read); the constants must name the same variables.
+    assert_eq!(datagen_rs::heldout::ENV, "LB_HELDOUT_HASHES");
+    let src = include_str!("../src/bin/generate.rs");
+    assert!(src.contains("std::env::var(\"LB_HELDOUT_HASHES\")"));
+    assert!(src.contains("const SEED_ENV: &str = \"LB_DATAGEN_SEED\";"));
+    assert!(src.contains("std::env::var(\"LB_DATAGEN_SEED\")"));
 }

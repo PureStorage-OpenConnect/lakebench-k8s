@@ -12,8 +12,13 @@ import re
 from pathlib import Path
 
 LOCK = Path(__file__).resolve().parents[1] / "datagen_rs" / "Cargo.lock"
+TOML = LOCK.with_name("Cargo.toml")
 PACKAGES = 275
 PACKAGE_SET_SHA256 = "345db4d8de0f4c21887f520a857370126cf59946b116114f0a1e1c21a5cd085d"
+#: The [dependencies] table of datagen_rs/Cargo.toml (requirements and
+#: features, comments and order ignored): a feature switched on changes the
+#: image without changing the locked package set.
+DEPENDENCIES_SHA256 = "71232c046aaa036fa7e94de54490d44ed9114b97aeb180caade5a25911ba73c6"
 
 
 def _packages(text: str) -> list[str]:
@@ -40,3 +45,15 @@ def test_hash_reader_crates_are_direct_dependencies():
     root = LOCK.read_text().split('name = "datagen_rs"')[1].split("[[package]]")[0]
     for dep in ("ring", "serde_json"):
         assert f'"{dep}"' in root, dep
+
+
+def test_direct_dependencies_and_features_are_pinned():
+    table = TOML.read_text().split("[dependencies]")[1].split("\n[")[0]
+    lines = sorted(
+        ln.strip() for ln in table.splitlines() if ln.strip() and not ln.strip().startswith("#")
+    )
+    digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    assert digest == DEPENDENCIES_SHA256, (
+        "datagen_rs/Cargo.toml's [dependencies] changed (a requirement or a feature): that "
+        "changes the look image (Freeze-cost: Rebuild); update this pin only with that decision"
+    )
