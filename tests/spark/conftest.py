@@ -20,6 +20,7 @@ earlier test started Spark without it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -239,6 +240,56 @@ def require_jars(*kinds: str) -> SparkJars:
 
 
 # ---------------------------------------------------------------------------
+# Shards (--lb-shard K/N): CI splits each Spark leg and order into N jobs.
+# ---------------------------------------------------------------------------
+
+SHARD_WEIGHTS = HERE / "shard_weights.json"
+
+
+def parse_shard(value: str) -> tuple[int, int]:
+    """``"K/N"`` as (K, N) with 1 <= K <= N; a usage error otherwise."""
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", value)
+    if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+        raise pytest.UsageError(f"--lb-shard takes K/N with 1 <= K <= N, got {value!r}")
+    return int(m.group(1)), int(m.group(2))
+
+
+def read_shard_weights(path: Path = SHARD_WEIGHTS) -> dict[str, float]:
+    """Recorded seconds per test file, keyed by the path from the repository
+    root (``tests/spark/test_x.py``); written by scripts/spark_shard_weights.py
+    from the CI Spark jobs' JUnit reports. Missing file: no weights."""
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text())
+    return {str(k): float(v) for k, v in data.get("seconds", {}).items()}
+
+
+def shard_files(files: Iterable[str], n: int, weights: Mapping[str, float]) -> dict[str, int]:
+    """Each file's shard (1..n), a function of the file set and the weights
+    only, so every shard process computes the same partition and every file
+    lands in exactly one shard. Heaviest file first, each to the shard with
+    the least recorded time so far (the lower number on a tie); a file with
+    no recorded time weighs the median of the recorded ones (1 s if none)."""
+    names = sorted(set(files))
+    known = sorted(weights[f] for f in names if f in weights)
+    default = known[len(known) // 2] if known else 1.0
+    load = [0.0] * n
+    out: dict[str, int] = {}
+    for name in sorted(names, key=lambda f: (-weights.get(f, default), f)):
+        target = min(range(n), key=lambda i: (load[i], i))
+        load[target] += weights.get(name, default)
+        out[name] = target + 1
+    return out
+
+
+def _shard_key(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+# ---------------------------------------------------------------------------
 # pytest hooks
 # ---------------------------------------------------------------------------
 
@@ -250,6 +301,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="run the collected tests in reverse order (QA-2 order check)",
     )
+    parser.addoption(
+        "--lb-shard",
+        default=None,
+        metavar="K/N",
+        help="run only the test files in shard K of N (1-based; tests/spark/conftest.py "
+        "shard_files). Every file is in exactly one shard; combines with --lb-reverse",
+    )
 
 
 _CONFIG: pytest.Config | None = None
@@ -258,6 +316,9 @@ _CONFIG: pytest.Config | None = None
 def pytest_configure(config: pytest.Config) -> None:
     global _CONFIG
     _CONFIG = config
+    shard = config.getoption("--lb-shard", default=None)
+    if shard is not None:
+        parse_shard(shard)
     config.addinivalue_line(
         "markers", "requires_jars(*kinds): needs the 'iceberg' and/or 'delta' test jars"
     )
@@ -420,6 +481,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if xfail is not None:
                 item.add_marker(xfail)
                 item.stash[_KNOWN_BUG] = (mark.args[0], mark.kwargs["match"])
+    shard = config.getoption("--lb-shard", default=None)
+    if shard is not None:
+        k, n = parse_shard(shard)
+        root = config.rootpath
+        keys = {id(item): _shard_key(item.path, root) for item in items}
+        # The files on disk join the collected ones, so the partition is the
+        # same whichever files this process was asked to collect.
+        on_disk = {_shard_key(p, root) for p in HERE.rglob("test_*.py")}
+        assignment = shard_files(on_disk | set(keys.values()), n, read_shard_weights())
+        dropped = [item for item in items if assignment[keys[id(item)]] != k]
+        if dropped:
+            config.hook.pytest_deselected(items=dropped)
+            items[:] = [item for item in items if assignment[keys[id(item)]] == k]
     if config.getoption("--lb-reverse", default=False):
         items.reverse()
 

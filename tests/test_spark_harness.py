@@ -582,3 +582,92 @@ def test_known_bug_does_not_cover_a_jar_failure_inside_the_test(pytester, monkey
     res = _session(pytester, monkeypatch, body)
     res.assert_outcomes(failed=1)
     assert "it needs a jar that is missing" in res.stdout.str()
+
+
+# -- --lb-shard: CI splits each Spark leg and order into shards by file ------
+
+SPARK_DIR = ROOT / "tests" / "spark"
+
+
+def _spark_files() -> set[str]:
+    return {p.relative_to(ROOT).as_posix() for p in SPARK_DIR.rglob("test_*.py")}
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4])
+def test_shards_put_every_spark_file_in_exactly_one_shard(harness, n):
+    files = _spark_files()
+    weights = harness.read_shard_weights()
+    assignment = harness.shard_files(files, n, weights)
+    assert set(assignment) == files
+    assert set(assignment.values()) == set(range(1, n + 1))
+    # A function of the file set and the weights only, not their order.
+    assert harness.shard_files(sorted(files, reverse=True), n, weights) == assignment
+
+
+def test_shards_balance_on_the_recorded_seconds(harness):
+    weights = {"a.py": 100.0, "b.py": 60.0, "c.py": 50.0, "d.py": 10.0}
+    got = harness.shard_files(weights, 2, weights)
+    assert got == {"a.py": 1, "b.py": 2, "c.py": 2, "d.py": 1}
+
+
+def test_a_file_without_a_recorded_time_weighs_the_median(harness):
+    weights = {"a.py": 10.0, "b.py": 30.0, "c.py": 50.0}
+    # new.py weighs 30: after c(50) -> 1 and b(30) -> 2, new(30, "n" > "b") -> 2,
+    # then a(10) -> 1.
+    got = harness.shard_files([*weights, "new.py"], 2, weights)
+    assert got == {"c.py": 1, "b.py": 2, "new.py": 2, "a.py": 1}
+
+
+@pytest.mark.parametrize("value", ["0/2", "3/2", "1", "a/b", "1/0", "-1/2"])
+def test_bad_shard_values_are_usage_errors(harness, value):
+    with pytest.raises(pytest.UsageError, match="--lb-shard"):
+        harness.parse_shard(value)
+
+
+def test_the_recorded_weights_name_spark_test_files(harness):
+    """Keyed the way the hook keys a collected file, or balancing is off."""
+    weights = harness.read_shard_weights()
+    files = _spark_files()
+    assert weights, "tests/spark/shard_weights.json has no seconds"
+    assert len(set(weights) & files) >= len(files) // 2, sorted(set(weights) - files)[:5]
+
+
+_SHARD_BODY = "def test_a():\n    pass\n\ndef test_b():\n    pass\n"
+
+
+def _collected(pytester, monkeypatch, *args: str) -> tuple[list[str], str]:
+    res = _session(pytester, monkeypatch, "", "--collect-only", "-q", *args)
+    assert res.ret == 0, res.stdout.str()
+    return [ln for ln in res.stdout.lines if "::" in ln], res.stdout.str()
+
+
+def test_lb_shard_partitions_the_files_and_keeps_the_reverse_order(pytester, monkeypatch):
+    pytester.makepyfile(**{f"test_s{i}": _SHARD_BODY for i in range(5)})
+    everything, _ = _collected(pytester, monkeypatch)
+    assert len(everything) == 10
+    shards = []
+    for k in (1, 2):
+        forward, out = _collected(pytester, monkeypatch, "--lb-shard", f"{k}/2")
+        backward, _ = _collected(pytester, monkeypatch, "--lb-shard", f"{k}/2", "--lb-reverse")
+        assert forward and backward == forward[::-1]
+        assert forward == [t for t in everything if t in forward]
+        assert f"{10 - len(forward)} deselected" in out
+        shards.append(forward)
+    assert sorted(shards[0] + shards[1]) == sorted(everything)
+    files = [{t.split("::")[0] for t in s} for s in shards]
+    assert not files[0] & files[1]
+
+
+def test_lb_shard_reads_the_weights_beside_the_harness(pytester, monkeypatch):
+    pytester.makepyfile(**{f"test_s{i}": _SHARD_BODY for i in range(4)})
+    (pytester.path / "shard_weights.json").write_text(
+        '{"seconds": {"test_s2.py": 1000, "test_s0.py": 1, "test_s1.py": 1, "test_s3.py": 1}}'
+    )
+    first, _ = _collected(pytester, monkeypatch, "--lb-shard", "1/2")
+    assert {t.split("::")[0] for t in first} == {"test_s2.py"}
+
+
+def test_lb_shard_rejects_a_bad_value(pytester, monkeypatch):
+    res = _session(pytester, monkeypatch, _SHARD_BODY, "--lb-shard", "3/2")
+    assert res.ret == pytest.ExitCode.USAGE_ERROR
+    assert "--lb-shard takes K/N" in res.stderr.str()

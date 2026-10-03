@@ -304,6 +304,7 @@ make test-spark                      # the fetch below, then the tier with LB_RE
 jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
 LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
 pytest tests/spark -q --lb-reverse   # the same tests in reverse order
+pytest tests/spark -q --lb-shard 1/2 # the test files in shard 1 of 2, as one CI job runs
 ```
 
 Two fixtures give a test a Spark with the jars. The JVM starts once per
@@ -333,8 +334,18 @@ child with `LB_PARITY_MUTATE` set, which makes `tests/spark/_parity_mutation.py`
 null one business column in that MERGE's source, and asserts the guard
 names the failure. A new guard child calls `_parity_mutation.install()`
 before it imports the stream script.
-`--lb-reverse` is defined in `tests/spark/conftest.py`, so pass it with
-`tests/spark` (or a file in it) on the command line.
+`--lb-reverse` and `--lb-shard` are defined in `tests/spark/conftest.py`,
+so pass them with `tests/spark` (or a file in it) on the command line.
+`--lb-shard K/N` keeps the test files in shard K of N and deselects the
+rest. Every file is in exactly one shard, and the split depends only on the
+files under `tests/spark` and the recorded seconds per file in
+`tests/spark/shard_weights.json` (heaviest file first, each to the shard
+with the least time so far; a file with no recorded time weighs the
+median). With `--lb-reverse` a shard runs its own tests backwards. The
+weights only balance the shards, so a new test file needs no entry; refresh
+them from the CI jobs' `spark-junit-*` artifacts with
+`python scripts/spark_shard_weights.py --source "<run id>" <reports>` when
+the shard times drift apart.
 
 ## Adding a recipe
 
@@ -526,12 +537,16 @@ on one Python version does not cancel the other (`fail-fast: false`). On 3.13 it
 coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
 per-file report as the `coverage-unit` artifact for 30 days; floors are
 raised from that report, never lowered. The Spark tier runs on two legs,
-`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, each as two parallel
-jobs: one runs `pytest tests/spark` forward and one with `--lb-reverse`,
-each under a 70-minute budget. Every job fetches the jars pinned in
-`tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py` and runs with
-`LB_REQUIRE_JARS=1`; the 4.0 forward job checks the Spark coverage floors
-with `scripts/check_coverage.py --suite spark`. A failing job uploads every
+`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, forward and with
+`--lb-reverse`, and each of those four passes is split into two jobs with
+`--lb-shard 1/2` and `2/2`: eight parallel jobs, each under a
+50-minute budget. Every job fetches the jars pinned in
+`tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py`, runs with
+`LB_REQUIRE_JARS=1` and keeps its JUnit report as a `spark-junit-*`
+artifact. The two 4.0 forward jobs collect coverage, and the "Spark
+coverage floors" job combines their data and checks the floors with
+`scripts/check_coverage.py --suite spark`, keeping the report as the
+`coverage-spark` artifact. A failing job uploads every
 `spark-subprocess.log`. The "AML statistics (slow)" job runs
 the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
 check and the Spark fidelity gate over silver) on Python 3.11 with the pinned

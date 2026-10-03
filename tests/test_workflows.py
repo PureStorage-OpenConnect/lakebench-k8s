@@ -14,6 +14,7 @@ import ast
 import importlib.util
 import math
 import re
+import sys
 from pathlib import Path
 
 import yaml
@@ -715,15 +716,98 @@ def test_xdist_is_pinned_in_dev():
     )
 
 
-def test_spark_tier_runs_each_leg_forward_and_reverse_in_parallel_jobs():
+def _spark_job() -> tuple[dict, str, int]:
+    """The spark-tests job, its pytest line and its shard count."""
     job = _load("ci.yml")["jobs"]["spark-tests"]
-    entries = job["strategy"]["matrix"]["include"]
-    pairs = {(e["pyspark"], e["order"]) for e in entries}
-    assert pairs == {(v, o) for v in ("4.0.1", "4.1.1") for o in ("forward", "reverse")}
-    for e in entries:
-        assert ("--lb-reverse" in e["args"]) == (e["order"] == "reverse"), e
-        assert ("--cov=" in e["args"]) == (e["pyspark"] == "4.0.1" and e["order"] == "forward"), e
+    step = next(s for s in job["steps"] if s.get("name") == "Run Spark tests")
+    run = " ".join(str(step["run"]).split())
+    m = re.search(r"--lb-shard \$\{\{ matrix\.shard \}\}/(\d+) ", run + " ")
+    assert m, "the Spark tests do not run one --lb-shard K/N per job"
+    return job, run, int(m.group(1))
+
+
+def test_spark_tier_runs_each_leg_forward_and_reverse_in_sharded_parallel_jobs():
+    job, run, n = _spark_job()
+    matrix = job["strategy"]["matrix"]
+    assert n >= 2
+    assert matrix["pyspark"] == ["4.0.1", "4.1.1"]
+    assert matrix["order"] == ["forward", "reverse"]
+    # Every shard of every (leg, order) pass is a job.
+    assert matrix["shard"] == list(range(1, n + 1))
+    assert {(e["pyspark"], e["leg"]) for e in matrix["include"]} == {
+        ("4.0.1", "4.0"),
+        ("4.1.1", "4.1"),
+    }
+    assert f"/{n})" in job["name"] and f"/{n})" in run
+    assert "${{ matrix.order == 'reverse' && '--lb-reverse' || '' }}" in run
+    cov = "${{ matrix.leg == '4.0' && matrix.order == 'forward' && '--cov=src/lakebench/spark/scripts --cov-report=' || '' }}"
+    assert cov in run
+    assert run.count("--cov") == 2, "coverage only on the 4.0 forward shards"
+    assert job["env"]["LB_REQUIRE_JARS"] == "1"
     budgeted = {n: b for n, _, _, b in _budgeted_steps()}
     assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 4200
-    floors = next(s for s in job["steps"] if s.get("name") == "Coverage floors")
-    assert floors["if"] == "matrix.leg == '4.0' && matrix.order == 'forward'"
+    assert not any(s.get("name") == "Coverage floors" for s in job["steps"])
+
+
+def test_spark_coverage_floors_are_checked_on_every_4_0_forward_shard_combined():
+    job, _, n = _spark_job()
+    data = job["env"]["COVERAGE_FILE"]
+    assert data == "coverage-spark-${{ matrix.shard }}.data"
+    upload = next(s for s in job["steps"] if s.get("name") == "Upload coverage data")
+    assert upload["if"] == "matrix.leg == '4.0' && matrix.order == 'forward'"
+    assert upload["with"]["path"] == data
+    assert upload["with"]["name"] == "coverage-spark-data-${{ matrix.shard }}"
+    assert upload["with"]["if-no-files-found"] == "error"
+
+    jobs = _load("ci.yml")["jobs"]
+    cov = jobs["spark-coverage"]
+    assert cov["needs"] == ["spark-tests"]
+    assert "spark-coverage" in jobs["build"]["needs"]
+    runs = [" ".join(str(s.get("run", "")).split()) for s in cov["steps"]]
+    download = next(s for s in cov["steps"] if "download-artifact" in str(s.get("uses")))
+    assert download["with"]["pattern"] == "coverage-spark-data-*"
+    combine = next(r for r in runs if r.startswith("test -f"))
+    for k in range(1, n + 1):
+        f = f"coverage-data/coverage-spark-{k}.data"
+        assert f"test -f {f}" in combine and combine.count(f) == 2, f
+    assert "coverage json --data-file=coverage-spark.data -o coverage-spark.json" in combine
+    assert "python scripts/check_coverage.py --suite spark coverage-spark.json" in runs
+    # The combining coverage is the one the shards measured with.
+    pin = re.search(r'"(coverage==[\d.]+)"', (ROOT / "pyproject.toml").read_text())
+    assert pin and f'pip install "{pin.group(1)}"' in runs
+
+
+def _spark_harness():
+    spec = importlib.util.spec_from_file_location(
+        "lb_spark_harness_wf", ROOT / "tests" / "spark" / "conftest.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclasses resolve the module by name
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_ci_shards_cover_every_spark_test_file_exactly_once():
+    """The shards CI runs for each (leg, order) pass partition tests/spark:
+    a file in no shard would silently never run."""
+    job, _, n = _spark_job()
+    harness = _spark_harness()
+    files = {p.relative_to(ROOT).as_posix() for p in (ROOT / "tests" / "spark").rglob("test_*.py")}
+    assert len(files) > 50
+    assignment = harness.shard_files(files, n, harness.read_shard_weights())
+    shards = [
+        {f for f, k in assignment.items() if k == shard}
+        for shard in job["strategy"]["matrix"]["shard"]
+    ]
+    assert all(shards), "an empty shard"
+    assert set().union(*shards) == files
+    assert sum(len(s) for s in shards) == len(files)
+
+
+def test_no_ci_artifact_is_taken_by_the_release_download():
+    """release.yml calls ci.yml and downloads the pattern lakebench-*."""
+    for job in _load("ci.yml")["jobs"].values():
+        for step in job.get("steps") or []:
+            if "upload-artifact" in str(step.get("uses")):
+                assert not str(step["with"]["name"]).startswith("lakebench-"), step
