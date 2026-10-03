@@ -1,4 +1,4 @@
-//! S3_PATH_STYLE, S3_VERIFY_SSL and S3_CA_CERT reach the S3 client (DAT-3);
+//! S3_PATH_STYLE, S3_VERIFY_SSL and S3_CA_CERT reach the S3 client;
 //! read back from the builder, no network.
 
 use datagen_rs::s3sink::{S3Cfg, S3Sink, Transport};

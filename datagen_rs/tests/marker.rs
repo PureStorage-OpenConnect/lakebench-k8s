@@ -1,5 +1,5 @@
-//! The per-node corpus marker, `--print-resolved-args` and `--version`
-//! (DAT-3). The marker's `corpus_args` is what the generator applied, so an
+//! The per-node corpus marker, `--print-resolved-args` and `--version`.
+//! The marker's `corpus_args` is what the generator applied, so an
 //! omitted flag and the same flag at its default hash the same, and every
 //! writer setting that changes bytes is in it.
 

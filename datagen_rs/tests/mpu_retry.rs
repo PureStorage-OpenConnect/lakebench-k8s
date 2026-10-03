@@ -1,6 +1,6 @@
 //! A failed multipart completion is retried by rebuilding the file from the
 //! same batch on the same key, and the object written is byte-identical to a
-//! first-time success (DAT-3 "MPU complete retry").
+//! first-time success.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
