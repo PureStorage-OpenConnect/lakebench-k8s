@@ -33,6 +33,7 @@ import uuid
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -288,22 +289,13 @@ def main() -> None:
         spark.sql(ddl)
         log(f"Bootstrapped gold.{name}")
 
-    # LB-125 upgrade guard: on a REUSED catalog whose gold.alerts predates
-    # detected_ts, `CREATE TABLE IF NOT EXISTS` is a no-op, and the detection
-    # loop's positional `INSERT INTO gold.alerts SELECT *` (now 18 columns)
-    # would fail against a 17-column table. Check the live schema and add the
-    # column only when it is genuinely missing -- Spark/Iceberg has no
-    # `ADD COLUMN IF NOT EXISTS` for columns (that clause is for PARTITION), so
-    # a blind ALTER would ParseException, and the plain `ADD COLUMNS` would
-    # error if the column already exists. On a fresh table (created 18-col by
-    # the DDL above) this reads the column present and does nothing.
-    try:
-        _alert_cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
-        if "detected_ts" not in _alert_cols:
-            spark.sql(f"ALTER TABLE {CATALOG}.{GOLD_ALERTS} ADD COLUMNS (detected_ts TIMESTAMP)")
-            log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
-    except Exception as e:  # noqa: BLE001
-        log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+    # Reused-catalog upgrade: `CREATE TABLE IF NOT EXISTS` is a no-op on an
+    # older gold.alerts (without detected_ts or reason_codes), and the
+    # detection loop's positional `INSERT INTO gold.alerts SELECT *` needs
+    # the table's columns to be ALERT_COLUMNS in order. Missing trailing
+    # columns are appended; any other difference fails the job here rather
+    # than writing columns into each other.
+    ensure_alert_columns(spark, f"{CATALOG}.{GOLD_ALERTS}", ALERT_COLUMNS)
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )

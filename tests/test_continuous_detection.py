@@ -125,8 +125,7 @@ def test_bootstraps_all_gold_tables_in_continuous_mode():
         assert ddl in src, f"continuous bootstrap missing {ddl}"
     # All five must be imported from the batch module and issued in the bootstrap.
     assert "for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS)" in src
-    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in src
-    assert '"detected_ts" not in cols' in src
+    assert "ensure_alert_columns(spark," in src  # reused-catalog upgrade of gold.alerts
 
 
 def test_continuous_logs_cumulative_alert_count_for_gate():

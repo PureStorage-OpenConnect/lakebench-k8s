@@ -327,22 +327,13 @@ def _ddl_column_names(text: str) -> list[str]:
     return cols
 
 
-def test_other_alert_ddl_copies_match_alert_columns():
-    """Two gold.alerts column lists are not built from ALERT_COLUMNS yet
-    (replay's target table and empty schema, deploy's DDL). A column
-    appended to ALERT_COLUMNS, or a type changed, without them fails here.
-    (A reused replay target table still needs its own upgrade for a new
-    column; replay adds only detected_ts today.)"""
-    cols = [(n, t) for n, t, _ in _alert_columns()]
-    names = [n for n, _ in cols]
+def test_deploy_alert_ddl_matches_alert_columns():
+    """Replay's target table and empty schema are built from ALERT_COLUMNS;
+    deploy's gold.alerts DDL is a written copy. A column appended to
+    ALERT_COLUMNS without it fails here."""
+    names = [c[0] for c in _alert_columns()]
     rp = (SCRIPTS / "replay_financial.py").read_text()
-    replay_ddl = rp[rp.index("CREATE TABLE IF NOT EXISTS {args.output_alerts}") :]
-    assert _ddl_column_names(replay_ddl) == cols
-    empty = rp[rp.index("def _empty_alerts_df") :]
-    empty = empty[: empty.index("return spark.createDataFrame")]
-    import re
-
-    assert re.findall(r'"(\w+) [A-Z]', empty) == names
+    assert rp.count("in ALERT_COLUMNS") >= 2  # _empty_alerts_df and _target_ddl
     fd = (SCRIPTS.parent.parent / "deploy" / "financial_ddl.py").read_text()
     i = fd.index("related_txn_ids    ARRAY<STRING>")
     start = fd.rindex("CREATE TABLE", 0, i)

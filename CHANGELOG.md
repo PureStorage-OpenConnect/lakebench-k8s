@@ -454,6 +454,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   nameless-config refusals already pointed here. `scripts/upgrading.py`
   also requires a breaking-changes entry for each config value 1.7 refuses
   that 1.6 accepted (`config/refused_keys.py`).
+- **Every AML alert carries reason codes.** `gold.alerts` gains a last
+  column, `reason_codes`: the rule's base code, then the conditions that
+  held (for example `W2_BENEFICIARY_FAN_IN`, `W5_RESCREEN`,
+  `W7_SYNTHETIC_CORRIDOR`). Batch scoring adds per-code recall, false
+  positives and alert counts (`financial_scoring.recall_by_code`,
+  `fp_by_code`, `alerts_by_code`). A gold.alerts table from an earlier
+  release gains the missing trailing columns at the next run; a table whose
+  columns are in another order now stops the gold job instead of taking
+  alerts positionally into the wrong columns. No alert, existing column or
+  score changes. See [aml-scoring.md](docs/aml-scoring.md#reason-codes).
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's

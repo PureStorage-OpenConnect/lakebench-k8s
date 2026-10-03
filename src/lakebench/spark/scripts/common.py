@@ -2922,3 +2922,38 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
             f"stages={len(stages)} {flags} name={r['name']}"
         )
     return rows
+
+
+class AlertColumnsError(RuntimeError):
+    """An alerts table whose columns are not the expected ones in order."""
+
+
+def ensure_alert_columns(spark, fq_table, columns):
+    """Bring alerts table *fq_table* up to *columns* ((name, type, ...) in
+    table order, detection_rules.ALERT_COLUMNS): add each missing column, in
+    order, through ensure_column_with_retry, then check the table holds
+    exactly those (name, type) pairs in that order.
+
+    A reused catalog's table from an older release lacks only trailing
+    columns (detected_ts, reason_codes), which ALTER ... ADD COLUMNS appends
+    in place. Raises AlertColumnsError when the table's columns differ in
+    any other way: the detection loop writes alerts with a positional
+    INSERT ... SELECT *, so a reordered or retyped table would take columns
+    into each other's slots. Returns the names added.
+    """
+    added = []
+    for name, sql_type, *_ in columns:
+        if ensure_column_with_retry(spark, fq_table, name, sql_type):
+            added.append(name)
+            log(f"[startup] added {name} to {fq_table} (reused-catalog upgrade)")
+    from pyspark.sql.types import _parse_datatype_string
+
+    got = [(f.name, f.dataType) for f in spark.table(fq_table).schema.fields]
+    want = [(name, _parse_datatype_string(sql_type)) for name, sql_type, *_ in columns]
+    if got != want:
+        raise AlertColumnsError(
+            f"{fq_table} columns {[(n, t.simpleString()) for n, t in got]} are not "
+            f"{[(n, t.simpleString()) for n, t in want]} in order; alerts are written "
+            "positionally, so this table cannot take them (drop or rebuild it)"
+        )
+    return added

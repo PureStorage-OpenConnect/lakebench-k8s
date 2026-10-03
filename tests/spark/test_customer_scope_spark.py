@@ -397,3 +397,20 @@ def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
     assert len(calls) == 1
     assert shared == alone
     assert all(f[0] > 0 for f in alone.values()), alone
+
+
+@pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
+def test_every_alert_carries_its_base_code_first(spark, rule):
+    """AML-5: every alert of every rule carries reason codes, its rule's base
+    code first, all from the rule's vocabulary (the per-code union identity
+    rests on the base code; without _alert_frame's guard W8, which has no
+    conditional code, would write empty lists)."""
+    from aml_reason_codes import BASE_CODE, REASON_CODES
+
+    txns, entities = _silver(spark)
+    rows = _run(spark, rule, txns, entities).select("reason_codes").collect()
+    assert rows, rule
+    for r in rows:
+        codes = list(r["reason_codes"])
+        assert codes and codes[0] == BASE_CODE[rule], (rule, codes)
+        assert set(codes) <= set(REASON_CODES[rule]), (rule, codes)

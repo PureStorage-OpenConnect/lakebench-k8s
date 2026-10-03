@@ -430,7 +430,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     run_id             STRING NOT NULL,          -- lakebench execution id
     narrative          STRING,                   -- regulator-facing summary (optional in v1)
     evidence           MAP<STRING, STRING>,      -- rule-specific evidence pointers
-    detected_ts        TIMESTAMP                 -- LB-125: wall-clock at rule execution (freshness/TTD)
+    detected_ts        TIMESTAMP,                -- LB-125: wall-clock at rule execution (freshness/TTD)
+    reason_codes       ARRAY<STRING>             -- base code of the rule, then its conditional codes
 )
 USING iceberg
 PARTITIONED BY (months(alert_ts))

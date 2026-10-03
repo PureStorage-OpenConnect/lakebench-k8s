@@ -258,7 +258,8 @@ def test_every_aml_json_listed_or_excluded():
 
 def test_ships_the_same_bytes_as_v16():
     """The role maps together ship exactly the v1.6 single map's files and
-    bytes (freeze cost None: frozen scripts and the prereg ship unchanged)."""
+    bytes, plus the files v1.7 adds (freeze cost None: frozen scripts and the
+    prereg ship unchanged)."""
     v16_scripts = [
         "common.py",
         "bronze_verify.py",
@@ -286,6 +287,8 @@ def test_ships_the_same_bytes_as_v16():
         "aml_features.py",
         "tm_operations.py",
     ]
+    # Files v1.7 adds to the maps (none frozen): the AML reason-code vocabulary.
+    v16_scripts += ["aml_reason_codes.py"]
     want = {n: (PKG / "spark/scripts" / n).read_bytes() for n in v16_scripts}
     want["reference_score.py"] = (PKG / "aml/reference_score.py").read_bytes()
     want["fidelity_gate.py"] = (PKG / "aml/fidelity_gate.py").read_bytes()

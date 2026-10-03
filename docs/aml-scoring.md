@@ -347,6 +347,45 @@ matching role, so accidentally scoring against them is not possible.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
+## Reason codes
+
+Every alert in `gold.alerts` carries `reason_codes` (the last column): its
+rule's base code first, then each code below whose condition holds on the
+alert. A code never changes which alerts a rule raises. The conditional codes
+reuse cut points the rules already have (the HIGH priority threshold, the
+screen's exact/fuzzy split, the rescreen pass, the corridor list's risk
+tier); none is a threshold of its own.
+
+| Rule | Base code | Conditional codes |
+|---|---|---|
+| W1_connected_components | `W1_COMPONENT` | `W1_LARGE_COMPONENT` (component of 8 or more entities, HIGH priority) |
+| W2_structuring | `W2_SUB_THRESHOLD_BURST` | `W2_BENEFICIARY_FAN_IN` (beneficiary kind), `W2_HIGH_COUNT` (6 or more in-band payments, HIGH) |
+| W3_round_tripping | `W3_CYCLE` | `W3_LONG_CYCLE` (4 or more hops, HIGH) |
+| W4_risk_propagation | `W4_FAST_PASS_THROUGH` | `W4_MULTI_CHAIN` (3 or more chains, HIGH) |
+| W5_sanctions_match | `W5_SANCTIONS_HIT` | `W5_EXACT`, `W5_FUZZY` (name match), `W5_RESCREEN` (raised by a list version) |
+| W6_pep_counterparty | `W6_PEP_HIT` | `W6_EXACT`, `W6_FUZZY` |
+| W7_cross_border_high_risk | `W7_HIGH_RISK_CORRIDOR` | `W7_FATF_BLACK`, `W7_FATF_GREY`, `W7_SYNTHETIC_CORRIDOR` |
+| W8_dormant_reactivation | `W8_DORMANCY_GAP` | none |
+| W17_layering_chain | `W17_CHAIN` | `W17_LONG_CHAIN` (5 or more hops, HIGH) |
+
+The generator's home countries include none of the FATF-listed
+jurisdictions, so on generated corpora W7 alerts carry
+`W7_SYNTHETIC_CORRIDOR` and the two FATF codes are listed with no alerts.
+
+Batch scoring splits each designated rule's recall and false-positive rate by
+code (`financial_scoring.recall_by_code`, `fp_by_code`, `alerts_by_code`,
+each `{rule: {code: value}}`): a code's recall is the share of the rule's
+target typology's instances with a planted payment in an alert of that rule
+carrying the code, and its false-positive rate is 1 minus the share of the
+rule's alerts carrying the code that touch a payment of that typology (an
+alert counts once per code it carries; null when no alert carries the code).
+Because every alert carries its base code, the base code's figures are the
+rule's own. Only rules that ran are split. When an alert carries no code, or
+the alerts predate the column, the blocks are empty and
+`financial_scoring.by_code_status` says why. `reason_code_vocabulary` is a
+digest of the code list the run used. A rule's evidence-cap label (below)
+applies to each of its codes. Continuous runs are not split by code in v1.7.
+
 ## Per-alert evidence caps
 
 Some rules cut an alert's related-transaction list so one alert row cannot
