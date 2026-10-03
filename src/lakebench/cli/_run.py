@@ -2701,6 +2701,8 @@ def _run_once(
             _cycle_ts_start = ""
             _cycle_ts_end = ""
             _cycle_dg_elapsed = 0.0
+            _cycle_dg_start = ""
+            _cycle_dg_end = ""
 
             _cycle_dg_skipped = False
             # Cycle header for multi-cycle runs
@@ -2733,6 +2735,8 @@ def _run_once(
                         stale_record=_cycle_stale_record,
                     )
                     _interrupt.creating("Job", "lakebench-datagen")
+                    # Time to value leaves the cycle's datagen out (CycleMetrics).
+                    _cycle_dg_start = utc_now().isoformat()
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
                     if datagen_result.status == DeploymentStatus.SUCCESS:
                         _interrupt.datagen_created()
@@ -2774,6 +2778,7 @@ def _run_once(
                             pipeline_success = False
                             break
                         _interrupt.finished("Job", "lakebench-datagen")
+                        _cycle_dg_end = utc_now().isoformat()
                         _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
                         _cycle_series_after(collector.current_run, cfg, _series_mark)
                         if _series_mark == "conflict":
@@ -3080,6 +3085,8 @@ def _run_once(
                     timestamp_end=_cycle_ts_end,
                     datagen_elapsed_seconds=_cycle_dg_elapsed,
                     datagen_skipped=_cycle_dg_skipped,
+                    datagen_start=_cycle_dg_start,
+                    datagen_end=_cycle_dg_end,
                     jobs=list(_cycle_jobs),
                     table_health=_cycle_health,
                 )
