@@ -291,9 +291,11 @@ rounds, so an older run in which a query failed in some rounds and not
 others reads blended too. When the rounds are blended, the aggregate
 benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
 set of every query name the rounds ran, even when one query failed in every
-round). `compare` marks a continuous run's `composite_qph`,
-`in_stream_composite_qph` and `qph_degradation_pct` `not_assessed` with the
-hint "rounds ran different query sets (A)", and the perf gate and
+round). `compare` marks a continuous run's `composite_qph` and
+`in_stream_composite_qph` `not_assessed` with the hint "rounds ran
+different query sets (A)"; such a run records no `qph_degradation_pct`
+(`scores.qph_degradation_withheld` says why; a record from before 1.7 that
+carries one reads `not_assessed` the same way). The perf gate and
 `reproduce` leave the in-stream QpH out. When every round missed the same
 query, the medians are over a smaller set than the run declared: `compare`
 marks the same rows `not_assessed` ("every round missed a query"), and
