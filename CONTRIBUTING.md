@@ -128,7 +128,7 @@ CI runs on every push and pull request. The first signal is the Lint job
 (`make check-fast` under an 8-minute budget); the unit tests on Python 3.10
 and 3.13 have a 15-minute budget, the Spark tier runs eight parallel jobs
 (two pyspark lines, each forward and reversed, each split in two by test
-file) of up to 48 minutes each,
+file) of up to 52 minutes each,
 and the Rust and secret-scan jobs run alongside; the package is built once
 they all pass. A job that runs over its budget fails. The full list is in
 [What CI runs](docs/development.md#what-ci-runs).

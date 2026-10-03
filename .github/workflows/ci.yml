@@ -325,20 +325,21 @@ jobs:
   # tests took 30 to 52 min on 2026-10-02 (37011145001, 37020573180); by
   # 2026-10-03 the tier had 455 tests (collected at a5923850) and Spark jobs in train runs failed
   # only on the 70-minute budget (4239 to 4265 s; 37139482365, 37145033026).
-  # Sharded, the test step took 1064 to 2096 s in 37153895161 (4.0 forward
-  # 1307 and 2096 s, 4.0 reverse 1064 and 1943, 4.1 forward 2000 and 2073,
-  # 4.1 reverse 2047 and 2034). On the 4.1 line the split is within 3% of an
+  # Sharded, the test step took (shard 1, shard 2, in seconds): 4.0 forward
+  # 1307, 2096 and 2283, 2005; 4.0 reverse 1064, 1943 and (runner shut down
+  # at 1583), 1935; 4.1 forward 2000, 2073 and 2037, 2128; 4.1 reverse 2047,
+  # 2034 and 1498, 2034 (37153895161, 37156481202). The same shard took 1307
+  # and 2283 s on two runners. On the 4.1 line the split is within 3% of an
   # even one; on the 4.0 line it is not (one weight per file serves both
-  # lines), and its forward 2/2 is the slowest job. The budget is 48 minutes
-  # (scripts/ci_budget.py), 37% above that shard, with timeout-minutes 72 as
-  # the backstop.
+  # lines). The budget is 52 minutes (scripts/ci_budget.py), 37% above the
+  # slowest shard seen, with timeout-minutes 78 as the backstop.
   # Coverage is collected on the two 4.0 forward shards and combined in the
   # "Spark coverage floors" job below. Each job keeps its JUnit report, the
   # input of scripts/spark_shard_weights.py.
   spark-tests:
     name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 72
+    timeout-minutes: 78
     strategy:
       fail-fast: false
       matrix:
@@ -405,7 +406,7 @@ jobs:
       # or only before, another one.
       - name: Run Spark tests
         run: >-
-          python scripts/ci_budget.py --seconds 2880
+          python scripts/ci_budget.py --seconds 3120
           --label "Spark tests (pyspark ${{ matrix.pyspark }}, ${{ matrix.order }}, ${{ matrix.shard }}/2)" --
           pytest tests/spark -q -rsxX -p no:cacheprovider --lb-shard ${{ matrix.shard }}/2
           --basetemp="${{ runner.temp }}/spark-${{ matrix.order }}"

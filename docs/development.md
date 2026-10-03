@@ -541,7 +541,7 @@ raised from that report, never lowered. The Spark tier runs on two legs,
 `pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, forward and with
 `--lb-reverse`, and each of those four passes is split into two jobs with
 `--lb-shard 1/2` and `2/2`: eight parallel jobs, each under a
-48-minute budget. Every job fetches the jars pinned in
+52-minute budget. Every job fetches the jars pinned in
 `tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py`, runs with
 `LB_REQUIRE_JARS=1` and keeps its JUnit report as a `spark-junit-*`
 artifact. The two 4.0 forward jobs collect coverage, and the "Spark

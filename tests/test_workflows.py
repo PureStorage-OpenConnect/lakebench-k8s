@@ -746,9 +746,9 @@ def test_spark_tier_runs_each_leg_forward_and_reverse_in_sharded_parallel_jobs()
     assert run.count("--cov") == 2, "coverage only on the 4.0 forward shards"
     assert job["env"]["LB_REQUIRE_JARS"] == "1"
     budgeted = {n: b for n, _, _, b in _budgeted_steps()}
-    # Sized per shard (2880 s, 37% above the slowest shard in 37153895161),
-    # not for an unsharded pass (4200 s).
-    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 2880
+    # Sized per shard (3120 s, 37% above the slowest shard in 37153895161
+    # and 37156481202), not for an unsharded pass (4200 s).
+    assert budgeted.get("spark-tests", 0) and budgeted["spark-tests"] <= 3120
     assert not any(s.get("name") == "Coverage floors" for s in job["steps"])
 
 
