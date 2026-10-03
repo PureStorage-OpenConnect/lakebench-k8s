@@ -129,10 +129,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   config's; it exits 4 (`s3.unreachable`) when bronze cannot be read. A
   single-cycle run over a corpus with no marker (1.6, or an older
   `generate`) proceeds as before and records `cycle_series.marker:
-  "absent"`, unless the corpus holds files of later cycles. Every clear of
+  "absent"`, unless the corpus holds files of later cycles. The clears of
   the datagen prefix (`--regenerate`, a fresh generate, a continuous reset,
-  `clean bronze`) first writes a marker that says a clear is under way and
-  keeps it until the clear is done; a generate whose marker another run
+  `clean bronze`) first write a marker that says a clear is under way and
+  keep it until the clear is done; a generate whose marker another run
   replaced exits 3. A multi-cycle `--skip-generate` now reuses a finished
   multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
   it said. An AML multi-cycle `--skip-generate` is refused (exit

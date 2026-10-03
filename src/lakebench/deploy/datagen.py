@@ -389,9 +389,9 @@ def bronze_prefix_gate(
     replaced, so the silver-state data clock is cleared.
 
     Every generate takes it before its first datagen Job: ``generate``,
-    ``run --generate`` and a multi-cycle run before cycle 0. A leftover
-    corpus series marker (``_corpus/series.json``) makes the prefix
-    non-empty like any other object.
+    ``run --generate`` and a multi-cycle run before cycle 0. A prefix holding
+    only the corpus series marker (``_corpus/series.json``, left by a clear
+    or a generate that stopped) counts as empty (``_holds_corpus``).
     """
     bucket = cfg.platform.storage.s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/")

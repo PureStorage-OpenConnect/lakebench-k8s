@@ -254,10 +254,10 @@ Every generate writes a corpus series marker,
 datagen Job finished, each cycle's window, the generation parameters and the
 image digest the datagen pods ran. It is written when the generate starts,
 with no cycle finished, and updated after each cycle's Job succeeds, so an
-interrupted generate leaves a marker that says so; every clear of the prefix
+interrupted generate leaves a marker that says so; the clears of the prefix
 (`--regenerate`, a fresh generate, a continuous reset, `clean bronze`) first
-writes a marker that says a clear is under way and keeps it until the clear
-is done. A prefix holding only that marker counts as empty. A run that reuses the
+write a marker that says a clear is under way and keep it until the clear is
+done. A prefix holding only that marker counts as empty. A run that reuses the
 corpus is refused (exit 3) when the marker is unfinished or describes
 another cycle count, window or generation than the config's; see "Reusing a
 corpus" under `run` in the [CLI reference](cli-reference.md#run). No Spark
