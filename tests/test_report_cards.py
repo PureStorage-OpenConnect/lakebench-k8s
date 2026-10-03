@@ -316,13 +316,20 @@ class TestReadFirstPanel:
             n_runs=3,
         )
         assert "Read this first" in html
-        # Verdict, headline, corpus label, n, limits present, record digest.
-        assert "Verdict:" in html
-        assert "Headline:" in html
-        assert "Corpus:" in html
-        assert ">n:</span>" in html or "n:</span>" in html
-        assert "Limits present:" in html
-        assert "Record digest:" in html
+        # The front matter, in its order (reports/front_matter.py).
+        labels = [
+            "Verdict:",
+            "Headline:",
+            "Evidence class:",
+            "Corpus:",
+            "Support state:",
+            "Binding caps:",
+            "n:",
+            "Provenance:",
+            "Digest:",
+        ]
+        positions = [html.index(f">{label}</span>") for label in labels]
+        assert positions == sorted(positions)
 
     def test_corpus_label_includes_role_and_id_prefix(self, tmp_path):
         storage, m = _metrics_with_experiment(tmp_path, corpus_role="evaluation")
@@ -336,22 +343,20 @@ class TestReadFirstPanel:
         assert "evaluation" in html
         assert "abc123abc123" in html  # first 12 chars of the corpus id
 
-    def test_provenance_label_at_top(self, tmp_path):
+    def test_fixed_stamp_is_gone(self, tmp_path):
+        # The evidence class comes from the look record in the front
+        # matter; the fixed "single-owner recorded" stamp is removed.
         storage, m = _metrics_with_experiment(tmp_path)
-        gen = ReportGenerator(storage.metrics_dir)
-        html = gen._generate_html(m, platform_metrics=None)
-        # The provenance label sits above the header, so it appears before
-        # the <h1> tag in the document flow.
-        h1 = html.index("<h1>")
-        prov = html.index("internal benchmark, single-owner recorded")
-        assert prov < h1
+        html = ReportGenerator(storage.metrics_dir)._generate_html(m, platform_metrics=None)
+        assert "single-owner recorded" not in html
+        assert "Evidence class:" in html
 
     def test_read_first_panel_present_in_full_html(self, tmp_path):
         storage, m = _metrics_with_experiment(tmp_path)
         gen = ReportGenerator(storage.metrics_dir)
         html = gen._generate_html(m, platform_metrics=None)
         assert "Read this first" in html
-        assert "Record digest:" in html
+        assert "Digest:" in html
 
 
 class TestConfidenceChipOnBadge:

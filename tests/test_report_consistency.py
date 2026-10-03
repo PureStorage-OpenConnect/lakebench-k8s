@@ -263,6 +263,11 @@ _FRACTION_UNITS = frozenset(
         "sar_conversion",
         # A fraction despite its name (tm_operations writes count / total).
         "filed_over_30_days_pct",
+        # Continuous covered-mode scoring and per-reason-code figures.
+        "recall_covered",
+        "coverage",
+        "recall_by_code",
+        "fp_by_code",
     }
 )
 _GIB = "/1073741824"
@@ -525,10 +530,19 @@ _PERCENT = re.compile(r"\d%")
 @pytest.mark.parametrize("run_id", record_ids())
 def test_every_page_percentage_is_derived(run_id):
     """A percentage in the page text is a derived span, or sits inside a
-    string the record stores verbatim (a recorded reason)."""
+    string the record stores verbatim (a recorded reason) or a verdict
+    reason or warning the front matter repeats from metrics/verdict.py."""
+    from lakebench.metrics.verdict import compute_badge_status, compute_verdict
+    from tests.fixtures.stored_records import load_metrics
+
     p = _BareText()
     p.feed(render(run_id))
     stored = _stored_strings(load_record(run_id))
+    # The verdict's own reasons and warnings (metrics/verdict.py), which the
+    # front matter repeats verbatim.
+    m = load_metrics(run_id)
+    _ok, reasons, warnings = compute_badge_status(m)
+    stored += [*reasons, *warnings, *compute_verdict(m).reasons]
     bare = [t for t in p.text if _PERCENT.search(t)]
     unexplained = [t for t in bare if not any(_PERCENT.search(s) and s in t for s in stored)]
     assert unexplained == []

@@ -526,6 +526,11 @@ class PipelineMetrics:
     record_kind: str = "run"
     parent_run_id: str | None = None
 
+    # The verdict block as the loaded metrics.json stored it, for readers
+    # that show the strictest of stored and recomputed (reports/front_matter.py).
+    # Never written: to_dict computes the verdict it saves. None on a fresh run.
+    stored_verdict: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
     def experiment_block(self) -> dict[str, Any] | None:
         """The experiment block: the stored one whenever the record has one,
         whatever its schema, and otherwise built from the snapshot's

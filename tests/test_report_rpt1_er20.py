@@ -343,10 +343,10 @@ def test_r6_interrupted_run_keeps_its_verdict_word(monkeypatch):
     """When the verdict is INTERRUPTED the panel and the headline both say
     so (not FAILED) and no headline figure is shown. The verdict comes from
     compute_verdict; it is fixed here to isolate the rendering."""
-    from lakebench.reports import generator
+    from lakebench.reports import front_matter
 
     reason = "Run interrupted (SIGINT during gold-finalize)"
-    monkeypatch.setattr(generator, "_page_verdict", lambda m: ("INTERRUPTED", [reason]))
+    monkeypatch.setattr(front_matter, "page_verdict", lambda m: ("INTERRUPTED", [reason], ""))
     record = load_record("5105a0")
     record["success"] = False
     text = _plain(_render_dict(record))

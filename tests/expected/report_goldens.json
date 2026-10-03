@@ -36,6 +36,10 @@
     {
       "text": "L1 escalation rate 10.8%; QA disagreement 14.2%",
       "from": "tm_operations.ops.l1_escalation_rate, qa_disagreement_rate 0.1422"
+    },
+    {
+      "text": "SARs filed = 7,457 on alert cases + 442 continuing-activity SARs",
+      "from": "tm_operations.ops.sars_filed 7899 = funnel.sars 7457 + reconciliation funnel.continuing_sars 442"
     }
   ],
   "be2b70": [
@@ -74,7 +78,7 @@
       "from": "streaming[*].total_rows_processed summed"
     },
     {
-      "text": "Streaming Jobs: 3/3 passed",
+      "text": "Continuous jobs: 3/3 passed",
       "from": "streaming[*].success"
     },
     {
@@ -92,6 +96,10 @@
     {
       "text": "54.0 CPU-hours requested",
       "from": "streaming jobs: stage executors x cores x streaming[i].elapsed_seconds / 3600, summed = 54.0"
+    },
+    {
+      "text": "SARs filed = 258 on alert cases + 14 continuing-activity SARs",
+      "from": "tm_operations.ops.sars_filed 272 = funnel.sars 258 + reconciliation funnel.continuing_sars 14"
     }
   ],
   "5105a0": [
@@ -130,7 +138,7 @@
       "from": "pipeline_benchmark.benchmark_rounds[0].qph, [3].qph"
     },
     {
-      "text": "Streaming Jobs: 3/3 passed",
+      "text": "Continuous jobs: 3/3 passed",
       "from": "streaming[*].success"
     }
   ],

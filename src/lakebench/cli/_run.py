@@ -246,7 +246,13 @@ def _print_pipeline_scorecard(
             )
         if pb.scale_ratio > 0:
             pct = pb.scale_ratio * 100
-            label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
+            label = (
+                "[yellow]incomplete[/yellow]"
+                if pct < 95
+                else "[yellow]above the scale[/yellow]"
+                if pb.scale_ratio > 1.05
+                else "[green]verified[/green]"
+            )
             scores.append(f"  Scale:          {pct:>7.1f}% {label}")
 
     if benchmark_qph is not None:
@@ -3713,6 +3719,11 @@ def _run_once(
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
             write_run_report(metrics_storage, run_id)
+            # The same front matter the report opens with, read back from
+            # the saved record.
+            from lakebench.reports.front_matter import print_front_matter
+
+            print_front_matter(run_metrics, console, storage=metrics_storage, run_id=run_id)
 
             _journal_safe(
                 j.record,

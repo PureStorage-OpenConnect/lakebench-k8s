@@ -772,6 +772,30 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
   runs. See
   [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
+- **The AML results block shows the funnel and labels capped totals.** The
+  report opens the AML results with a funnel from rule alerts to SARs filed,
+  each count with its record path and nested counts shown as "of which",
+  and checks the identities the transaction-monitoring step holds, sizing
+  any difference. Total alerts, the overall off-target rate and the funnel
+  say they cover only the rules that ran and carry a BOUNDED BY label when
+  a rule was skipped on a Lakebench cap. A continuous run's recall is shown
+  over covered instances with coverage beside it, per-reason-code recall
+  and FP are shown when recorded (or the scorer's status), and leakage
+  reads "not measured in this run".
+- **Reports open with the front matter.** The HTML report, `lakebench
+  report` and the end of `run` show, before any metric: the verdict (the
+  strictest of the stored and the recomputed one, with "stored X;
+  recomputed Y" when they differ) and its headline, the evidence class,
+  the corpus, the support state and what it means, the binding caps, n,
+  the provenance and the identity digest, then the verdict's qualifiers
+  and what limits interpretation. The evidence class is read from the
+  registered-look record, never the config: every run reads "development"
+  until a completed look names it. The fixed "internal benchmark,
+  single-owner recorded" stamp is gone. A batch scale ratio above 1.05 is
+  now a badge warning (amber badge and the headline of a passed run),
+  never a failure; the stored verdict does not change. Mode labels read
+  batch or continuous ("Continuous Throughput", "Continuous jobs"), never
+  "Sustained" or "streaming".
 - **Every derived number on the HTML report is checked against the record.**
   Each percentage, total and count the report computes is wrapped in a
   `data-lb-derived` span that names the `metrics.json` paths it came from,

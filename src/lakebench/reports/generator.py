@@ -28,6 +28,7 @@ from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.bounds import binding_caps as _binding_caps
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import direction_hint
+from lakebench.reports import copy as _words
 
 logger = logging.getLogger(__name__)
 
@@ -132,86 +133,13 @@ def _stage_inputs_note(metrics) -> str:
     return f"{pb.total_data_processed_gb:.1f} GB of stage inputs; {_corpus_note(metrics)}"
 
 
-def _provenance_line(metrics) -> str:
-    """Which Lakebench produced the record: version, commit and whether the
-    tree had uncommitted changes."""
-    prov = getattr(metrics, "provenance", None)
-    if not isinstance(prov, dict) or not prov:
-        return "not recorded (this record predates provenance)"
-    version = prov.get("lakebench_version") or "version unknown"
-    sha = str(prov.get("git_sha") or "")[:7] or "commit unknown"
-    dirty = prov.get("git_dirty")
-    state = "dirty" if dirty is True else "clean" if dirty is False else "tree state unknown"
-    return f"lakebench {version}, commit {sha}, {state}"
-
-
-def _limits_interpretation(metrics) -> list[str]:
-    """What a reader must know before using this record's numbers, as HTML
-    list items (counts are derived spans)."""
-    from lakebench.reports import derived as dv
-
-    e = _html_escape
-    items: list[str] = []
-    try:
-        exp = metrics.experiment_block() or {}
-    except Exception:  # noqa: BLE001 -- a bad block must not break the render
-        exp = {}
-    runs = (exp.get("repetitions") or {}).get("runs") or 1
-    if runs == 1:
-        items.append("n=1: one run, so no figure here is a repeatability claim")
-    rules = exp.get("rules") or {}
-    skipped = dict(rules.get("skipped") or {})
-    errored = dict(rules.get("errored") or {})
-    base = "experiment.rules"
-    if not skipped and not errored:
-        # Records before the rules block: the last gold-finalize job's skips.
-        gold = [i for i, j in enumerate(metrics.jobs) if j.job_type == "gold-finalize"]
-        if gold:
-            job = metrics.jobs[gold[-1]]
-            skipped = dict(job.rules_skipped or {})
-            errored = dict(job.rule_errors or {})
-            base = f"jobs[{gold[-1]}]"
-    skipped_path = (
-        "experiment.rules.skipped" if base == "experiment.rules" else f"{base}.rules_skipped"
-    )
-    errored_path = (
-        "experiment.rules.errored" if base == "experiment.rules" else f"{base}.rule_errors"
-    )
-    if skipped:
-        names = ", ".join(f"{k} ({v})" for k, v in sorted(skipped.items()))
-        n = dv.count(len(skipped), path=skipped_path)
-        items.append(f"{n} detection rule(s) skipped: {e(names)}")
-    if errored:
-        n = dv.count(len(errored), path=errored_path)
-        items.append(f"{n} detection rule(s) errored: {e(', '.join(sorted(errored)))}")
-    if (metrics.config_snapshot or {}).get("workload_schema") == "financial":
-        from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
-        from lakebench.reports.scorecard import registered_look_role
-
-        pb = metrics.pipeline_benchmark
-        if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
-            executed = set(rules.get("executed") or [])
-            not_run = [r for r in AML_CONTINUOUS_SKIPPED_RULES if r not in executed]
-            n_not_run = len(not_run)
-            if not_run:
-                ids = ", ".join(r.split("_", 1)[0] for r in not_run)
-                items.append(
-                    f"{n_not_run} detection rules not run in continuous mode ({e(ids)}): "
-                    "their typologies have no result in this run"
-                )
-
-        if not registered_look_role(metrics.run_id):
-            items.append(
-                "AML recall is uncalibrated and in-sample: no registered look names this run"
-            )
-    prov = getattr(metrics, "provenance", None)
-    if isinstance(prov, dict) and prov.get("git_dirty") is True:
-        items.append("produced from a tree with uncommitted changes (dirty)")
-    return items
-
-
 def _limits_interpretation_html(metrics) -> str:
-    items = _limits_interpretation(metrics)
+    from lakebench.reports import derived as dv
+    from lakebench.reports.front_matter import limits_interpretation
+
+    items = limits_interpretation(
+        metrics, count=lambda n, path: dv.count(n, path=path), esc=_html_escape
+    )
     if not items:
         return ""
     lis = "".join(f"<li>{i}</li>" for i in items)
@@ -221,28 +149,19 @@ def _limits_interpretation_html(metrics) -> str:
     )
 
 
-# compute_verdict puts this first whenever success is False; it says
-# nothing a reader can act on, so a headline takes the next reason.
-_EXIT_INTENT_REASON = "Process exit intent was not OK"
-
-
 def _page_verdict(metrics) -> tuple[str, list[str]]:
-    """(status, reasons) the page reads, the same verdict the badge uses.
-    The loaded metrics do not carry the stored verdict block, so the
-    strictest-of-stored-and-recomputed rule waits for the verdict-from-
-    record reader."""
-    from lakebench.metrics.verdict import compute_verdict
+    """(status, reasons) the page reads: the strictest of the stored and the
+    recomputed verdict (reports/front_matter.py)."""
+    from lakebench.reports.front_matter import page_verdict
 
-    verdict = compute_verdict(metrics)
-    return verdict.status, list(verdict.reasons)
+    status, reasons, _note = page_verdict(metrics)
+    return status, reasons
 
 
 def _headline_reason(status: str, reasons: list[str]) -> str:
-    """The first reason a reader can act on."""
-    useful = [r for r in reasons if r != _EXIT_INTENT_REASON]
-    if useful:
-        return useful[0]
-    return reasons[0] if reasons else f"verdict {status}"
+    from lakebench.reports.front_matter import headline_reason
+
+    return headline_reason(status, reasons)
 
 
 def _runs_of(metrics) -> int:
@@ -525,79 +444,58 @@ class ReportGenerator:
         self,
         metrics: PipelineMetrics,
         *,
-        passed: bool,
-        warnings: list[str],
-        fail_reasons: list[str],
-        n_runs: int,
+        passed: bool | None = None,
+        warnings: list[str] | None = None,
+        fail_reasons: list[str] | None = None,
+        n_runs: int | None = None,
+        fm=None,
     ) -> str:
-        """Dense header panel: verdict, headline, corpus label, n, limits count, digest.
-
-        Small and dense so it sits above the identity strip without pushing
-        the score cards below the fold. Its five fields carry what a reader
-        should know before reading a single card: whether the run passed,
-        why in one sentence, the corpus it ran against, the number of
-        independent samples, how many Lakebench caps were in effect during
-        the run, and the record's identity digest for cross-referencing.
-        """
+        """The front matter (reports/front_matter.py), before any metric:
+        verdict and headline, evidence class, support state with its
+        meaning, binding caps, n, provenance, digest; then the verdict's
+        qualifiers and what limits interpretation. The keyword arguments
+        other than *fm* are accepted for older callers and not used: every
+        field is read from the record."""
+        from lakebench.reports.front_matter import front_matter
 
         e = _html_escape
-        exp = metrics.experiment_block() or {}
-        corpus = exp.get("corpus") or {}
-        corpus_role = corpus.get("corpus_role") or "none"
-        corpus_id = corpus.get("id") or "unknown"
-        scale = corpus.get("scale")
-        corpus_label = f"{corpus_role} (id {corpus_id[:12]}, scale {scale})"
-
-        from lakebench.metrics.bounds import binding_caps
-
-        # Every limit that bound the run, the trickle once whether or not
-        # the stored block lists it.
-        n_limits = len(binding_caps(metrics))
-
-        if passed and not warnings:
-            verdict_word = "PASSED"
-            verdict_color = "var(--success)"
-        elif passed and warnings:
-            verdict_word = "WARNING"
-            verdict_color = "var(--warning)"
-        else:
-            # INTERRUPTED and REFUSED keep their own word, as the failed-run
-            # headline below the panel does.
-            status, _ = _page_verdict(metrics)
-            verdict_word = status if status in ("INTERRUPTED", "REFUSED") else "FAILED"
-            verdict_color = "var(--danger)"
-
-        if fail_reasons:
-            headline = fail_reasons[0]
-        elif warnings:
-            headline = warnings[0]
-        else:
-            mode = "sustained" if self._is_sustained(metrics) else "batch"
-            headline = f"{mode} pipeline completed, all gates passed"
-
-        # Identity digest: a short hash of the experiment identity so two
-        # runs of the same experiment print the same digest.
-        try:
-            from lakebench.metrics.experiment import identity_hash
-
-            record_digest = identity_hash(exp) if exp else "unresolved"
-        except Exception:  # noqa: BLE001
-            record_digest = "unresolved"
-
+        fm = fm if fm is not None else front_matter(metrics)
+        colour = {
+            "PASSED": "var(--warning)" if fm.warnings else "var(--success)",
+        }.get(fm.verdict, "var(--danger)")
+        rows = []
+        for label, text in fm.lines():
+            value = (
+                f"<strong style='color: {colour};'>{e(text)}</strong>"
+                if label == "Verdict"
+                else e(text)
+            )
+            if label in ("Digest", "Provenance"):
+                value = f'<code class="mono">{e(text)}</code>'
+            rows.append(
+                f'<div class="fm-{label.lower().replace(" ", "-")}">'
+                f'<span class="read-first-key" style="color: var(--text-muted);">{e(label)}:</span> '
+                f"{value}</div>"
+            )
+        extra = ""
+        # A passed run's first warning is its headline; every other warning
+        # and the verdict's qualifiers are listed.
+        notes = [*fm.qualifiers, *(fm.warnings[1:] if fm.verdict == "PASSED" else fm.warnings)]
+        if notes:
+            lis = "".join(f"<li>{e(q)}</li>" for q in notes)
+            extra = (
+                '<div class="fm-qualifiers" style="margin-top: 0.75rem; font-size: 0.8rem;">'
+                f'<strong>Qualifiers and warnings:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+            )
         return f"""
-        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid {verdict_color};">
+        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid {colour};">
             <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
                 Read this first
             </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
-                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: {verdict_color};">{verdict_word}</strong></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> {e(headline)}</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">{e(corpus_label)}</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> {int(n_runs)}</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> {n_limits}</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">{e(record_digest)}</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">{e(_provenance_line(metrics))}</code></div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                {"".join(rows)}
             </div>
+            {extra}
             {_limits_interpretation_html(metrics)}
         </section>
         """
@@ -1311,7 +1209,7 @@ class ReportGenerator:
             total = len(metrics.streaming)
             passed = len([s for s in metrics.streaming if s.success])
             cls = "status-success" if passed == total else "status-failed"
-            indicators.append(("Streaming Jobs", cls, _passed_of(passed, total, "streaming")))
+            indicators.append(("Continuous jobs", cls, _passed_of(passed, total, "streaming")))
         elif metrics.jobs:
             total = len(metrics.jobs)
             passed = len([j for j in metrics.jobs if j.success])
@@ -1693,7 +1591,14 @@ class ReportGenerator:
         validity_html = self._generate_data_validity_section(metrics)
         stability_html = self._generate_stability_section(metrics)
         contention_html = self._generate_contention_section(metrics)
-        overall_passed, fail_reasons, warnings = self._compute_overall_status(metrics)
+        # The badge says what the front matter says: the strictest of the
+        # stored and the recomputed verdict.
+        from lakebench.reports.front_matter import front_matter
+
+        fm = front_matter(metrics)
+        overall_passed = fm.verdict == "PASSED"
+        warnings = fm.warnings
+        fail_reasons = fm.reasons
         if overall_passed and not warnings:
             _badge_cls = "status-success"
             _badge_text = "PASSED"
@@ -1704,8 +1609,9 @@ class ReportGenerator:
             _badge_tip = "; ".join(warnings)
         else:
             _badge_cls = "status-failed"
-            _badge_text = "FAILED"
+            _badge_text = fm.verdict
             _badge_tip = "; ".join(fail_reasons)
+        _badge_tip = _html_escape(_badge_tip, quote=True)
 
         # Confidence chip next to the verdict badge: n=1 -> single_run,
         # n>=3 -> replicated_n=N, n>=5 with sub-10% spread -> high.
@@ -1722,14 +1628,7 @@ class ReportGenerator:
         _n_runs = n_runs_of(metrics) or 1
         _confidence_chip = confidence_chip_html(_n_runs, spread=None)
 
-        # "Read this first" panel + provenance label.
-        _read_first_html = self._generate_read_first_panel(
-            metrics,
-            passed=overall_passed,
-            warnings=warnings,
-            fail_reasons=fail_reasons,
-            n_runs=_n_runs,
-        )
+        _read_first_html = self._generate_read_first_panel(metrics, fm=fm)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1934,9 +1833,6 @@ class ReportGenerator:
 </head>
 <body>
     <div class="container">
-        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
-            internal benchmark, single-owner recorded
-        </div>
         <header>
             <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
@@ -1947,7 +1843,7 @@ class ReportGenerator:
                 </span>
                 {_confidence_chip}
             </div>
-            {"" if overall_passed and not warnings else '<div style="margin-top: 0.5rem; font-size: 0.8rem; color: ' + ("var(--danger)" if not overall_passed else "var(--warning)") + ';">' + "; ".join(fail_reasons or warnings) + "</div>"}
+            {"" if overall_passed and not warnings else '<div style="margin-top: 0.5rem; font-size: 0.8rem; color: ' + ("var(--danger)" if not overall_passed else "var(--warning)") + ';">' + _html_escape("; ".join(fail_reasons or warnings)) + "</div>"}
         </header>
 
         {_read_first_html}
@@ -2019,7 +1915,7 @@ class ReportGenerator:
     )
     _CONTINUOUS_CARDS = (
         "Data Freshness",
-        "Sustained Throughput",
+        "Continuous Throughput",
         "Compute Efficiency",
         "In-Stream QpH",
         "Total CPU-hours",
@@ -2126,7 +2022,7 @@ class ReportGenerator:
             qph_samples = _samples_per_query(metrics.benchmark)
 
         freshness_val: float | None = None
-        freshness_hint = "worst-case gold staleness during streaming window"
+        freshness_hint = "worst-case gold staleness during the continuous window"
         if pb and pb.data_freshness_seconds is not None and pb.data_freshness_seconds > 0:
             freshness_val = pb.data_freshness_seconds
 
@@ -2200,7 +2096,7 @@ class ReportGenerator:
                 <div class="card-hint2">{freshness_hint2}</div>
             </div>
             <div class="card">
-                <div class="card-label">Sustained Throughput</div>
+                <div class="card-label">Continuous Throughput</div>
                 <div class="card-value">{throughput_display}</div>
                 <div class="card-hint">rows entering bronze per second</div>
                 <div class="card-hint2">{throughput_hint2}</div>
@@ -2933,7 +2829,7 @@ class ReportGenerator:
         from lakebench.reports import derived as dv
 
         summary_parts = [
-            f"{dv.count(n_rounds, path='benchmark_rounds')} rounds during streaming",
+            f"{dv.count(n_rounds, path='benchmark_rounds')} in-stream rounds in the window",
             f"Median QpH: <strong>{median_qph:.1f}</strong>",
         ]
         if median_freshness > 0:
@@ -3180,7 +3076,7 @@ class ReportGenerator:
         <section>
             <h2>{section_title}</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Mode: {pb.pipeline_mode} | {summary}
+                Mode: {_words.mode_label(pb.pipeline_mode)} | {summary}
             </div>
             <table>
                 <thead>
@@ -3374,7 +3270,7 @@ class ReportGenerator:
             ("Seed", c.get("seed")),
             ("Corpus role", c.get("corpus_role") or "none"),
             ("Scale", c.get("scale")),
-            ("Mode", exp.get("mode")),
+            ("Mode", _words.mode_label(exp.get("mode"))),
             ("Datagen image", dg.get("pod_image") or c.get("generator_image")),
             ("Datagen digest", digest),
             ("Recipe", a.get("recipe")),
