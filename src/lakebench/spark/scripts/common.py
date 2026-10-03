@@ -2930,30 +2930,40 @@ class AlertColumnsError(RuntimeError):
 
 def ensure_alert_columns(spark, fq_table, columns):
     """Bring alerts table *fq_table* up to *columns* ((name, type, ...) in
-    table order, detection_rules.ALERT_COLUMNS): add each missing column, in
-    order, through ensure_column_with_retry, then check the table holds
-    exactly those (name, type) pairs in that order.
+    table order, detection_rules.ALERT_COLUMNS): when the table's columns
+    are a leading part of *columns*, append the missing trailing ones in
+    order through ensure_column_with_retry. Then the table must hold exactly
+    those (name, type) pairs in that order.
 
     A reused catalog's table from an older release lacks only trailing
     columns (detected_ts, reason_codes), which ALTER ... ADD COLUMNS appends
-    in place. Raises AlertColumnsError when the table's columns differ in
-    any other way: the detection loop writes alerts with a positional
+    in place. Any other difference raises AlertColumnsError before anything
+    is altered: the detection loop writes alerts with a positional
     INSERT ... SELECT *, so a reordered or retyped table would take columns
     into each other's slots. Returns the names added.
     """
-    added = []
-    for name, sql_type, *_ in columns:
-        if ensure_column_with_retry(spark, fq_table, name, sql_type):
-            added.append(name)
-            log(f"[startup] added {name} to {fq_table} (reused-catalog upgrade)")
     from pyspark.sql.types import _parse_datatype_string
 
-    got = [(f.name, f.dataType) for f in spark.table(fq_table).schema.fields]
     want = [(name, _parse_datatype_string(sql_type)) for name, sql_type, *_ in columns]
-    if got != want:
-        raise AlertColumnsError(
+
+    def _got():
+        return [(f.name, f.dataType) for f in spark.table(fq_table).schema.fields]
+
+    def _refuse(got):
+        return AlertColumnsError(
             f"{fq_table} columns {[(n, t.simpleString()) for n, t in got]} are not "
             f"{[(n, t.simpleString()) for n, t in want]} in order; alerts are written "
             "positionally, so this table cannot take them (drop or rebuild it)"
         )
+
+    got = _got()
+    if got != want[: len(got)]:
+        raise _refuse(got)
+    added = []
+    for name, sql_type, *_ in columns[len(got) :]:
+        if ensure_column_with_retry(spark, fq_table, name, sql_type):
+            added.append(name)
+    got = _got()
+    if got != want:
+        raise _refuse(got)
     return added

@@ -414,3 +414,17 @@ def test_every_alert_carries_its_base_code_first(spark, rule):
         codes = list(r["reason_codes"])
         assert codes and codes[0] == BASE_CODE[rule], (rule, codes)
         assert set(codes) <= set(REASON_CODES[rule]), (rule, codes)
+
+
+def test_conditional_codes_reach_real_rule_output(spark):
+    """The conditional codes are wired into the rules, not only defined: the
+    W2 beneficiary-kind alert carries W2_BENEFICIARY_FAN_IN and the W7
+    alert into the synthetic corridor carries W7_SYNTHETIC_CORRIDOR."""
+    txns, entities = _silver(spark)
+    w2 = {
+        r["entity_id"]: list(r["reason_codes"])
+        for r in _run(spark, "W2_structuring", txns, entities).collect()
+    }
+    assert "W2_BENEFICIARY_FAN_IN" in w2[2] and "W2_BENEFICIARY_FAN_IN" not in w2[1]
+    (w7,) = _run(spark, "W7_cross_border_high_risk", txns, entities).collect()
+    assert list(w7["reason_codes"]) == ["W7_HIGH_RISK_CORRIDOR", "W7_SYNTHETIC_CORRIDOR"]

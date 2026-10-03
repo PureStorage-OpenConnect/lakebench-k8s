@@ -375,10 +375,13 @@ jurisdictions, so on generated corpora W7 alerts carry
 Batch scoring splits each designated rule's recall and false-positive rate by
 code (`financial_scoring.recall_by_code`, `fp_by_code`, `alerts_by_code`,
 each `{rule: {code: value}}`): a code's recall is the share of the rule's
-target typology's instances with a planted payment in an alert of that rule
-carrying the code, and its false-positive rate is 1 minus the share of the
-rule's alerts carrying the code that touch a payment of that typology (an
-alert counts once per code it carries; null when no alert carries the code).
+target typology's instances (counted as typology recall counts them) with a
+planted payment in an alert of that rule carrying the code, 0.0 when no alert
+carries it (`alerts_by_code` then reads 0), and its false-positive rate is 1
+minus the share of the rule's alerts carrying the code that touch a payment
+of that typology, over the alerts with a related payment as the rule's
+false-positive rate counts them (an alert counts once per code it carries;
+null when no such alert carries the code).
 Because every alert carries its base code, the base code's figures are the
 rule's own. Only rules that ran are split. When an alert carries no code, or
 the alerts predate the column, the blocks are empty and

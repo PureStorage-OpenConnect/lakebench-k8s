@@ -35,6 +35,7 @@ from pyspark.sql.functions import (
     broadcast,
     coalesce,
     col,
+    countDistinct,
     explode,
     explode_outer,
     lit,
@@ -200,26 +201,29 @@ def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
     For a designated rule R that ran, with target typology T, and each code c
     R can write (aml_reason_codes.REASON_CODES, plus any other code seen):
 
-    - ``recall_by_code[R][c]``: the share of T's instances with a participant
-      payment in an alert of R carrying c;
+    - ``recall_by_code[R][c]``: the share of T's instances (all of them, as
+      typology recall counts them) with a participant payment in an alert of
+      R carrying c; 0.0 when no alert carries c (``alerts_by_code`` says so);
     - ``fp_by_code[R][c]``: 1 minus the share of R's alerts carrying c that
-      touch a payment of T (null when no alert carries c);
+      touch a payment of T, over the alerts with a related payment, as
+      ``fp_rate_by_rule`` counts them (null when no such alert carries c);
     - ``alerts_by_code[R][c]``: how many of R's alerts carry c.
 
-    Every alert carries its rule's base code, so R's per-code hit sets union
-    to R's hit set and the base code's figures are R's. That holds only when
-    every alert carries a code: an alert with none would drop out of every
-    per-code figure, so then (or when the alerts have no reason_codes column)
-    every per-code block is empty and ``by_code_status`` says why. Recall for a rule bounded by an
-    evidence cap is bounded for each of its codes too."""
+    Every alert carries its rule's base code, so the base code's figures are
+    R's own and R's per-code hit sets union to R's. That needs every alert to
+    carry a code: an alert with none would drop out of every per-code
+    figure, so then (or when the alerts have no reason_codes column) every
+    per-code block is empty and ``by_code_status`` says why. A few grouped
+    Spark jobs for all rules together."""
     from aml_reason_codes import REASON_CODES, vocabulary_digest
+    from detection_rules import HIGH_PRIORITY_CUTOFFS
     from pyspark.sql.functions import size
 
     out: dict = {
         "recall_by_code": {},
         "fp_by_code": {},
         "alerts_by_code": {},
-        "reason_code_vocabulary": vocabulary_digest(),
+        "reason_code_vocabulary": vocabulary_digest(HIGH_PRIORITY_CUTOFFS),
     }
     if "reason_codes" not in alerts.columns:
         out["by_code_status"] = "not_recorded: the alerts have no reason_codes column"
@@ -228,48 +232,78 @@ def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
     if uncoded:
         out["by_code_status"] = f"not_scored: {uncoded} alerts carry no reason code"
         return out
-    codes = alerts.select("alert_id", "rule_id", explode(col("reason_codes")).alias("code"))
-    code_uetrs = codes.join(alert_uetrs, ["alert_id", "rule_id"]).cache()
-    instances = manifest_uetrs.where(col("uetr").isNotNull()).select(
-        "typology_id", "typology_type", "uetr"
+    rules = sorted(r for r in ran if r in target_of)
+    if not rules:
+        out["by_code_status"] = "scored"
+        return out
+    targets = spark.createDataFrame(
+        [(r, target_of[r]) for r in rules], "rule_id STRING, typology_type STRING"
     )
+    codes = (
+        alerts.select("alert_id", "rule_id", explode(col("reason_codes")).alias("code"))
+        .join(broadcast(targets.select("rule_id")), "rule_id")
+        .distinct()
+        .cache()
+    )
+    n_by = {
+        (r["rule_id"], r["code"]): int(r["count"])
+        for r in codes.groupBy("rule_id", "code").count().collect()
+    }
+    # Alerts with at least one related payment, per code (fp_rate_by_rule's base).
+    code_uetrs = codes.join(alert_uetrs, ["alert_id", "rule_id"]).cache()
+    n_with_txn = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in code_uetrs.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    n_inst = {
+        r["typology_type"]: int(r["n"])
+        for r in manifest_uetrs.groupBy("typology_type")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    on_target = (
+        code_uetrs.join(broadcast(targets), "rule_id")
+        .join(
+            manifest_uetrs.where(col("uetr").isNotNull()).select(
+                "uetr", "typology_type", "typology_id"
+            ),
+            ["uetr", "typology_type"],
+        )
+        .cache()
+    )
+    hit_inst = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    hit_alerts = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    for frame in (on_target, code_uetrs, codes):
+        frame.unpersist()
     recall: dict = {}
     fp: dict = {}
     counts: dict = {}
-    for rule in sorted(r for r in ran if r in target_of):
-        typ = target_of[rule]
-        inst = instances.where(col("typology_type") == lit(typ))
-        n_inst = inst.select("typology_id").distinct().count()
-        rule_codes = codes.where(col("rule_id") == lit(rule))
-        n_by = {r["code"]: int(r["count"]) for r in rule_codes.groupBy("code").count().collect()}
-        vocab = list(REASON_CODES.get(rule, ())) + sorted(
-            set(n_by) - set(REASON_CODES.get(rule, ()))
-        )
-        hits = (
-            inst.join(code_uetrs.where(col("rule_id") == lit(rule)), "uetr")
-            .select("code", "typology_id")
-            .distinct()
-            .cache()
-        )
-        hit_by = {r["code"]: int(r["count"]) for r in hits.groupBy("code").count().collect()}
-        on_target = (
-            inst.select("uetr")
-            .distinct()
-            .join(code_uetrs.where(col("rule_id") == lit(rule)), "uetr")
-            .select("alert_id", "code")
-            .distinct()
-            .groupBy("code")
-            .count()
-            .collect()
-        )
-        hit_alerts = {r["code"]: int(r["count"]) for r in on_target}
-        recall[rule] = {c: (hit_by.get(c, 0) / n_inst if n_inst else None) for c in vocab}
+    for rule in rules:
+        seen = {c for (r, c) in n_by if r == rule}
+        vocab = list(REASON_CODES.get(rule, ())) + sorted(seen - set(REASON_CODES.get(rule, ())))
+        total = n_inst.get(target_of[rule], 0)
+        recall[rule] = {c: (hit_inst.get((rule, c), 0) / total if total else None) for c in vocab}
         fp[rule] = {
-            c: (1.0 - hit_alerts.get(c, 0) / n_by[c] if n_by.get(c) else None) for c in vocab
+            c: (
+                1.0 - hit_alerts.get((rule, c), 0) / n_with_txn[(rule, c)]
+                if n_with_txn.get((rule, c))
+                else None
+            )
+            for c in vocab
         }
-        counts[rule] = {c: n_by.get(c, 0) for c in vocab}
-        hits.unpersist()
-    code_uetrs.unpersist()
+        counts[rule] = {c: n_by.get((rule, c), 0) for c in vocab}
     out.update(recall_by_code=recall, fp_by_code=fp, alerts_by_code=counts, by_code_status="scored")
     return out
 
