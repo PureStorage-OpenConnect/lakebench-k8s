@@ -31,7 +31,6 @@ Prints one JSON object on the last stdout line.
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import os
 import shutil
@@ -43,6 +42,7 @@ from pathlib import Path
 from c360_generator_model import generate
 from c360_stream_scenarios import BRONZE_DDL
 from delta_silver_epoch_scenarios import ICEBERG_CATALOG, _submit_args
+from table_fingerprint import table_fingerprint
 
 _SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 
@@ -53,7 +53,6 @@ CYCLE_DAYS = (30, 30, 31)
 DATA_CLOCK = "2024-04-01"
 ROWS_PER_CYCLE = 3_000
 CUSTOMERS = 400
-EXCLUDED = {"silver_processing_timestamp", "_batch_id", "interaction_payload"}
 
 
 def cycle_rows(cycle: int) -> list[dict]:
@@ -135,16 +134,7 @@ def _table(spark, work: str, fmt: str, layer: str):
 
 
 def fingerprint(spark, work: str, fmt: str, layer: str) -> dict:
-    df = _table(spark, work, fmt, layer)
-    cols = sorted(c for c in df.columns if c not in EXCLUDED)
-    rows = sorted(
-        json.dumps(r.asDict(), sort_keys=True, default=str) for r in df.select(*cols).collect()
-    )
-    return {
-        "rows": len(rows),
-        "columns": cols,
-        "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest(),
-    }
+    return table_fingerprint(_table(spark, work, fmt, layer))
 
 
 def _fresh(root: str, name: str) -> str:
