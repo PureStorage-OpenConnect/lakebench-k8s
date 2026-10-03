@@ -24,6 +24,10 @@ maintenance engine (Trino or Spark Thrift) reads:
 Excluded, and named without bytes because they are not in object storage:
 the executor scratch PVCs and the dependency server's ``lb-deps`` PVC.
 Incomplete multipart uploads do not appear in a listing and are not counted.
+
+Per bucket, ``buckets`` is a list of ``{bucket, layers, physical_bytes,
+unattributed_bytes, listing_error}``: a bucket name is always a value, never
+a key, so the fixture scrubber can rewrite it (LB-265).
 """
 
 from __future__ import annotations
@@ -218,7 +222,8 @@ def measure(
         "total": {},
         "excluded": excluded,
         "raw_files": {},
-        "unattributed": {},
+        # One entry per listed bucket; the name is a value, never a key.
+        "buckets": [],
         "not_measured": not_measured,
     }
 
@@ -263,7 +268,6 @@ def measure(
         layers_of.setdefault(bucket, []).append(layer)
     physical_by_table: dict[str, float] = dict.fromkeys(locations, 0.0)
     metadata_by_table: dict[str, float] = dict.fromkeys(locations, 0.0)
-    per_bucket: dict[str, float] = {}
     listing_failed: dict[str, str] = {}
     for bucket, layers in layers_of.items():
         own = sorted(
@@ -312,8 +316,15 @@ def measure(
                     continue
                 b_unattributed += size
         except Exception as e:  # noqa: BLE001 -- recorded, never raised into the run
-            out["unattributed"][bucket] = None
-            out.setdefault("listing_errors", {})[bucket] = type(e).__name__
+            out["buckets"].append(
+                {
+                    "bucket": bucket,
+                    "layers": list(layers),
+                    "physical_bytes": None,
+                    "unattributed_bytes": None,
+                    "listing_error": type(e).__name__,
+                }
+            )
             for t, _prefix in own:
                 listing_failed[t] = f"the listing of {bucket} failed ({type(e).__name__})"
             continue
@@ -325,10 +336,15 @@ def measure(
             metadata_by_table[t] += size
         if b_raw:
             out["raw_files"]["bronze"] = out["raw_files"].get("bronze", 0) + b_raw
-        if b_unattributed:
-            out["unattributed"][bucket] = out["unattributed"].get(bucket, 0) + b_unattributed
-        per_bucket[bucket] = b_total
-    out["physical_bytes_by_bucket"] = per_bucket
+        out["buckets"].append(
+            {
+                "bucket": bucket,
+                "layers": list(layers),
+                "physical_bytes": b_total,
+                "unattributed_bytes": b_unattributed,
+                "listing_error": None,
+            }
+        )
 
     def sql_value(sql: str) -> float | None:
         if over_budget():

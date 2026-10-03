@@ -106,6 +106,18 @@ def _row(out, table):
     return next(t for t in out["tables"] if t["table"] == table)
 
 
+def _bucket(out, name):
+    return next(b for b in out["buckets"] if b["bucket"] == name)
+
+
+def _unattributed(out):
+    return {b["bucket"]: b["unattributed_bytes"] for b in out["buckets"]}
+
+
+def _listing_errors(out):
+    return {b["bucket"]: b["listing_error"] for b in out["buckets"] if b["listing_error"]}
+
+
 def test_known_multiple_fixture():
     out, _ = _measure(maintenance_id="m2", orphan_removal_ran=True)
     silver = _row(out, "silver.txn")
@@ -138,7 +150,7 @@ def test_ml_loop_prefix_excluded():
     assert out["total"] == base["total"]
     assert out["layers"] == base["layers"]
     assert out["excluded"]["ML loop (<gold>/_ml_loop/)"] == 5 * GB
-    assert out["unattributed"] == base["unattributed"]
+    assert _unattributed(out) == _unattributed(base)
 
 
 def test_ml_loop_without_the_exclusion_moves_gold(monkeypatch):
@@ -152,7 +164,7 @@ def test_ml_loop_without_the_exclusion_moves_gold(monkeypatch):
         lambda layer, key, *rest: None if key.startswith("_ml_loop/") else real(layer, key, *rest),
     )
     out, _ = _measure(objects=_objects(extra_gold=loop))
-    assert out["unattributed"].get("lb-gold") == 5 * GB
+    assert _bucket(out, "lb-gold")["unattributed_bytes"] == 5 * GB
 
 
 def test_pvcs_named_not_listed():
@@ -187,7 +199,7 @@ def test_table_the_catalog_does_not_know():
     assert _row(out, "bronze.raw")["not_measured"] == "not in the catalog (RuntimeError)"
     assert "bronze" not in out["layers"]
     # Its objects are not attributed to any table.
-    assert out["unattributed"]["lb-bronze"] == 5 * GB
+    assert _bucket(out, "lb-bronze")["unattributed_bytes"] == 5 * GB
 
 
 def test_foreign_location_is_never_listed():
@@ -217,7 +229,8 @@ def test_no_sql_engine_records_physical_only():
     )
     assert out["not_measured"] == "no SQL engine in this recipe can read table metadata"
     assert out["tables"] == [] and out["total"] == {}
-    assert out["physical_bytes_by_bucket"]["lb-silver"] == 10 * GB
+    assert _bucket(out, "lb-silver")["physical_bytes"] == 10 * GB
+    assert [b["bucket"] for b in out["buckets"]] == ["lb-bronze", "lb-silver", "lb-gold"]
 
 
 def test_spark_thrift_parsing():
@@ -252,7 +265,8 @@ def test_listing_error_is_recorded_not_raised():
         list_objects=boom,
         run_sql=_Sql(),
     )
-    assert out["listing_errors"] == dict.fromkeys(BUCKETS.values(), "OSError")
+    assert _listing_errors(out) == dict.fromkeys(BUCKETS.values(), "OSError")
+    assert all(b["physical_bytes"] is None for b in out["buckets"])
 
 
 def test_orphan_removal_ran_from_outcomes():
@@ -422,14 +436,15 @@ def test_partial_listing_yields_no_multiple():
     silver = _row(out, "silver.txn")
     assert silver["not_measured"] == "the listing of lb-silver failed (OSError)"
     assert "multiple" not in silver
-    assert out["listing_errors"] == {"lb-silver": "OSError"}
+    assert _listing_errors(out) == {"lb-silver": "OSError"}
+    assert _bucket(out, "lb-silver")["physical_bytes"] is None
     assert out["total"]["tables_measured"] == 2 and out["total"]["tables"] == 3
 
 
 def test_budget_bounds_the_listing():
     ticks = iter([0.0] + [1000.0] * 100)
     out, _ = _measure(clock=lambda: next(ticks), budget_seconds=600)
-    assert out["listing_errors"]["lb-bronze"] == "TimeoutError"
+    assert _listing_errors(out)["lb-bronze"] == "TimeoutError"
 
 
 def test_report_says_what_the_total_covers():
@@ -464,7 +479,7 @@ def test_moved_checkpoint_base_is_excluded():
     base, _ = _measure(checkpoint_base="streams")
     out, _ = _measure(objects=_objects(extra_gold=moved), checkpoint_base="streams")
     assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 3 * GB
-    assert out["unattributed"] == base["unattributed"]
+    assert _unattributed(out) == _unattributed(base)
     assert out["layers"] == base["layers"]
 
 
@@ -488,3 +503,134 @@ def test_checkpoint_base_over_a_table_location_hides_no_table():
     assert out["layers"] == base["layers"]
     assert out["total"] == base["total"]
     assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 1 * GB
+
+
+#: Bucket names shaped like a release-harness deployment's (LB-265).
+REAL = {
+    "lb-bronze": "rel17-m01-d0fc03-bronze",
+    "lb-silver": "rel17-m01-d0fc03-silver",
+    "lb-gold": "rel17-m01-d0fc03-gold",
+}
+
+
+def _partial_block():
+    """A block with every per-bucket figure set: physical bytes, unattributed
+    bytes in silver (a stray key under no table) and a failed gold listing."""
+    objects = _objects()
+    objects["lb-silver"] = [*objects["lb-silver"], {"Key": "tmp/stray.parquet", "Size": 1 * GB}]
+
+    def list_objects(bucket):
+        if bucket == "lb-gold":
+            raise OSError("connection reset")
+        return objects[bucket]
+
+    return sm.measure(
+        buckets=BUCKETS,
+        tables_by_layer=TABLES,
+        catalog="lakehouse",
+        engine="trino",
+        table_format="iceberg",
+        datagen_prefix="customer/interactions",
+        list_objects=list_objects,
+        run_sql=_Sql(),
+        maintenance_id="m2-2026-09-26",
+    )
+
+
+def _keys_of(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k
+            yield from _keys_of(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _keys_of(v)
+
+
+def test_scrubber_accepts_a_record_with_real_bucket_names():
+    """LB-265: the fixture scrubber refuses a record in which a bucket name
+    is a dict key. The block keyed physical bytes, unattributed bytes and
+    listing errors by bucket name, so every release-matrix record was
+    refused ("bucket name ... is also a key in the record"). The bucket name
+    is now a value, and the scrubbed block keeps every number."""
+    import copy
+    import json
+
+    from tests.fixtures.scrub import scrub_record
+    from tests.fixtures.stored_records import load_record
+
+    text = json.dumps(_partial_block())
+    for fake, real in REAL.items():
+        text = text.replace(fake, real)
+    block = json.loads(text)
+    record = load_record("5105a0")
+    layers = {"bronze": REAL["lb-bronze"], "silver": REAL["lb-silver"], "gold": REAL["lb-gold"]}
+    record["config_snapshot"]["s3"]["buckets"] = dict(layers)
+    record["pipeline_benchmark"]["config_snapshot"]["s3"]["buckets"] = dict(layers)
+    record["storage_multiple"] = block
+    before = copy.deepcopy(block)
+
+    scrubbed, _notes = scrub_record(record)
+
+    out = scrubbed["storage_multiple"]
+    assert not set(REAL.values()) & set(_keys_of(out))
+    assert not any(real in json.dumps(out) for real in REAL.values())
+    assert [b["bucket"] for b in out["buckets"]] == [
+        "scrubbed-bronze",
+        "scrubbed-silver",
+        "scrubbed-gold",
+    ]
+    assert out["buckets"][1]["unattributed_bytes"] == 1 * GB
+    assert out["buckets"][2]["listing_error"] == "OSError"
+    assert out["buckets"][2]["physical_bytes"] is None
+    # Only names moved: every number in the block is the source's.
+    for got, want in zip(out["buckets"], before["buckets"], strict=True):
+        assert {k: v for k, v in got.items() if k != "bucket"} == {
+            k: v for k, v in want.items() if k != "bucket"
+        }
+    assert out["tables"][1]["location"] == "s3a://scrubbed-silver/warehouse/silver/txn"
+    assert out["total"] == before["total"] and out["layers"] == before["layers"]
+
+
+def test_no_bucket_name_is_a_key_in_the_block():
+    block = _partial_block()
+    assert not set(BUCKETS.values()) & set(_keys_of(block))
+    assert block["buckets"] == [
+        {
+            "bucket": "lb-bronze",
+            "layers": ["bronze"],
+            "physical_bytes": 10 * GB + 1000 + 2000 + 300 + 5 * GB,
+            "unattributed_bytes": 0.0,
+            "listing_error": None,
+        },
+        {
+            "bucket": "lb-silver",
+            "layers": ["silver"],
+            "physical_bytes": 11 * GB,
+            "unattributed_bytes": 1 * GB,
+            "listing_error": None,
+        },
+        {
+            "bucket": "lb-gold",
+            "layers": ["gold"],
+            "physical_bytes": None,
+            "unattributed_bytes": None,
+            "listing_error": "OSError",
+        },
+    ]
+
+
+def test_report_notes_read_the_bucket_list():
+    """The report's unattributed and failed-listing notes come from the
+    bucket list and carry the record's figures."""
+    from tests.fixtures.stored_records import load_record
+    from tests.test_report_consistency import _plain_text, _render_dict, mismatches
+
+    record = load_record("5105a0")
+    record["storage_multiple"] = _partial_block()
+    html = _render_dict(record)
+    text = _plain_text(html)
+    assert "Unattributed in lb-silver: 1.00 GiB." in text
+    assert "Listing of lb-gold failed (OSError); its tables are not measured." in text
+    assert "Unattributed in lb-bronze" not in text
+    assert mismatches(record, html) == []

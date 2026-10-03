@@ -3187,15 +3187,26 @@ class ReportGenerator:
                 f"Raw datagen files in {layer}: {value / (1024**3):.2f} GiB, physical only, "
                 "outside the total."
             )
-        for bucket, value in sorted((sm.get("unattributed") or {}).items()):
-            if value is None:
-                notes.append(f"Bucket {bucket} could not be listed.")
-            elif value:
-                notes.append(f"Unattributed in {bucket}: {value / (1024**3):.2f} GiB.")
+        # One entry per bucket, the name a value (LB-265). Development
+        # builds before the fix keyed these by bucket name; that shape was
+        # never released and is not read.
+        bucket_rows = sm.get("buckets")
+        listing_notes = []
+        for b in bucket_rows if isinstance(bucket_rows, list) else []:
+            if not isinstance(b, dict):
+                continue
+            name = b.get("bucket")
+            if b.get("listing_error"):
+                listing_notes.append(
+                    f"Listing of {name} failed ({b['listing_error']}); its tables are not measured."
+                )
+                continue
+            value = b.get("unattributed_bytes")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value:
+                notes.append(f"Unattributed in {name}: {value / (1024**3):.2f} GiB.")
         if sm.get("budget_spent"):
             notes.append(f"Time budget: {sm['budget_spent']}.")
-        for bucket, err in sorted((sm.get("listing_errors") or {}).items()):
-            notes.append(f"Listing of {bucket} failed ({err}); its tables are not measured.")
+        notes.extend(listing_notes)
         for t in sm.get("tables") or []:
             if isinstance(t, dict) and t.get("retained_error"):
                 notes.append(
