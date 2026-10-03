@@ -820,11 +820,15 @@ class TestDatagenCycleTimestampRange:
             assert ranges[i][0] >= ranges[i - 1][1]
 
     def test_default_timestamps(self):
+        """Multi-cycle runs split 2024-01-01..2025-12-31; one cycle is the
+        generator's own default window, 2024-01-01..2025-01-01 (deploy_cycle
+        runs only for cycles > 1; config.c360_run.cycle_windows)."""
         from lakebench.deploy.datagen import DatagenDeployer
 
-        start, end = DatagenDeployer._cycle_timestamp_range(0, 1)
-        assert start == "2024-01-01"
-        assert end == "2025-12-31"
+        start, _ = DatagenDeployer._cycle_timestamp_range(0, 2)
+        _, end = DatagenDeployer._cycle_timestamp_range(1, 2)
+        assert (start, end) == ("2024-01-01", "2025-12-31")
+        assert DatagenDeployer._cycle_timestamp_range(0, 1) == ("2024-01-01", "2025-01-01")
 
 
 # ---------------------------------------------------------------------------

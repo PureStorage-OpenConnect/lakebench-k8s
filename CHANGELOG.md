@@ -7,6 +7,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **Multi-cycle runs and reused corpora check a corpus series marker.**
+  Every generate (`generate`, `run --generate`, each cycle of a multi-cycle
+  run, and a continuous run's datagen) now writes
+  `<datagen prefix>/_corpus/series.json` in the bronze bucket: the cycle
+  count, the cycles whose datagen Job finished, each cycle's event-time
+  window, the generation parameters and the image digest the datagen pods
+  ran. A batch run that reuses bronze (`--skip-generate`, or a single-cycle
+  run without `--generate`) reads it before anything is deployed or
+  submitted and exits 2 (new path `run.series_mismatch`) when the generate
+  did not finish (an interrupted generate, or a continuous run's corpus) or
+  the marker names another cycle count, window or generation (seed, scale,
+  customer id space, file size, dirty ratio, image) than the config's. A
+  single-cycle run over a corpus with no marker (1.6, or an older
+  `generate`) proceeds as before and records `cycle_series.marker:
+  "absent"`. A multi-cycle `--skip-generate` now reuses a finished
+  multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
+  it said. An AML multi-cycle `--skip-generate` is refused (exit
+  2): its stages read the whole bronze prefix every cycle. A multi-cycle run
+  that generates no longer clears an owned non-empty datagen prefix before
+  cycle 0: it exits 3 unless `--regenerate`, which a multi-cycle run now
+  takes without `--generate`. `lakebench generate` (new path
+  `generate.multi_cycle`) and `run --generate-only` refuse a multi-cycle
+  config (exit 2): a corpus generated in one go would be read as cycle 0;
+  `reproduce` of a multi-cycle config lets its run generate each cycle.
+  `metrics.json` gains `cycle_series {marker, reused, cycles_total,
+  windows}` and `cycles[].datagen_skipped`.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -114,10 +140,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
   `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
   `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
-  `--regenerate` without `--generate` or `--generate-only`, or with
+  `--regenerate` on a run that does not generate, or with
   `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
-  `--generate` on a multi-cycle batch run (it generated the corpus twice; the run
-  generates each cycle without it);
+  `--generate` or `--generate-only` on a multi-cycle batch run (it generated the corpus twice; the run
+  generates each cycle without it); `--skip-generate` on a multi-cycle AML run;
   `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
   `--duration` on a batch run or below 60; `--timeout` below 1. The full
   list is under `run` in docs/cli-reference.md. `reproduce` refuses a
@@ -1184,6 +1210,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A multi-cycle `run` no longer fails at cycle 1.** Its datagen wait used
   a name only the single-shot generate defined, so every multi-cycle run
   without `--generate` stopped with "cannot access local variable" (exit 1).
+- **`run --generate` no longer runs its stages over a datagen Job that
+  failed.** Its progress poll stopped when no datagen pod was active, which
+  a Job whose pods failed after their retries also is, printed "Datagen
+  completed" and ran the pipeline over a partial corpus. It now exits 1
+  ("Datagen did not complete: N/M pods succeeded").
 - `run --continuous --skip-generate` no longer journals a "Datagen started"
   event for a datagen it did not start.
 
@@ -1226,12 +1257,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bucket silently before cycle 0. A user with a pre-provisioned bronze
   bucket who relied on `--regenerate` clears the prefix, or claims the bucket
   once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
-  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
-  an owned prefix before cycle 0, and a `run` after `generate
-  --allow-stale-bronze` still records the note. `run` refuses
+  (`--allow-stale-bronze` would over-count). A multi-cycle run takes the
+  same gate before cycle 0, and a `run` that reuses a corpus generated with
+  `--allow-stale-bronze` still records the note (from the corpus series
+  marker, or the note `generate` left on the host). `run` refuses
   `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
   reads it: without `--generate`, `--generate-only` or a multi-cycle batch
-  run, and with `--local`, `--deploy-only` or a continuous run other than
+  run that generates, and with `--local`, `--deploy-only` or a continuous run other than
   `--generate-only`. A `run --repeat` series passes it to repetition 1
   only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
 - **`destroy` clears the kept silver-state's data clock when it empties

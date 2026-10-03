@@ -712,12 +712,19 @@ def _deploy_impl(
                 f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
-        success_msg += (
-            "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
-            "\n      [bold]lakebench run --generate[/bold]  to generate data and run the pipeline"
-            "\n      (a multi-cycle config: [bold]lakebench run[/bold], each cycle generates)"
-            "\n      [bold]lakebench status[/bold]          to check deployment"
-        )
+        if cfg.architecture.pipeline.cycles > 1:
+            success_msg += (
+                "\n\nNext: [bold]lakebench run[/bold]     to run the pipeline; each cycle "
+                "generates its data first"
+                "\n      [bold]lakebench status[/bold]  to check deployment"
+            )
+        else:
+            success_msg += (
+                "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
+                "\n      [bold]lakebench run --generate[/bold]  to generate data and run the "
+                "pipeline"
+                "\n      [bold]lakebench status[/bold]          to check deployment"
+            )
 
         console.print(
             Panel(

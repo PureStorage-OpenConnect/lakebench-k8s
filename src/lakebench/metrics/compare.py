@@ -750,10 +750,11 @@ _WORKLOAD_SETTING = {
 def _regen(side: Side, cycles: int | None = None) -> str:
     """The run that regenerates a side's corpus: a batch run needs
     ``--generate --regenerate``; a multi-cycle batch run generates in its
-    cycles (cycle 0 clears an owned datagen prefix) and refuses
-    ``--generate``; a continuous run regenerates its own data and refuses
-    ``--regenerate``. *cycles* is the cycle count the side will run with
-    (the hint's own setting), else the one it recorded."""
+    cycles, refuses ``--generate`` and takes ``--regenerate`` alone (an owned
+    non-empty datagen prefix is refused without it); a continuous run
+    regenerates its own data and refuses ``--regenerate``. *cycles* is the
+    cycle count the side will run with (the hint's own setting), else the
+    one it recorded."""
     cfg = _cfg(side)
     if _continuous(side):
         return f"lakebench run {cfg} --continuous"
@@ -763,7 +764,7 @@ def _regen(side: Side, cycles: int | None = None) -> str:
         rec = _first(side)
         cycles = _cycles(rec.get("experiment") or {}, rec)
     if cycles > 1:
-        return f"lakebench run {cfg}"
+        return f"lakebench run {cfg} --regenerate"
     return f"lakebench run {cfg} --generate --regenerate"
 
 

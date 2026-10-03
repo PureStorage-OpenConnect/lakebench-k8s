@@ -334,31 +334,59 @@ def test_destroy_clears_the_bronze_clock_only_with_bronze(clean_buckets):
 
 
 class TestMultiCycleGate:
-    """The multi-cycle loop runs the gate with clear_owned: an owned prefix is
-    cleared as 1.6 did before cycle 0, and --allow-stale-bronze still applies
-    to an unowned one."""
+    """The multi-cycle loop runs the same gate as every generate before cycle
+    0 (DESIGN ch05 7.1 rule 3): an owned non-empty prefix, a leftover series
+    marker included, is refused unless --regenerate, which clears only the
+    datagen prefix; --allow-stale-bronze still applies to an unowned one."""
 
-    def test_owned_prefix_is_cleared_without_regenerate(self):
+    def test_owned_prefix_is_refused_without_regenerate(self):
         with recording() as rec:
             cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/part-0", OWNER_MARKER_KEY])
-            got = _gate(cfg, clear_owned=True)
-            assert got.proceed and got.cleared == 1
-            assert list(rec.buckets_store[BRONZE]) == [OWNER_MARKER_KEY]
+            got = _gate(cfg)
+            assert not got.proceed and got.cleared == 0
+            assert "--regenerate" in got.message
+            assert sorted(rec.buckets_store[BRONZE]) == sorted(
+                [OWNER_MARKER_KEY, f"{PREFIX}/part-0"]
+            )
+
+    def test_leftover_series_marker_alone_is_a_corpus(self):
+        with recording() as rec:
+            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/_corpus/series.json"])
+            assert not _gate(cfg).proceed
+
+    def test_regenerate_keeps_ownership_marker(self):
+        """Only the datagen prefix goes: the bucket's .lakebench/ owner marker
+        and every other prefix stay (cluster-safety item 7)."""
+        with recording() as rec:
+            cfg = _seed(
+                rec,
+                owned=True,
+                objects=[
+                    OWNER_MARKER_KEY,
+                    f"{PREFIX}/part-0",
+                    f"{PREFIX}/_corpus/series.json",
+                    "checkpoints/x",
+                ],
+            )
+            got = _gate(cfg, regenerate=True)
+            assert got.proceed and got.cleared == 2
+            assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, "checkpoints/x"])
 
     def test_unowned_with_allow_stale_proceeds(self):
         with recording() as rec:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-            got = _gate(cfg, clear_owned=True, allow_stale_bronze=True)
+            got = _gate(cfg, allow_stale_bronze=True)
             assert got.proceed and got.stale_allowed
             assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
 
     def test_unowned_without_the_flag_refuses(self):
         with recording() as rec:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-            assert not _gate(cfg, clear_owned=True).proceed
+            assert not _gate(cfg).proceed
 
-    def test_run_wires_the_multicycle_gate_with_clear_owned(self):
-        """[static] the loop's call passes clear_owned=True and the user's flags."""
+    def test_run_wires_every_gate_with_the_users_flags(self):
+        """[static] Phase 3's and the multi-cycle loop's calls pass the user's
+        flags and nothing that would clear an owned prefix without them."""
         import ast
         from pathlib import Path
 
@@ -369,10 +397,6 @@ class TestMultiCycleGate:
             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "enforce_bronze_gate"
         ]
         assert len(calls) == 2
-        multi = [c for c in calls if any(k.arg == "clear_owned" for k in c.keywords)]
-        assert len(multi) == 1
-        assert [ast.unparse(a) for a in multi[0].args] == [
-            "cfg",
-            "regenerate",
-            "allow_stale_bronze",
-        ]
+        for c in calls:
+            assert [ast.unparse(a) for a in c.args] == ["cfg", "regenerate", "allow_stale_bronze"]
+            assert c.keywords == []

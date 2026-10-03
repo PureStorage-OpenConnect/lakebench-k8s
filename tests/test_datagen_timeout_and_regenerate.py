@@ -46,6 +46,15 @@ class _FakeS3:
     _next_info: BucketInfo | None = None
     _next_init_error: str | None = None
     instances: list[_FakeS3] = []  # noqa: F821 -- forward ref via type hints below
+    #: Objects behind ``raw_client`` (the corpus series marker), shared by
+    #: every instance in a test.
+    store: dict[tuple[str, str], bytes] = {}
+
+    @property
+    def raw_client(self):
+        from tests.fixtures.memory_s3 import MemoryBoto
+
+        return MemoryBoto(_FakeS3.store)
 
     def __init__(self, **_kw: object) -> None:
         self.kw = _kw
@@ -96,10 +105,12 @@ def _reset_fake_s3() -> None:
     _FakeS3.instances = []
     _FakeS3._next_info = None
     _FakeS3._next_init_error = None
+    _FakeS3.store = {}
     yield
     _FakeS3.instances = []
     _FakeS3._next_info = None
     _FakeS3._next_init_error = None
+    _FakeS3.store = {}
 
 
 def _cfg(schema: str = "customer360"):
@@ -372,6 +383,12 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     )
     # No earlier datagen Job to stop (tests/test_datagen_old_pods.py covers it).
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
+    # A run that reuses bronze reads its corpus series marker first: an empty
+    # bucket in memory, unless the test installed its own S3 fake already.
+    import lakebench.s3 as _s3
+
+    if _s3.S3Client.__module__ == "lakebench.s3.client":
+        monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
     return {"k8s": k8s_stub, "op": op, "job_manager": job_manager}
 
 

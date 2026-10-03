@@ -318,6 +318,7 @@ def _deserialize_cycles(
                 timestamp_end=c.get("timestamp_end", ""),
                 datagen_elapsed_seconds=c.get("datagen_elapsed_seconds", 0.0),
                 datagen_output_gb=c.get("datagen_output_gb", 0.0),
+                datagen_skipped=bool(c.get("datagen_skipped", False)),
                 jobs=jobs,
                 benchmark=bench,
                 table_health=c.get("table_health", {}),
@@ -644,6 +645,7 @@ class MetricsStorage:
             interrupted=data.get("interrupted"),
             abort_reason=data.get("abort_reason"),
             series=data.get("series"),
+            cycle_series=data.get("cycle_series"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),

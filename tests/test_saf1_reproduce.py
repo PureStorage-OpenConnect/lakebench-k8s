@@ -965,3 +965,20 @@ def test_nameless_check_mismatch_keeps_the_redeployed_wording(tmp_path, monkeypa
     res = CliRunner().invoke(app, ["destroy", str(cfg), "--force", "--name", t.NAME])
     assert res.exit_code == 3, res.output
     assert "redeployed after this command checked it" in res.output
+
+
+@pytest.mark.parametrize(("cycles", "generates"), [(1, True), (3, False)])
+def test_reproduce_generates_first_only_for_one_cycle(tmp_path, pipeline, cycles, generates):
+    """A multi-cycle run generates each cycle itself and `generate` refuses a
+    multi-cycle config, so reproduce goes straight to the run (CD-18)."""
+    from lakebench.cli._reproduce import _run_pipeline
+
+    p = tmp_path / "repro.yaml"
+    p.write_text(CFG + f"architecture:\n  pipeline:\n    mode: batch\n    cycles: {cycles}\n")
+    cfg = _cfg(p)
+    with recording(cfg.get_namespace()) as rec:
+        rec.for_config(cfg)
+        _run_pipeline(p, None, True)
+    names = _names(FakeEngine.calls)
+    assert ("generate" in names) is generates
+    assert "run" in names

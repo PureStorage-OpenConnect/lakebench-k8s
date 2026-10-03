@@ -163,6 +163,8 @@ def test_run_skip_deploy_still_runs_the_prerequisites(monkeypatch, cfg_file, fla
         return _failing_report()
 
     monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", fake)
+    # The corpus check reads S3 (tests/test_c360_series_run.py covers it).
+    monkeypatch.setattr("lakebench.cli._run._check_series_reuse", lambda *a, **k: None)
     # Past the prerequisites the run would need a cluster; stop it there.
     monkeypatch.setattr(
         "lakebench.cli._run.no_query_engine_skip",
@@ -185,6 +187,8 @@ def test_run_skip_deploy_skips_only_the_infra_check(monkeypatch, cfg_file):
     monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", lambda cfg, **kw: passing)
     infra = mock.Mock()
     monkeypatch.setattr("lakebench.cli._run._run_preflight_infra_check", infra)
+    # The corpus check reads S3 (tests/test_c360_series_run.py covers it).
+    monkeypatch.setattr("lakebench.cli._run._check_series_reuse", lambda *a, **k: None)
     monkeypatch.setattr(
         "lakebench.cli._run.no_query_engine_skip",
         mock.Mock(side_effect=SystemExit(99)),

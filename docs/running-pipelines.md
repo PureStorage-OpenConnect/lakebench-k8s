@@ -91,7 +91,15 @@ iterations. Each cycle generates new data for its portion of the timestamp
 range, then runs the full bronze-verify -> silver-build -> gold-finalize
 sequence. The run generates without `--generate`, which a multi-cycle run
 refuses (exit 2): a whole corpus generated first would be read again by
-cycle 0.
+cycle 0. A non-empty datagen prefix is refused (exit 3) unless
+`--regenerate`, which clears it on a bucket this deployment created.
+
+To run the cycles again over the same corpus, add `--skip-generate`: every
+cycle runs its stages over its own slice with no datagen, provided the
+corpus series marker says the multi-cycle generate finished for this
+config's cycle count, windows and generation (exit 2 otherwise). An AML
+multi-cycle run cannot reuse its corpus this way: its stages read the whole
+bronze prefix every cycle.
 
 ```yaml
 architecture:
@@ -110,8 +118,8 @@ and per-cycle timing. After all cycles complete, pre-benchmark maintenance
 runs compaction and snapshot expiry (if enabled), then the benchmark
 measures QpH against the accumulated table.
 
-Metrics include a `cycles[]` array with per-cycle datagen timing, job
-metrics, and table health (data file counts and snapshot counts from
+Metrics include a `cycles[]` array with per-cycle datagen timing
+(`datagen_skipped` under `--skip-generate`), job metrics, and table health (data file counts and snapshot counts from
 Iceberg system tables). The `cycle_progression` score shows how elapsed
 time and table state evolve across cycles.
 
