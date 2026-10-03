@@ -249,7 +249,7 @@ def test_init_wizard_flags_print_their_line(flag, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("LAKEBENCH_S3_ENDPOINT", "http://10.0.1.50:80")
     res = CliRunner().invoke(app, ["init", flag, "--output", str(tmp_path / "c.yaml")])
-    assert ALIASED_FLAGS["init"][flag] in " ".join(res.output.split()), res.output
+    assert ALIASED_FLAGS["init"][flag].note in " ".join(res.output.split()), res.output
 
 
 @pytest.mark.parametrize("flag", ["--metrics-dir", "-m"])

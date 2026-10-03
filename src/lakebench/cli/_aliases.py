@@ -54,6 +54,19 @@ ALIASES: dict[str, Alias] = {
     "admin install-scratch-storage-class": Alias("admin install --component scratch-storage-class"),
 }
 
+
+@dataclass(frozen=True)
+class FlagAlias:
+    """A flag that still parses: ``replacement`` is the flag to use instead
+    (None: drop it), ``note`` what it does now."""
+
+    replacement: str | None
+    note: str
+
+
+#: The release whose commands ``DEPRECATED_COMMANDS`` hid.
+DEPRECATED_SINCE = "1.3"
+
 #: Commands hidden and marked deprecated since 1.3 (Click prints its own
 #: notice), kept as verbs in 1.7: the command each points to.
 DEPRECATED_COMMANDS: dict[str, str] = {
@@ -61,13 +74,17 @@ DEPRECATED_COMMANDS: dict[str, str] = {
     "recommend": "config recommend",
 }
 
-#: Flags that still parse: the line or replacement each names. init's
-#: wizard flags print their line and write the default config.
-_WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
-ALIASED_FLAGS: dict[str, dict[str, str]] = {
-    "init": dict.fromkeys(("--interactive", "-i", "--advanced"), _WIZARD_REMOVED),
-    "run": {"--sustained": "--continuous"},
-    "recommend": dict.fromkeys(("--extended", "-e"), "--slow-datagen"),
+#: Flags that still parse. init's wizard flags print their note and write
+#: the default config.
+_WIZARD = FlagAlias(
+    None, "the init wizard is removed; init writes a default config (see init --help)"
+)
+ALIASED_FLAGS: dict[str, dict[str, FlagAlias]] = {
+    "init": dict.fromkeys(("--interactive", "-i", "--advanced"), _WIZARD),
+    "run": {"--sustained": FlagAlias("--continuous", "a deprecated alias; prints a warning")},
+    "recommend": dict.fromkeys(
+        ("--extended", "-e"), FlagAlias("--slow-datagen", "a deprecated alias; prints a warning")
+    ),
 }
 
 #: Hidden on purpose, not renamed or removed: the deprecated ``-f`` short
