@@ -34,7 +34,9 @@ nothing measured under this one):
 - ``aml-2``: AML continuous in-stream rounds run the investigator queries
   (IQ1 to IQ4) once the run has a case, so the continuous query set changes
   from 8 queries to 12; a round before the first TM pass runs the 8 and is
-  labelled (2026-10-02).
+  labelled (2026-10-02). The version is per workload, so AML batch records
+  move to ``aml-2`` too, and stored ``aml-1`` records (batch included) no
+  longer compare with new ones.
 - ``c360-2``: gold-finalize no longer switches to the incremental strategy
   when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
   every gold day; incremental gold runs only for multi-cycle cycles 2+, and
