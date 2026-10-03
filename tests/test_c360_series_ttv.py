@@ -130,3 +130,14 @@ def test_aml_time_to_value_keeps_its_meaning():
     pb = _bench([_cycle(i) for i in range(4)], schema="financial")
     assert pb.time_to_value_datagen_excluded_seconds is None
     assert pb.time_to_value_seconds == 1350.0
+
+
+def test_excluded_seconds_are_read_back_with_the_record():
+    from lakebench.metrics.collector import PipelineMetrics
+    from lakebench.metrics.storage import MetricsStorage
+
+    run = PipelineMetrics(run_id="r", deployment_name="d", start_time=T0)
+    run.pipeline_benchmark = _bench([_cycle(i) for i in range(4)])
+    back = MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(run.to_dict())
+    assert back.pipeline_benchmark.time_to_value_datagen_excluded_seconds == 150.0
+    assert back.pipeline_benchmark.time_to_value_seconds == 1200.0
