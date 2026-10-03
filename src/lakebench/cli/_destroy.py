@@ -12,7 +12,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from lakebench.cli._exit import refused_result_code
+from lakebench.cli._exit import note_exit_paths, refusal_paths, refused_result_code
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
@@ -561,4 +561,5 @@ def _destroy_impl(
                 expand=False,
             )
         )
+        note_exit_paths(refusal_paths(results))
         raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)

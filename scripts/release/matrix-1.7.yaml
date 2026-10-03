@@ -1,0 +1,25 @@
+# Release matrix 1.7.0: the rows of the SPEC section 11 table, one
+# deployment each, scale 1 unless noted. The Spark minor and table format
+# version of every row come from
+# lakebench.metrics.release_record.RELEASE_MATRIX_VERSIONS; the harness
+# refuses a row whose generated config resolves to other versions, and
+# refuses a row that is not in RELEASE_MATRIX. Seeds: Customer 360 42,
+# AML 43 (the development seed).
+version: 1.7.0
+rows:
+  - {id: M01, workload: customer360, mode: batch, recipe: hive-iceberg-spark-trino, scale: 1, seed: 42}
+  - {id: M02, workload: customer360, mode: batch, recipe: polaris-iceberg-spark-trino, scale: 1, seed: 42}
+  - {id: M03, workload: customer360, mode: batch, recipe: hive-delta-spark-trino, scale: 1, seed: 42}
+  - {id: M04, workload: customer360, mode: batch, recipe: hive-delta-spark-thrift, scale: 1, seed: 42}
+  - {id: M05, workload: customer360, mode: batch, recipe: hive-iceberg-spark-thrift, scale: 1, seed: 42}
+  - {id: M06, workload: customer360, mode: batch, recipe: polaris-iceberg-spark-thrift, scale: 1, seed: 42}
+  - {id: M07, workload: customer360, mode: batch, recipe: hive-iceberg-spark-duckdb, scale: 1, seed: 42}
+  - {id: M08, workload: customer360, mode: batch, recipe: polaris-iceberg-spark-duckdb, scale: 1, seed: 42}
+  - {id: M09, workload: customer360, mode: batch, recipe: hive-iceberg-spark-none, scale: 1, seed: 42}
+  - {id: M10, workload: customer360, mode: continuous, recipe: hive-iceberg-spark-trino, scale: 1, seed: 42}
+  - {id: M11, workload: customer360, mode: continuous, recipe: hive-delta-spark-trino, scale: 1, seed: 42}
+  - {id: M12, workload: financial, mode: batch, recipe: hive-iceberg-spark-trino, scale: 1, seed: 43}
+  - {id: M13, workload: financial, mode: batch, recipe: polaris-iceberg-spark-trino, scale: 1, seed: 43}
+  - {id: M14, workload: financial, mode: continuous, recipe: hive-iceberg-spark-trino, scale: 1, seed: 43}
+  - {id: M15, workload: financial, mode: continuous, recipe: polaris-iceberg-spark-trino, scale: 1, seed: 43}
+  - {id: M16, workload: financial, mode: batch, recipe: hive-iceberg-spark-trino, scale: 10, seed: 43, alone: true}

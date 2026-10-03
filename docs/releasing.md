@@ -86,6 +86,71 @@ reads it through hatch. Set it to the release version (no `.dev` suffix),
 add a `## [<version>]` section to `CHANGELOG.md`, and commit both through a
 pull request to `main`.
 
+### Release harness
+
+The release matrix runs through `scripts/release/harness.py` from a
+worktree detached at the freeze commit. It is not part of the wheel. It
+runs lakebench only as `env PYTHONPATH=<worktree>/src python3.11 -m
+lakebench`, so the editable install never shadows the release tree.
+
+```bash
+git worktree add --detach /home/repos/lb-release-<version> <freeze sha>
+cd /home/repos/lb-release-<version>
+python3.11 scripts/release/harness.py plan --matrix scripts/release/matrix-1.7.yaml --freeze <sha>
+export LB_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
+python3.11 scripts/release/harness.py run --matrix scripts/release/matrix-1.7.yaml \
+    --freeze <sha> --context <kube context> --out /root/lakebench-release/<version> \
+    --deployments-ledger <deployments ledger file> [--rows M01,M02] [--slots 3] [--rehearsal]
+python3.11 scripts/release/harness.py resume --out /root/lakebench-release/<version> \
+    --context <kube context> --deployments-ledger <deployments ledger file>
+```
+
+`plan` needs no cluster: it writes each row's config with `lakebench
+init`, checks that it resolves to the row's Spark minor and table format
+version (`RELEASE_MATRIX_VERSIONS`), and prints the row's peak from the
+same sizing code as `lakebench plan`. The matrix file must list only
+release-matrix rows (`RELEASE_MATRIX`); C360 rows use seed 42 and AML rows
+seed 43.
+
+`run` refuses to start (exit 2) when HEAD is on a branch, HEAD is not
+`--freeze` (`--rehearsal` waives only this), the tree has a tracked change
+or an untracked or ignored file under `src/` or `scripts/`, lakebench is
+imported from outside the tree, `--context` is not in the kubeconfig, the
+ledger file or a credential variable is missing, or `--out` is inside the
+worktree or under `/tmp`. Row configs, their `.lakebench/` state, logs and
+`rows.jsonl` (one line per row transition) live under `--out`, one
+directory per row, never in the worktree.
+
+For each row it waits for admission, writes the row into the deployments
+ledger table, deploys with `--require-new`, reads the deployment's
+incarnation (`<namespace uid>#<nonce>`) from the config's state file,
+runs `run --generate --yes` with the default per-job timeout, writes the
+report, scrubs the record into `<out>/uat/runs/` and destroys with
+`destroy --yes --expect-incarnation <uid>#<nonce>`. A row passes only when
+its record has no `release_record.record_problems` finding; the exit code
+alone never passes a row. `<out>/results.md` is the UAT results table
+(`results-rehearsal.md` for a rehearsal, which is never evidence); copy it
+and the scrubbed records into `uat/` in the post-freeze data commit.
+
+Safety rules: destroy is never passed `--force` and never re-invoked. Exit
+6 is followed by read-only polls for up to 20 minutes; any other non-zero
+exit, or "Destroy NOT completed", marks the row `failed` or
+`destroy-refused` and stops admitting rows. A deploy that fails is never
+retried: its namespace is destroyed by incarnation only when it carries the
+row's own confirmed nonce, and is otherwise left in the ledger for a
+person. A row whose namespace is already gone is `left`, because its
+buckets may remain. Admission counts lakebench namespaces, ledger rows and
+the harness's own rows against the four-deployment limit, counts every
+ledger deployment at its plan peak, keeps load within 80% of schedulable
+allocatable, runs at most two AML continuous rows at once and runs an
+`alone` row with nothing else. Unreadable nodes admit nothing. The ledger
+table is edited under a lock, with a backup under `<out>/ledger-backups/`,
+and only when the file did not change while it was read. Ctrl-C stops
+admission and sends one SIGINT to running `lakebench run` children; deploys
+and destroys finish. `resume` continues every unfinished row and never
+re-deploys, re-runs or re-destroys; it refuses while a row's child process
+is still alive.
+
 ### UAT results
 
 The gate requires `uat/results-<version>.md`, for example

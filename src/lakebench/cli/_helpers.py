@@ -274,6 +274,11 @@ def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> No
             code = path_code("k8s.unreachable")
         else:
             code = ExitCode.FAILED
+        from lakebench.cli._exit import note_exit_paths
+
+        note_exit_paths(
+            [e.exit_path or ("k8s.unreachable" if isinstance(e, DatagenPodsUnknown) else "")]
+        )
         raise typer.Exit(code) from None
 
 
@@ -301,6 +306,10 @@ def enforce_bronze_gate(
     )
     if not result.proceed:
         print_error(result.message)
+        if result.exit_code == ExitCode.REFUSED:
+            from lakebench.cli._exit import note_exit_paths
+
+            note_exit_paths(["run.bronze_nonempty"])
         raise typer.Exit(result.exit_code)
     record_stale_bronze(cfg, result.record())
     shown = f"s3://{result.bucket}/{result.prefix}"

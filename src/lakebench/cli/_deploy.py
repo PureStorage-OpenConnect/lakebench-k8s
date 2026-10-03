@@ -14,7 +14,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from lakebench.cli._exit import refused_result_code
+from lakebench.cli._exit import note_exit_paths, refusal_paths, refused_result_code
 from lakebench.cli._helpers import (
     _journal_safe,
     check_datagen_scale,
@@ -750,5 +750,6 @@ def _deploy_impl(
             )
         )
         # An ownership refusal (deploy.identity_foreign) is 3, any other failed step 1.
+        note_exit_paths(refusal_paths(results))
         raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)
     return recorded

@@ -1667,6 +1667,48 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
         assert UNEXPECTED_OUTPUT[name] not in result.output, result.output
 
 
+# Every refusal (exit 3) names its path in LB_EXIT_PATH_FILE, so the release
+# harness tells refusals apart (incarnation mismatch, unverified cluster,
+# lease held) without reading message text. Deploy and destroy step
+# refusals exit through typer.Exit and note their paths first.
+_REFUSALS = sorted(n for n in SCENARIOS if exit_codes.path_code(n) == ExitCode.REFUSED)
+
+
+@pytest.mark.parametrize("name", _REFUSALS)
+def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+    target = tmp_path / "exit-path"
+    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
+    result = SCENARIOS[name](monkeypatch, tmp_path)
+    assert result.exit_code == ExitCode.REFUSED, result.output
+    code, *paths = target.read_text().splitlines()[-1].split()
+    assert code == "3"
+    assert name in paths, (name, paths)
+
+
+def test_exit_path_file_written_on_success_and_absent_without_env(monkeypatch, tmp_path):
+    target = tmp_path / "exit-path"
+    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
+    result = _runner().invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert target.read_text() == "0 -\n"
+    monkeypatch.delenv(cli_exit.EXIT_PATH_FILE_ENV)
+    target.unlink()
+    _runner().invoke(app, ["version"])
+    assert not target.exists()
+
+
+def test_refusal_paths_reads_failed_steps_only():
+    rows = [
+        SimpleNamespace(status=SimpleNamespace(value="failed"), details={"refusal": "lease.held"}),
+        SimpleNamespace(status=SimpleNamespace(value="success"), details={"refusal": "x.y"}),
+        SimpleNamespace(status=SimpleNamespace(value="failed"), details={"refusal": "lease.held"}),
+        SimpleNamespace(status=SimpleNamespace(value="failed"), details={}),
+    ]
+    assert cli_exit.refusal_paths(rows) == ["lease.held"]
+
+
 # -- generated table -----------------------------------------------------------
 
 

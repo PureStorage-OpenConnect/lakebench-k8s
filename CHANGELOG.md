@@ -470,6 +470,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **Release harness.** `scripts/release/harness.py` (not in the wheel) runs
+  the release matrix (`scripts/release/matrix-1.7.yaml`) from a worktree
+  detached at the freeze commit: it refuses a dirty tree, a foreign sha or a
+  lakebench imported from outside the tree, writes the deployments-ledger
+  row before each deploy, admits rows against the cluster's load, judges
+  each row by its record and destroys only the incarnation it deployed
+  (`destroy --expect-incarnation`). See docs/releasing.md.
+- **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
+  to that file as it exits, so scripts can tell refusals that share exit 3
+  apart without reading message text (docs/exit-codes.md).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
