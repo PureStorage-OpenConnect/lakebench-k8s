@@ -1,9 +1,12 @@
 """B1: --force-rebuild bumps the silver rebuild-epoch counter and Delta
 txnAppId moves to a new namespace.
 
-Delta short-circuits any (txnAppId, txnVersion) commit it has recorded, so
-cycle 0 of a rebuild that shared its appId with the last epoch's cycle 0
-would silently commit zero rows. This test asserts that:
+The counter is a floor, not the defence against a skipped Delta write: the
+Delta silver build takes its epoch from the table's own SetTransaction ids
+(``silver_build_delta.resolve_txn_epoch``; executed in
+tests/spark/test_silver_build_delta_epoch_spark.py), so a counter that reads
+low, or a failed bump, cannot make Delta skip a cycle. The CLI still refuses
+to submit after a failed bump. This test asserts that:
 
 1. The generated ``delta_batch_txn_options`` result changes across two
    ``--force-rebuild`` invocations.
@@ -13,14 +16,13 @@ would silently commit zero rows. This test asserts that:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE.parent / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_delta_batch_txn_options_shape():
@@ -176,7 +178,7 @@ def test_delta_appid_moves_across_two_force_rebuilds(monkeypatch):
 
 
 def test_cli_fail_hard_on_bump_exception_no_silent_continue():
-    """B1: bump failure must be typer.Exit(1), not silent-continue.
+    """B1: bump failure must be typer.Exit(ExitCode.FAILED), not silent-continue.
 
     The previous behaviour caught any exception from _bump_silver_rebuild_epoch,
     printed a warning, and still exported LB_FORCE_REBUILD=1 alongside the
@@ -185,7 +187,7 @@ def test_cli_fail_hard_on_bump_exception_no_silent_continue():
     silent zero-row write, exit 0, silver missing all of cycle 2 (invariant 3).
 
     The fix hoists the bump above the cycle loop (once per invocation) and
-    raises typer.Exit(1) on any failure.
+    raises typer.Exit(ExitCode.FAILED) on any failure.
     """
     import inspect
 
@@ -204,7 +206,7 @@ def test_cli_fail_hard_on_bump_exception_no_silent_continue():
         "epoch' and misreporting on invariant 5."
     )
     bump_block = src[force_block_pos:cycle_loop_pos]
-    assert "raise typer.Exit(1) from e" in bump_block, (
+    assert "raise typer.Exit(ExitCode.FAILED) from e" in bump_block, (
         "A bump failure must fail hard; the previous 'proceeding with "
         "--force-rebuild flag only' path was invariant-3 silent data loss."
     )

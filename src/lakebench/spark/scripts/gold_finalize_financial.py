@@ -33,6 +33,7 @@ import uuid
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -40,8 +41,11 @@ from common import (
     log,
     log_job_metrics,
     one_line,
+    rule_profile_mark,
+    rule_stage_profile,
     sealed_txns_filter,
 )
+from detection_rules import ALERT_COLUMNS
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -88,6 +92,9 @@ except ValueError:
 # not prevent the cheap ones from writing their alerts. W5 and W6 screen
 # payment beneficiaries against the corpus watchlist
 # (bronze/watchlist.parquet); a corpus without one records them as skipped.
+#: Rules that take the shared screening base (detection_rules.screen_base_frame).
+SCREEN_BASE_RULES = ("W5_sanctions_match", "W6_pep_counterparty")
+
 DEFAULT_DETECTION_RULES = (
     "W5_sanctions_match",
     "W6_pep_counterparty",
@@ -101,26 +108,17 @@ DEFAULT_DETECTION_RULES = (
 )
 
 
+def _alerts_ddl_columns() -> str:
+    """The gold.alerts column list, from detection_rules.ALERT_COLUMNS."""
+    return ",\n".join(
+        f"    {name:<18} {ddl_type}{'' if nullable else ' NOT NULL'}"
+        for name, ddl_type, nullable in ALERT_COLUMNS
+    )
+
+
 DDL_ALERTS = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_ALERTS} (
-    alert_id           STRING NOT NULL,
-    rule_id            STRING NOT NULL,
-    rule_version       STRING NOT NULL,
-    model_id           STRING NOT NULL,
-    model_version      STRING NOT NULL,
-    entity_id          BIGINT NOT NULL,
-    related_txn_ids    ARRAY<STRING>,
-    related_entity_ids ARRAY<BIGINT>,
-    alert_ts           TIMESTAMP NOT NULL,
-    alert_score        DOUBLE,
-    priority           STRING,
-    status             STRING,
-    disposition        STRING,
-    alert_type         STRING,
-    run_id             STRING NOT NULL,
-    narrative          STRING,
-    evidence           MAP<STRING, STRING>,
-    detected_ts        TIMESTAMP
+{_alerts_ddl_columns()}
 ) USING iceberg PARTITIONED BY (months(alert_ts))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
@@ -291,22 +289,13 @@ def main() -> None:
         spark.sql(ddl)
         log(f"Bootstrapped gold.{name}")
 
-    # LB-125 upgrade guard: on a REUSED catalog whose gold.alerts predates
-    # detected_ts, `CREATE TABLE IF NOT EXISTS` is a no-op, and the detection
-    # loop's positional `INSERT INTO gold.alerts SELECT *` (now 18 columns)
-    # would fail against a 17-column table. Check the live schema and add the
-    # column only when it is genuinely missing -- Spark/Iceberg has no
-    # `ADD COLUMN IF NOT EXISTS` for columns (that clause is for PARTITION), so
-    # a blind ALTER would ParseException, and the plain `ADD COLUMNS` would
-    # error if the column already exists. On a fresh table (created 18-col by
-    # the DDL above) this reads the column present and does nothing.
-    try:
-        _alert_cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
-        if "detected_ts" not in _alert_cols:
-            spark.sql(f"ALTER TABLE {CATALOG}.{GOLD_ALERTS} ADD COLUMNS (detected_ts TIMESTAMP)")
-            log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
-    except Exception as e:  # noqa: BLE001
-        log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+    # Reused-catalog upgrade: `CREATE TABLE IF NOT EXISTS` is a no-op on an
+    # older gold.alerts (without detected_ts or reason_codes), and the
+    # detection loop's positional `INSERT INTO gold.alerts SELECT *` needs
+    # the table's columns to be ALERT_COLUMNS in order. Missing trailing
+    # columns are appended; any other difference fails the job here rather
+    # than writing columns into each other.
+    ensure_alert_columns(spark, f"{CATALOG}.{GOLD_ALERTS}", ALERT_COLUMNS)
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
@@ -333,7 +322,7 @@ def main() -> None:
     log(f"Wrote {GOLD_DASH} baseline rows")
 
     try:
-        run_detection_rules(spark, txns, RUN_ID)
+        run_detection_rules(spark, txns, RUN_ID, profile_stages=True)
     finally:
         # W1's reliable checkpoints; see detection_rules.cleanup_w1_checkpoints.
         from detection_rules import cleanup_w1_checkpoints
@@ -366,7 +355,9 @@ def main() -> None:
     spark.stop()
 
 
-def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None) -> dict:
+def run_detection_rules(
+    spark, txns, run_id: str, rules=None, skipped_rules=None, profile_stages=False
+) -> dict:
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
     Per-rule isolation: a rule that raises is logged and skipped, and
@@ -408,6 +399,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     which the rule's alerts were committed to gold.alerts, None for a rule
     that did not run (skip or error). ``cleanup_s`` is the per-rule cache
     and path-spill cleanup, summed. Batch ignores it.
+
+    ``profile_stages`` (batch gold-finalize): run each rule in its own Spark
+    job group and log its heaviest stages after it (``[stage-profile]``,
+    common.rule_stage_profile), restoring the caller's job group after each
+    rule. The profile runs after the rule's commit, so the rule's elapsed
+    time and commit time do not include it; it counts in ``cleanup_s``. Off
+    by default, so the continuous tick's timings are unchanged.
     """
     import inspect
 
@@ -478,6 +476,28 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
     log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
     timings["setup_s"] = time.time() - pass_start
+    # With profile_stages, each rule runs in its own Spark job group, so its
+    # jobs and stages can be attributed to it ([stage-profile] lines, read
+    # from the status store after the rule). The caller's group is restored
+    # after every rule.
+    sc = spark.sparkContext
+    caller_group = _job_group_props(sc) if profile_stages else None
+    # W5 and W6 screen the same input (silver txns joined to the
+    # beneficiary's country). When both run, it is built once, persisted, and
+    # passed to each as screen_base; results are the same frame either way.
+    screen_rules = [r for r in rules if r in SCREEN_BASE_RULES]
+    screen_base = None
+    if len(screen_rules) > 1 and silver_entities is not None:
+        from detection_rules import screen_base_frame
+
+        try:
+            screen_base = screen_base_frame(txns, silver_entities).persist(
+                StorageLevel.MEMORY_AND_DISK
+            )
+            log(f"[detection] shared screening base for {', '.join(screen_rules)}")
+        except Exception as e:  # noqa: BLE001 -- each rule then builds its own
+            log(f"[detection] shared screening base not built: {one_line(e)}")
+            screen_base = None
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -486,7 +506,15 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             status_rows.append((rule_id, "error", "unknown-rule", target_typology, None))
             timings["rules"][rule_id] = {"elapsed_s": 0.0, "committed_s": None}
             continue
+        group = mark = None
+        if profile_stages:
+            # Unique per invocation: a rerun of the rule in the same driver
+            # must not read the earlier run's jobs from the status store.
+            group = f"lb-rule-{rule_id}-{uuid.uuid4().hex[:8]}"
+            sc.setJobGroup(group, f"{rule_id} run {run_id}", interruptOnCancel=False)
+            mark = rule_profile_mark(spark)
         rule_start = time.time()
+        rule_frame = None
         try:
             # Signature-based param filter, NOT ``__code__.co_varnames``
             # -- co_varnames includes every local in the function body,
@@ -506,6 +534,8 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # silently disable the rule by capping it at zero.
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
+            if "screen_base" in sig.parameters and screen_base is not None:
+                params["screen_base"] = screen_base
             alerts = fn(txns, **params)
             # Persist before counting, so the rule is computed exactly once.
             # The loop used to count the frame and then INSERT from a temp
@@ -515,6 +545,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # below, so gold.alerts never shows alerts for a rule whose
             # status is not 'ran'.
             alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
+            rule_frame = alerts
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
@@ -573,11 +604,23 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
             cleanup_start = time.time()
+            if profile_stages:
+                rule_stage_profile(spark, group, rule_id, mark=mark)
+                _restore_job_group(sc, caller_group)
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
             # write, and left cached they hold executor memory and scratch
-            # through every later rule.
-            spark.catalog.clearCache()
+            # through every later rule. The one exception is the shared
+            # screening base while a later screening rule still needs it:
+            # then only this rule's alerts frame is dropped (W5 and W6 persist
+            # nothing else).
+            if screen_base is not None and rule_id in screen_rules[:-1]:
+                if rule_frame is not None:
+                    rule_frame.unpersist()
+            else:
+                spark.catalog.clearCache()
+                if rule_id in screen_rules:
+                    screen_base = None
             # W3/W17 write their path levels and results under the gold
             # bucket; the alerts are written (or dropped) by now.
             cleanup_path_search_spill(spark)
@@ -601,6 +644,21 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     _project_derived_gold(spark, run_id)
     timings["finish_s"] = time.time() - finish_start
     return timings
+
+
+_JOB_GROUP_KEYS = ("spark.jobGroup.id", "spark.job.description", "spark.job.interruptOnCancel")
+
+
+def _job_group_props(sc) -> dict:
+    """The thread's job-group local properties (None when unset)."""
+    return {k: sc.getLocalProperty(k) for k in _JOB_GROUP_KEYS}
+
+
+def _restore_job_group(sc, props: dict) -> None:
+    """Put back the job-group properties ``_job_group_props`` read. A None
+    value removes the property, as it was before the rule's group was set."""
+    for k in _JOB_GROUP_KEYS:
+        sc.setLocalProperty(k, props.get(k))
 
 
 def _drop_rule_alerts(spark, rule_id: str) -> None:

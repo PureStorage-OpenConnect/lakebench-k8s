@@ -75,52 +75,26 @@ def test_legacy_run_gets_the_id_of_the_set_it_ran(tmp_path):
     assert qph_comparable(loaded.query_set_id, query_set_id(FIN))[0] is False
 
 
-def test_compare_keeps_legacy_c360_runs_comparable_among_themselves():
-    from lakebench.cli._compare import _build_comparison
-
-    c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
-    old = _bench(c360).to_dict()
-    old.pop("query_set_id")
-    new = _bench(c360).to_dict()
-
-    def m(b, qph, start="2026-09-24T20:00:00-06:00"):
-        return {
-            "run_id": "x",
-            "start_time": start,
-            "benchmark": b,
-            "pipeline_benchmark": {"scores": {"composite_qph": qph}},
-        }
-
-    # Two legacy runs over the same pinned SQL still compare with each other.
-    c = _build_comparison("a", m(old, 500), "b", m(dict(old), 480))
-    assert c["qph_comparable"] is True
-    assert [r["metric"] for r in c["metrics"]] == ["composite_qph"]
-    # A legacy run against a current one does not: the Q4 tiebreaker moved
-    # the current c360 id past the pinned one.
-    c = _build_comparison("a", m(old, 500), "b", m(new, 480))
-    assert c["qph_comparable"] is False
-    # Recorded before the last c360 SQL change (Q6 recency): not the same SQL.
-    c = _build_comparison("a", m(old, 500, "2026-09-20T10:00:00-06:00"), "b", m(new, 480))
-    assert c["qph_comparable"] is False
-
-
 def test_compare_refuses_qph_across_query_sets():
-    from lakebench.cli._compare import _build_comparison
+    """Two runs whose benchmark query sets differ are NOT COMPARABLE
+    (ladder step 5): no QpH delta is drawn."""
+    import copy
 
-    def m(names, qph):
-        return {
-            "run_id": "x",
-            "benchmark": _bench(names).to_dict(),
-            "pipeline_benchmark": {"scores": {"composite_qph": qph, "time_to_value_seconds": 9}},
-        }
+    from lakebench.metrics.compare import compare_records
+    from tests.fixtures import stored_records as sr
 
-    c = _build_comparison("a", m(FIN8, 500), "b", m(FIN, 300))
-    assert c["qph_comparable"] is False
-    assert [r["metric"] for r in c["metrics"]] == ["time_to_value_seconds"]
-    assert c["qph_refused"]["metrics"] == ["composite_qph"]
-    same = _build_comparison("a", m(FIN, 500), "b", m(FIN, 300))
-    assert same["qph_comparable"] is True
-    assert "composite_qph" in [r["metric"] for r in same["metrics"]]
+    a = sr.load_record("825153")
+    b = copy.deepcopy(a)
+    b["run_id"] = "20261001-000000-95e700"
+    b["experiment"]["results"]["query_set_id"] = query_set_id(FIN8)
+    c = compare_records([a], [b])
+    assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
+    assert "benchmark query sets differ" in c["reasons"][0]
+    qph = next(r for r in c["metrics"] if r["metric"] == "composite_qph")
+    assert qph["delta_pct"] is None and qph["assessment"] == "withheld"
+    same = copy.deepcopy(a)
+    same["run_id"] = "20261001-000000-95e701"
+    assert compare_records([a], [same])["verdict"] != "NOT COMPARABLE"
 
 
 def test_reproduce_refuses_qph_across_query_sets():

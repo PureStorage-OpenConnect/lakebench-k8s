@@ -6,8 +6,8 @@ cluster-corrupting actions:
 - ``helm install spark-operator ...``: raw helm install bypasses the
   cluster lease and read-modify-write on the operator watch list; it has
   caused crash loops of the shared Spark Operator that affected every
-  running deployment. The managed path is ``lakebench admin
-  install-spark-operator``.
+  running deployment. The managed path is ``lakebench admin install
+  --component spark-operator``.
 
 - ``kubectl create namespace <ns>``: pre-creating a namespace bypasses
   ``lakebench deploy``'s ownership stamp and the leased operator watch-list
@@ -19,7 +19,7 @@ cluster-corrupting actions:
 
 - ``Pass --force to release`` (the cluster lease): the release-lock command
   must first steer the user to check the holder and, if the lease is
-  expired, to use ``--expired-only``. ``--force`` on a live lease can
+  expired, to release it without ``--force``. ``--force`` on a live lease can
   corrupt a concurrent deploy or destroy and must only appear as a
   last-resort suggestion, never as a bare one-liner.
 
@@ -187,7 +187,7 @@ def test_no_raw_helm_install_spark_operator_in_hints(path: Path) -> None:
     Raw helm install bypasses the cluster lease and the operator watch-list
     read-modify-write, and has crash-looped the shared operator for every
     running deployment. The safe path is ``lakebench admin
-    install-spark-operator``.
+    install --component spark-operator``.
     """
     text = path.read_text(encoding="utf-8")
     for start, block in _extract_hint_blocks(text):
@@ -195,7 +195,7 @@ def test_no_raw_helm_install_spark_operator_in_hints(path: Path) -> None:
             f"{path}: hint block at offset {start} recommends `helm install "
             "spark-operator`, which bypasses the cluster lease and can "
             "crash-loop the shared Spark Operator. Use `lakebench admin "
-            "install-spark-operator` instead."
+            "install --component spark-operator` instead."
         )
 
 
@@ -246,7 +246,7 @@ def test_no_bare_force_release_of_lease(path: Path) -> None:
     """Refuse a bare ``Pass --force to release`` hint for the cluster lease.
 
     ``admin release-lock`` must first steer the user to check the holder and,
-    if the lease is expired, use ``--expired-only``. ``--force`` on a live
+    if the lease is expired, release it without ``--force``. ``--force`` on a live
     lease can corrupt a concurrent deploy or destroy and must only appear as
     a last-resort suggestion accompanied by an explicit check.
     """
@@ -258,15 +258,15 @@ def test_no_bare_force_release_of_lease(path: Path) -> None:
         if not m:
             continue
         window = block.lower()
-        # Require at least one of: mention of "expired-only", "last resort",
-        # "confirm", or "holder" nearby (the safer paths).
-        allowed = ("expired-only", "last resort", "check the holder", "check who")
+        # Require at least one of: "last resort", or a check of the holder
+        # nearby (the safer paths).
+        allowed = ("last resort", "check the holder", "check who")
         assert any(w in window for w in allowed), (
             f"{path}: hint block at offset {start} suggests `Pass --force to "
             "release` for the cluster lease without steering the user to "
-            "`--expired-only` first and without flagging `--force` as a "
+            "check the holder first and without flagging `--force` as a "
             "last-resort with confirmation. Rephrase to check the holder, "
-            "prefer `--expired-only`, mention `--force` last."
+            "prefer `release-lock` without `--force`, mention `--force` last."
         )
 
 
@@ -336,12 +336,15 @@ def test_force_legacy_hints_include_context_check(path: Path) -> None:
 
 def test_prerequisites_recommends_managed_spark_operator_install() -> None:
     """The Spark Operator prerequisite hint must recommend the managed
-    ``lakebench admin install-spark-operator`` path.
+    ``lakebench admin install --component spark-operator`` path.
     """
-    text = (SRC_ROOT / "cli" / "_prerequisites.py").read_text(encoding="utf-8")
-    assert "lakebench admin install-spark-operator" in text, (
-        "cli/_prerequisites.py must recommend `lakebench admin "
-        "install-spark-operator` as the safe managed install path."
+    from lakebench.deploy.prereqs import PREREQS
+
+    # The run preflight's hint is the registry's fix text (DEP-4).
+    fix = next(p.fix for p in PREREQS if p.id == "spark-operator")
+    assert "lakebench admin install --component spark-operator" in fix, (
+        "the spark-operator prerequisite must recommend `lakebench admin "
+        "install --component spark-operator` as the safe managed install path."
     )
 
 
@@ -363,89 +366,139 @@ def test_prerequisites_namespace_hint_no_kubectl_create() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Declined-prompt exit code (C3, v1.6). A user who answers "n" to a
-# confirmation prompt must exit with EXIT_DECLINED (3), distinct from 0
-# (success) and 1 (failure), so wrapper scripts can tell "user cancelled"
-# apart from either.
+# Declined-prompt exit code (C3, v1.6; renumbered by CLI-1). A user who
+# answers "n" to a confirmation prompt exits 5 (not confirmed), distinct from
+# 0 (success), 1 (failure), 2 (usage) and 3 (refused), so wrapper scripts can
+# tell "user cancelled" apart from the rest.
 # ---------------------------------------------------------------------------
 
 
-def test_exit_declined_is_three() -> None:
-    """``EXIT_DECLINED`` is 3."""
-    from lakebench.cli._helpers import EXIT_DECLINED
+def test_declined_code_is_not_confirmed() -> None:
+    """A declined prompt is ``ExitCode.NOT_CONFIRMED`` (5); the 1.6 constant is gone."""
+    import lakebench.cli._helpers as helpers
+    from lakebench.exit_codes import ExitCode
 
-    assert EXIT_DECLINED == 3
+    assert ExitCode.NOT_CONFIRMED == 5
+    assert not hasattr(helpers, "EXIT_DECLINED")
 
 
-def test_declined_confirm_exits_three_via_clirunner() -> None:
-    """A ``typer.confirm`` that returns False and raises ``typer.Exit(EXIT_DECLINED)``
-    surfaces exit code 3 through Typer's ``CliRunner``.
+def test_declined_confirm_exits_five_via_clirunner() -> None:
+    """A declined ``typer.confirm`` exits 5 through Typer's ``CliRunner``.
 
-    Uses a mini in-process Typer app rather than driving a real lakebench
-    command (which needs live cluster access to reach the prompt) so the
-    test stays hermetic.
+    Uses a mini in-process Typer app on the lakebench group class rather than
+    driving a real command (which needs live cluster access to reach the
+    prompt) so the test stays hermetic.
     """
     import typer
     from typer.testing import CliRunner
 
-    from lakebench.cli._helpers import EXIT_DECLINED
+    from lakebench.cli._exit import LakebenchGroup
+    from lakebench.exit_codes import ExitCode
 
-    app = typer.Typer()
+    app = typer.Typer(cls=LakebenchGroup)
 
     @app.command()
     def cancellable() -> None:
         if not typer.confirm("Proceed?"):
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
+
+    @app.command()
+    def other() -> None:  # a second command keeps Typer in group mode
+        pass
 
     runner = CliRunner()
-    result = runner.invoke(app, [], input="n\n")
-    assert result.exit_code == 3, f"expected 3, got {result.exit_code}: {result.output!r}"
+    result = runner.invoke(app, ["cancellable"], input="n\n")
+    assert result.exit_code == 5, f"expected 5, got {result.exit_code}: {result.output!r}"
 
 
-def test_cli_confirm_sites_use_exit_declined() -> None:
-    """Every ``typer.confirm(...)`` in ``src/lakebench/cli/`` whose ``False``
-    branch immediately calls ``raise typer.Exit(...)`` must pass
-    ``EXIT_DECLINED`` (not a literal 0 or 1).
+def _confirm_call(node) -> bool:
+    """``typer.confirm(...)`` / ``_typer.confirm(...)`` without ``abort=True``."""
+    import ast
+
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        return False
+    if node.func.attr != "confirm":
+        return False
+    abort = any(
+        kw.arg == "abort" and isinstance(kw.value, ast.Constant) and kw.value.value
+        for kw in node.keywords
+    )
+    return not abort
+
+
+def declined_branch_offenders(source: str, name: str) -> list[str]:
+    """Declined-prompt branches that do not exit ``NOT_CONFIRMED``.
+
+    A declined branch is the body of ``if not typer.confirm(...)`` or of
+    ``if not <name>`` where ``<name> = typer.confirm(...)``. It must raise
+    ``typer.Exit(ExitCode.NOT_CONFIRMED)`` or ``NotConfirmed(...)``, wherever
+    in the branch the raise is (a ``confirm(abort=True)`` raises Abort, which
+    the handler maps to 5).
+    """
+    import ast
+
+    tree = ast.parse(source)
+    confirm_names = {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and _confirm_call(n.value)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp)):
+            continue
+        if not isinstance(node.test.op, ast.Not):
+            continue
+        operand = node.test.operand
+        declined = _confirm_call(operand) or (
+            isinstance(operand, ast.Name) and operand.id in confirm_names
+        )
+        if not declined:
+            continue
+        raises = [r for stmt in node.body for r in ast.walk(stmt) if isinstance(r, ast.Raise)]
+        good = [
+            r
+            for r in raises
+            if "NOT_CONFIRMED" in ast.unparse(r) or "NotConfirmed(" in ast.unparse(r)
+        ]
+        if not raises or len(good) != len(raises):
+            offenders.append(f"{name}:{node.lineno}: declined branch does not exit NOT_CONFIRMED")
+    return offenders
+
+
+def test_cli_confirm_sites_use_not_confirmed() -> None:
+    """Every declined ``typer.confirm(...)`` branch in ``src/lakebench/cli/``
+    exits ``ExitCode.NOT_CONFIRMED`` (5), by ``typer.Exit(ExitCode.NOT_CONFIRMED)``
+    or ``raise NotConfirmed(...)``.
 
     Missed sites are the whole point of standardising this exit code:
-    scripts that check for 3 to distinguish cancellation would silently
-    treat one that still exits 0 as success.
+    scripts that check for 5 to distinguish cancellation would silently
+    treat one that still exits 0 or 1 as something else.
     """
-    # Match the pattern:
-    #     confirm = typer.confirm(...)     OR     if not typer.confirm(...):
-    #     if not confirm:                          <indented block>
-    #         ... print_info(...)                  raise typer.Exit(<code>)
-    #         raise typer.Exit(<code>)
-    # We scan for a `raise typer.Exit(N)` (where N is a bare integer literal
-    # 0 or 1) that appears within 8 non-blank lines after a `typer.confirm(`
-    # call in the same file. That window catches the "print then exit" pair
-    # every CLI in this tree uses.
-    cli_dir = SRC_ROOT / "cli"
     offenders: list[str] = []
-    for path in sorted(cli_dir.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        lines = text.split("\n")
-        for m in re.finditer(r"typer\.confirm\s*\(", text):
-            # Allow the case where the confirm was called with abort=True:
-            # click.Abort produces its own exit (1) and the Exit(...) we
-            # see later is unrelated to the declined branch.
-            head_end_of_call = text.find(")", m.end())
-            call_args = text[m.end() : head_end_of_call] if head_end_of_call != -1 else ""
-            if "abort=True" in call_args:
-                continue
-            line_no = text.count("\n", 0, m.end()) + 1
-            # Only inspect the 3 lines immediately after the confirm.
-            # The declined branch in this tree is either an ``if not
-            # typer.confirm(): raise typer.Exit(...)`` two-liner or a
-            # three-liner with an intervening ``print_info``; a wider
-            # window catches unrelated ``Exit(1)`` calls in the same
-            # function's except-blocks and false-fails.
-            snippet = "\n".join(lines[line_no - 1 : line_no + 3])
-            bad = re.search(r"typer\.Exit\(\s*[01]\s*\)", snippet)
-            if bad:
-                offenders.append(
-                    f"{path.relative_to(SRC_ROOT)}:{line_no}: typer.confirm() "
-                    f"followed by literal typer.Exit(0) or typer.Exit(1). "
-                    f"Use typer.Exit(EXIT_DECLINED)."
-                )
+    for path in sorted((SRC_ROOT / "cli").rglob("*.py")):
+        offenders += declined_branch_offenders(
+            path.read_text(encoding="utf-8"), str(path.relative_to(SRC_ROOT))
+        )
     assert not offenders, "declined-prompt exit not standardised:\n  " + "\n  ".join(offenders)
+
+
+def test_declined_branch_rule_sees_a_wrong_exit_anywhere_in_the_branch() -> None:
+    wrong = (
+        "def f():\n"
+        "    confirm = typer.confirm('x')\n"
+        "    if not confirm:\n"
+        "        print_info('a')\n"
+        "        print_info('b')\n"
+        "        print_info('c')\n"
+        "        raise typer.Exit(ExitCode.FAILED)\n"
+    )
+    assert declined_branch_offenders(wrong, "w")
+    silent = "if not typer.confirm('x'):\n    print_info('cancelled')\n"
+    assert declined_branch_offenders(silent, "s")
+    right = "if not typer.confirm('x'):\n    raise typer.Exit(ExitCode.NOT_CONFIRMED)\n"
+    assert not declined_branch_offenders(right, "r")
+    aborting = "typer.confirm('x', abort=True)\n"
+    assert not declined_branch_offenders(aborting, "a")

@@ -23,6 +23,10 @@ spec:
         app: datagen-rs
     spec:
       restartPolicy: Never
+      volumes:
+        - name: heldout
+          configMap:
+            name: lakebench-heldout-hashes
       containers:
         - name: generate
           image: docker.io/sillidata/lb-datagen-rs:latest
@@ -41,6 +45,12 @@ spec:
             - "--prefix"
             - "datagen-v2-rs-s1"
           env:
+            # The generator refuses the financial schema without the held-out
+            # hash file; `lakebench generate` applies this map, or create it:
+            #   kubectl -n <ns> create configmap lakebench-heldout-hashes \
+            #     --from-file=src/lakebench/spark/data/aml/heldout_hashes.json
+            - name: LB_HELDOUT_HASHES
+              value: /etc/lakebench/heldout/heldout_hashes.json
             - name: S3_ENDPOINT
               value: "http://10.0.1.50:80"
             - name: AWS_REGION
@@ -55,6 +65,10 @@ spec:
                 secretKeyRef:
                   name: lakebench-s3-credentials
                   key: secretKey
+          volumeMounts:
+            - name: heldout
+              mountPath: /etc/lakebench/heldout
+              readOnly: true
           resources:
             requests:
               cpu: "8"

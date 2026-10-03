@@ -479,10 +479,12 @@ _DOWNLOAD = re.compile(
 def classify_submission_failure(message: str | None) -> str:
     """A one-line reason for a SUBMISSION_FAILED status message.
 
-    The operator runs spark-submit, which resolves ``spark.jars.packages``
-    with Ivy; a truncated Maven download (0 bytes of a 63 MB jar in the
-    2026-09-27 discovery run) is the common case and is named with the
-    artifact and byte counts. Anything else is the message's first line.
+    Before 1.7 the operator's spark-submit resolved ``spark.jars.packages``
+    with Ivy, and a truncated Maven download (0 bytes of a 63 MB jar in the
+    2026-09-27 discovery run) was the common case; it is still named with
+    the artifact and byte counts for applications that set packages. Since
+    1.7 Lakebench's jobs name their jars as lb-deps URLs. Anything else is
+    the message's first line.
     """
     text = message or ""
     m = _DOWNLOAD.search(text)
@@ -531,3 +533,61 @@ def settle_state(
     if not any(e.kind == "refreshed" and e.ident in read_after for e in gold):
         return False, "no gold refresh has read silver since its last commit"
     return True, "settled"
+
+
+#: SPEC section 8: BOUNDED BY trickle needs ingested / offered rows at or
+#: above this, and lag at window end within one trigger interval.
+TRICKLE_KEPT_PACE_RATIO = 0.99
+#: Window seconds are recorded to 0.1 s; the last write is not.
+_LAG_ROUNDING_S = 0.05
+
+
+def trickle_kept_pace(
+    *,
+    ingested_rows: float | None,
+    released_rows: float | None,
+    corpus_taken: bool,
+    window_s: float | None,
+    last_write_offset_s: float | None,
+    trigger_s: float | None,
+) -> dict[str, Any]:
+    """Whether bronze kept pace with what the trickle offered (SPEC section
+    8): ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO, offered rows
+    being the rows the trickle had released (``released_rows``), and lag at
+    window end (window seconds less bronze's last write) <= one trigger
+    interval.
+
+    When bronze had taken the whole corpus there was nothing left to offer:
+    a last write long before the window end is not falling behind, so the
+    lag is not tested. ``kept_pace`` is True, False, or None with
+    ``not_measured`` naming the input that was missing.
+    """
+    out: dict[str, Any] = {
+        "kept_pace": None,
+        "ingested_rows": ingested_rows,
+        "offered_rows": released_rows,
+        "ratio": None,
+        "lag_s": None,
+        "trigger_s": trigger_s,
+    }
+    if ingested_rows is None or not released_rows:
+        out["not_measured"] = "the rows the trickle offered are not known"
+        return out
+    ratio = float(ingested_rows) / float(released_rows)
+    out["ratio"] = round(ratio, 4)
+    lag_known = window_s is not None and last_write_offset_s is not None and bool(trigger_s)
+    if lag_known and not corpus_taken:
+        out["lag_s"] = round(float(window_s) - float(last_write_offset_s), 1)  # type: ignore[arg-type]
+    if ratio < TRICKLE_KEPT_PACE_RATIO:
+        out["kept_pace"] = False
+        return out
+    if corpus_taken:
+        out["kept_pace"] = True
+        out["lag_note"] = "bronze took the whole corpus; nothing was left to offer"
+        return out
+    if not lag_known:
+        out["not_measured"] = "the lag at window end is not known"
+        return out
+    lag = float(window_s) - float(last_write_offset_s)  # type: ignore[arg-type]
+    out["kept_pace"] = lag <= float(trigger_s) + _LAG_ROUNDING_S  # type: ignore[arg-type]
+    return out

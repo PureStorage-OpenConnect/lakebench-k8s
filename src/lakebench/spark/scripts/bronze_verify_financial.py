@@ -39,7 +39,7 @@ BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
 #     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
-# LB-165: prior to PR-F this script assumed the flat datagen_py layout
+# Prior to PR-F this script assumed the flat datagen_py layout
 # where the ROOT prefix directly held the pacs.008 files, and Spark
 # listing the ROOT hit the three subdirs and failed with
 # UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
@@ -54,7 +54,7 @@ PACS_PREFIX = env(
 # rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
-# LB-165 round 1 fixed only the pacs.008 read; round 2 (this) adds the
+# The first fix covered only the pacs.008 read; this one adds the
 # manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
@@ -77,9 +77,10 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 #   - bronze, empty, with the inferred schema plus ingest_ts. Registering the
 #     files present at preflight time would ingest each of them twice, since
 #     bronze-ingest streams every file under the prefix itself.
-#   - silver.transactions and silver.counterparty_edges, which silver-stream
-#     recreates. Rows left by an earlier batch or continuous run would
-#     otherwise be counted again next to the re-ingested corpus.
+#   - every silver table silver-stream writes (CONTINUOUS_SILVER_TABLES),
+#     which it recreates. Rows left by an earlier batch or continuous run
+#     would otherwise be counted again next to the re-ingested corpus, or
+#     carried into this run's statements and profiles.
 # A pod restart inside a run does not re-run the preflight, so it keeps its
 # checkpoints and tables.
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
@@ -89,6 +90,30 @@ SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
+SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+# Every silver table silver_stream_financial writes; the continuous reset
+# drops them all (its fresh-checkpoint refusal checks the same set).
+CONTINUOUS_SILVER_TABLES = (
+    SILVER_TXNS,
+    SILVER_EDGES,
+    SILVER_ENTITIES,
+    SILVER_ACCOUNTS,
+    SILVER_STATEMENTS,
+    SILVER_PROFILES,
+    SILVER_BATCH_VERSIONS,
+)
+# The gold tables gold-refresh writes, besides the TM tables (TM_TABLES):
+# until its first tick a reader would take the previous run's rows as this
+# run's (score_financial reads the run id from detection_status).
+CONTINUOUS_GOLD_TABLES = (
+    env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts"),
+    env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores"),
+    env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters"),
+    env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards"),
+    env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status"),
+)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 
 
@@ -119,7 +144,7 @@ def _with_location(writer):
 
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
-# add_files preflight thresholds (LB-110). At scale 100+ the pacs008/
+# add_files preflight thresholds. At scale 100+ the pacs008/
 # tree can be 700 GB and 700k+ files; add_files manifest generation
 # scans every file and holds per-file state on the driver, which OOMs
 # the default 4Gi bronze-verify executor. When either threshold is
@@ -232,9 +257,11 @@ def _continuous_reset(spark, df):
     # orphaned data in the silver bucket on every rerun. Entities and accounts
     # too: the continuous stream only appends dimension rows it has not seen,
     # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
-    # would otherwise survive the reset.
+    # would otherwise survive the reset. Statements are appended and profiles
+    # folded into what is there, so they go too, with the batch-versions
+    # sidecar.
     # _drop_owned_table falls back to a plain DROP where Polaris refuses PURGE.
-    for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
+    for t in CONTINUOUS_SILVER_TABLES:
         _drop_owned_table(spark, t)
     _with_location(
         df.limit(0)
@@ -248,7 +275,7 @@ def _continuous_reset(spark, df):
     ).create()
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
-        f"dropped {SILVER_TXNS}, {SILVER_EDGES}, {SILVER_ENTITIES}, {SILVER_ACCOUNTS}"
+        f"dropped {', '.join(CONTINUOUS_SILVER_TABLES)}"
     )
     # The previous run's manifest table must not outlive the reset: this
     # run's datagen writes a new schedule, and scoring against the old one
@@ -265,29 +292,35 @@ def _continuous_reset(spark, df):
     for t in TM_TABLES:
         _drop_owned_table(spark, t)
     log("Continuous reset: dropped the TM operations tables")
+    # The other gold tables are the previous run's alerts, scores, clusters,
+    # dashboards and detection status; gold-refresh recreates them empty.
+    for t in CONTINUOUS_GOLD_TABLES:
+        _drop_owned_table(spark, t)
+    log(f"Continuous reset: dropped {', '.join(CONTINUOUS_GOLD_TABLES)}")
 
 
 def _drop_owned_table(spark, table):
     """DROP a table whose files only it owns; PURGE only when that is proven.
 
-    LB-188: PURGE deletes every file the table metadata references, wherever it
+    PURGE deletes every file the table metadata references, wherever it
     sits, so it runs only for a table whose location is its own directory
     (named after the table, or Iceberg's ``name-<suffix>`` unique-location form)
     and disjoint from the raw datagen landing zone. A table whose location is
     unreadable, shared (a namespace or warehouse root), or overlaps the datagen
     path is dropped catalog-only and its files are kept.
 
-    Scope of the proof: the callers pass only this deployment's silver.* and TM
-    gold.* tables, all created ``CREATE TABLE ... USING iceberg`` with no
-    LOCATION and no ``add_files`` (verified in silver_build_financial.py and
-    tm_operations.py), in this deployment's own catalog. So their files live
+    Scope of the proof: the callers pass only this deployment's silver.*, TM
+    gold.* and gold-refresh gold.* tables, all created ``CREATE TABLE ...
+    USING iceberg`` with no LOCATION and no ``add_files`` (verified in
+    silver_build_financial.py, tm_operations.py and gold_finalize_financial.py),
+    in this deployment's own catalog. So their files live
     under the catalog warehouse and the name + datagen-disjoint check is enough
     to keep PURGE off the raw corpus and off a shared namespace root. It does
     NOT prove the location is under a deployment-owned bucket root the way c360's
     common.owned_table_dir does, because this script does not know the catalog
     warehouse root (Hive vs Polaris differ) and the tables are catalog-managed;
     a bucket-root check keyed on the warehouse is tracked for when it can be
-    verified live (BUGS LB-188 note). Not a live hazard today: with no LOCATION
+    verified live. Not a live hazard today: with no LOCATION
     and no add_files these tables cannot resolve to a foreign bucket.
 
     Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
@@ -421,7 +454,7 @@ def main() -> None:
         # 2. CTAS fallback: if add_files isn't supported by the catalog
         #    (e.g. Nessie REST prior to a certain version) OR the source
         #    parquet exceeds ADD_FILES_MAX_BYTES / ADD_FILES_MAX_FILES
-        #    (LB-110: add_files manifest generation OOMs a 4Gi executor
+        #    (add_files manifest generation OOMs a 4Gi executor
         #    at scale 100+), rewrite the data into the Iceberg table.
         #    Doubles S3 usage; operators can bump the thresholds or the
         #    executor sizing to keep zero-copy.
@@ -541,7 +574,7 @@ def main() -> None:
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
-        # Manifest registration (LB-165 round 2). One file, small; CTAS
+        # Manifest registration. One file, small; CTAS
         # unconditionally. Failure of the pacs.008 registration above
         # would have already raised, so if we're here the catalog and
         # the SparkSession are known good. Manifest failure is however

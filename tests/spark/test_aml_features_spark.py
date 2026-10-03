@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pyspark")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+# Module-scoped fixtures below run scripts, so the module shares one
+# private script namespace.
+pytestmark = pytest.mark.usefixtures("load_script_module")
 
 # A Monday. Time-zone aware so Spark stores the intended UTC instant whatever
 # the host's local zone is (naive datetimes are read as local time).
@@ -51,7 +53,7 @@ def _txn(u, o, b, hours, amount=100.0, ccy="USD", oc="US", bc="US"):
 
 
 @pytest.fixture(scope="module")
-def feats(spark):
+def feats(load_script_module, spark):
     import aml_features as af
 
     rows = [

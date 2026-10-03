@@ -1,0 +1,57 @@
+[lb] 2026-10-01T15:06:07.529721 - ============================================================
+[lb] 2026-10-01T15:06:07.529765 - Gold Refresh (Periodic Re-aggregation)
+[lb] 2026-10-01T15:06:07.529773 - ============================================================
+[lb] 2026-10-01T15:06:07.529779 - Source table: lakehouse.silver.customer_interactions_enriched
+[lb] 2026-10-01T15:06:07.529786 - Target table: lakehouse.gold.customer_executive_dashboard
+[lb] 2026-10-01T15:06:07.529792 - Checkpoint:   s3a://runchar-gold/checkpoints/gold-refresh/
+[lb] 2026-10-01T15:06:07.529798 - Trigger:      5 minutes
+[lb] 2026-10-01T15:06:07.529804 - Creating Iceberg namespace...
+[lb] 2026-10-01T15:06:09.100100 - Created namespace lakehouse.gold
+[lb] 2026-10-01T15:06:11.348473 - Streaming query started, awaiting termination...
+[lb] 2026-10-01T15:06:12.213504 - Refresh cycle 1 (batch 0)
+[lb] 2026-10-01T15:06:12.358342 - Cycle 1: Silver table not ready yet
+[lb] 2026-10-01T15:10:00.211023 - Refresh cycle 2 (batch 1)
+[lb] 2026-10-01T15:10:03.281217 - Cycle 2: aggregating 182,170 Silver records
+[lb] 2026-10-01T15:10:10.715646 - Cycle 2: generated 366 daily KPI records
+[lb] 2026-10-01T15:10:23.123965 - Cycle 2: data freshness 81s
+[lb] 2026-10-01T15:10:23.124004 - Cycle 2: refreshed lakehouse.gold.customer_executive_dashboard in 22.9s (366 KPI records)
+[lb] 2026-10-01T15:15:00.180973 - Refresh cycle 3 (batch 2)
+[lb] 2026-10-01T15:15:00.791666 - Cycle 3: aggregating 485,780 Silver records
+[lb] 2026-10-01T15:15:04.374795 - Cycle 3: generated 366 daily KPI records
+[lb] 2026-10-01T15:15:17.216172 - Cycle 3: data freshness 75s
+[lb] 2026-10-01T15:15:17.216248 - Cycle 3: refreshed lakehouse.gold.customer_executive_dashboard in 17.0s (366 KPI records)
+[lb] 2026-10-01T15:20:00.151399 - Refresh cycle 4 (batch 3)
+[lb] 2026-10-01T15:20:00.504453 - Cycle 4: aggregating 789,409 Silver records
+[lb] 2026-10-01T15:20:04.857434 - Cycle 4: generated 366 daily KPI records
+[lb] 2026-10-01T15:20:22.422347 - Cycle 4: data freshness 81s
+[lb] 2026-10-01T15:20:22.422427 - Cycle 4: refreshed lakehouse.gold.customer_executive_dashboard in 22.3s (366 KPI records)
+[lb] 2026-10-01T15:25:00.175556 - Refresh cycle 5 (batch 4)
+[lb] 2026-10-01T15:25:00.585680 - Cycle 5: aggregating 1,093,065 Silver records
+[lb] 2026-10-01T15:25:06.595106 - Cycle 5: generated 366 daily KPI records
+[lb] 2026-10-01T15:25:28.835516 - Cycle 5: data freshness 87s
+[lb] 2026-10-01T15:25:28.835597 - Cycle 5: refreshed lakehouse.gold.customer_executive_dashboard in 28.7s (366 KPI records)
+[lb] 2026-10-01T15:30:00.139741 - Refresh cycle 6 (batch 5)
+[lb] 2026-10-01T15:30:00.510394 - Cycle 6: aggregating 1,396,623 Silver records
+[lb] 2026-10-01T15:30:04.723212 - Cycle 6: generated 366 daily KPI records
+[lb] 2026-10-01T15:30:20.613974 - Cycle 6: data freshness 79s
+[lb] 2026-10-01T15:30:20.614052 - Cycle 6: refreshed lakehouse.gold.customer_executive_dashboard in 20.5s (366 KPI records)
+[lb] 2026-10-01T15:35:00.145693 - Refresh cycle 7 (batch 6)
+[lb] 2026-10-01T15:35:00.397746 - Cycle 7: aggregating 1,700,188 Silver records
+[lb] 2026-10-01T15:35:02.601449 - Cycle 7: generated 366 daily KPI records
+[lb] 2026-10-01T15:35:12.986043 - Cycle 7: data freshness 71s
+[lb] 2026-10-01T15:35:12.986117 - Cycle 7: refreshed lakehouse.gold.customer_executive_dashboard in 12.8s (366 KPI records)
+[lb] 2026-10-01T15:40:00.142178 - Refresh cycle 8 (batch 7)
+[lb] 2026-10-01T15:40:00.398804 - Cycle 8: aggregating 2,003,673 Silver records
+[lb] 2026-10-01T15:40:03.798603 - Cycle 8: generated 366 daily KPI records
+[lb] 2026-10-01T15:40:18.917152 - Cycle 8: data freshness 77s
+[lb] 2026-10-01T15:40:18.917229 - Cycle 8: refreshed lakehouse.gold.customer_executive_dashboard in 18.8s (366 KPI records)
+[lb] 2026-10-01T15:45:00.152758 - Refresh cycle 9 (batch 8)
+[lb] 2026-10-01T15:45:00.482302 - Cycle 9: aggregating 2,307,230 Silver records
+[lb] 2026-10-01T15:45:05.363745 - Cycle 9: generated 366 daily KPI records
+[lb] 2026-10-01T15:45:24.864312 - Cycle 9: data freshness 83s
+[lb] 2026-10-01T15:45:24.864389 - Cycle 9: refreshed lakehouse.gold.customer_executive_dashboard in 24.7s (366 KPI records)
+[lb] 2026-10-01T15:50:00.144915 - Refresh cycle 10 (batch 9)
+[lb] 2026-10-01T15:50:00.451758 - Cycle 10: aggregating 2,428,561 Silver records
+[lb] 2026-10-01T15:50:05.354552 - Cycle 10: generated 366 daily KPI records
+[lb] 2026-10-01T15:50:25.927764 - Cycle 10: data freshness 264s
+[lb] 2026-10-01T15:50:25.927844 - Cycle 10: refreshed lakehouse.gold.customer_executive_dashboard in 25.8s (366 KPI records)

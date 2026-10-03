@@ -1,0 +1,1 @@
+  - recipe: recipe must be one name, not list

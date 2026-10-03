@@ -1,0 +1,1191 @@
+{
+ "_derivation": {
+  "author": "independent second agent (SD-19 golden), derived by reading 189fa3d and the harness diff on top of the 46cc3f4 golden; harness, test, run() and CLI not run",
+  "tree": "lane/v17-run-sd19 at 189fa3d (SD-19, LB-210) plus the uncommitted FakeTrino partition answer in tests/harness/run_harness.py",
+  "exported_run_id": "cli/_run.py:1923 os.environ['LB_RUN_ID'] = run_id; CliRunner.isolation restores only the env keys passed to it, so it survives the invoke. Normalised to <run_id>.",
+  "submits": "cli/_run.py:2249 cycle_env LB_RUN_ID=f'{run_id}-c1', cycles=1, no force rebuild; normalised <run_id>-c1.",
+  "calls_args": "wait_for_completion timeout 3600 (= max(3600, 1*120), cli/_run.py:1776) and poll 5 (_STAGE_POLL_S cli/_run.py:548). application_end returns an end, so cli/_run.py:661-667 reads the cluster offset once: getattr(monitor,'_lb_clock_offset') hits FakeMonitor's '_' AttributeError -> None -> cluster_clock_offset_seconds (cli/_sustained.py:2318) -> VersionApi get_code; the float is then stored on the monitor and later stages skip it. S3 init from config: endpoint, env-expanded keys, region us-east-1, path_style True, verify_ssl True (cli/_run.py:2434-2442, 3079-3087); one init per stage measurement and one in finally. Health probes use query_sql, which passes no timeout (exec_in_pod default 30, modules/table_formats/iceberg/maintenance.py:342). Maintenance and compaction statements: budget.statement_timeout(1800) = min(1800, int(~1800)+30) = 1800 (cli/_sustained.py:796, cli/_run.py:43-47). Trino readiness execute_query timeout=15 (cli/_sustained.py:1468).",
+  "jobs": "timing_source: monitor.stage_timing (modules/pipeline_engines/spark/monitor.py:129-174): end = driver end (+55 s) + 0.5 - offset (|offset| <= ~0.5) lies inside [submitted-2, submitted+62], so TIMING_DRIVER 'driver_container'. executor_count 4 from the RUNNING progress callback (cli/_run.py:2316); cores and memory from _JOB_PROFILES c360 (bronze 2c 4g+2g, silver 4c 48g+12g, gold 4c 32g+8g), memory_gb_requested = 4*(mem+overhead) (cli/_run.py:2391-2406). Rows and input_size_gb from the fixture JOB METRICS blocks; gold input 0.000 falls back to silver output_size_gb (cli/_run.py:2409-2421); output_size_gb from FakeS3 bytes / 1024^3 (cli/_run.py:2443-2445).",
+  "values": "maintenance_policy_id MAINTENANCE_POLICY_ID (metrics/maintenance_policy.py:44; no --skip-maintenance). effective maintenance from metrics/maintenance_policy.py effective_maintenance via metrics/experiment.py:758-767. bucket_gb from record_actual_sizes (metrics/collector.py:2545). scores: PipelineBenchmark._scores_dict batch branch (metrics/collector.py:1588-1659); total_data_processed_gb sums stage input_size_gb incl. the query stage (input = run.gold_size_gb) (collector.py:1046, 2033-2043); scale_ratio = 9.917/10.0 (collector.py:1084-1091).",
+  "exit_code": "as v1: pipeline_success never set False.",
+  "calls": "as the 46cc3f4 golden, except compaction: after find_maintenance_engine's list_namespaced_pod, the plan comprehension (cli/_sustained.py:1423) calls build_sql per table in order silver, gold. Silver is on _COMPACTION_PARTITION_COLUMN (iceberg/maintenance.py:234), so _compaction_partitions runs query_sql with build_partition_values_sql (maintenance.py:265-268), no container, timeout budget.statement_timeout(120) = min(120, int(~1800)+30) = 120 (cli/_sustained.py:1474, 1505-1507). FakeTrino answers the 366 dates of 2024; parse_partition_values keeps them sorted; 366 > 90 so build_compaction_plan (maintenance.py:325-346) emits 5 chunks: <= 2024-03-30 (index 89), (03-30, 06-28], (06-28, 09-26], (09-26, 12-25], > 2024-12-25 (last run 6 values); no NULL partition, so no IS NULL statement. Gold is off the map: no read, one unchunked statement. Every statement exec timeout 1800 as before (cli/_sustained.py:972). Worker readiness and post probes unchanged. 74 calls (69 + 1 read + 4 extra chunks).",
+  "maintenance_outcomes": "compaction now counts tables (_table_outcome, cli/_sustained.py:1435): total 2, succeeded 2, others 0, so the trace row is unchanged; the new keys unit, engine, statements_total (6), statements_succeeded (6), statements_attempted (6), failures [], statements are not in _OUTCOME_KEYS (tests/harness/run_harness.py:941), and note is absent because the partition read succeeded. Files row unchanged: 367 -> 367 no-op.",
+  "values_success": "unchanged. effective_maintenance: compaction total/ok 2/2 tables, stmt 6/6 (maintenance_policy.py:324), so ran/on; compaction_detail adds detail keys only, not id or detail_id (maintenance_policy.py:364-390). Settle trigger now counts 10 statements (4 expire + 6 compaction, cli/_run.py:899-922, 2835) but the trigger is a string only; settle still runs, same probes. maintenance_value_reason unchanged (367 -> 367).",
+  "c360_correctness": "unchanged from v1: pass.",
+  "verdict": "PASSED, reasons [].",
+  "unsure": "Nothing material. The 120 s read and 1800 s statement timeouts assume under 30 s pass between MaintenanceBudget creation and each call, which holds with instant fakes.",
+  "er9h": {
+   "author": "independent second agent (ER-9h golden update), derived by reading the uncommitted lane diff; pytest, the harness, run(), _run_sustained and the CLI were not run",
+   "tree": "lane/v17-identity-er9h, uncommitted working tree on integrate 9afa879 (cli/_run.py, cli/_sustained.py, corpus_digest.py, metrics/corpus_identity.py, tests/harness/run_harness.py)",
+   "position": "calls[74..76], appended after the finally block's three get_bucket_size calls (cli/_run.py:3107-3112); nothing records between those and the new site. calls 74 -> 77.",
+   "site": "cli/_run.py:3205-3208 (batch finally block, inside `if run_metrics:`, after build_pipeline_benchmark, before save_run at :3209) calls record_corpus_observation(run_metrics, cfg) with s3=None. config_snapshot.experiment_inputs is a dict (metrics/collector.py:2276), so the helper does not return early.",
+   "calls[74]": "S3 init: record_corpus_observation builds S3Client from cfg.platform.storage.s3 (metrics/corpus_identity.py:209-219), via lakebench.s3.S3Client, which the harness patches to FakeS3 (tests/harness/run_harness.py:1501); FakeS3.__init__ records endpoint, keys, region, path_style, verify_ssl (run_harness.py:893-911), the same values as the finally block's init (ca_cert is passed but not recorded).",
+   "calls[75]": "S3 raw_client: observe_corpus reads s3.raw_client once (metrics/corpus_identity.py:161); FakeS3.raw_client records it and returns _FakeBoto (run_harness.py:927-930).",
+   "calls[76]": "S3 paginate list_objects_v2 runchar-bronze customer/interactions/: read_corpus_markers -> _read_into -> list_scope (corpus_digest.py:263-292, 137-146); get_paginator itself records nothing, paginate records (Bucket, Prefix) (run_harness.py:857-872). Bucket cfg.platform.storage.s3.buckets.bronze = runchar-bronze (default_bucket_names, as the get_bucket_size calls show). bronze_datagen_prefix (deploy/datagen.py:40-53): schema customer360, path_template default 'customer/interactions' (config/schema.py:929; base_config does not set it), unchanged; datagen_scope (corpus_digest.py:94-101) -> 'customer/interactions/'. The bucket starts with 'runchar-', so no refusal.",
+   "after": "The page is empty, so no marker or series.json GET (corpus_digest.py:294-356); resolve_lineage reads the local lineage table only (metrics/corpus_identity.py:511-549); no further seam call before save_run.",
+   "other_sections": "unchanged. experiment's top-level keys are fixed (metrics/experiment.py:811-828), so metrics_keys.experiment is the same; the observation adds only experiment.corpus fields (id_v2 None, id_v2_unavailable, declared, problems), which no trace section reads (build_trace, run_harness.py:1687-1746). compute_verdict reads no corpus or experiment field (metrics/verdict.py), so success, verdict and verdict_reasons are unchanged. No journal event. unscripted stays []."
+  },
+  "er10a": "v2_unavailable joins the experiment block keys: experiment_inputs writes identity_version 2 at run start, and the block is exp1 until it has corpus id v2 and a system identity, so build_experiment writes v2_unavailable (metrics/experiment.py build_experiment). Derived by the independent second agent of the ER-10 goldens from the code, harness not run.",
+  "er10": "calls 77 -> 89: start sample at calls[11..19], end sample at calls[83..85], ER-9h observation at calls[86..88]. author: independent second agent (ER-10b goldens). tree: lane/v17-identity-er10-r2 at 7bfef9cb (ER-10b) on 3aee9906 (ER-10a) and integrate 6e18d048; the only uncommitted edit is tests/test_comparability.py, outside the traced path. Derived by reading code only; pytest, the harness, run(), _run_sustained and the CLI were not run. Start sample: sample_run_start(collector.current_run, cfg) runs right after collector.start_run (cli/_run.py:1943-1947), before the try that builds SparkOperatorManager (cli/_run.py:1979); journal_open, MetricsCollector and build_config_snapshot record nothing, so the 9 entries sit between the preflight's last read (read_namespaced_stateful_set lakebench-trino-worker, _run_preflight_infra_check, cli/_run.py:1894) and SparkOperator init. _inputs finds config_snapshot['experiment_inputs'] (metrics/collector.py:2286) and the run is not local, so work() runs in the _within thread (metrics/system_identity.py:645-664), which the main thread joins: records fall in call order. _clients (system_identity.py:614-642): get_k8s_client(context, namespace=cfg.get_namespace()) through the patched lakebench.k8s (run_harness.py:1551-1554) -> [k8s, get_k8s_client, runchar] (run_harness.py:376); a client exists, so S3Client(endpoint, access_key, secret_key, region, path_style, ca_cert, verify_ssl) through the patched lakebench.s3 (run_harness.py:1586) -> FakeS3.__init__ records [S3, init, http://10.0.1.50:80, harness-access, harness-secret, us-east-1, true, true] (run_harness.py:978-997; ca_cert binds against S3Client.__init__, s3/client.py:93-102, and is not recorded). observe_system (system_identity.py:381-422), readers in order: api_server_ca reads k8s._core_v1 (property building FakeCoreV1Api directly, run_harness.py:410-412, no record) .api_client.configuration.ssl_ca_cert = harness-ca.pem (run_harness.py:522-524) and hashes the file, no record (system_identity.py:217-233); kubernetes: client.VersionApi(api_client) (patched constructor, run_harness.py:1558-1566, records nothing) .get_code(_request_timeout=(5, 15)) -> [VersionApi, get_code_version, [5, 15]] (system_identity.py:133, 236-245; run_harness.py:599-601); openshift: k8s._custom (run_harness.py:414-416) .get_cluster_custom_object -> [CustomObjectsApi, get_cluster, clusterversions, version], 404 -> None (system_identity.py:248-260; run_harness.py:566-569); nodes: list_node(_request_timeout=(5, 15)) -> [CoreV1Api, list_node, [5, 15]] (system_identity.py:302-304; run_harness.py:526-528); storage_endpoint and storage_backend read the config only (detect_backend is a string test, s3/conformance.py:627-636); storage_server: s3_client.raw_client -> [S3, raw_client] (run_harness.py:1012-1015), .head_bucket(Bucket=buckets.bronze) -> [S3, head_bucket, runchar-bronze] (system_identity.py:355; run_harness.py:953-957); scratch reads the config. observe_load (system_identity.py:535-605): list_node (5, 15) at line 562; worker-0 and worker-1 are schedulable workers (worker-2 cordoned, master-0 control plane), so _list_pods (system_identity.py:503-519) sends one page, list_pod_for_all_namespaces(field_selector='status.phase!=Succeeded,status.phase!=Failed', limit=500, _request_timeout=(5, 60)) -> [CoreV1Api, list_pod_for_all_namespaces, <field_selector>, [5, 60]] (limit not recorded; run_harness.py:530-540); the page has no metadata, so no continue token. kubernetes.utils.parse_quantity exists in the installed client (35.0.0). Tuples render as JSON lists (normalise, run_harness.py:1937-1947). End sample: sample_run_end(run_metrics, cfg) (cli/_run.py:3215) runs inside `if run_metrics:` after build_pipeline_benchmark and immediately before the ER-9h record_corpus_observation (cli/_run.py:3219) and save_run (cli/_run.py:3220); run_metrics is collector.current_run (metrics/collector.py:2508-2526), so the same experiment_inputs. It builds only the k8s client (_clients s3_too=False returns before S3Client, system_identity.py:624-626): [k8s, get_k8s_client, runchar], then observe_load's list_node and list_pod_for_all_namespaces as at start: 3 entries, inserted before the ER-9h block's [S3, init], which keeps its 3 entries at the tail. metrics_keys.experiment gains observed and system_identity (metrics/experiment.py:868, 870-875): sysid has parts; observed is the dict _record_load writes (system_identity.py:765-777). v2_unavailable stays ['corpus id v2'] (experiment.py:847): the ER-9h observation still finds no markers, so id_v2 is None; system identity is not missing (experiment.py:850-857) because api_server_ca, kubernetes, openshift (None is observed) and nodes are cluster parts read from the cluster. Schema stays exp1. No other section changes: the new data sit in config_snapshot and experiment, so metrics_keys.top, pipeline_benchmark and jobs[0] are unchanged; values, maintenance_outcomes, verdict (metrics/verdict.py reads neither field); every new call is scripted, so unscripted stays []. Rechecked against the d5e21319 derivation (pre-ER-9h tree): the 9 start entries are the same and in the same place; the 3 end entries are the same, but now precede the ER-9h observation instead of ending the trace.",
+  "er6_images": "each batch stage builds collector.stage_image_watch (cli/_run.py:2414); FakeMonitor.wait_for_completion records its call, then fires progress_callback once with RUNNING and executor_count=4 (tests/harness/run_harness.py:1036, 1049-1050; no interrupt in this scenario), so on_progress's _watch.on_status (cli/_run.py:2430) makes the first read; the harness pod list is empty (run_harness.py:666-671), so no driver digest is seen and _images.finish() (cli/_run.py:2457), after CD-16's interrupt bookkeeping, reads once more before record_scratch and _stage_timing's application_end. Two pod lists per stage (metrics/provenance.py:368, no label_selector), adjacent, between the stage's wait_for_completion and its application_end: calls 89 -> 95, new entries at calls[27..28], [35..36], [42..43] (bronze-verify, silver-build, gold-finalize). Nothing else moves: the reads return no roles, observe_images and record_scratch never raise, the interrupt bookkeeping and _inflight_state record nothing, provenance is already a top key and the experiment block keeps its lakebench key (its new contents are not traced). Derived by reading 84ec6b7e against 9a77ab18; pytest, the harness and the CLI were not run.",
+  "er5": "ER-5 (lane/v17-evidence-er5): metrics_keys.experiment gains 'requested_effective' and 'requested_effective_mismatches'. metrics/experiment.py build_experiment adds both keys to every block it builds, batch or continuous, passed or failed (_requested_effective, after 'limits'), so the sorted key list takes them between 'repetitions' and 'results'. The trace keeps only the experiment block's key names (build_trace), so nothing else moves: config_snapshot gains 'requested' (gold_strategy 'auto' for Customer 360), which the trace does not read, and the verdict carries no requested_effective qualifier, because no entry is a mismatch: a gold entry (when gold ran) reads 'not recorded', the fixture gold-finalize.log having no gold_strategy line; the executor entries are profile requests, never a mismatch even where the fake's count differs (silver-build requested 8, observed 4); the mode is met. Derived by reading the code; checked by a second agent in the ER-5 review."
+ },
+ "exit_code": 0,
+ "unscripted": [],
+ "runs_saved": 1,
+ "exported_run_id": "<run_id>",
+ "calls": [
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_cluster_capacity"
+  ],
+  [
+   "prerequisites",
+   "run",
+   {
+    "sustained": false,
+    "datagen_runs": false
+   }
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "namespace_exists",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-postgres",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-hive-metastore-default",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_deployment",
+   "lakebench-trino-coordinator",
+   "runchar"
+  ],
+  [
+   "AppsV1Api",
+   "read_namespaced_stateful_set",
+   "lakebench-trino-worker",
+   "runchar"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "VersionApi",
+   "get_code_version",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CustomObjectsApi",
+   "get_cluster",
+   "clusterversions",
+   "version"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "head_bucket",
+   "runchar-bronze"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CoreV1Api",
+   "list_pod_for_all_namespaces",
+   "status.phase!=Succeeded,status.phase!=Failed",
+   [
+    5,
+    60
+   ]
+  ],
+  [
+   "SparkOperator",
+   "init",
+   "spark-operator",
+   null,
+   "runchar"
+  ],
+  [
+   "SparkOperator",
+   "check_status"
+  ],
+  [
+   "SparkOperator",
+   "ensure_namespace_watched",
+   true
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "JobManager",
+   "deploy_scripts_configmap"
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "bronze-verify"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-bronze-verify",
+   3600,
+   5
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-bronze-verify"
+  ],
+  [
+   "VersionApi",
+   "get_code"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "silver-build"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-silver-build",
+   3600,
+   5
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-silver-build"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "JobManager",
+   "submit_job",
+   "gold-finalize"
+  ],
+  [
+   "SparkJobMonitor",
+   "wait_for_completion",
+   "lakebench-gold-finalize",
+   3600,
+   5
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   ""
+  ],
+  [
+   "SparkJobMonitor",
+   "application_end",
+   "lakebench-gold-finalize"
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   1,
+   300,
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   3,
+   300,
+   false
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-bronze-ingest",
+   "runchar"
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-silver-stream",
+   "runchar"
+  ],
+  [
+   "CustomObjectsApi",
+   "get",
+   "sparkapplications",
+   "lakebench-gold-refresh",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.expire_snapshots_min_retention = '0s'; ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE expire_snapshots(retention_threshold => '0s')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.remove_orphan_files_min_retention = '1450m'; ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE remove_orphan_files(retention_threshold => '1450m')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.expire_snapshots_min_retention = '0s'; ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE expire_snapshots(retention_threshold => '0s')"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "SET SESSION lakehouse.remove_orphan_files_min_retention = '1450m'; ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE remove_orphan_files(retention_threshold => '1450m')"
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT DISTINCT partition.interaction_date FROM lakehouse.silver.\"customer_interactions_enriched$partitions\" ORDER BY 1"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date <= DATE '2024-03-30'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-03-30' AND interaction_date <= DATE '2024-06-28'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-06-28' AND interaction_date <= DATE '2024-09-26'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-09-26' AND interaction_date <= DATE '2024-12-25'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.silver.customer_interactions_enriched EXECUTE optimize(file_size_threshold => '128MB') WHERE interaction_date > DATE '2024-12-25'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   1800,
+   "trino --execute",
+   "ALTER TABLE lakehouse.gold.customer_executive_dashboard EXECUTE optimize(file_size_threshold => '128MB')"
+  ],
+  [
+   "subprocess",
+   "kubectl",
+   "get",
+   "statefulset",
+   "lakebench-trino-worker",
+   "-n",
+   "runchar",
+   "-o",
+   "jsonpath={.spec.replicas}"
+  ],
+  [
+   "Executor",
+   "execute_query",
+   "SELECT COUNT(*) FROM system.runtime.nodes WHERE state = 'active' AND coordinator = false",
+   15
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   30,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "probe_query",
+   null
+  ],
+  [
+   "Benchmark",
+   "time_query",
+   "Q1_full_aggregation_scan",
+   1
+  ],
+  [
+   "Benchmark",
+   "time_query",
+   "Q1_full_aggregation_scan",
+   1
+  ],
+  [
+   "Benchmark",
+   "init",
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   1,
+   300,
+   false
+  ],
+  [
+   "Benchmark",
+   "run_power",
+   "hot",
+   3,
+   300,
+   true
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "get_bucket_size",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.customer_interactions_enriched"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.customer_executive_dashboard"
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"customer_interactions_enriched$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/customer_interactions_enriched/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"customer_interactions_enriched$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"customer_interactions_enriched$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"customer_executive_dashboard$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/customer_executive_dashboard/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"customer_executive_dashboard$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"customer_executive_dashboard$files\")"
+  ],
+  [
+   "k8s",
+   "get_k8s_client",
+   "runchar"
+  ],
+  [
+   "CoreV1Api",
+   "list_node",
+   [
+    5,
+    15
+   ]
+  ],
+  [
+   "CoreV1Api",
+   "list_pod_for_all_namespaces",
+   "status.phase!=Succeeded,status.phase!=Failed",
+   [
+    5,
+    60
+   ]
+  ],
+  [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   "customer/interactions/"
+  ]
+ ],
+ "submits": [
+  [
+   "bronze-verify",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ],
+  [
+   "silver-build",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ],
+  [
+   "gold-finalize",
+   [
+    "LB_RUN_ID"
+   ],
+   {
+    "LB_RUN_ID": "<run_id>-c1",
+    "LB_BRONZE_CYCLE": null,
+    "LB_SILVER_INCREMENTAL": null,
+    "LB_GOLD_INCREMENTAL": null,
+    "LB_FORCE_REBUILD": null
+   }
+  ]
+ ],
+ "journal_events": [
+  [
+   "session.start",
+   null,
+   null
+  ],
+  [
+   "command.start",
+   null,
+   null
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "bronze-verify"
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "silver-build"
+  ],
+  [
+   "pipeline.stage",
+   true,
+   "gold-finalize"
+  ],
+  [
+   "pipeline.complete",
+   true,
+   null
+  ],
+  [
+   "streaming.health",
+   null,
+   null
+  ],
+  [
+   "streaming.health",
+   null,
+   null
+  ],
+  [
+   "benchmark.start",
+   null,
+   null
+  ],
+  [
+   "benchmark.complete",
+   true,
+   null
+  ],
+  [
+   "metrics.saved",
+   null,
+   null
+  ],
+  [
+   "command.end",
+   true,
+   null
+  ]
+ ],
+ "metrics_keys": {
+  "top": [
+   "autosize_cuts",
+   "benchmark",
+   "benchmark_query_timeout_seconds",
+   "bronze_size_gb",
+   "c360_correctness",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "experiment",
+   "gold_size_gb",
+   "job_timeout_seconds",
+   "jobs",
+   "maintenance_outcomes",
+   "maintenance_policy_id",
+   "pipeline_benchmark",
+   "provenance",
+   "queries",
+   "run_id",
+   "silver_size_gb",
+   "start_time",
+   "storage_multiple",
+   "streaming",
+   "success",
+   "total_elapsed_seconds",
+   "verdict"
+  ],
+  "pipeline_benchmark": [
+   "advanced_metrics",
+   "bucket_sizes",
+   "config_snapshot",
+   "deployment_name",
+   "end_time",
+   "maintenance_settle",
+   "pipeline_mode",
+   "pre_compaction_benchmark",
+   "query_benchmark",
+   "run_id",
+   "scale_factor",
+   "scale_ratio",
+   "score_descriptions",
+   "scorecard",
+   "scores",
+   "stage_matrix",
+   "stages",
+   "start_time",
+   "success"
+  ],
+  "jobs[0]": [
+   "alerts_by_rule",
+   "c360_bronze",
+   "c360_check",
+   "cpu_seconds_requested",
+   "elapsed_seconds",
+   "end_time",
+   "error_message",
+   "executor_cores",
+   "executor_count",
+   "executor_memory_gb",
+   "extra_metrics",
+   "input_rows",
+   "input_size_gb",
+   "job_name",
+   "job_type",
+   "memory_gb_requested",
+   "output_rows",
+   "output_size_gb",
+   "rule_elapsed_s",
+   "rule_errors",
+   "rules_skipped",
+   "silver_tables",
+   "stage_profile",
+   "stage_profile_cost_s",
+   "stage_profile_unavailable",
+   "start_time",
+   "submission_failures",
+   "submission_retry_seconds",
+   "success",
+   "throughput_gb_per_second",
+   "throughput_rows_per_second",
+   "timing_resolution_seconds",
+   "timing_source",
+   "tm_invariants",
+   "tm_ops",
+   "tm_status"
+  ],
+  "experiment": [
+   "architecture",
+   "corpus",
+   "effective_maintenance",
+   "lakebench",
+   "limits",
+   "maintenance_policy_id",
+   "maintenance_settings",
+   "mode",
+   "observed",
+   "repetitions",
+   "requested_effective",
+   "requested_effective_mismatches",
+   "results",
+   "rules",
+   "schema",
+   "stages",
+   "support",
+   "system",
+   "system_identity",
+   "v2_unavailable",
+   "workload"
+  ]
+ },
+ "jobs": [
+  {
+   "job_type": "bronze-verify",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 2,
+   "executor_memory_gb": 4.0,
+   "memory_gb_requested": 24.0,
+   "input_rows": 2478560,
+   "output_rows": 2478560,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.917505
+  },
+  {
+   "job_type": "silver-build",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 4,
+   "executor_memory_gb": 48.0,
+   "memory_gb_requested": 240.0,
+   "input_rows": 2478560,
+   "output_rows": 2428561,
+   "input_size_gb": 9.917,
+   "output_size_gb": 9.762412
+  },
+  {
+   "job_type": "gold-finalize",
+   "success": true,
+   "error_message": null,
+   "timing_source": "driver_container",
+   "executor_count": 4,
+   "executor_cores": 4,
+   "executor_memory_gb": 32.0,
+   "memory_gb_requested": 160.0,
+   "input_rows": 2428561,
+   "output_rows": 366,
+   "input_size_gb": 9.762412,
+   "output_size_gb": 6.5e-05
+  }
+ ],
+ "maintenance_outcomes": [
+  {
+   "failed": 0,
+   "kind": "expire",
+   "not_attempted": 0,
+   "succeeded": 4,
+   "timed_out": 0,
+   "total": 4
+  },
+  {
+   "failed": 0,
+   "kind": "compaction",
+   "not_attempted": 0,
+   "succeeded": 2,
+   "timed_out": 0,
+   "total": 2
+  },
+  {
+   "files_after": 367,
+   "files_before": 367,
+   "kind": "compaction",
+   "note": "no-op: data files 367 -> 367"
+  }
+ ],
+ "values": {
+  "maintenance_policy_id": "m2-2026-09-26",
+  "effective_maintenance_id": "m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran",
+  "effective_maintenance_detail_id": "m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on",
+  "bucket_gb": [
+   9.917505,
+   9.762412,
+   6.5e-05
+  ],
+  "benchmark_qph": 1800.0,
+  "benchmark_queries": [
+   [
+    "Q1_full_aggregation_scan",
+    1,
+    true
+   ],
+   [
+    "Q2_filtered_aggregation",
+    455,
+    true
+   ],
+   [
+    "Q4_churn_risk_analysis",
+    6,
+    true
+   ],
+   [
+    "Q3_customer_segmentation",
+    12,
+    true
+   ],
+   [
+    "Q7_channel_conversion_funnel",
+    5,
+    true
+   ],
+   [
+    "Q5_revenue_trend_ma7",
+    90,
+    true
+   ],
+   [
+    "Q6_customer_rfm",
+    6,
+    true
+   ],
+   [
+    "Q9_executive_dashboard",
+    30,
+    true
+   ]
+  ],
+  "scores": {
+   "composite_qph": 1800.0,
+   "scale_ratio": 0.992,
+   "total_data_processed_gb": 29.596,
+   "benchmark_samples_per_query": 3,
+   "qph_spread": {
+    "low": 1800.0,
+    "high": 1800.0,
+    "relative_range": 0.0
+   },
+   "pre_compaction_file_count": 367,
+   "post_compaction_file_count": 367,
+   "compaction_ratio": 1.0,
+   "pre_compaction_qph": 1800.0,
+   "post_compaction_qph": 1800.0,
+   "maintenance_value_pct": null,
+   "maintenance_paired_queries": 0,
+   "maintenance_value_reason": "compaction changed no files (367 -> 367)",
+   "maintenance_settled": true,
+   "maintenance_settle_capped": false,
+   "maintenance_settle_verified": true
+  }
+ },
+ "c360_correctness": "pass",
+ "success": true,
+ "verdict": "PASSED",
+ "verdict_reasons": []
+}

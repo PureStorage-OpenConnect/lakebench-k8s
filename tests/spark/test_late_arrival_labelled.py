@@ -23,31 +23,19 @@ Asserts:
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
-_HERE = Path(__file__).resolve().parent
-_SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
-
-sys.path.insert(0, str(_HERE))
-from _d_full_helpers import iceberg_jar  # noqa: E402
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def test_late_arrival_produces_arrival_order_label_in_a_fresh_jvm():
-    jar = iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+def test_late_arrival_produces_arrival_order_label_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Batch 0 sees no prior state -> zero late arrivals (fresh table).
     assert out["batch0_late_count"] == 0, out
@@ -67,7 +55,7 @@ def test_late_arrival_produces_arrival_order_label_in_a_fresh_jvm():
     ), out
 
 
-def _run(jar):
+def _run(jars):
     from datetime import timedelta
 
     from _d_full_helpers import (
@@ -80,7 +68,7 @@ def _run(jar):
     )
 
     with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jar)
+        spark = build_spark(work, jars)
         bootstrap_catalog(spark)
         for iban in ("GB01", "US02"):
             seed_account(spark, iban)
@@ -107,7 +95,7 @@ def _run(jar):
         # Batch 0: one payment at hour 24.
         b0_rows = [("B0T0", BASE_TS + timedelta(hours=24), "GB01", "US02", "100.00")]
         captured_len_before_b0 = len(captured)
-        b0_result = ss._merge_batch(bronze_batch(spark, b0_rows), 0)
+        b0_result = foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b0_rows), 0)
         b0_lines = captured[captured_len_before_b0:]
 
         # Batch 1: one payment at hour 0 -- EARLIER than batch 0's row, so
@@ -115,7 +103,7 @@ def _run(jar):
         # IBANs are late.
         b1_rows = [("B1T0", BASE_TS + timedelta(hours=0), "GB01", "US02", "50.00")]
         captured_len_before_b1 = len(captured)
-        b1_result = ss._merge_batch(bronze_batch(spark, b1_rows), 1)
+        b1_result = foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b1_rows), 1)
         b1_lines = captured[captured_len_before_b1:]
 
         common.log = real_log  # type: ignore[assignment]
@@ -133,6 +121,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(_SCRIPTS), str(_HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH and passes the jar classpath.
     _run(sys.argv[1])

@@ -373,6 +373,7 @@ class TestCliReportsTablesLeftRegistered:
         assert "1 tables left registered" in out.output
 
 
+@pytest.mark.usefixtures("load_script")
 class TestOrphanDeltaLogGuard:
     """A later run must not append to or adopt a _delta_log that destroy
     left in a bucket it did not own."""
@@ -389,12 +390,8 @@ class TestOrphanDeltaLogGuard:
         return spark
 
     def _fs(self, monkeypatch, exists):
-        from pathlib import Path
         from unittest.mock import MagicMock
 
-        monkeypatch.syspath_prepend(
-            str(Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts")
-        )
         import common
 
         fs = MagicMock()

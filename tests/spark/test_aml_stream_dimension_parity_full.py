@@ -16,62 +16,48 @@ on the MAINTAINED tables. D-safe skips ``silver.account_statements``,
 continuous mode -- those are covered by the D-safe refusal test, not
 here.
 
-Runs in a child process (Iceberg jars + Iceberg SQL extension on the
-JVM classpath from launch).
+Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
+``LB_SPARK_TEST_JARS`` and the Iceberg SQL extension on the JVM from launch.
 """
 
 from __future__ import annotations
 
-import glob
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_batch_and_stream_dimensions_are_row_hash_identical():
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_batch_and_stream_dimensions_are_row_hash_identical(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Every maintained entity column matches between batch and stream on
-    # every row (sorted by entity_id).
-    assert out["entities_match"] is True, out
-    # Same for the maintained account columns (sorted by iban).
-    assert out["accounts_match"] is True, out
-    # Row counts also match: batch's DISTINCT and stream's MERGE
-    # both end up with one row per key.
-    assert out["entities_batch_count"] == out["entities_stream_count"], out
-    assert out["accounts_batch_count"] == out["accounts_stream_count"], out
-    # Guard against a silent no-op where both sides read the same table.
-    assert out["entities_batch_count"] > 0, out
-    assert out["accounts_batch_count"] > 0, out
+    assert not problems(out), out
+
+
+def problems(out):
+    """The guard's checks on the child's JSON, as named failures (the parity
+    mutation check reads them too): every maintained entity and account
+    column matches on every row; row counts match (batch's DISTINCT and the
+    stream's MERGE both end with one row per key); and both sides have rows,
+    so a silent no-op cannot pass."""
+    found = []
+    if out["entities_match"] is not True:
+        found.append("entities_match")
+    if out["accounts_match"] is not True:
+        found.append("accounts_match")
+    if out["entities_batch_count"] != out["entities_stream_count"]:
+        found.append("entities_count")
+    if out["accounts_batch_count"] != out["accounts_stream_count"]:
+        found.append("accounts_count")
+    if not (out["entities_batch_count"] > 0 and out["accounts_batch_count"] > 0):
+        found.append("no_rows")
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -214,14 +200,14 @@ def _chunks(bronze, n=5):
     return [rows[i : i + per] for i in range(0, len(rows), per)]
 
 
-def _run(jar):
+def _run(jars):
     from pyspark.sql import SparkSession
 
     with tempfile.TemporaryDirectory() as work:
         spark = (
             SparkSession.builder.master("local[1]")
             .config("spark.ui.enabled", "false")
-            .config("spark.jars", jar)
+            .config("spark.jars", jars)
             .config("spark.sql.shuffle.partitions", "2")
             .config(
                 "spark.sql.extensions",
@@ -320,6 +306,9 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(SCRIPTS)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
+    # is the comma-separated jar classpath.
+    import _parity_mutation
+
+    _parity_mutation.install()
     _run(sys.argv[1])

@@ -1,4 +1,4 @@
-//! Sanctions and PEP screening track (AML-GOALS #50).
+//! Sanctions and PEP screening track.
 //!
 //! The generator publishes a synthetic, dated watchlist (a sanctions list in
 //! two versions and a PEP list) and plants payments from the reporting FI's

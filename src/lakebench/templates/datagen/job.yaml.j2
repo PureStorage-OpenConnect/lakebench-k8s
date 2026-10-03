@@ -27,11 +27,22 @@ spec:
     spec:
       serviceAccountName: lakebench-spark-runner
       restartPolicy: OnFailure
-      {% if s3_ca_cert_pem %}
+      {% set heldout = (datagen_schema | default('customer360')) == 'financial' and datagen_heldout_map is defined %}
+      {% if s3_ca_cert_pem or heldout %}
       volumes:
+        {% if s3_ca_cert_pem %}
         - name: ca-cert
           secret:
             secretName: lakebench-ca-certificate
+        {% endif %}
+        {% if heldout %}
+        {# The held-out hash file; the generator refuses the financial schema
+           without it. #}
+        - name: heldout
+          configMap:
+            name: {{ datagen_heldout_map }}
+            optional: false
+        {% endif %}
       {% endif %}
       containers:
         - name: datagen
@@ -74,8 +85,12 @@ spec:
             - "{{ bucket_bronze }}"
             - "--prefix"
             - "{{ datagen_path_prefix | default('customer/interactions/') }}"
+            {# A registered (held-out) corpus's seed comes from the Secret
+               through LB_DATAGEN_SEED below, never from the Job's args. #}
+            {% if not (datagen_seed_secret is defined and datagen_seed_secret) %}
             - "--seed"
             - "{{ datagen_seed }}"
+            {% endif %}
             {% if datagen_robustness_perturbation is defined and datagen_robustness_perturbation %}
             - "--robustness-perturbation"
             {% endif %}
@@ -142,6 +157,18 @@ spec:
             # aggregator prefers this over rayon's pool size (which may
             # differ from the pod's request because rayon's default reads
             # `available_parallelism()`, not the cgroup CPU quota).
+            {% if datagen_seed_secret is defined and datagen_seed_secret %}
+            - name: LB_DATAGEN_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ datagen_seed_secret }}
+                  key: {{ datagen_seed_secret_key | default('seed') }}
+                  optional: false
+            {% endif %}
+            {% if heldout %}
+            - name: LB_HELDOUT_HASHES
+              value: "{{ datagen_heldout_dir }}/heldout_hashes.json"
+            {% endif %}
             - name: LB_POD_CPU_REQUEST_MILLI
               valueFrom:
                 resourceFieldRef:
@@ -157,11 +184,18 @@ spec:
             - name: LB_RUN_ID
               value: "{{ run_id | default('') }}"
             {% endif %}
-          {% if s3_ca_cert_pem %}
+          {% if s3_ca_cert_pem or heldout %}
           volumeMounts:
+            {% if s3_ca_cert_pem %}
             - name: ca-cert
               mountPath: /etc/ssl/certs/custom-ca
               readOnly: true
+            {% endif %}
+            {% if heldout %}
+            - name: heldout
+              mountPath: {{ datagen_heldout_dir }}
+              readOnly: true
+            {% endif %}
           {% endif %}
           resources:
             requests:

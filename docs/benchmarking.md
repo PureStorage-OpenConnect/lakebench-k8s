@@ -15,7 +15,17 @@ Lakebench produces two distinct measurements:
 
 The scorecard includes QpH as one of its scores (`composite_qph`), but they
 are separate operations. `lakebench run` produces both automatically.
-`lakebench benchmark` runs only the query engine benchmark.
+`lakebench benchmark` runs only the query engine benchmark. It saves its
+result as a record of its own, `record_kind: "benchmark"` with
+`parent_run_id` naming the run it measured: a copy of that run's record with
+the new benchmark, under a new run id. The run's own record is never
+rewritten, and a benchmark record is never a deployment's "latest run" for
+`report` or `compare`, nor a candidate or baseline for the perf gate. Its
+QpH, scores and query stage are the new benchmark's; its pipeline stages,
+sizes and timings are the run's, and `provenance.benchmark` names the code
+that ran the benchmark and when. A continuous run's in-stream rounds and the
+run's maintenance QpH pair (before and after compaction) are not copied. `lakebench query` prints its result and writes no
+record.
 
 ---
 
@@ -76,17 +86,51 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
 | `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
-| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
+| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic: `compare` does not colour it). |
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
-| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up). |
+| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up: `ingest_ratio >= 0.95`). Whether the trickle held intake is `experiment.limits.trickle_bound`, below. |
 | `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
-| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
+| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. Withheld when the rounds ran different query sets (`scores.qph_degradation_withheld` says so), as an AML continuous run's do once its investigator queries start. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
+
+**BOUNDED BY trickle.** A continuous run feeds bronze at most
+`max_files_per_trigger` files per trigger. When that trickle was set and the
+pipeline kept pace, the throughput figures (`sustained_throughput_rps`,
+`pipeline_throughput_gb_per_second` and compute efficiency in a continuous
+run) are the offered load, not what the infrastructure can do. Kept pace
+means ingested rows over offered rows is at least 0.99 and the lag at window
+end (window seconds minus bronze's last write) is at most one trigger
+interval. Offered rows are `released_rows`, so the ratio is the record's
+`ingest_ratio`; when bronze took the whole corpus there was nothing left to
+offer and the lag is not tested. A run whose `intake_limit` is
+`trickle_rate` is labelled too. The experiment block records
+`limits.trickle_bound` (`{kind, value, source, kept_pace, ratio, lag_s,
+trigger_s, offered_rows, ingested_rows}`, with `not_measured` when
+`kept_pace` is null and `lag_note` when the lag was not tested; null when
+the trickle did not hold intake) and adds a line `trickle: max_files_per_trigger N (auto), the
+pipeline kept pace` to `limits.bound`. When an input was not recorded,
+`kept_pace` is null and the line says "the pipeline was not shown to keep
+pace"; the throughput is still not shown as a capacity. The trickle is not one of `limits.bound_kinds`, so it is not
+part of the experiment identity. The report labels the continuous rows/s
+(headline card, Pipeline Stages summary, the bronze stream and stage rows),
+GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not
+capacity)", with "trickle N files per trigger; this is the offered load,
+not infrastructure capacity" as the tooltip, and counts the trickle among
+the run's limits. `compare` marks the rows that depend on the trickle
+(`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
+efficiency and `corpus_drain_seconds`) `capped`, with `capped_by` naming
+the trickle, and each side's `bound` lists the trickle line. A record written before 1.7 gets the
+same answer, computed when it is read. `released_rows` counts the trigger at
+the window's edge, so a run whose last batch was still in flight can read up
+to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
+shortfall is within one trigger's batch and the lag within one trigger, the
+run is labelled with `kept_pace` null ("not shown to keep pace"), not shown
+as a capacity.
 
 ### Per-Stage Metrics
 
@@ -241,6 +285,33 @@ is the median over all rounds and `qph_degradation_pct` compares the first
 and second halves, so settling rounds are included in both. The median
 limits the effect when only a few rounds land in a settling window.
 
+Each in-stream round records `index`, `started_at`, `ended_at`, the queries
+it executed (`executed_queries`, the ones that succeeded),
+`executed_query_set_id` and `investigator_queries` (`included`,
+`absent_no_cases`, `probe_failed`: whether an AML continuous round with the
+TM operations layer ran IQ1-IQ4, which it does once the run has a case; null
+for C360 and for AML without that layer). A round whose query failed executed a smaller set
+than the others, so its QpH is over different queries.
+`scores.composite_qph_basis` says whether the rounds behind the in-stream
+QpH (those with a QpH) executed more than one set (`blended`) and how many
+rounds each set has; `scores.composite_qph_by_set` is the median per set. A
+round recorded before 1.7 gets its set from its queries' success flags,
+and `compare`, the perf gate and `reproduce` all read the basis from the
+rounds, so an older run in which a query failed in some rounds and not
+others reads blended too. When the rounds are blended, the aggregate
+benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
+set of every query name the rounds ran, even when one query failed in every
+round). `compare` marks a continuous run's `composite_qph` and
+`in_stream_composite_qph` `not_assessed` with the hint "rounds ran
+different query sets (A)"; such a run records no `qph_degradation_pct`
+(`scores.qph_degradation_withheld` says why; a record from before 1.7 that
+carries one reads `not_assessed` the same way). The perf gate and
+`reproduce` leave the in-stream QpH out. When every round missed the same
+query, the medians are over a smaller set than the run declared: `compare`
+marks the same rows `not_assessed` ("every round missed a query"), and
+`reproduce` reads the run's query set as the smaller set the rounds
+executed (for a record from before 1.7, its pinned legacy id or `unknown`).
+
 The value is reported only when the pre and post rounds are distinguishable
 at the samples taken. Over the paired queries, each round's total seconds
 can fall anywhere between the sum of per-query fastest samples and the sum
@@ -277,16 +348,57 @@ actually got (`experiment.effective_maintenance`), one label per operation
 | `not_run` | The run ended before the maintenance phase. |
 
 Two runs whose effective maintenance differs are comparable at best, not
-like-for-like.
+like-for-like. The one exception: two runs that each skipped every
+operation by the user's choice (`--skip-maintenance`, or in batch mode
+`pre_benchmark_maintenance: false`) under one maintenance policy count as
+the same maintenance, even across table formats, where the labels name
+different operations: no maintenance ran on either side, so their
+maintenance settings are not compared either. A `not_supported` label is
+not a skip: a DuckDB run with maintenance on records `not_supported` and
+does not match a skipped run, while with `--skip-maintenance` it records
+`skipped_by_user` like any other run.
+
+Compaction differs by engine: Trino runs `optimize` with a 128 MB file size
+threshold, Spark Thrift runs Iceberg `rewrite_data_files` with its defaults.
+A run whose compaction ran records the operation and its parameters in
+`effective_maintenance.detail.operations.compaction` (`{"operation":
+"trino_optimize", "params": {"file_size_threshold": "128MB"}}`, or
+`iceberg_rewrite_data_files`; `mixed`, with the list in `operations`, when
+compaction calls fell back to the other engine), taken from the code that
+writes the statements. Delta compaction never runs. An exp2 block also names
+it in the id (`compaction=ran(trino_optimize:128MB)`, or
+`compaction=ran(mixed(iceberg_rewrite_data_files+trino_optimize:128MB))`); for a record from before it,
+`compare` derives the operation from the query engine and table format. The
+compaction operation is an execution condition: a Trino and a Spark Thrift
+run that both compacted are not like-for-like.
+
+Compaction is counted per table: a table counts as compacted only when
+every statement for it succeeded. On Trino, a Customer 360 silver table
+(partitioned by `interaction_date`) with more than 90 partitions is
+compacted in chunks of at most 90 partitions, one `optimize ... WHERE
+interaction_date ...` per chunk, in batch and continuous mode alike: Trino
+refuses an `optimize` that rewrites files in more than 100 partitions, and
+continuous silver has small files in every partition. A table whose chunks
+partly succeeded is partial: it keeps `compaction=ran` in the id (which reads
+`failed` only when no statement succeeded) and reads `compaction=partial` in
+`detail_id`. `reasons` names each failed table as "compaction failed on
+<table>: <error>", and `detail.compaction_failures` and
+`detail.compaction_statements` list the failed tables and the statements
+attempted.
 
 `experiment.limits` records the Lakebench-imposed caps a run executed
-under, and `limits.bound` lists the ones that bound it. They include the
-continuous trickle (`max_files_per_trigger`, auto-capped at 50 files per
-trigger), the per-job executor caps (28 at most) and any concurrent
-executor budget, auto-sizing cuts, the pre-benchmark maintenance budget
-when it stopped maintenance early, and the benchmark iterations and
-in-stream rounds. A number measured under a cap that bound is a property of
-the cap, not of the infrastructure.
+under (among them the continuous trickle, `max_files_per_trigger`,
+auto-capped at 50 files per trigger, the benchmark iterations and the
+in-stream rounds), and `limits.bound` lists the ones that bound it: the
+per-job executor caps (28 at most) and any concurrent executor budget,
+auto-sizing cuts, TM alerts over capacity, AML rules skipped on a cap, the
+pre-benchmark maintenance budget when it stopped maintenance early, and the
+trickle line when the trickle held intake (BOUNDED BY trickle, above).
+`limits.bound_kinds` names the same limits without their counts, the
+trickle excepted. A number measured under a cap that bound is a property of
+the cap, not of the infrastructure. `limits.headroom_pct` (batch,
+diagnostic) gives each stage's headroom against the per-job timeout and the
+timed benchmark's against its per-query timeout; see [aml-scoring.md](aml-scoring.md#where-gold-finalize-spends-its-time).
 
 ---
 
@@ -381,9 +493,16 @@ geometric mean of the two:
 composite_qph = sqrt(power_qph * throughput_qph)
 ```
 
+Throughput and composite runs come from `lakebench benchmark --mode`.
+`lakebench run` measures one power pass with one stream and a hot cache, and
+refuses a config whose `architecture.benchmark` asks it for `throughput`,
+`composite`, `cache: cold` or `streams` above 1, rather than recording a run
+that did not happen; `metrics.json` records the power pass it ran.
+
 ### Cache Modes
 
-Each benchmark mode supports `hot` or `cold` cache. In cold mode the query
+Each benchmark mode supports `hot` or `cold` cache (`lakebench benchmark
+--cold`; `lakebench run` uses hot). In cold mode the query
 engine's metadata cache is flushed before execution (e.g.
 `CALL iceberg.system.flush_metadata_cache()` on Trino, or engine-specific
 equivalents for Spark Thrift and DuckDB). In power mode with cold cache, the
@@ -487,6 +606,92 @@ with a warning and no QpH score is produced.
 
 ## Interpreting Scores
 
+### What a PASSED verdict asserts
+
+The verdict in `metrics.json` (`verdict.status`, with each gate in
+`verdict.gates`) is decided from the record as it is saved, so `run`,
+`compare`, the perf gate and the release gate read the same outcome from
+the same record. Besides the stages succeeding and no query failing, a
+PASSED run shows:
+
+- **Rows in every layer** (`layer_rows`). Batch: the last bronze-verify,
+  silver-build and gold-finalize job each recorded more than 0 output rows
+  (a driver log that was not read counts as 0); a missing stage job fails.
+  Continuous: bronze-ingest's output rows, silver-stream's rows after its
+  transforms (the AML stream logs only the rows of its committed batches,
+  which stand for them) and gold-refresh's output rows are above 0. AML
+  gold-refresh logs no row count; the alerts its time-to-detect lines
+  counted stand for it, so a run with no alerts fails. A continuous layer with no row
+  count passes on its bytes alone, with the warning "rows not measured for
+  gold; bytes > 0" and the layer listed in
+  `verdict.qualifiers.layer_rows_unmeasured`; release evidence refuses that.
+- **The expected AML rules ran** (`aml_rules`, financial runs). Batch: no
+  rule errored, detection produced alerts, and every rule ran except an
+  allowed skip: `W1_connected_components` for `giant-component` or
+  `vertex-cap`, and `W3_round_tripping` or `W17_layering_chain` for
+  `path-cap`. A skip on a Lakebench cap is labelled in `limits.bound` and
+  in `verdict.qualifiers.rule_caps`; any other skip fails. A batch gold log
+  with no per-rule counts is a warning, not a failure. Continuous: no rule
+  ran that the mode leaves out, and detection produced alerts; the
+  continuous record carries no rule errors, so they are not judged there.
+- **The scale's data** (`scale_ratio`, batch). The bronze read is at least
+  95% of the scale's expected volume, as stored (3 places, never rounded
+  up to 0.95); a ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
+  last bronze-verify's, which reads every cycle.
+- **Answers** (`query_answers`). No successful benchmark query returned 0
+  rows unless the query is declared to allow an empty result. A continuous
+  run is held to this in its last in-stream round only, and a Q9 that
+  failed in a round is tolerated (gold refresh replaces the table it
+  reads), as the run itself reports them.
+
+A run whose stage failed, or that was interrupted, is not judged on these;
+it already did not pass. A `run --stage` run is judged on its stage's
+layer, on the rules when the stage is gold-finalize, and on the scale ratio
+only when the stage is bronze-verify. When the record does not read PASSED
+although every check the run printed passed, `run` prints `Verdict:
+<reason>` and exits 1. `compare`, the perf gate and the release gate take
+the strictest of the stored verdict and the one recomputed from the
+record, so a record saved by an earlier Lakebench can read failed now.
+
+### Requested and effective values
+
+A run can ask for one thing and do another, so the record keeps both for
+each decision Lakebench or a Spark job makes on the run's behalf, in
+`experiment.requested_effective` (each entry `{requested, effective,
+source, stage}`):
+
+- `gold_strategy` (Customer 360): the `spark.lb.gold.strategy` the config
+  names (`auto` when unset) against the strategy each gold-finalize job
+  reports it ran and why (`auto`, `override`, or `cycle` for cycles 2+ of a
+  multi-cycle run). With several gold jobs the keys are
+  `gold_strategy[cycle=N]`.
+- `pipeline_mode`: the mode the command asked for against the pipeline
+  the record shows ran (`not recorded` when the record holds no stage, for
+  example a run that stopped before its first one).
+- `executors[<job>]` (cluster runs): the executor override, else the job
+  profile's count at this scale under its cap, against the count observed:
+  for a batch job the most executor pods the operator listed while it ran,
+  sampled every few seconds (a replaced executor counts again), for a
+  stream the count submitted. The source
+  names the executor cap or a concurrent budget when one applied. Only an
+  override that ran with fewer executors than it asked for is a mismatch.
+- `trickle` (continuous): `max_files_per_trigger` as configured, or `auto`,
+  against the value the run resolved.
+
+The other Lakebench caps are in `experiment.limits` as configured and, when
+one bounds the run, in `limits.bound`. A request that was not met is a
+verdict qualifier (`verdict.qualifiers.requested_effective`) and a report
+warning such as
+"gold_strategy: requested two_phase_agg, ran simple_agg (auto)" when a
+configured strategy did not reach the gold job. Incremental gold that a gold
+job reports it chose automatically would be labelled even though the
+request was `auto`, because it aggregates only part of silver (the gold
+jobs no longer make that choice); incremental gold for a multi-cycle cycle
+is by design and is not. Which entries are mismatches is decided when the
+record is read; `experiment.requested_effective_mismatches` keeps the list
+as the run saw it. A mismatch never fails a run and never enters the
+experiment identity.
+
 ### Batch Mode
 
 **Time to Value** is the primary score. It measures wall-clock time from when
@@ -514,6 +719,20 @@ comparable to runs at the same nominal scale.
 layer. This score depends on the query engine (Trino, Spark Thrift, DuckDB),
 worker count, and memory allocation. It is independent of pipeline throughput.
 
+**Customer 360 expected results.** A Customer 360 batch run on the
+cluster checks silver and gold against what the generator wrote, and
+records every check in `metrics.json` as `c360_correctness`. Sixteen checks
+gate the run: the fifteen invariant and reconcile checks (bronze rows equal
+to the rows datagen was sized to write, the silver invariants, bronze to
+silver to gold reconciliation and the gold KPI identities) and the overall
+average transaction value. The run fails when one of them fails or could
+not be evaluated, or when gold-finalize logged no facts or the check itself
+raised. The other
+statistical checks and the benchmark row counts are printed and recorded but
+do not fail the run; a failed one is also listed in `metrics.json` under
+`verdict.qualifiers.c360_failed_not_gating`. A `--local` run and a
+`--stage` run make no Customer 360 check.
+
 ### Continuous Mode
 
 **Data Freshness** (`data_freshness_seconds`) is the gold staleness headline:
@@ -523,7 +742,7 @@ read (`current_timestamp` minus the newest silver processing timestamp), so
 the figure tracks the silver trigger and the gold write time rather than
 `gold_refresh_interval`. Lower is better.
 
-**Sustained Throughput** (rows/sec) measures the steady-state ingestion rate
+**Continuous Throughput** (`sustained_throughput_rps`, rows/sec) measures the steady-state ingestion rate
 through bronze. This is unique rows only -- gold-stage re-reads of silver data
 are excluded.
 
@@ -766,7 +985,7 @@ rounds for trend analysis.
 | `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
 | `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
 | `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
-| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Empty bronze (`lakebench clean bronze`) and rerun; the report warns above 1.05 and the perf gate refuses the run |
+| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun without `--skip-generate`: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts (a Customer 360 rerun over existing tables also needs `--force-reset`); the report warns above 1.05 and the perf gate refuses the run |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
 | Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
@@ -794,9 +1013,24 @@ The JSON structure includes:
   "run_id": "20260201-143052-a1b2c3",
   "maintenance_policy_id": "m2-2026-09-26",
   "provenance": {
-    "lakebench_version": "1.6.0",
-    "git_sha": "<40-char commit, or null outside a git checkout>",
-    "git_dirty": false
+    "lakebench_version": "1.7.0",
+    "git_sha": "<40-char commit, or null when unknown>",
+    "git_dirty": false,
+    "install": "checkout",
+    "end_sample": { "git_sha": "...", "code_changed_during_run": false },
+    "config_sha256": "<sha256 of the config file>",
+    "config_path": "/abs/path/to/config.yaml",
+    "scripts_sha256": "<sha256 over the Spark scripts ConfigMaps>",
+    "scripts_maps": { "common": "<sha256>" },
+    "deps": { "pinset_sha256": "<sha256>", "request_sha256": "<sha256>", "...": "...", "pods_checked": 1, "pod_mismatches": [] },
+    "images_observed": {
+      "spark_driver": "<registry>/spark@sha256:...",
+      "spark_executor": "<registry>/spark@sha256:...",
+      "trino_coordinator": "<registry>/trino@sha256:..."
+    },
+    "scratch_as_ran": {
+      "silver-build": { "size_limit": "300Gi", "storage_class": "px-csi-scratch" }
+    }
   },
   "pipeline_benchmark": {
     "pipeline_mode": "batch",
@@ -817,20 +1051,71 @@ The JSON structure includes:
 ```
 
 `maintenance_policy_id` names the table-maintenance policy the run was
-measured under (see `docs/perf-regression-gate.md`); `provenance` records
-the lakebench version and, from a git checkout, the commit and whether
-tracked files had uncommitted changes. Container image versions are in
-`config_snapshot.images`.
+measured under (see `docs/perf-regression-gate.md`). `provenance` records
+what produced the run. The experiment block's `lakebench` copy carries the
+code fields, `deps` and `images_observed`: the dependency pinset
+(`deps.pinset_sha256`) is part of the experiment identity, and `compare`
+reads the observed image digests as an architecture key, comparing each
+role both runs observed (a role seen by one run only, or a run that
+observed none, is not a difference). The rest is provenance only:
+
+- `lakebench_version`, `git_sha`, `git_dirty`, `install` and
+  `tree_sha256`. From a git checkout (`install: checkout`) the commit and
+  whether the package had uncommitted changes; from a pip-installed wheel
+  (`install: wheel`) the commit and tree state the wheel was built from,
+  which the build writes into the package. `unknown` is any other install
+  (the single-file binary), with a null commit. `tree_sha256` hashes the
+  package's files on disk.
+- `end_sample`: the same fields read again when the run ends, and
+  `code_changed_during_run`: true when the package files changed, or the
+  commit, version or install did. An edit inside an installed wheel or an
+  already-modified checkout counts. When the code changed, a support state
+  of `supported` is withdrawn to `unverified`.
+- `config_sha256` (the same value the perf gate checks in
+  `config_snapshot`) and `config_path`, the config file as given, made
+  absolute.
+- `scripts_sha256`, `scripts_maps` and `scripts_files_sha256`: the Spark
+  scripts ConfigMaps the run applied and read back.
+- `deps`: the deployment's dependency set the run checked before anything
+  was submitted: `pinset_sha256` (the set's identity, which compare reads),
+  `request_sha256`, the repositories and index, the files per group with
+  their sha256, `resolved_at` and the server pod. At run end the Spark
+  Thrift or DuckDB pods are checked against it: `pods_checked` (how many),
+  `pod_mismatches` (pods on another set, which fail the run),
+  `pods_check_error` (the pods could not be read, which fails the run too),
+  or `pods_check_skipped` (why the check did not read: interrupted, a
+  prerequisite failed, the namespace went, no cluster). `"not_recorded"`
+  for a `--local` run and for records made before 1.7.
+- `images_observed`: the image digests this run's pods ran (`imageID` from
+  the pod status): the Spark driver and executors of the run's own
+  applications, and the running Trino coordinator and Spark Thrift server.
+  A batch stage is read while it runs, until a driver and an executor
+  digest are seen (at most four reads, 15 s apart, and once more after the
+  stage when no driver digest was seen); a stage whose driver or executor
+  was never seen
+  is listed in `images_observed_missing`. A continuous run is read when
+  the streams are running and again before they stop. The first digest
+  seen per role is kept; a later different one is listed in
+  `images_observed_changed`. When pods cannot be listed (RBAC) it reads
+  `{"not_observed": "<reason>"}`. The image references the config asked
+  for are in `config_snapshot.images`.
+- `scratch_as_ran`: per Spark job, the executor scratch PVC size and
+  storage class in the SparkApplication as the cluster held it (both null
+  when the job had no scratch PVC).
 
 ### HTML Reports
 
 Every `lakebench run` delivers `lakebench-output/runs/run-<id>/report.html`
 once, at the end of the run. That file is the shareable artifact.
 
-Print the summary of the latest run (does not modify `report.html`):
+Print the summary of the latest run (does not modify `report.html`). With
+no argument, `report` reads `./lakebench.yaml` when it exists and shows the
+latest run of that deployment; otherwise the latest run of any deployment:
 
 ```bash
 lakebench report
+lakebench report other.yaml              # the latest run of other.yaml's deployment
+lakebench report 20260201-143052-a1b2c3  # one run, by id
 ```
 
 List all available runs:
@@ -860,12 +1145,13 @@ breakdown of the query engine benchmark, and the configuration snapshot.
 
 ### Viewing Results on the Command Line
 
-Use `lakebench results` to display the stage-matrix view in the terminal:
+Use `lakebench report --format` to display the stage-matrix view in the
+terminal:
 
 ```bash
-lakebench results                      # latest run, table format
-lakebench results --format json        # JSON output
-lakebench results --run <id>           # specific run
+lakebench report --format table          # latest run, table format
+lakebench report --format json           # the pipeline benchmark block as JSON
+lakebench report --run <id> --format csv # specific run, CSV
 ```
 
 Use `lakebench report` (no flags) to print key scores directly in the terminal
@@ -891,12 +1177,52 @@ Some sections only appear in batch or continuous mode as noted below.
 
 The header shows the deployment name, run ID, and an overall status badge:
 
-- **PASSED** (green) -- pipeline completed, data complete (scale/ingest ratio
-  0.95--1.05), all jobs succeeded, no failed queries.
+- **PASSED** (green) -- pipeline completed, data complete (batch scale
+  ratio at least 0.95, continuous ingest ratio at least 0.95), all jobs
+  succeeded, no failed queries, and the record shows rows in every layer,
+  the expected rules and non-empty answers (see
+  [What a PASSED verdict asserts](#what-a-passed-verdict-asserts)).
 - **WARNING** (amber) -- pipeline completed but a ratio or job raised a
-  non-fatal flag.
+  non-fatal flag, for example a batch scale ratio above 1.05 (more data
+  than the scale asks for).
 - **FAILED** (red) -- a stage or query failed, or data completeness is below
-  threshold.
+  threshold. A run stopped by Ctrl-C or SIGTERM also shows as failed, with
+  the interrupt as its reason; its verdict is INTERRUPTED (see
+  [Interrupting a run](cli-reference.md#run)).
+
+The "Read this first" panel under the header is the report's front matter,
+and no metric comes before it. In this order it shows:
+
+- **Verdict** and **headline**: the strictest of the verdict the record
+  stored and the one recomputed from the record today (a record is never
+  promoted); when they differ it says so, for example "FAILED (stored
+  PASSED; recomputed FAILED)". The headline is the first reason a failed
+  run gives, the first warning, or for a clean pass the workload, mode,
+  scale, rules run and n.
+- **Evidence class**: read only from the registered-look record
+  (`src/lakebench/spark/data/aml/aml_registered_looks.json`), never from
+  the config. A completed look whose `run_ids` names this run is
+  "registered look: <role>" with the first 12 characters of its report
+  sha256; an AML calibration corpus is "development (calibration corpus:
+  in-sample ...)"; every other run, and any run when the look record is
+  missing or unreadable, is "development".
+- **Corpus**, **support state** with what it means, **binding caps** (every
+  Lakebench limit that bound the run, or "none"), **n** (runs, and samples
+  per query), **provenance** (the Lakebench version, commit, and whether its
+  tree was dirty) and the identity **digest**.
+
+Under them come the verdict's qualifiers (rules skipped on a Lakebench cap,
+layers whose rows were not measured, C360 checks that failed outside the
+gating set) and what limits interpretation: a single run (n=1), detection
+rules skipped or errored (and, for continuous AML, the rules that mode does
+not run), AML recall that is uncalibrated and in-sample, and a dirty tree.
+`lakebench report` prints the same front matter before its scores, and
+`run` prints it after the record is saved (not for `--local` runs).
+
+The evidence class is decided when a report is rendered. A run's delivered
+`report.html` is written at save, before any look record can name the run,
+so it reads "development"; a report rendered after the look is recorded
+(`lakebench report --render`) reads the registered look.
 
 A one-line context banner below the header shows pipeline mode (Batch /
 Continuous), Customer360 scale factor, the recipe string
@@ -909,32 +1235,63 @@ Five primary KPI cards. The cards change with pipeline mode:
 **Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
 Job Status (pass/fail count).
 
-**Continuous:** Data Freshness, Sustained Throughput (rows/s), Compute
+**Continuous:** Data Freshness, Continuous Throughput (rows/s), Compute
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
+Pipeline throughput and compute efficiency are over stage inputs (bronze,
+silver, gold and the query stage each count the data they read), so the card
+shows the corpus size in bronze beside the stage-input total (for a
+continuous run, the bronze bucket at run end, which holds the landing files
+and the bronze table together). A run whose verdict
+is not PASSED shows no headline number: the page leads with the first
+verdict reason a reader can act on and each failed job's error, every card
+reads "-", and the pipeline summary line says the figures are not shown.
+
+The tag beside a QpH counts independent runs and, separately, the repetition
+inside the run: `n=1 run, 3 samples/query` for a batch power benchmark,
+`n=1 run, 4 rounds` for continuous in-stream rounds. Samples and rounds are
+never counted as runs.
+
 ### Bottleneck Identification (batch and continuous)
 
-A stacked bar chart showing time and compute distribution across pipeline
-stages. Each stage is color-coded (bronze = amber, silver = indigo, gold =
-gold, query = cyan). The chart identifies which stage dominates elapsed time
-or compute. In continuous mode the chart uses micro-batch latency instead of
-elapsed seconds.
+A stacked bar of each stage's share of requested core-seconds (executors x
+cores x seconds; Trino pod cores x seconds for a Trino query stage). Each
+stage is color-coded (bronze = amber, silver = indigo, gold = gold, query =
+cyan). The table beside it adds each stage's share of stage time (batch) or
+of micro-batch latency (continuous). A query stage on Spark Thrift or DuckDB
+records no cores and is left out of the core-second shares; the continuous
+query stage has no micro-batch latency and is left out of the latency
+shares.
 
 ### Data Validity (batch and continuous)
 
-Green/red status indicators for data quality checks:
+Green, amber and red status indicators for data quality checks:
 
 - **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
-  processed the expected data volume. Red when below 0.95 or above 1.05.
+  processed the expected data volume. A scale ratio is red below 0.95 and
+  amber above 1.05 (more data than the scale asks for, not shown as
+  "Complete"). An ingest ratio is red below 0.95 (amber when the trickle held
+  intake rather than the pipeline falling behind) and amber above 1.05,
+  which usually means gold re-read silver across refreshes.
 - **Job Success** -- counts of passed and failed batch and continuous jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
 
 ### Stability Over Time (continuous only)
 
-A line chart showing the QpH trend across in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
-Helps identify performance degradation over time as table state grows.
+A line chart of QpH across in-stream benchmark rounds, with the recorded QpH
+degradation (`qph_degradation_pct`: the second-half median QpH against the
+first-half median, positive when slower; recorded when at least 4 rounds
+ran). The page computes no trend of its own.
+
+### Table Maintenance
+
+The maintenance policy, file counts before and after, and QpH before and
+after maintenance, each with the number of queries its round ran. The change
+is the paired figure, over the queries both rounds ran ("QpH change, paired
+over 8 queries"); when the two rounds ran different query sets the table
+says the unpaired QpH figures are not the maintenance effect.
 
 ### Q9 Contention (continuous only)
 
@@ -949,7 +1306,7 @@ A table with one row per Spark job (bronze-verify, silver-build,
 gold-finalize). Columns: job name, status, elapsed time, input/output data,
 throughput, executor count, cores, and total CPU seconds.
 
-### Streaming Pipeline (continuous only)
+### Continuous Pipeline (continuous only)
 
 A table with one row per stream job. Columns: job type, status, rows
 processed, throughput (rows/s), freshness, executor count, and compute
@@ -959,11 +1316,67 @@ resources.
 
 Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
 In continuous mode: rows/s, micro-batch latency, freshness.
+In continuous mode it is followed by the intake cards: the ingest ratio
+(bronze rows over the rows the trickle released, or over the generated
+corpus rows when the record has no released-row count), corpus coverage (the share
+of the generated corpus the window took in, `corpus_ingest_ratio`), the
+window, and the offered load (the trickle rate, a Lakebench-imposed limit,
+not a capacity). For AML, the rules continuous mode does not run are named,
+and the detection table reads "excluded in continuous mode" for them, not
+"no data".
+
+The AML results open with a funnel: rule alerts (from scoring, and in
+`gold.alerts` as transaction monitoring read them), the alerts dispositioned
+on customers (of which over the per-customer cap, and of which withdrawn
+alerts carried from an earlier cycle) and on non-customers (of which not
+declared as counterparties), customer alerts per customer, dispositions, escalations,
+alert cases, continuing-activity review cases and SARs filed, each with the
+record path it comes from. A reconciliation checks the identities the
+transaction-monitoring step holds (scoring and TM alert totals; TM alerts
+equal customer plus non-customer dispositions minus withdrawn carried
+alerts; dispositions sum to the customer plus non-customer count; SARs
+filed equal alert-case SARs plus continuing-activity SARs) and sizes any
+difference, saying when the record does not explain it.
+
+In the detection table, recall reads "uncalibrated, in-sample" unless a
+completed registered look names the run. The random-control chance sits
+beside recall. A continuous run shows recall over the covered instances
+with the coverage beside it (chance and off-target are then over the
+covered instances too), or why it was not scored; it never shows plain
+"recall". Total alerts and the off-target rate say they cover only the
+rules that ran, and carry a BOUNDED BY label when a rule was skipped on a
+Lakebench cap (a skip reason naming a cap); the funnel's alert totals carry
+the same label, with a note saying every count below them comes from the
+rules that ran, and the counts worked after the per-customer cap
+(escalated, alert cases, SARs filed) carry that cap when it held alerts
+back. A per-reason-code table follows when the run recorded reason
+codes, the producer's status when it recorded none, or "reason codes not
+recorded". Leakage reads "not measured in this run": the AML fidelity gate
+(`scripts/aml_gate.py`) runs outside `lakebench run`. The block also shows
+the planted-subject customer check, and, when the record's scoring or
+detection data cannot be rendered, says "AML results could not be
+rendered" with the error instead of leaving the section out.
+
+### Expected results (Customer 360)
+
+The Customer 360 expected-results checks (`c360_correctness`): a chip with
+how many checks passed out of the checks the record holds (unchecked ones
+included) and the gate as the verdict applies it now (`GATING_CHECKS`):
+"N gating checks passed", or "fails the run" with the reason. Gating checks
+are tagged; a gating check absent from the record is listed as "not
+evaluated", since it fails the run. The checks that did not pass come first
+(those that fail the run, then other failures, then unchecked) with
+observed, expected and tolerance, then the passed checks grouped as pipeline
+(invariant and reconcile), benchmark shapes and statistical, in collapsed
+lists. A note stored with an older record (for example "reporting only"
+from before the gating checks were approved) is shown as recorded with the
+run, not as the current rule.
 
 ### Query Performance (batch and continuous)
 
 Performance table for the engine benchmark (8 queries for Customer 360,
-12 for AML). Columns: query name,
+12 for AML), titled with the query engine the record names ("Trino query
+benchmark", "Spark Thrift query benchmark"). Columns: query name,
 display name, category, elapsed time, rows returned, and pass/fail status.
 The benchmark mode (power, throughput, composite), stream count, and final QpH
 appear in a summary row.
@@ -975,39 +1388,159 @@ Shows per-query times across rounds plus statistical measures (median, min,
 max). Each round header includes its QpH, gold freshness, and contention
 status.
 
+### Storage multiple
+
+Physical bytes over logical bytes, per table, per layer and in total,
+measured once at the end of the run: after maintenance and the post-maintenance
+benchmark round (batch), or after the settle wait (continuous; for AML
+after the gold-refresh drain, the stream stop and the score job), and stated
+with the maintenance policy that produced it. It is a condition of that
+policy, not a system score (`storage_multiple_total` is diagnostic).
+
+- **Physical** is the object bytes under each table's location, from one
+  listing per bucket. **Logical** (current) is the data files of the table's
+  current snapshot (Iceberg `$files`, Delta `DESCRIBE DETAIL`).
+- Physical is split into current data, retained-snapshot data (files only an
+  older retained snapshot references; Spark Thrift `all_files`, Trino
+  `$all_entries`), metadata (`metadata/` or `_delta_log/`) and other. When the
+  engine cannot separate retained data (Delta, or a Trino without
+  `$all_entries`), "retained and unreferenced" is one figure. When orphan
+  removal ran, the unreferenced share is labelled as bounded by its
+  24 h 10 min floor.
+- Excluded and listed with their bytes: stream checkpoints (any
+  `checkpoints/` segment, and the stream directories under
+  `sustained.checkpoint_base` when it moves them), the datagen
+  markers (`_corpus/`) and manifest, scoring outputs (`<gold>/scoring/`) and
+  the ML loop's `<gold>/_ml_loop/`. Named without bytes, because they are not
+  in object storage: the executor scratch PVCs and the dependency server's
+  `lb-deps` PVC. The raw datagen files in bronze are reported as physical
+  only, outside the total. Incomplete multipart uploads do not appear in a
+  listing and are not counted.
+- A table is "not measured", with the reason, when the catalog does not
+  know it, when its data files are registered in place outside its
+  location (AML batch bronze, registered with `add_files`), when the engine
+  cannot read its current data size (Delta on Trino), or when physical
+  bytes under its location are below the bytes it references. C360 batch
+  bronze is the raw corpus, not a table. Retained-snapshot bytes are not
+  read on Trino past 500 snapshots (its `$all_entries` read is expensive on
+  the coordinator).
+- A recipe whose query engine cannot read table metadata (DuckDB, `none`)
+  records physical bytes per bucket only, with the reason.
+- The measurement makes its own listing of each bucket (one more pass after
+  the bucket sizes) and has a 10-minute budget covering the listings and
+  the queries; a bucket whose listing fails or runs out of time leaves its
+  tables not measured, and the total says how many tables it covers. A run
+  that did not pass, and a `run --stage` run (the other layers' tables are
+  an earlier run's), record the measurement as not measured.
+
+The record holds it as `storage_multiple`. Its `buckets` list has one entry
+per bucket listed: the bucket name, the layers it serves, its physical bytes
+(every object in the listing), its unattributed bytes and the listing error
+when the listing failed, in which case both byte figures are null.
+Unattributed bytes are objects under no exclusion, no raw datagen prefix and
+no location the catalog returned for a measured table, so the objects of a
+table the catalog does not know land there. A bucket name is a value in the
+record, never a key, so a record can be scrubbed into a test fixture.
+
+### Resources as run
+
+Per job, the executors as recorded (batch: every executor the monitor saw,
+replacements included, else the job profile's count; continuous: the count
+the stream was submitted with), cores and memory per executor from the job
+profile, and the scratch PVC size and storage class as the cluster held it
+(`provenance.scratch_as_ran`; records before 1.7 say "not recorded").
+
 ### Configuration
 
 Key configuration parameters extracted from the run: scale factor, S3 endpoint,
-executor specifications, catalog type, table format, and query engine settings.
+catalog type, table format, and query engine settings. Executor sizing is
+under Resources as run.
 
 ### Platform Metrics (when observability is enabled)
 
 Per-stage pod resource summary: CPU average/max, memory average/max, and pod
 counts. Infrastructure pods (Hive, Polaris, Trino, Postgres) are shown
-separately from pipeline pods.
+separately from pipeline pods. Each pod's figures sum its containers only:
+the pod-level cgroup series and the pause container are excluded, and a
+container scraped twice (for example by both the cluster's own kubelet
+monitor and kube-prometheus-stack's) is taken once. A stage's max columns
+are the sum of each pod's own peak, taken at different moments, not a
+concurrent peak. A record collected before these queries says its figures
+count containers more than once.
 
 ---
 
 ## Comparing Runs
 
-`lakebench compare <config_a> <config_b>` runs both configurations one
-after the other, then checks the two runs' experiment blocks before it
-shows any delta. It gives one of three verdicts:
+`lakebench compare SIDE_A SIDE_B` compares stored run records: each side is
+run ids, run directories, a `series:<id>` or a config (its latest run, or
+every member of that run's `run --repeat` series). It runs nothing; run each
+side first with `lakebench run`. It checks the runs' experiment blocks and
+results before it shows any number, and the exit code is the verdict:
 
-| Verdict | When | Deltas | Exit |
-|---|---|---|---|
-| comparable | Same experiment, and the benchmark results are shown equivalent | Shown | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that failed, or a record without an experiment block | Withheld | 1 |
-| comparability not established | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | Withheld; raw numbers shown | 0 |
+| Verdict | When | Exit |
+|---|---|---|
+| LIKE-FOR-LIKE | Same experiment, equal benchmark results, same execution conditions | 0 |
+| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | 11 |
+| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs | 12 |
+| CONFOUNDED | Comparable, but the architecture and the system both differ | 13 |
 
-A comparable pair is also like-for-like when the execution conditions
-match: effective maintenance and maintenance settings, query access path,
-system, benchmark iterations and mode, in-stream rounds (continuous), and
-the Lakebench limits that bound. Otherwise the table is titled "comparable,
-not like-for-like" and lists the differences, because a delta may come from
-those conditions rather than the architecture. A config pair that already
-differs in experiment identity or conditions is flagged before either run
-starts.
+The execution conditions are effective maintenance and the compaction
+operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
+`rewrite_data_files` are different operations), maintenance settings,
+benchmark iterations and mode, in-stream rounds (continuous), and the
+Lakebench limits that bound. A delta between runs whose conditions differ
+may come from those conditions rather than the architecture. Each verdict
+is printed with the one condition the pair is missing and, where one
+exists, the command that supplies it. Medians, ranges and n are shown for
+every score, with the delta of medians where the pair is comparable; no
+winner is named in this release. See the [CLI reference](cli-reference.md#compare).
+
+Two of these rules decide pairs that would otherwise read differently:
+
+- **Outcome keys inside a side.** The in-stream round count and the
+  investigator sessions are outcomes of a run's own speed. When the
+  repeats on one side differ in them, the side is still one experiment and
+  the pair is NOT LIKE-FOR-LIKE (exit 12), as when the two sides differ in
+  them. A round count of 0 against more than 0 is not such an outcome: 0
+  means the QpH is the post-stream benchmark, another estimator, so that
+  side is not one experiment (NOT COMPARABLE). Any other difference inside
+  a side, in the workload, corpus, architecture, system, another condition
+  or the query results, still makes it not one experiment. No run records
+  investigator sessions in this release (the key is reserved); when one
+  does, it counts as an outcome only when both runs recorded a count and
+  neither ran none against some. Such a pair shows its medians, but no
+  directional row is assessed, since it is not like-for-like.
+- **Maintenance skipped on both sides.** Effective maintenance skipped by
+  the user on every operation, on both sides, is the same maintenance
+  (above), so an Iceberg and a Delta run with `--skip-maintenance` can be
+  LIKE-FOR-LIKE, attributed to the architecture. With maintenance on, an
+  Iceberg and a Delta run always differ on this key, and the hint says to
+  run both with `--skip-maintenance`.
+
+The architecture (the recipe, its components and versions, the query access
+path, the dependency set) and the system (the cluster and object store,
+recorded as `experiment.system_identity`) are not conditions; they are what
+a comparison varies. A pair that differs in the architecture alone is an
+architecture differential, and one that differs in the system alone is a
+system differential. A pair that differs in both is **confounded**: no
+difference can be put down to either, and the table lists "architecture
+and system both differ" with the not like-for-like reasons. Two runs whose
+only architecture difference is the dependency set (same composition,
+different jars) are not like-for-like. Records written before 1.7 carry no
+system identity, and two of them are assumed to share a system. A record
+with a system identity against one without counts as a different system,
+as does a 1.7 run whose system could not be sampled, or two observations
+with no part in common; such a pair is confounded when the architecture
+also differs, and is never called a system differential. A pair whose observations agree on every part both
+read but cannot show one cluster (an API server CA that could not be read),
+or two `--local` runs, which record no part, is treated as one system but
+never as a repeat of the same experiment. Each
+run also records the allocatable CPU and memory of the schedulable workers
+and the CPU and memory other namespaces' pods requested, platform pods
+included, at run start and when the record is saved
+(`experiment.observed`), as evidence only.
 
 For ad hoc analysis the metrics JSON can also be diffed directly. Key
 fields:

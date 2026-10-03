@@ -8,7 +8,7 @@ The work directory stands in for the deployment's bucket: the Iceberg hadoop
 warehouse, an external Delta table and the raw landing zone all live under
 it, plus one table outside it that the reset must not delete files from.
 
-Usage: python c360_reset_scenarios.py <jar_dir> <work_dir>
+Usage: python c360_reset_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 Prints one JSON object on the last stdout line.
 """
 
@@ -19,9 +19,6 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 from c360_stream_scenarios import bronze_df, session  # noqa: E402
 
 
@@ -30,8 +27,8 @@ def _files_under(path):
 
 
 def main():
-    jar_dir, work = sys.argv[1], sys.argv[2]
-    spark = session(jar_dir, work)
+    jars, work = sys.argv[1], sys.argv[2]
+    spark = session(jars, work)
     from common import (
         SilverAbort,
         refuse_fresh_checkpoint_over_data,
@@ -141,7 +138,7 @@ def main():
     out["targets"] = tables
     # main() stops the session; restart one to inspect the result.
     bronze_verify.main()
-    spark = session(jar_dir, work)
+    spark = session(jars, work)
     out["exists_after"] = {t: table_exists(spark, t) for t in tables}
     out["silver_dir_files_after"] = _files_under(f"{wh}/silver/customer_interactions_enriched")
     out["raw_files_after"] = len([f for f in os.listdir(raw_dir) if f.endswith(".parquet")])
@@ -158,4 +155,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run by spark_subprocess, which puts the scripts and tests/spark on PYTHONPATH.
     main()

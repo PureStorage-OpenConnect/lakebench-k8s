@@ -681,6 +681,10 @@ class TestMetricsStorage:
             "alerts_by_rule": {"R": 7},
             "rule_errors": {"R": "e"},
             "rules_skipped": {"R": "s"},
+            "rule_elapsed_s": {"R": 1.5},
+            "stage_profile": {"R": [{"stage": 1, "exec_s": 2.0}]},
+            "stage_profile_unavailable": {"Q": "store unreadable"},
+            "stage_profile_cost_s": {"R": 0.1},
             "tm_invariants": {"1": {"x": {"status": "ok", "detail": "d"}}},
             "tm_ops": {"k": "v"},
             "tm_status": {"1": {"status": "ok", "reason": "r"}},
@@ -1183,7 +1187,8 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" in html
+        # The title names the recorded query engine; this record names none.
+        assert "<h2>Query benchmark</h2>" in html
         assert "820.4" in html
         assert "Q1_full_aggregation_scan" in html
         assert "QpH" in html
@@ -1202,7 +1207,7 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Trino Query Benchmark" not in html
+        assert "query benchmark</h2>" not in html.lower()
 
     def test_generate_report_specific_nonexistent(self, tmp_path):
         metrics_dir = tmp_path / "metrics"
@@ -1391,7 +1396,7 @@ class TestSustainedReport:
     def test_sustained_run_context_banner(self):
         """Context banner should show mode and scale."""
         html = self._render()
-        assert "Sustained" in html
+        assert "Continuous" in html
         assert "scale 50" in html
         assert "hive-iceberg-spark-trino" in html
 
@@ -1460,7 +1465,7 @@ class TestSustainedReport:
         assert "Time to Value" in html
         # Should NOT show streaming summary cards
         assert "Data Throughput" not in html
-        assert "Sustained Throughput" not in html
+        assert "Continuous Throughput" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -1792,7 +1797,10 @@ class TestStreamingReportGeneration:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Streaming Pipeline" in html
+        # LB-191: the mode is continuous; the section never says streaming.
+        assert "Continuous Pipeline" in html
+        assert "Streaming Pipeline" not in html
+        assert "streaming jobs" not in html
         assert "lakebench-bronze-ingest" in html
         assert "lakebench-silver-stream" in html
         assert "900,000" in html
@@ -1827,7 +1835,7 @@ class TestStreamingReportGeneration:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Streaming Pipeline" not in html
+        assert "Continuous Pipeline" not in html
 
     def test_report_streaming_freshness_column(self, tmp_path):
         """Streaming table should show Freshness column when data exists."""
@@ -2180,7 +2188,6 @@ class TestBuildConfigSnapshot:
                     "scratch": {
                         "enabled": True,
                         "storage_class": "px-csi-scratch",
-                        "size": "150Gi",
                     },
                 },
             },
@@ -2197,8 +2204,10 @@ class TestBuildConfigSnapshot:
         assert snapshot["s3"]["endpoint"] == "http://test-s3-endpoint:80"
         assert snapshot["s3"]["buckets"]["bronze"] == "lb-bronze"
         assert snapshot["scratch"]["enabled"] is True
-        assert snapshot["spark"]["executor"]["instances"] == 8  # default
-        assert snapshot["spark"]["executor"]["cores"] == 4  # default
+        # Per-executor sizing is recorded per job, from the job profiles.
+        assert "executor" not in snapshot["spark"] and "driver" not in snapshot["spark"]
+        assert snapshot["scratch"]["size_per_job"]["silver-build"] == "300Gi"
+        assert "size" not in snapshot["scratch"]
         assert snapshot["catalog"] == "hive"  # default
         assert snapshot["table_format"] == "iceberg"  # default
         assert snapshot["pipeline_engine"] == "spark"  # default
@@ -3711,11 +3720,16 @@ class TestSustainedPipelineScoring:
 
         generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
         report_path = generator.generate_report()
-        html = report_path.read_text()
+        report = report_path.read_text()
+        # This run's verdict fails (gold freshness 15 s over a short window),
+        # so the page leads with the failure and its cards show no number.
+        assert "Run FAILED: Gold freshness" in report
+        # The continuous cards themselves, as a passed run renders them.
+        html = generator._generate_sustained_summary(storage.load_run("cont-test"))
 
         assert "Data Freshness" in html
-        assert "Sustained Throughput" in html
-        assert "Data Processed" in html
+        assert "Continuous Throughput" in html
+        assert "Stage inputs processed" in html
         assert "CPU-hours" in html
         assert "worst-case gold staleness" in html
         # Batch cards should NOT appear
@@ -4000,12 +4014,12 @@ class TestPipelineMetricsRounds:
 
 
 # ---------------------------------------------------------------------------
-# MetricsCollector record_benchmark_round
+# MetricsCollector record_round
 # ---------------------------------------------------------------------------
 
 
 class TestRecordBenchmarkRound:
-    """Tests for MetricsCollector.record_benchmark_round."""
+    """Tests for MetricsCollector.record_round."""
 
     def test_records_round(self):
         c = MetricsCollector()
@@ -4019,7 +4033,7 @@ class TestRecordBenchmarkRound:
             total_seconds=30.0,
             round_meta=meta,
         )
-        c.record_benchmark_round(rnd)
+        c.record_round(rnd)
         assert len(c.current_run.benchmark_rounds) == 1
         assert c.current_run.benchmark_rounds[0].qph == 200.0
 
@@ -4027,7 +4041,7 @@ class TestRecordBenchmarkRound:
         c = MetricsCollector()
         c.start_run("test-run", "test", {})
         for i in range(3):
-            c.record_benchmark_round(
+            c.record_round(
                 BenchmarkMetrics(
                     mode="power",
                     cache="hot",
@@ -4042,7 +4056,7 @@ class TestRecordBenchmarkRound:
     def test_no_current_run(self):
         c = MetricsCollector()
         # Should not raise even without a current run
-        c.record_benchmark_round(
+        c.record_round(
             BenchmarkMetrics(
                 mode="power",
                 cache="hot",

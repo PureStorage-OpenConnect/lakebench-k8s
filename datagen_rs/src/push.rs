@@ -2,7 +2,7 @@
 //!
 //! Datagen pods are short-to-medium-lived batch jobs; Prometheus pull misses a
 //! job that finishes inside a scrape interval, so the pod pushes its metrics to
-//! a per-deployment Pushgateway (see docs/internal/observability-pushgateway.md).
+//! a per-deployment Pushgateway (see docs/design/observability-pushgateway.md).
 //! We hand-build the HTTP request over a raw TcpStream rather than pull in a
 //! client crate, matching this crate's "no serde, hand-build it" principle
 //! (metrics.rs) -- adopting hyper here would make a transitive dep direct.

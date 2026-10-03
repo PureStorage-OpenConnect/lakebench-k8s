@@ -77,6 +77,14 @@ def _verified_namespace():
         )
     )
     stack.enter_context(patch("lakebench.deploy.ownership.build_identity_from_config"))
+    # No engine pod: clean empties the buckets and leaves the catalog, with a
+    # warning (tests/test_clean_unregister.py covers the unregister step).
+    stack.enter_context(
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+            return_value=(None, None, None),
+        )
+    )
     return stack
 
 
@@ -84,12 +92,11 @@ def _clean(cfg, **kw):
     from lakebench.cli._clean import clean
 
     args = {
-        "target": "data",
+        "target": "silver",
         "config_file": cfg,
         "file_option": None,
         "force": True,
         "force_legacy": False,
-        "metrics_dir": Path("/tmp/nonexistent-metrics"),
     }
     args.update(kw)
     with _verified_namespace():
@@ -107,7 +114,7 @@ def test_unsupported_refuses_when_siblings_unknown(
 ):
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     with pytest.raises(typer.Exit) as exc:
         _clean(_cfg(tmp_path))
     assert exc.value.exit_code == 1
@@ -127,7 +134,7 @@ def test_unsupported_refuses_when_other_deployment_has_prefix_claim(
     # here the bucket name does not match "my-clean" at all.
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     cfg = tmp_path / "c.yaml"
     cfg.write_text(
         CFG.replace("my-clean-bronze", "other-bronze")
@@ -151,9 +158,9 @@ def test_unsupported_cleans_on_prefix_match(
 ):
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 3
+    assert s3.empty_bucket.call_count == 1  # clean silver: one bucket
 
 
 @patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=False)
@@ -170,7 +177,7 @@ def test_unsupported_prefix_match_without_record_is_not_cleaned(
     on FlashBlade after destroy had stopped doing so."""
     s3 = _s3()
     s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     with pytest.raises(typer.Exit):
         _clean(_cfg(tmp_path))
     assert s3.empty_bucket.call_count == 0
@@ -216,11 +223,10 @@ def test_clean_refuses_when_namespace_absent(s3_cls, _k8s, tmp_path):
         core.return_value.list_namespace.return_value.items = []
         with pytest.raises(typer.Exit):
             clean(
-                target="data",
+                target="silver",
                 config_file=_cfg(tmp_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
     s3.empty_bucket.assert_not_called()

@@ -65,10 +65,25 @@ directly.
 Lakebench's aggregator reads each pod's log after the Job succeeds,
 extracts the line, folds them into a `FleetSummary`, and writes the
 result to a namespace-keyed sidecar under
-`lakebench-output/datagen/`.
+`lakebench-output/datagen/`. `lakebench generate` does this, and so does
+a `lakebench run` that generates its own corpus (batch `--generate`, or a
+continuous run without `--skip-generate`): that run records the fleet
+of its own pods as `datagen_fleet`, and `experiment.corpus.datagen` reads
+the generator image digest from it. A run that does not generate takes the
+namespace's sidecar, the record of the generate that wrote its corpus
+(batch only: a continuous `--skip-generate` run records no fleet). A batch
+run with `pipeline.cycles` above 1 generates every cycle's bronze but does
+not read those pods, so it records no fleet (it refuses `--generate`), and
+removes the sidecar before its bronze check, so a refusal there removes it
+too;
+`run --local` reads the sidecar and does not write one.
+`lakebench generate` and a run that generates remove the sidecar before
+they empty or regenerate the corpus, so a corpus they replaced is never
+attributed to a later run, even when their own pods cannot be read or the
+generate fails.
 
-`lakebench run`, when it builds the pipeline scorecard, loads the
-sidecar for the current namespace and enriches the datagen
+A batch `lakebench run`, when it builds the pipeline scorecard, uses that
+fleet record and enriches the datagen
 `StageMetrics` with `executor_count`, `executor_cores`, and derived
 `cpu_seconds_requested`. Downstream `total_core_hours` now includes
 datagen. Same formula as the Spark stages; same units.

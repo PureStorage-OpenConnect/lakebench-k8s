@@ -25,7 +25,7 @@ pub const BASELINE_ACTIVITY: [f64; 3] = [60.0, 240.0, 1500.0];
 // Share of transactions whose beneficiary is drawn from the originator's ring.
 pub const RING_HIT_RATE: [f64; 3] = [0.95, 0.80, 0.60];
 
-// --- Persona (P2, LB-130 datagen fidelity) --------------------------------
+// --- Persona (per-account activity and amount spread) ---------------------
 // Before P2 every account of a given type shared one activity rate and one
 // amount distribution, so entity_profiles features (avg_gap_days,
 // avg_amount_usd) were near-constant across accounts and no typology could be

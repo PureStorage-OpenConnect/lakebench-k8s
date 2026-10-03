@@ -7,7 +7,6 @@ from lakebench.config import (
     ConfigFileNotFoundError,
     LakebenchConfig,
     generate_default_config,
-    generate_example_config_yaml,
     load_config,
     parse_size_to_bytes,
     parse_spark_memory,
@@ -68,7 +67,8 @@ class TestLakebenchConfig:
         """Test creating config with just the required field."""
         config = LakebenchConfig(name="test-deployment")
         assert config.name == "test-deployment"
-        assert config.version == 1
+        # The schema version number was removed (nothing read it).
+        assert not hasattr(config, "version")
 
     def test_missing_name_raises(self):
         """Test that missing name raises validation error."""
@@ -86,12 +86,9 @@ class TestLakebenchConfig:
         assert config.platform.storage.s3.path_style is True
 
         # Compute defaults (proven values)
-        assert config.platform.compute.spark.driver.cores == 4
-        assert config.platform.compute.spark.driver.memory == "8g"
-        assert config.platform.compute.spark.executor.instances == 8
-        assert config.platform.compute.spark.executor.cores == 4
-        assert config.platform.compute.spark.executor.memory == "48g"
-        assert config.platform.compute.spark.executor.memory_overhead == "12g"
+        # Per-executor sizing is the job profiles', not the config's.
+        assert not hasattr(config.platform.compute.spark, "driver")
+        assert not hasattr(config.platform.compute.spark, "executor")
 
         # Architecture defaults
         assert config.architecture.catalog.type.value == "hive"
@@ -99,9 +96,9 @@ class TestLakebenchConfig:
         assert config.architecture.query_engine.type.value == "trino"
         assert config.architecture.pipeline.pattern.value == "medallion"
 
-        # Spark conf defaults (S3A tuning)
-        assert config.spark.conf["spark.hadoop.fs.s3a.connection.maximum"] == "500"
-        assert config.spark.conf["spark.hadoop.fs.s3a.fast.upload"] == "true"
+        # spark.conf holds user keys only; the job defaults are
+        # SPARK_CONF_DEFAULTS, merged under it in each manifest.
+        assert config.spark.conf == {}
 
     def test_get_namespace_defaults_to_name(self):
         """Test that namespace defaults to deployment name."""
@@ -120,21 +117,26 @@ class TestLakebenchConfig:
         # No credentials
         config = LakebenchConfig(name="test")
         assert not config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
         # Inline credentials
         config = LakebenchConfig(
             name="test", platform={"storage": {"s3": {"access_key": "key", "secret_key": "secret"}}}
         )
         assert config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
-        # Secret ref
-        config = LakebenchConfig(
-            name="test", platform={"storage": {"s3": {"secret_ref": "my-secret"}}}
-        )
-        assert not config.has_inline_s3_credentials()
-        assert config.has_s3_secret_ref()
+        # secret_ref was removed: built without a load purpose it is dropped
+        # with a DeprecationWarning; see test_config_honesty_v16.
+        with pytest.warns(DeprecationWarning, match="secret_ref"):
+            config = LakebenchConfig(
+                name="test",
+                platform={
+                    "storage": {
+                        "s3": {"access_key": "k", "secret_key": "s", "secret_ref": "my-secret"}
+                    }
+                },
+            )
+        assert config.has_inline_s3_credentials()
+        assert not hasattr(config.platform.storage.s3, "secret_ref")
 
     def test_s3_tls_fields_defaults(self):
         """Test S3Config ca_cert and verify_ssl default values."""
@@ -196,7 +198,10 @@ class TestStackableOperatorConfig:
         assert op.namespace == "stackable"
         assert op.version == "25.7.0"
 
-    def test_override_install_true(self):
+    def test_install_true_outside_a_load_keeps_the_value(self):
+        """A model built without a load purpose keeps install as given (nothing
+        reads it); load_config refuses true for commands that change data
+        (tests/test_shared_components.py, test_cfg1_honoured_or_refused.py)."""
         cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": True}}}})
         assert cfg.architecture.catalog.hive.operator.install is True
 
@@ -237,11 +242,16 @@ platform:
             load_config(config_path)
 
     def test_load_minimal_config_auto_names(self, tmp_path):
-        """Config with only version gets auto-generated name (v1.3)."""
+        """A nameless config loads for read-only use under a suggested name,
+        and the commands that change data refuse it (SAF-2)."""
+        from lakebench.config.loader import ConfigNameRequired, LoadPurpose
+
         config_path = tmp_path / "config.yaml"
         config_path.write_text("version: 1")
-        cfg = load_config(config_path)
+        cfg = load_config(config_path, purpose=LoadPurpose.READ)
         assert cfg.name.startswith("lb-")
+        with pytest.raises(ConfigNameRequired):
+            load_config(config_path)
 
     def test_save_and_load_roundtrip(self, tmp_path):
         """Test that saving and loading preserves config."""
@@ -267,7 +277,6 @@ platform:
 
         loaded = load_config(config_path)
         assert loaded.name == config.name
-        assert loaded.description == config.description
         assert loaded.platform.storage.s3.buckets.bronze == "test-bronze"
 
 
@@ -415,12 +424,12 @@ class TestScratchStorageConfig:
     """Tests for scratch storage configuration."""
 
     def test_scratch_storage_defaults(self):
-        """Default scratch config: disabled, px-csi-scratch, 100Gi."""
+        """Default scratch config: disabled, px-csi-scratch, no size (job profiles)."""
         config = LakebenchConfig(name="test")
         scratch = config.platform.storage.scratch
         assert scratch.enabled is False
         assert scratch.storage_class == "px-csi-scratch"
-        assert scratch.size == "100Gi"
+        assert not hasattr(scratch, "size")
 
     def test_scratch_legacy_create_sc_field_ignored(self):
         """create_storage_class is a legacy field.
@@ -446,7 +455,6 @@ class TestScratchStorageConfig:
                     "scratch": {
                         "enabled": True,
                         "storage_class": "my-sc",
-                        "size": "200Gi",
                     }
                 }
             },
@@ -454,7 +462,6 @@ class TestScratchStorageConfig:
         scratch = config.platform.storage.scratch
         assert scratch.enabled is True
         assert scratch.storage_class == "my-sc"
-        assert scratch.size == "200Gi"
 
     def test_scratch_provisioner_default(self):
         """BUG-001: Default scratch provisioner is Portworx."""
@@ -531,7 +538,7 @@ class TestGenerateConfig:
         """Test generating default config with minimal inputs."""
         config = generate_default_config(name="test")
         assert config.name == "test"
-        assert "test" in config.description
+        assert not hasattr(config, "description")
 
     def test_generate_config_with_s3(self):
         """Test generating config with S3 settings."""
@@ -544,62 +551,6 @@ class TestGenerateConfig:
         assert config.platform.storage.s3.endpoint == "http://localhost:9000"
         assert config.platform.storage.s3.access_key == "accesskey"
         assert config.platform.storage.s3.secret_key == "secretkey"
-
-    def test_generate_example_yaml(self):
-        """Test generating example YAML."""
-        yaml_content = generate_example_config_yaml()
-        assert "name:" in yaml_content
-        assert "platform:" in yaml_content
-        assert "architecture:" in yaml_content
-        assert "observability:" in yaml_content
-        assert "spark:" in yaml_content
-        # Check for proven defaults in comments
-        assert "spark.hadoop.fs.s3a" in yaml_content
-
-
-class TestGeneratedYamlDrift:
-    """BUG-008: Verify generated config YAML stays in sync with schema."""
-
-    def test_duckdb_mentioned(self):
-        """Generated YAML should mention duckdb as a query engine option."""
-        yaml_content = generate_example_config_yaml()
-        assert "duckdb" in yaml_content
-
-    def test_recipe_field_present(self):
-        """Generated YAML should include a recipe field with valid names."""
-        yaml_content = generate_example_config_yaml()
-        assert "recipe:" in yaml_content
-        # At least one known recipe name should appear
-        assert "hive-iceberg-spark-trino" in yaml_content
-
-    def test_datagen_image_matches_schema(self):
-        """Generated YAML datagen image should match schema default."""
-        yaml_content = generate_example_config_yaml()
-        default_image = LakebenchConfig(name="t").images.datagen
-        assert default_image in yaml_content
-
-    def test_scratch_provisioner_present(self):
-        """Generated YAML should document scratch provisioner field."""
-        yaml_content = generate_example_config_yaml()
-        assert "provisioner:" in yaml_content
-
-    def test_legend_present(self):
-        """Generated YAML should start with a usage legend."""
-        yaml_content = generate_example_config_yaml()
-        assert "LEGEND" in yaml_content
-
-    def test_spark_operator_note(self):
-        """Generated YAML should document that spark operator defaults to false."""
-        yaml_content = generate_example_config_yaml()
-        assert "default is false" in yaml_content.lower()
-
-    def test_benchmark_section_engine_agnostic(self):
-        """Benchmark section should not be Trino-specific."""
-        yaml_content = generate_example_config_yaml()
-        # Should NOT say "Trino query benchmark" (was the old header)
-        assert "Trino query benchmark" not in yaml_content
-        # Should have a generic benchmark header
-        assert "benchmark" in yaml_content.lower()
 
 
 class TestPerJobExecutorOverrides:
@@ -648,10 +599,10 @@ class TestPerJobExecutorOverrides:
         config = LakebenchConfig(
             name="test",
             architecture={"workload": {"datagen": {"scale": 100}}},
-            platform={"compute": {"spark": {"silver_executors": 30}}},
+            platform={"compute": {"spark": {"silver_executors": 24}}},
         )
         assert config.architecture.workload.datagen.scale == 100
-        assert config.platform.compute.spark.silver_executors == 30
+        assert config.platform.compute.spark.silver_executors == 24
         assert config.platform.compute.spark.bronze_executors is None
 
 
@@ -712,23 +663,16 @@ class TestComponentValidation:
             },
         )
         assert config.architecture.catalog.polaris.port == 8181
-        assert config.architecture.catalog.polaris.version == "1.6.0"
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 
     def test_polaris_without_secret_loads_but_deploy_rejects(self):
-        """LB-090: config load succeeds so `lakebench validate` / `info`
-        can inspect a Polaris config even before a secret is set. The
-        deploy-time gate (`require_polaris_client_secret`) is what
-        refuses the empty value. This split matters: auto-generating at
-        load time would give `deploy` and `run` different secrets on
-        independent CLI invocations, breaking OAuth2. A hardcoded
-        default (pre-LB-090) would share one secret across every install.
-        """
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
+        """LB-090 and SAF-8: config load succeeds with no secret, and nothing
+        generates one at load. A run with neither a config value nor the
+        Secret deploy stores refuses, naming deploy."""
+        from lakebench.config.schema import PolarisClientSecretMissing
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         cfg = LakebenchConfig(
             name="a",
@@ -738,38 +682,15 @@ class TestComponentValidation:
                 "query_engine": {"type": "trino"},
             },
         )
-        # Load succeeds -- validate/info work.
         assert cfg.architecture.catalog.polaris.client_secret == ""
-        # Deploy-time gate refuses with an actionable message.
-        with pytest.raises(PolarisClientSecretMissing, match="polaris.client_secret is required"):
-            require_polaris_client_secret(cfg)
-
-    def test_polaris_missing_secret_error_names_generator_command(self):
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
-
-        cfg = LakebenchConfig(
-            name="a",
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        try:
-            require_polaris_client_secret(cfg)
-        except PolarisClientSecretMissing as e:
-            assert "token_urlsafe" in str(e), "error must show the user how to generate a secret"
-        else:
-            pytest.fail("expected PolarisClientSecretMissing")
+        with pytest.raises(PolarisClientSecretMissing, match="run lakebench deploy first"):
+            polaris_client_secret(cfg, FakeCore())
 
     def test_polaris_supplied_secret_survives_reload(self):
         """The LB-090 core invariant: two independent loads of the same
-        config produce the same secret, so `deploy` and `run` never
-        diverge."""
-        from lakebench.config.schema import require_polaris_client_secret
+        config give the same secret, so `deploy` and `run` never diverge."""
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         args = {
             "name": "a",
@@ -784,8 +705,8 @@ class TestComponentValidation:
         }
         cfg_a = LakebenchConfig(**args)
         cfg_b = LakebenchConfig(**args)
-        assert require_polaris_client_secret(cfg_a) == "user-supplied-value"
-        assert require_polaris_client_secret(cfg_a) == require_polaris_client_secret(cfg_b)
+        assert polaris_client_secret(cfg_a, FakeCore()) == "user-supplied-value"
+        assert polaris_client_secret(cfg_b, FakeCore()) == "user-supplied-value"
 
     def test_polaris_hardcoded_default_removed(self):
         """The pre-LB-090 shared default must not slip back in."""

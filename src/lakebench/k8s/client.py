@@ -7,11 +7,14 @@ import logging
 import random
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+
+from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +144,80 @@ class ClusterCapacity:
     largest_node_memory_bytes: int
 
 
+@dataclass(frozen=True)
+class FreeCapacity:
+    """What the schedulable nodes can still take, for the run preflight.
+
+    ``free`` is allocatable minus the requests of every non-terminal pod
+    outside the excluded namespace, in total and on the node with the most
+    free memory; ``allocatable`` is the same nodes before those requests.
+    Both are ``ClusterCapacity`` so ``config.sizing.check_capacity`` reads
+    either.
+    """
+
+    free: ClusterCapacity
+    allocatable: ClusterCapacity
+    #: (free millicores, free bytes) of each schedulable node, for the
+    #: check that one pod fits one node in both dimensions at once.
+    free_by_node: tuple[tuple[int, int], ...] = ()
+
+    def pod_fits(self, cpu_cores: float, memory_gb: float) -> bool:
+        """Whether some schedulable node has *cpu_cores* and *memory_gb*
+        (GiB) free at once."""
+        need_m = cpu_cores * 1000
+        need_b = memory_gb * 1024**3
+        return any(c >= need_m and m >= need_b for c, m in self.free_by_node)
+
+
+@dataclass(frozen=True)
+class CapacityUnknown:
+    """The capacity could not be read; the preflight refuses (fails closed).
+
+    ``pods_only`` says the node list was read and only the pod side failed
+    (the pod list, or a pod on a node the list does not show), so the
+    nodes' allocatable is still known; ``deploy`` checks that instead.
+    """
+
+    reason: str
+    pods_only: bool = False
+
+
+@dataclass(frozen=True)
+class ScratchCapacity:
+    """Published storage capacity for one StorageClass, or why there is none.
+
+    ``total_bytes`` is the sum of its ``CSIStorageCapacity`` objects; None
+    with a ``reason`` when the driver publishes none or they cannot be read.
+    """
+
+    total_bytes: int | None
+    reason: str = ""
+
+
+#: Taint effects that keep ordinary pods off a node.
+_BLOCKING_TAINTS = ("NoSchedule", "NoExecute")
+
+
+def _quantity(value: Any) -> float:
+    """A Kubernetes quantity ("1500m", "129497084Ki", "2") as a number of
+    base units (lakebench.quantity, the one parser)."""
+    from lakebench.quantity import parse
+
+    return float(parse(str(value)))
+
+
+def _schedulable(node: Any) -> bool:
+    """Ready, not cordoned, and no NoSchedule or NoExecute taint. A
+    control-plane node counts when nothing keeps pods off it."""
+    if getattr(node.spec, "unschedulable", False):
+        return False
+    for taint in getattr(node.spec, "taints", None) or []:
+        if taint.effect in _BLOCKING_TAINTS:
+            return False
+    conditions = getattr(node.status, "conditions", None) or []
+    return any(c.type == "Ready" and c.status == "True" for c in conditions)
+
+
 class K8sClient:
     """Kubernetes client for resource management.
 
@@ -148,28 +225,43 @@ class K8sClient:
     high-level operations for Lakebench.
     """
 
-    def __init__(self, context: str = "", namespace: str = ""):
-        """Initialize Kubernetes client."""
-        self.context_name = context
+    def __init__(
+        self,
+        context: str | None = "",
+        namespace: str = "",
+        *,
+        target: ClusterTarget | None = None,
+    ):
+        """Initialize Kubernetes client.
+
+        The client is pinned to one :class:`ClusterTarget`, so it cannot
+        follow a context switch: ``target`` when given, else the one
+        ``context`` resolves to. An empty context
+        resolves to the process's active target, or to the kubeconfig's
+        current context by name. A different context from the one already
+        active raises :class:`ContextConflictError`.
+        """
         self._namespace = namespace
 
         try:
-            if context:
-                config.load_kube_config(context=context)
-            else:
-                # Try in-cluster config first, fall back to kubeconfig
-                try:
-                    config.load_incluster_config()
-                except config.ConfigException:
-                    config.load_kube_config()
+            resolved = (
+                target if target is not None else ClusterTarget.resolve(context=context or "")
+            )
+            self.target = resolved.activate()
+        except ContextConflictError:
+            raise
         except Exception as e:
             raise K8sConnectionError(f"Failed to load Kubernetes config: {e}")  # noqa: B904
+        # The resolved context name, so kubectl subprocesses this client
+        # runs use the same context as its API clients.
+        self.context_name = self.target.context or ""
 
         self._core_v1 = client.CoreV1Api()
         self._apps_v1 = client.AppsV1Api()
         self._rbac_v1 = client.RbacAuthorizationV1Api()
         self._batch_v1 = client.BatchV1Api()
         self._custom = client.CustomObjectsApi()
+        self._storage_v1 = client.StorageV1Api()
 
     @property
     def namespace(self) -> str:
@@ -177,55 +269,79 @@ class K8sClient:
         if self._namespace:
             return self._namespace
 
-        # Try to get from kubeconfig
-        try:
-            contexts, active = config.list_kube_config_contexts()
-            if active and "namespace" in active.get("context", {}):
-                return active["context"]["namespace"]
-        except Exception as e:
-            logger.debug("Could not read namespace from kubeconfig: %s", e)
+        # The pinned context's namespace from the kubeconfig.
+        ctx = self._pinned_context_entry()
+        if ctx and "namespace" in ctx.get("context", {}):
+            return ctx["context"]["namespace"]
 
         return "default"
 
+    def _pinned_context_entry(self) -> dict[str, Any] | None:
+        """The kubeconfig entry of this client's pinned context, or None."""
+        if not self.context_name:
+            return None
+        try:
+            contexts, _current = config.list_kube_config_contexts()
+        except Exception as e:
+            logger.debug("Could not list kubeconfig contexts: %s", e)
+            return None
+        for entry in contexts or []:
+            if entry.get("name") == self.context_name:
+                return entry
+        return None
+
     def get_current_context(self) -> K8sContext | None:
-        """Get information about the current context.
+        """Get information about this client's pinned context.
 
         Returns:
             K8sContext with context details, or None if unavailable
         """
-        try:
-            contexts, active = config.list_kube_config_contexts()
-            if active:
-                ctx = active.get("context", {})
-                return K8sContext(
-                    name=active.get("name", ""),
-                    cluster=ctx.get("cluster", ""),
-                    user=ctx.get("user", ""),
-                    namespace=ctx.get("namespace"),
-                )
-        except Exception as e:
-            logger.debug("Could not list kubeconfig contexts: %s", e)
+        entry = self._pinned_context_entry()
+        if entry:
+            ctx = entry.get("context", {})
+            return K8sContext(
+                name=entry.get("name", ""),
+                cluster=ctx.get("cluster", ""),
+                user=ctx.get("user", ""),
+                namespace=ctx.get("namespace"),
+            )
         return None
 
-    def test_connectivity(self) -> tuple[bool, str]:
+    def test_connectivity(self, timeout: Any = None) -> tuple[bool, str]:
         """Test connectivity to the Kubernetes cluster.
+
+        Args:
+            timeout: ``_request_timeout`` for the probe (seconds, or a
+                ``(connect, read)`` pair); None keeps the client default.
 
         Returns:
             Tuple of (success, message)
         """
         try:
             # Try to get API versions - lightweight call
-            version = client.VersionApi().get_code()
+            kw = {} if timeout is None else {"_request_timeout": timeout}
+            version = client.VersionApi().get_code(**kw)
             return True, f"Connected to Kubernetes {version.git_version}"
         except ApiException as e:
             return False, f"API error: {e.reason}"
         except Exception as e:
             return False, f"Connection error: {e}"
 
+    @staticmethod
+    def _lease_kw() -> dict[str, Any]:
+        """``_request_timeout`` for a call made while the cluster lease is held.
+
+        A deferred signal (``cluster_lock``) waits for the leased work to end,
+        so no request inside the lease may hang (DESIGN ch01 3.6).
+        """
+        from lakebench.k8s.lease_state import request_timeout_kw
+
+        return request_timeout_kw()
+
     def namespace_exists(self, name: str) -> bool:
         """Check if a namespace exists."""
         try:
-            self._core_v1.read_namespace(name)
+            self._core_v1.read_namespace(name, **self._lease_kw())
             return True
         except ApiException as e:
             if e.status == 404:
@@ -235,7 +351,7 @@ class K8sClient:
     def get_namespace_phase(self, name: str) -> str:
         """Get the phase of a namespace (Active, Terminating, etc)."""
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
             return ns.status.phase or ""
         except ApiException as e:
             if e.status == 404:
@@ -249,7 +365,7 @@ class K8sClient:
         re-created by a later deploy has the same name and a new UID.
         """
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return ""
@@ -259,7 +375,7 @@ class K8sClient:
     def get_namespace_annotation(self, name: str, key: str) -> str:
         """Return one annotation of a namespace, ``""`` if unset or absent."""
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return ""
@@ -278,7 +394,7 @@ class K8sClient:
             remaining: persistentvolumeclaims. has 1 resource instances".
         """
         try:
-            ns = self._core_v1.read_namespace(name)
+            ns = self._core_v1.read_namespace(name, **self._lease_kw())
         except ApiException as e:
             if e.status == 404:
                 return "", []
@@ -291,7 +407,7 @@ class K8sClient:
                 blockers.append(cond.message or cond.reason or cond.type)
         return phase, blockers
 
-    def wait_for_namespace_deleted(self, name: str, timeout: int = 120) -> None:
+    def wait_for_namespace_deleted(self, name: str, timeout: float = 120) -> None:
         """Wait for a namespace to be fully deleted."""
         import time
 
@@ -387,9 +503,10 @@ class K8sClient:
                 self._core_v1.delete_namespace(
                     name,
                     body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid)),
+                    **self._lease_kw(),
                 )
             else:
-                self._core_v1.delete_namespace(name)
+                self._core_v1.delete_namespace(name, **self._lease_kw())
             return True
         except ApiException as e:
             if e.status == 404:
@@ -422,6 +539,35 @@ class K8sClient:
             if e.status == 404:
                 return False
             raise K8sResourceError(f"Error checking secret: {e}")  # noqa: B904
+
+    @retry_k8s_api
+    def get_configmap(self, name: str, namespace: str | None = None) -> dict[str, Any] | None:
+        """A ConfigMap's ``labels``, ``annotations`` and ``data``, or None when
+        it does not exist."""
+        ns = namespace or self.namespace
+        try:
+            cm = self._core_v1.read_namespaced_config_map(name, ns)
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            raise
+        return {
+            "labels": dict(cm.metadata.labels or {}),
+            "annotations": dict(cm.metadata.annotations or {}),
+            "data": dict(cm.data or {}),
+        }
+
+    @retry_k8s_api
+    def delete_configmap(self, name: str, namespace: str | None = None) -> bool:
+        """Delete a ConfigMap. True if deleted, False if it did not exist."""
+        ns = namespace or self.namespace
+        try:
+            self._core_v1.delete_namespaced_config_map(name, ns)
+        except ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+        return True
 
     @retry_k8s_api
     def apply_manifest(self, manifest: dict[str, Any], namespace: str | None = None) -> bool:
@@ -915,28 +1061,137 @@ class K8sClient:
             largest_node_memory_bytes=max_mem,
         )
 
+    def get_free_capacity(
+        self,
+        exclude_namespace: str = "",
+        *,
+        count_own: Callable[[Any], bool] | None = None,
+    ) -> FreeCapacity | CapacityUnknown:
+        """Free capacity of the schedulable nodes, for the run preflight.
+
+        Unlike ``get_cluster_capacity`` (allocatable totals, used to size a
+        run), this subtracts what other pods already request, so a busy
+        cluster that fits by total but not by what is free is refused. Pods
+        in *exclude_namespace* (the deployment's own) are not subtracted,
+        since the preflight counts that deployment's Trino, catalog and
+        Postgres itself, except those *count_own* selects (leftover Spark
+        pods, a datagen Job still running).
+
+        Fails closed: a forbidden or failed node or pod list, a pod on a
+        node the node list does not show, or no schedulable node gives
+        ``CapacityUnknown`` with the reason.
+        """
+        try:
+            nodes = self._core_v1.list_node().items
+        except ApiException as e:
+            return CapacityUnknown(f"listing nodes failed ({e.status} {e.reason})")
+        except Exception as e:  # noqa: BLE001 -- any failure means "unknown"
+            return CapacityUnknown(f"listing nodes failed ({type(e).__name__})")
+        try:
+            pods = self._core_v1.list_pod_for_all_namespaces(
+                field_selector="status.phase!=Succeeded,status.phase!=Failed"
+            ).items
+        except ApiException as e:
+            return CapacityUnknown(f"listing pods failed ({e.status} {e.reason})", pods_only=True)
+        except Exception as e:  # noqa: BLE001
+            return CapacityUnknown(f"listing pods failed ({type(e).__name__})", pods_only=True)
+
+        from lakebench.quantity import QuantityError, pod_request
+
+        known = {n.metadata.name for n in nodes}
+        used: dict[str, list[float]] = {}
+        try:
+            for pod in pods:
+                node_name = getattr(pod.spec, "node_name", None)
+                if not node_name:
+                    continue  # not scheduled yet: holds no node's capacity
+                if node_name not in known:
+                    return CapacityUnknown(
+                        f"pod {pod.metadata.namespace}/{pod.metadata.name} runs on node "
+                        f"{node_name}, which the node list does not show",
+                        pods_only=True,
+                    )
+                if (
+                    exclude_namespace
+                    and pod.metadata.namespace == exclude_namespace
+                    and not (count_own is not None and count_own(pod))
+                ):
+                    continue
+                cpu, mem = pod_request(pod)
+                acc = used.setdefault(node_name, [0.0, 0.0])
+                acc[0] += cpu
+                acc[1] += mem
+            rows = []
+            for node in nodes:
+                if not _schedulable(node):
+                    continue
+                alloc = node.status.allocatable or {}
+                a_cpu = _quantity(alloc.get("cpu", 0))
+                a_mem = _quantity(alloc.get("memory", 0))
+                u_cpu, u_mem = used.get(node.metadata.name, [0.0, 0.0])
+                rows.append((a_cpu, a_mem, max(a_cpu - u_cpu, 0.0), max(a_mem - u_mem, 0.0)))
+        except QuantityError as e:
+            return CapacityUnknown(f"a node or pod resource quantity cannot be read: {e}")
+        except Exception as e:  # noqa: BLE001 -- a malformed object is "unknown"
+            return CapacityUnknown(f"reading node or pod resources failed ({type(e).__name__})")
+        if not rows:
+            return CapacityUnknown("no schedulable node (all cordoned, tainted or not Ready)")
+
+        # The largest-pod check uses one node's free cores and memory
+        # together: the node with the most free memory (executor pods are
+        # memory-bound), ties broken by free cores.
+        best = max(rows, key=lambda r: (r[3], r[2]))
+        biggest = max(rows, key=lambda r: (r[1], r[0]))
+        free = ClusterCapacity(
+            total_cpu_millicores=int(sum(r[2] for r in rows) * 1000),
+            total_memory_bytes=int(sum(r[3] for r in rows)),
+            node_count=len(rows),
+            largest_node_cpu_millicores=int(best[2] * 1000),
+            largest_node_memory_bytes=int(best[3]),
+        )
+        allocatable = ClusterCapacity(
+            total_cpu_millicores=int(sum(r[0] for r in rows) * 1000),
+            total_memory_bytes=int(sum(r[1] for r in rows)),
+            node_count=len(rows),
+            largest_node_cpu_millicores=int(biggest[0] * 1000),
+            largest_node_memory_bytes=int(biggest[1]),
+        )
+        return FreeCapacity(
+            free=free,
+            allocatable=allocatable,
+            free_by_node=tuple((int(r[2] * 1000), int(r[3])) for r in rows),
+        )
+
+    def get_scratch_capacity(self, storage_class: str) -> ScratchCapacity:
+        """The ``CSIStorageCapacity`` the CSI driver publishes for
+        *storage_class*, summed over its topology segments."""
+        try:
+            items = self._storage_v1.list_csi_storage_capacity_for_all_namespaces().items
+        except ApiException as e:
+            return ScratchCapacity(None, f"CSIStorageCapacity not readable ({e.status} {e.reason})")
+        except Exception as e:  # noqa: BLE001
+            return ScratchCapacity(None, f"CSIStorageCapacity not readable ({type(e).__name__})")
+        mine = [i for i in items if i.storage_class_name == storage_class and i.capacity]
+        if not mine:
+            return ScratchCapacity(None, "no CSIStorageCapacity published for it")
+        try:
+            return ScratchCapacity(int(sum(_quantity(i.capacity) for i in mine)))
+        except Exception as e:  # noqa: BLE001
+            return ScratchCapacity(None, f"CSIStorageCapacity unreadable ({type(e).__name__})")
+
     @staticmethod
     def _parse_cpu_to_millicores(cpu: str) -> int:
-        """Parse K8s CPU string to millicores."""
-        cpu = cpu.strip()
-        if cpu.endswith("m"):
-            return int(cpu[:-1])
-        return int(float(cpu) * 1000)
+        """K8s CPU quantity to millicores (lakebench.quantity)."""
+        from lakebench.quantity import to_millicores
+
+        return to_millicores(cpu)
 
     @staticmethod
     def _parse_memory_to_bytes(mem: str) -> int:
-        """Parse K8s memory string to bytes."""
-        mem = mem.strip()
-        units = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
-        for suffix, multiplier in units.items():
-            if mem.endswith(suffix):
-                return int(mem[: -len(suffix)]) * multiplier
-        # Plain bytes or with 'k', 'M', 'G' (SI units)
-        si_units = {"k": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4}
-        for suffix, multiplier in si_units.items():
-            if mem.endswith(suffix):
-                return int(mem[: -len(suffix)]) * multiplier
-        return int(mem)
+        """K8s memory quantity to bytes (lakebench.quantity)."""
+        from lakebench.quantity import to_bytes
+
+        return to_bytes(mem)
 
     def get_pod_status(self, name: str, namespace: str | None = None) -> ResourceStatus:
         """Get status of a pod.
@@ -1023,14 +1278,27 @@ class K8sClient:
             return 1, "", str(e)
 
 
-def get_k8s_client(context: str = "", namespace: str = "") -> K8sClient:
-    """Create a Kubernetes client.
+def get_k8s_client(
+    *,
+    context: str | None = None,
+    target: ClusterTarget | None = None,
+    namespace: str = "",
+) -> K8sClient:
+    """Create a Kubernetes client pinned to the process's one cluster context.
+
+    Callers pass ``context=cfg.platform.kubernetes.context`` (empty means
+    the kubeconfig's current context, resolved once per process) or a
+    ``target``. Passing neither is a programming error, and the context
+    pinning lint fails on such a call.
 
     Args:
-        context: Kubernetes context (empty = current)
+        context: Kubernetes context from the config ("" = resolve current)
+        target: An already resolved target
         namespace: Default namespace (empty = from context)
 
     Returns:
         K8sClient instance
     """
-    return K8sClient(context=context, namespace=namespace)
+    if context is None and target is None:
+        raise TypeError("get_k8s_client() needs context= or target=")
+    return K8sClient(context=context or "", namespace=namespace, target=target)

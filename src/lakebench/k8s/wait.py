@@ -74,9 +74,18 @@ def wait_for_condition(
 
     Returns:
         WaitResult with outcome
+
+    Raises:
+        DeployTimeout: the deploy deadline, not ``timeout_seconds``,
+            ended the wait. Every ``wait_for_*`` here goes through this
+            function, so each is bounded by ``lakebench deploy --timeout``.
     """
+    from lakebench.deploy import deadline as deploy_deadline
+
+    limit = deploy_deadline.clamp(timeout_seconds)
     start_time = time.time()
     attempts = 0
+    message = ""
 
     while True:
         attempts += 1
@@ -101,7 +110,10 @@ def wait_for_condition(
         except Exception as e:
             message = str(e)
 
-        if elapsed >= timeout_seconds:
+        if elapsed >= limit:
+            if limit < timeout_seconds:
+                # The deploy deadline cut this wait short.
+                deploy_deadline.check(description, message)
             return WaitResult(
                 status=WaitStatus.TIMEOUT,
                 message=f"Timeout after {int(elapsed)}s waiting for {description}: {message}",
@@ -109,7 +121,7 @@ def wait_for_condition(
                 attempts=attempts,
             )
 
-        time.sleep(poll_interval)
+        time.sleep(max(0.0, min(poll_interval, limit - elapsed)))
 
 
 def wait_for_pod_ready(

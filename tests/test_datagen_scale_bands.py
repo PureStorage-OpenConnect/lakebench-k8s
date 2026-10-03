@@ -34,10 +34,8 @@ def test_file_size_refuses_every_other_size(value: object) -> None:
 
 def test_cleanup_loaders_tolerate_an_old_file_size() -> None:
     """destroy and clean must still load a config written with an old size."""
-    with pytest.warns(UserWarning, match="fixed at 64mb"):
-        dg = DatagenConfig.model_validate(
-            {"file_size": "128mb"}, context={"allow_long_names": True}
-        )
+    with pytest.warns(DeprecationWarning, match="fixed at 64mb"):
+        dg = DatagenConfig.model_validate({"file_size": "128mb"}, context={"purpose": "teardown"})
     assert dg.file_size == "64mb"
 
 
@@ -69,17 +67,21 @@ def test_unknown_workload_or_scale_has_no_band() -> None:
     assert datagen_scale_problem("financial", None) is None
 
 
-def _record(workload: str) -> dict[tuple[str, str, str], Validation]:
+VERSIONS = {"spark": "4.1", "table_format_version": "1.11.0"}
+
+
+def _record(workload: str) -> dict:
     from lakebench.config.support import recipe_for
 
     recipe = str(recipe_for(*COMBO))
-    return {(workload, recipe, "batch"): Validation(workload, recipe, "batch", "abc", ("run-x",))}
+    v = Validation(workload, recipe, "batch", "4.1", "1.11.0", "a" * 40, ("run-x",))
+    return {v.key: v}
 
 
 def test_support_state_refuses_above_ceiling_even_when_validated() -> None:
     ceiling = DATAGEN_SCALE_BANDS["financial"][1]
     out = support_state(
-        "financial", *COMBO, "batch", record=_record("financial"), scale=ceiling + 1
+        "financial", *COMBO, "batch", record=_record("financial"), scale=ceiling + 1, **VERSIONS
     )
     assert out["state"] == UNSUPPORTED
     assert "ceiling" in out["basis"]
@@ -90,7 +92,9 @@ def test_support_state_downgrades_validated_run_above_measured_scale() -> None:
     supported_max, ceiling = DATAGEN_SCALE_BANDS["financial"]
     if ceiling == supported_max:
         pytest.skip("no unverified band")
-    out = support_state("financial", *COMBO, "batch", record=_record("financial"), scale=ceiling)
+    out = support_state(
+        "financial", *COMBO, "batch", record=_record("financial"), scale=ceiling, **VERSIONS
+    )
     assert out["state"] == UNVERIFIED
     assert out["scale_note"] == out["basis"]
 
@@ -98,7 +102,7 @@ def test_support_state_downgrades_validated_run_above_measured_scale() -> None:
 def test_support_state_keeps_supported_within_band() -> None:
     supported_max, _ = DATAGEN_SCALE_BANDS["financial"]
     out = support_state(
-        "financial", *COMBO, "batch", record=_record("financial"), scale=supported_max
+        "financial", *COMBO, "batch", record=_record("financial"), scale=supported_max, **VERSIONS
     )
     assert out["state"] == SUPPORTED
     assert "scale_note" not in out

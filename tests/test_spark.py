@@ -202,8 +202,8 @@ class TestSparkJobManager:
                     break
         assert found_scratch, "px-csi-scratch storage class not found in manifest"
 
-    def test_manifest_has_iceberg_packages(self):
-        """Spark conf should include Iceberg JARs."""
+    def test_manifest_has_iceberg_jars_from_the_set(self):
+        """spark.jars names the set's Iceberg and Hadoop AWS jars (DEP-2)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
@@ -211,19 +211,14 @@ class TestSparkJobManager:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         spark_conf = manifest["spec"]["sparkConf"]
 
-        packages = spark_conf["spark.jars.packages"]
-        assert "iceberg-spark-runtime" in packages
-        assert "hadoop-aws" in packages
+        jars = spark_conf["spark.jars"]
+        assert "iceberg-spark-runtime" in jars
+        assert "hadoop-aws" in jars
+        assert "spark.jars.packages" not in spark_conf
 
-    def test_manifest_has_maven_mirror_repositories(self):
-        """Spark conf must set ``spark.jars.repositories`` to a Central
-        mirror so Ivy falls to it when the cluster's egress hits an
-        HTTP 429 rate-limit on repo1.maven.org. Live-verified 2026-09-22
-        on aml-baseline-s1 where a fresh Central 429 blocked
-        bronze-verify; adding this fallback let the same run finish.
-        """
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS
-
+    def test_manifest_resolves_nothing_at_submit(self):
+        """No Maven repository or Ivy cache in the conf: the controller and
+        the driver resolve nothing; the jars come from lb-deps (DEP-2)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
@@ -231,12 +226,8 @@ class TestSparkJobManager:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         spark_conf = manifest["spec"]["sparkConf"]
 
-        assert "spark.jars.repositories" in spark_conf, (
-            "spark.jars.repositories missing -- Ivy has no Central mirror "
-            "fallback when repo1.maven.org 429s the cluster's egress IP"
-        )
-        assert spark_conf["spark.jars.repositories"] == _MAVEN_MIRROR_REPOS
-        assert "maven-central.storage-download.googleapis.com" in _MAVEN_MIRROR_REPOS
+        for key in ("spark.jars.repositories", "spark.jars.ivy", "spark.jars.ivySettings"):
+            assert key not in spark_conf
 
     def test_manifest_has_s3_config(self):
         """Spark conf should include S3A endpoint."""
@@ -307,13 +298,18 @@ class TestSparkJobManager:
         driver_vols = [v["name"] for v in driver_tpl["spec"]["volumes"]]
         assert "spark-scripts" in driver_vols
         assert "spark-work-dir" in driver_vols
-        assert "spark-ivy-cache" in driver_vols
+        # The driver downloads the set's jars into /tmp, bounded.
+        assert "lb-deps-dl" in driver_vols
+        assert "spark-ivy-cache" not in driver_vols
 
         executor_tpl = manifest["spec"]["executor"]["template"]
         executor_vols = [v["name"] for v in executor_tpl["spec"]["volumes"]]
         assert "spark-scripts" in executor_vols
         assert "spark-work-dir" in executor_vols
-        assert "spark-ivy-cache" in executor_vols
+        assert "lb-deps-dl" not in executor_vols
+        assert "spark-ivy-cache" not in executor_vols
+        mounts = executor_tpl["spec"]["containers"][0]["volumeMounts"]
+        assert not [m for m in mounts if m["mountPath"] == "/tmp"]
 
     def test_manifest_truststore_when_ca_cert(self):
         """When ca_cert is set, truststore volumes and init container are added."""
@@ -517,7 +513,7 @@ class TestPerJobExecutorOverridesInManifest:
                         },
                     },
                 },
-                "compute": {"spark": {"silver_executors": 30}},
+                "compute": {"spark": {"silver_executors": 24}},
             },
         )
         k8s = _mock_k8s()
@@ -530,7 +526,7 @@ class TestPerJobExecutorOverridesInManifest:
         assert executor["cores"] == 4
         assert executor["memory"] == "48g"
         assert executor["memoryOverhead"] == "12g"
-        assert executor["instances"] == 30
+        assert executor["instances"] == 24
 
 
 class TestDriverResourceOverrides:
@@ -672,8 +668,9 @@ class TestMaxResultSizeScaling:
         spark_conf = manifest["spec"]["sparkConf"]
         assert spark_conf["spark.driver.maxResultSize"] == "12g"
 
-    def test_max_result_size_capped_at_16g(self):
-        """Even at extreme executor counts, cap at 16g."""
+    def test_max_result_size_at_the_override_ceiling(self):
+        """At the 28-executor override ceiling on Spark 4: max(8, 28 // 2) = 14g
+        (the 16g cap needs 32 executors, which no config can set)."""
         config = _make_config(
             platform={
                 "storage": {
@@ -688,15 +685,14 @@ class TestMaxResultSizeScaling:
                         },
                     }
                 },
-                "compute": {"spark": {"silver_executors": 60}},
+                "compute": {"spark": {"silver_executors": 28}},
             }
         )
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.SILVER_BUILD)
         spark_conf = manifest["spec"]["sparkConf"]
-        # min(16, max(4, 60//3)) = min(16, 20) = 16
-        assert spark_conf["spark.driver.maxResultSize"] == "16g"
+        assert spark_conf["spark.driver.maxResultSize"] == "14g"
 
     def test_user_spark_conf_override_takes_precedence(self):
         """If user sets maxResultSize in spark.conf, it wins."""
@@ -1484,6 +1480,11 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
             ),
+            # _watch_list_pin: the installed chart, read again inside the lease
+            MagicMock(
+                returncode=0,
+                stdout='[{"name":"spark-operator","chart":"spark-operator-2.4.0"}]',
+            ),
             # _add_namespace_to_watch: helm upgrade
             MagicMock(returncode=0, stdout="Release updated"),
             # _is_openshift check (returncode=1 -> not OpenShift)
@@ -1604,7 +1605,7 @@ class TestPolarisSparkManifest:
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.SILVER_BUILD)
         spark_conf = manifest["spec"]["sparkConf"]
-        packages = spark_conf["spark.jars.packages"]
+        packages = spark_conf["spark.jars"]
 
         assert "iceberg-spark-runtime-4" in packages
         assert "iceberg-aws-bundle" in packages
@@ -1670,56 +1671,23 @@ class TestCycleEnv:
 
 
 class TestScriptsConfigMapDeltaScripts:
-    """Verify deploy_scripts_configmap includes Delta script files."""
+    """The scripts ConfigMaps ship the Delta script files (v1.2)."""
 
     def test_script_files_list_includes_delta_variants(self):
-        """The script_files list in deploy_scripts_configmap should include Delta scripts."""
-        config = _make_config()
-        k8s = _mock_k8s()
-        mgr = SparkJobManager(config, k8s)
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import (
+            build_script_configmaps,
+        )
 
-        # Inspect the method source to verify the list, or call and check.
-        # We mock k8s.apply_manifest to capture the ConfigMap data.
-        k8s.apply_manifest.return_value = True
-
-        with patch("lakebench._resources.get_scripts_dir") as mock_dir:
-            import tempfile
-            from pathlib import Path
-
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp = Path(tmpdir)
-                # Create all expected script files
-                expected_delta_scripts = [
-                    "silver_build_delta.py",
-                    "gold_finalize_delta.py",
-                    "gold_refresh_delta.py",
-                    "bronze_ingest_delta.py",
-                    "silver_stream_delta.py",
-                ]
-                expected_iceberg_scripts = [
-                    "common.py",
-                    "bronze_verify.py",
-                    "silver_build.py",
-                    "gold_finalize.py",
-                    "bronze_ingest.py",
-                    "silver_stream.py",
-                    "gold_refresh.py",
-                ]
-                all_scripts = expected_iceberg_scripts + expected_delta_scripts
-                for script in all_scripts:
-                    (tmp / script).write_text(f"# {script}\nprint('hello')\n")
-                mock_dir.return_value = tmp
-
-                result = mgr.deploy_scripts_configmap()
-                assert result is True
-
-                # Verify the ConfigMap data includes Delta scripts
-                call_args = k8s.apply_manifest.call_args[0][0]
-                configmap_data = call_args["data"]
-                for delta_script in expected_delta_scripts:
-                    assert delta_script in configmap_data, (
-                        f"Delta script {delta_script} missing from ConfigMap"
-                    )
+        maps = build_script_configmaps(_make_config(), "test-ns")
+        shipped = {k for cm in maps for k in cm["data"]}
+        for delta_script in [
+            "silver_build_delta.py",
+            "gold_finalize_delta.py",
+            "gold_refresh_delta.py",
+            "bronze_ingest_delta.py",
+            "silver_stream_delta.py",
+        ]:
+            assert delta_script in shipped, f"Delta script {delta_script} missing from the maps"
 
 
 class TestFinancialScriptDispatch:
@@ -1800,14 +1768,14 @@ class TestReferenceScoreWiring:
         """deploy_scripts_configmap must ship BOTH score_financial_reference.py
         and reference_score.py (the self-contained module it imports) flat, so
         the bare `from reference_score import` resolves on the driver."""
-        config = _make_config()
-        k8s = _mock_k8s()
-        k8s.apply_manifest.return_value = True
-        mgr = SparkJobManager(config, k8s)
+        from tests.test_scripts_maps import FakeK8s
+
+        k8s = FakeK8s(legacy_owner=None)
+        mgr = SparkJobManager(_make_config(), k8s)
 
         result = mgr.deploy_scripts_configmap()
         assert result is True
-        data = k8s.apply_manifest.call_args[0][0]["data"]
+        data = {k: v for cm in k8s.applied for k, v in cm["data"].items()}
         assert "score_financial_reference.py" in data, "reference Spark entry point not packaged"
         assert "reference_score.py" in data, (
             "reference_score.py module not packaged -- the driver has no lakebench "
@@ -1837,14 +1805,44 @@ class TestReferenceScoreWiring:
         )
 
     def test_reference_score_module_is_self_contained(self):
-        """reference_score.py must not import from lakebench (it ships flat with
-        no package around it)."""
+        """reference_score.py and fidelity_gate.py ship flat with no package
+        around them: a lakebench import is allowed only inside a try whose
+        ImportError handler imports the same names from a flat module."""
+        import ast
+
         from lakebench._resources import _package_dir
 
+        def lb(node) -> bool:
+            if isinstance(node, ast.ImportFrom):
+                return (node.module or "").split(".")[0] == "lakebench"
+            if isinstance(node, ast.Import):
+                return any(a.name.split(".")[0] == "lakebench" for a in node.names)
+            return False
+
+        def names(nodes) -> set[str]:
+            return {
+                a.asname or a.name
+                for n in nodes
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in n.names
+            }
+
         for mod in ("reference_score.py", "fidelity_gate.py"):
-            src = (_package_dir() / "aml" / mod).read_text()
-            assert "from lakebench" not in src and "import lakebench" not in src, (
-                f"{mod} imports lakebench; it cannot ship as a flat driver module"
+            tree = ast.parse((_package_dir() / "aml" / mod).read_text())
+            guarded: set[int] = set()
+            for t in ast.walk(tree):
+                if not isinstance(t, ast.Try):
+                    continue
+                body_lb = [n for n in t.body if lb(n)]
+                for h in t.handlers:
+                    catches = isinstance(h.type, ast.Name) and h.type.id == "ImportError"
+                    flat = [n for n in h.body if isinstance(n, ast.ImportFrom) and not lb(n)]
+                    if catches and body_lb and names(body_lb) <= names(flat):
+                        guarded.update(id(n) for n in body_lb)
+            bare = [n.lineno for n in ast.walk(tree) if lb(n) and id(n) not in guarded]
+            assert not bare, (
+                f"{mod} imports lakebench at lines {bare} without a flat fallback; "
+                "it cannot ship as a flat driver module"
             )
 
     def test_reference_script_uses_real_silver_column(self):
@@ -2136,23 +2134,28 @@ class TestReferencePyDeps:
         return SparkJobManager(config, _mock_k8s())
 
     def test_reference_job_installs_pinned_deps_on_driver_only(self):
-        from lakebench.modules.pipeline_engines.spark.job import (
-            REFERENCE_PY_DEPS,
-            REFERENCE_PY_DEPS_DIR,
-        )
+        from lakebench.deps import manifest as dm
+        from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS_DIR
 
-        m = self._mgr()._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        mgr = self._mgr()
+        m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
         drv = m["spec"]["driver"]["template"]["spec"]
         init = {c["name"]: c for c in drv["initContainers"]}
-        assert "install-pydeps" in init
-        cmd = init["install-pydeps"]["command"][-1]
-        for dep in REFERENCE_PY_DEPS:
-            assert "==" in dep and dep in cmd
+        assert "install-pydeps" not in init
+        cmd = init["lb-deps-py-reference"]["command"][-1]
+        # From the deployment's set only, hash-checked against the manifest.
+        for flag in ("--no-index", "--require-hashes", "--only-binary=:all:", "--no-deps"):
+            assert flag in cmd
+        assert f"--find-links {mgr.deps.base_url}/py-reference/" in cmd
+        assert f"-r {dm.MANIFEST_MOUNT}/requirements-py-reference.txt" in cmd
         assert f"--target {REFERENCE_PY_DEPS_DIR}" in cmd
+        assert "pypi.org" not in cmd
         mounts = drv["containers"][0]["volumeMounts"]
         assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
+        vols = {v["name"]: v for v in drv["volumes"]}
+        assert vols["lb-deps-manifest"]["configMap"]["name"] == dm.MANIFEST_CONFIGMAP
         exe = m["spec"]["executor"]["template"]["spec"]
-        assert not any(v["name"] == "lb-pydeps" for v in exe["volumes"])
+        assert not any(v["name"] in ("lb-pydeps", "lb-deps-manifest") for v in exe["volumes"])
         assert not any(
             v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
         )
@@ -2160,7 +2163,8 @@ class TestReferencePyDeps:
     def test_other_jobs_do_not_install_deps(self):
         m = self._mgr()._build_manifest(JobType.GOLD_FINALIZE)
         drv = m["spec"]["driver"]["template"]["spec"]
-        assert "install-pydeps" not in {c["name"] for c in drv["initContainers"]}
+        names = {c["name"] for c in drv.get("initContainers", [])}
+        assert not names & {"install-pydeps", "lb-deps-py-reference"}
 
 
 class TestSparkDriverPushgatewayEnv:

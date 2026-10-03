@@ -17,12 +17,13 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+# Module-scoped fixtures below run scripts, so the module shares one
+# private script namespace.
+pytestmark = pytest.mark.usefixtures("load_script_module")
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 CUSTOMERS = set(range(1, 10))
@@ -207,7 +208,7 @@ def _watchlist(spark, path):
 
 
 @pytest.fixture(scope="module", autouse=True)
-def watchlist_env(spark, tmp_path_factory):
+def watchlist_env(load_script_module, spark, tmp_path_factory):
     import os
 
     wl = str(tmp_path_factory.mktemp("watchlist") / "watchlist.parquet")
@@ -222,7 +223,7 @@ def watchlist_env(spark, tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def alerts(spark, watchlist_env):
+def alerts(load_script_module, spark, watchlist_env):
     txns, entities = _silver(spark)
     out = {}
     for rule in CUSTOMER_ONLY + GRAPH:
@@ -335,3 +336,95 @@ def test_missing_customer_master_is_a_skip(spark):
         with pytest.raises(RuleSkipped) as exc:
             get_rule(rule)(txns, run_id="r")
         assert exc.value.reason == "no-customer-master", rule
+
+
+@pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
+def test_rule_alerts_have_the_alert_columns(spark, rule):
+    """AML-2: every rule's alert frame has exactly the ALERT_COLUMNS names
+    and types, in order (gold_finalize's INSERT is positional), and the
+    fixture gives every rule at least one alert, so the check is not over
+    an empty frame alone."""
+    from detection_rules import ALERT_COLUMNS
+    from pyspark.sql.types import _parse_datatype_string
+
+    txns, entities = _silver(spark)
+    df = _run(spark, rule, txns, entities)
+    got = [(f.name, f.dataType) for f in df.schema.fields]
+    want = [(name, _parse_datatype_string(ddl)) for name, ddl, _ in ALERT_COLUMNS]
+    assert got == want, rule
+    assert df.count() > 0, rule
+
+
+def test_empty_alerts_frame_has_the_alert_columns(spark):
+    from detection_rules import ALERT_COLUMNS, _empty_alerts_df
+    from pyspark.sql.types import _parse_datatype_string
+
+    df = _empty_alerts_df(spark, "r")
+    assert [(f.name, f.dataType, f.nullable) for f in df.schema.fields] == [
+        (name, _parse_datatype_string(ddl), nullable) for name, ddl, nullable in ALERT_COLUMNS
+    ]
+    assert df.count() == 0
+
+
+def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
+    """AML-3: W5 and W6 build their screening input once when the driver
+    passes it as screen_base. Their alerts are the same rows either way, and
+    with the base _screen_txns runs once for both instead of once each."""
+    import detection_rules as dr
+    from common import frame_fingerprint
+
+    txns, entities = _silver(spark)
+    calls = []
+    real = dr._screen_txns
+    monkeypatch.setattr(dr, "_screen_txns", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    def fp(df):
+        cols = [c for c in df.columns if c not in ("alert_id", "detected_ts")]
+        return frame_fingerprint(df, cols)
+
+    alone = {
+        r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r"))
+        for r in ("W5_sanctions_match", "W6_pep_counterparty")
+    }
+    assert len(calls) == 2
+    calls.clear()
+    base = dr.screen_base_frame(txns, entities).persist()
+    shared = {
+        r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r", screen_base=base))
+        for r in ("W5_sanctions_match", "W6_pep_counterparty")
+    }
+    base.unpersist()
+    assert len(calls) == 1
+    assert shared == alone
+    assert all(f[0] > 0 for f in alone.values()), alone
+
+
+@pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
+def test_every_alert_carries_its_base_code_first(spark, rule):
+    """AML-5: every alert of every rule carries reason codes, its rule's base
+    code first, all from the rule's vocabulary (the per-code union identity
+    rests on the base code; without _alert_frame's guard W8, which has no
+    conditional code, would write empty lists)."""
+    from aml_reason_codes import BASE_CODE, REASON_CODES
+
+    txns, entities = _silver(spark)
+    rows = _run(spark, rule, txns, entities).select("reason_codes").collect()
+    assert rows, rule
+    for r in rows:
+        codes = list(r["reason_codes"])
+        assert codes and codes[0] == BASE_CODE[rule], (rule, codes)
+        assert set(codes) <= set(REASON_CODES[rule]), (rule, codes)
+
+
+def test_conditional_codes_reach_real_rule_output(spark):
+    """The conditional codes are wired into the rules, not only defined: the
+    W2 beneficiary-kind alert carries W2_BENEFICIARY_FAN_IN and the W7
+    alert into the synthetic corridor carries W7_SYNTHETIC_CORRIDOR."""
+    txns, entities = _silver(spark)
+    w2 = {
+        r["entity_id"]: list(r["reason_codes"])
+        for r in _run(spark, "W2_structuring", txns, entities).collect()
+    }
+    assert "W2_BENEFICIARY_FAN_IN" in w2[2] and "W2_BENEFICIARY_FAN_IN" not in w2[1]
+    (w7,) = _run(spark, "W7_cross_border_high_risk", txns, entities).collect()
+    assert list(w7["reason_codes"]) == ["W7_HIGH_RISK_CORRIDOR", "W7_SYNTHETIC_CORRIDOR"]

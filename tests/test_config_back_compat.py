@@ -13,7 +13,7 @@ from typer.testing import CliRunner
 
 from lakebench.cli import app
 from lakebench.config import load_config
-from lakebench.config.loader import ConfigValidationError
+from lakebench.config.loader import ConfigValidationError, LoadPurpose
 from lakebench.config.schema import LakebenchConfig
 
 FIXTURE = Path(__file__).parent / "fixtures" / "v14user.yaml"
@@ -26,7 +26,25 @@ REMOVED = [
     ("images", "pull_secrets", ["regcred"]),
     ("platform.storage.scratch", "create_storage_class", False),
     ("architecture.table_format", "hudi", {"version": "0.14.0", "properties": {}}),
-    ("architecture.pipeline.medallion.silver", "strategy", {"enable_salting": True}),
+    # medallion.silver.strategy went in v1.5; the whole medallion block in v1.7.
+    ("architecture.pipeline", "medallion", {"silver": {"strategy": {"enable_salting": True}}}),
+    # Removed in v1.7 (nothing read them).
+    ("images", "hive", "apache/hive:4.0.1"),
+    ("images", "prometheus", "prom/prometheus:v3"),
+    ("images", "grafana", "grafana/grafana:11"),
+    ("platform.storage.s3", "secret_ref", "my-secret"),
+    ("architecture.catalog.hive", "thrift", {"min_threads": 20}),
+    ("architecture.catalog.polaris", "version", "1.5.0"),
+    ("architecture.catalog.unity", "version", "0.3.0"),
+    ("architecture.table_format.iceberg", "file_format", "orc"),
+    ("architecture.table_format.iceberg", "properties", {"a": "b"}),
+    ("architecture.table_format.delta", "properties", {"a": "b"}),
+    ("architecture.workload.customer360", "date_range_days", 90),
+    ("observability", "reports", {"format": "json"}),
+    ("observability", "storage_class", "fast"),
+    ("observability", "prometheus_stack_enabled", False),
+    ("observability", "s3_metrics_enabled", False),
+    ("observability", "spark_metrics_enabled", False),
     ("architecture.workload.customer360", "channels", ["web"]),
     ("architecture.workload.customer360", "event_types", ["purchase"]),
     ("architecture.workload.customer360", "quality_distribution", {"clean": 0.92}),
@@ -40,7 +58,9 @@ def _nest(dotted: str, key: str, value) -> dict:
     return {"name": "t", **d}
 
 
-@pytest.mark.parametrize(("where", "key", "value"), REMOVED, ids=[k for _, k, _ in REMOVED])
+@pytest.mark.parametrize(
+    ("where", "key", "value"), REMOVED, ids=[f"{w}.{k}" for w, k, _ in REMOVED]
+)
 def test_removed_key_warns_and_is_dropped(where, key, value):
     with pytest.warns(DeprecationWarning, match=key):
         cfg = LakebenchConfig.model_validate(_nest(where, key, value))
@@ -51,13 +71,24 @@ def test_removed_key_warns_and_is_dropped(where, key, value):
 
 
 def test_v14_user_config_loads():
+    # Loads for the read and teardown commands (removed keys dropped with a
+    # note), so an old deployment can still be inspected and destroyed.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        cfg = load_config(FIXTURE)
+        cfg = load_config(FIXTURE, purpose=LoadPurpose.TEARDOWN)
     assert cfg.name == "v14user"
     messages = " ".join(str(w.message) for w in caught)
     for key in ("pull_secrets", "create_storage_class", "channels", "quality_distribution"):
         assert key in messages
+
+
+def test_v14_user_config_refused_for_commands_that_change_data():
+    # CFG-1: deploy and run refuse the removed keys, each with its fix text.
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(FIXTURE, purpose=LoadPurpose.MUTATE)
+    msg = str(e.value)
+    for key in ("pull_secrets", "create_storage_class", "channels", "quality_distribution"):
+        assert f"'{key}' was removed" in msg
 
 
 def test_v14_user_config_reaches_destroy_confirmation(monkeypatch, tmp_path):
@@ -66,7 +97,7 @@ def test_v14_user_config_reaches_destroy_confirmation(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     monkeypatch.chdir(tmp_path)  # journal output lands here, not in the repo
     result = runner.invoke(app, ["destroy", str(FIXTURE)])
-    assert "Extra inputs" not in result.output
+    assert "unknown key" not in result.output
     assert "validation failed" not in result.output.lower()
     assert "Refusing to destroy" in result.output
 
@@ -75,7 +106,7 @@ def test_v14_user_config_reaches_status(monkeypatch, tmp_path):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     monkeypatch.chdir(tmp_path)  # journal output lands here, not in the repo
     result = runner.invoke(app, ["status", str(FIXTURE)])
-    assert "Extra inputs" not in result.output
+    assert "unknown key" not in result.output
     assert "validation failed" not in result.output.lower()
 
 

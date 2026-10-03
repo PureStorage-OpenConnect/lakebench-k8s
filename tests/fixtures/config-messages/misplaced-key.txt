@@ -1,0 +1,1 @@
+  - platform.storage.scale: unknown key; did you mean `workload.datagen.scale`?

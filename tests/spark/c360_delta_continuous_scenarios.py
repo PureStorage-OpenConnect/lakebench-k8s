@@ -10,7 +10,7 @@ LB_ICEBERG_CATALOG is spark_catalog. Before the fix the continuous reset
 named bronze ``lakehouse.default.bronze_raw`` and failed with
 REQUIRES_SINGLE_PART_NAMESPACE before any stream ran.
 
-Usage: python c360_delta_continuous_scenarios.py <jar_dir> <work_dir>
+Usage: python c360_delta_continuous_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 Prints one JSON object on the last stdout line.
 """
 
@@ -19,10 +19,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from c360_stream_scenarios import bronze_df, run_stream, session, stage_files  # noqa: E402
 
@@ -32,7 +28,7 @@ def _files_under(path):
 
 
 def main():
-    jar_dir, work = sys.argv[1], sys.argv[2]
+    jars, work = sys.argv[1], sys.argv[2]
     buckets = {k: f"{work}/{k}" for k in ("bronze", "silver", "gold")}
     os.environ.update(
         {
@@ -47,7 +43,7 @@ def main():
             "LB_GOLD_TABLE": "gold.customer_executive_dashboard",
         }
     )
-    spark = session(jar_dir, work)
+    spark = session(jars, work)
     import bronze_ingest_delta
     from common import _describe_table, _norm_uri, table_exists, write_delta_table
 
@@ -90,7 +86,7 @@ def main():
     tables, _, _ = bronze_verify.continuous_reset_targets()
     out["targets"] = tables
     bronze_verify.main()  # stops the session
-    spark = session(jar_dir, work)
+    spark = session(jars, work)
     out["exists_after"] = {t: table_exists(spark, t) for t in tables}
     out["bronze_dir_files_after"] = _files_under(
         f"{buckets['bronze']}/warehouse/default.db/bronze_raw"
@@ -109,7 +105,7 @@ def main():
         f"{buckets['bronze']}/warehouse/default.db/bronze_raw/_delta_log"
     )
     bronze_verify.main()  # the next reset clears it
-    spark = session(jar_dir, work)
+    spark = session(jars, work)
     out["orphan_dir_files_after_reset"] = _files_under(
         f"{buckets['bronze']}/warehouse/default.db/bronze_raw"
     )
@@ -121,4 +117,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # Run by spark_subprocess, which puts the scripts and tests/spark on PYTHONPATH.
     main()

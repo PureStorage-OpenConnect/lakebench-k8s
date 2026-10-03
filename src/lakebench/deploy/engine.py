@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
+from lakebench.config.schema import STACKABLE_HIVE_VERSION, QueryEngineType
+from lakebench.exit_codes import REFUSAL_DETAIL
 from lakebench.k8s import K8sClient, K8sResourceError
+
+from . import deadline as deploy_deadline
+
+if TYPE_CHECKING:
+    from lakebench.deps.manifest import DepsHandle
 
 logger = logging.getLogger(__name__)
 
@@ -222,8 +229,10 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
     refusing the deploy for a different reason and cleanup is
     best-effort.
     """
+    from lakebench.s3.client import has_user_objects
+
     try:
-        r = boto_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        holds = has_user_objects(boto_client, bucket)
     except Exception:  # noqa: BLE001
         logger.warning(
             "orphan bucket %s: could not verify empty before delete; "
@@ -232,7 +241,7 @@ def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
             exc_info=True,
         )
         return
-    if r.get("KeyCount", 0) > 0 or r.get("Contents"):
+    if holds:
         logger.warning(
             "orphan bucket %s: contains objects (a concurrent process "
             "wrote between our CreateBucket and our ownership refusal). "
@@ -345,17 +354,23 @@ class DeploymentEngine:
     2. S3 bucket validation/creation
     3. PostgreSQL (StatefulSet + Service)
     4. Catalog Service (Hive Metastore / Polaris / Unity)
-    5. Query Engine (Trino / Spark Thrift Server)
-    6. Spark Operator (if not already installed)
-    7. Spark RBAC (ServiceAccount, Role, RoleBinding)
-    8. Monitoring Stack (if enabled)
+    5. Spark RBAC (ServiceAccount, Role, RoleBinding)
+    6. Spark Operator check and watch-list entry
+    7. Dependency server (lb-deps: resolves and serves the jars and wheels)
+    8. Query Engine (Trino / Spark Thrift Server / DuckDB)
+    9. Monitoring Stack (if enabled)
     """
+
+    #: Class default, so an engine built without __init__ (tests) reads False.
+    require_new: bool = False
 
     def __init__(
         self,
         config: LakebenchConfig,
         k8s_client: K8sClient | None = None,
         dry_run: bool = False,
+        deploy_nonce: str | None = None,
+        require_new: bool = False,
     ):
         """Initialize deployment engine.
 
@@ -363,7 +378,16 @@ class DeploymentEngine:
             config: Lakebench configuration
             k8s_client: Kubernetes client (created if not provided)
             dry_run: If True, show what would be deployed without making changes
+            deploy_nonce: The nonce ``deploy`` recorded in the directory's
+                state before deploying; stamped on the namespace.
+            require_new: Refuse, instead of adopting, a namespace or bucket
+                that already exists (``reproduce``, which may destroy only
+                what it created). The namespace is created with a plain
+                create, so a competing create between a caller's check and
+                this step is refused (409), not adopted.
         """
+        self.deploy_nonce = deploy_nonce
+        self.require_new = require_new
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
@@ -372,6 +396,8 @@ class DeploymentEngine:
         # from "we created it" into "unowned legacy" that then requires
         # the dangerous --force-legacy flag.
         self._namespace_created_this_run: set[str] = set()
+        # The verified, served dependency set; set by the deps step.
+        self.deps: DepsHandle | None = None
 
         if k8s_client:
             self.k8s = k8s_client
@@ -479,49 +505,6 @@ class DeploymentEngine:
         return spark_mem
 
     @staticmethod
-    def _build_spark_thrift_packages(cfg: Any) -> str:
-        """Build ``spark.jars.packages`` CSV for Spark Thrift Server.
-
-        Format-aware: uses Iceberg or Delta packages depending on the
-        configured table format.
-        """
-        from lakebench.spark.job import (
-            _ICEBERG_RUNTIME_SUFFIX,
-            _delta_spark_artifact,
-            _parse_spark_major,
-            _parse_spark_major_minor,
-            _spark_compat,
-        )
-
-        table_format = cfg.architecture.table_format.type.value
-        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-
-        if table_format == "delta":
-            delta_version = cfg.architecture.table_format.delta.version
-            catalog_type = cfg.architecture.catalog.type.value
-            packages = [
-                _delta_spark_artifact(scala_suffix, delta_version),
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}")
-        else:
-            iceberg_version = cfg.architecture.table_format.iceberg.version
-            key = _parse_spark_major_minor(cfg.images.spark)
-            iceberg_suffix = _ICEBERG_RUNTIME_SUFFIX.get(key, f"{key[0]}.{key[1]}")
-            packages = [
-                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_suffix}{scala_suffix}:{iceberg_version}",
-                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-        if _parse_spark_major(cfg.images.spark) < 4:
-            packages.append(
-                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-            )
-        return ",".join(packages)
-
-    @staticmethod
     def _read_ca_cert_pem(path: str) -> str:
         """Read PEM certificate file content for embedding in K8s Secret.
 
@@ -547,7 +530,7 @@ class DeploymentEngine:
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
 
-        from lakebench.spark.job import _MAVEN_MIRROR_REPOS, _spark_compat
+        from lakebench.spark.job import _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -563,7 +546,8 @@ class DeploymentEngine:
             "openshift_mode": openshift_mode,
             # Images
             "postgres_image": cfg.images.postgres,
-            "hive_image": cfg.images.hive,
+            # The HiveCluster productVersion. Fixed: there is no config key for it.
+            "hive_version": STACKABLE_HIVE_VERSION,
             "trino_image": cfg.images.trino,
             "spark_image": cfg.images.spark,
             "jmx_exporter_image": cfg.images.jmx_exporter,
@@ -594,26 +578,15 @@ class DeploymentEngine:
             "hive_cpu_min": cfg.architecture.catalog.hive.resources.cpu_min,
             "hive_cpu_max": cfg.architecture.catalog.hive.resources.cpu_max,
             "hive_memory": cfg.architecture.catalog.hive.resources.memory,
-            "hive_thrift_min_threads": cfg.architecture.catalog.hive.thrift.min_threads,
-            "hive_thrift_max_threads": cfg.architecture.catalog.hive.thrift.max_threads,
-            "hive_client_timeout": cfg.architecture.catalog.hive.thrift.client_timeout,
             # Polaris
-            "polaris_version": cfg.architecture.catalog.polaris.version,
             "polaris_image": cfg.images.polaris,
             "polaris_admin_tool_image": cfg.images.polaris_admin_tool,
             "polaris_port": cfg.architecture.catalog.polaris.port,
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
-            # LB-090: only require the secret when we're actually deploying
-            # Polaris; hive/unity deploys never touch the templates that
-            # consume it, and `lakebench validate` / `info` on a Polaris
-            # config without a secret would otherwise be blocked from ever
-            # printing the config that names the missing field.
-            "polaris_client_secret": (
-                require_polaris_client_secret(cfg)
-                if cfg.architecture.catalog.type == CatalogType.POLARIS
-                else ""
-            ),
+            # The Polaris client secret is not in the context. Every
+            # consumer reads it from the Secret lakebench-polaris-client
+            # (secretKeyRef), which the Polaris step writes.
             # Unity
             "unity_image": cfg.images.unity,
             "unity_port": cfg.architecture.catalog.unity.port,
@@ -645,13 +618,6 @@ class DeploymentEngine:
             "scratch_storage_class": cfg.platform.storage.scratch.storage_class,
             "scratch_provisioner": cfg.platform.storage.scratch.provisioner,
             "scratch_parameters": cfg.platform.storage.scratch.parameters,
-            # Spark
-            "spark_driver_cores": cfg.platform.compute.spark.driver.cores,
-            "spark_driver_memory": cfg.platform.compute.spark.driver.memory,
-            "spark_executor_instances": cfg.platform.compute.spark.executor.instances,
-            "spark_executor_cores": cfg.platform.compute.spark.executor.cores,
-            "spark_executor_memory": cfg.platform.compute.spark.executor.memory,
-            "spark_executor_memory_overhead": cfg.platform.compute.spark.executor.memory_overhead,
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
@@ -659,12 +625,6 @@ class DeploymentEngine:
             "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
-            # Spark Thrift packages (computed from config versions)
-            "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
-            # Fallback Maven mirror -- Ivy falls to this when Central 429s
-            # on the cluster's egress IP (see _MAVEN_MIRROR_REPOS in
-            # spark/job.py for the rationale).
-            "spark_thrift_repositories": _MAVEN_MIRROR_REPOS,
             "spark_major_minor": self._get_spark_major_minor(cfg),
             "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB
@@ -692,7 +652,10 @@ class DeploymentEngine:
             progress_callback: Optional callback for progress updates
                                (component, status, message)
             timeout: Global deployment timeout in seconds (0 = no timeout).
-                     Checked between steps -- does not interrupt a step in progress.
+                     Every wait inside a step is clamped to it; a wait
+                     it cuts short fails the step with a message naming the
+                     component and what it was waiting for. Helm and API
+                     calls are not interrupted.
             force_legacy: Claim ownership of a pre-existing annotation-less
                      namespace and untagged buckets. Use only when
                      migrating a pre-ownership-taxonomy deployment; a
@@ -702,6 +665,7 @@ class DeploymentEngine:
         Returns:
             List of deployment results
         """
+        from .deps import DependencyServerDeployer
         from .duckdb import DuckDBDeployer
         from .hive import HiveDeployer
         from .observability import ObservabilityDeployer
@@ -721,6 +685,7 @@ class DeploymentEngine:
         spark_thrift = SparkThriftDeployer(self)
         duckdb = DuckDBDeployer(self)
         rbac = RBACDeployer(self)
+        deps = DependencyServerDeployer(self)
         observability = ObservabilityDeployer(self)
 
         # Both HiveDeployer and PolarisDeployer have self-skip guards.
@@ -739,30 +704,47 @@ class DeploymentEngine:
                 "Creating S3 buckets",
                 lambda: self._deploy_buckets(force_legacy=force_legacy),
             ),
-            ("scratch-sc", "Creating scratch StorageClass", self._deploy_scratch_storageclass),
+            ("scratch-sc", "Verifying scratch StorageClass", self._deploy_scratch_storageclass),
             ("postgres", "Deploying PostgreSQL", postgres.deploy),
             ("hive", "Deploying Hive Metastore", hive.deploy),
             ("polaris", "Deploying Polaris Catalog", polaris.deploy),
             ("rbac", "Creating Spark RBAC", rbac.deploy),
             ("unity", "Deploying Unity Catalog", unity.deploy),
-            ("spark-operator", "Installing Spark Operator", self._deploy_spark_operator),
+            (
+                "spark-operator",
+                "Checking Spark Operator and watch list",
+                self._deploy_spark_operator,
+            ),
+            # Ready before Thrift and DuckDB render and before any run.
+            ("deps", "Starting dependency server", deps.deploy),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
             ("duckdb", "Deploying DuckDB", duckdb.deploy),
             ("observability", "Deploying Observability Stack", observability.deploy),
         ]
 
+        # The deadline bounds every wait inside every step, not only
+        # the gaps between steps.
+        with deploy_deadline.deploy_deadline(timeout):
+            return self._run_steps(steps, progress_callback)
+
+    def _run_steps(
+        self,
+        steps: list[tuple[str, str, Callable[[], DeploymentResult]]],
+        progress_callback: Callable[[str, DeploymentStatus, str], None] | None,
+    ) -> list[DeploymentResult]:
         import time
 
-        deadline = time.monotonic() + timeout if timeout > 0 else float("inf")
-
         for component, description, deploy_fn in steps:
-            # Global timeout check (between steps, never interrupts mid-step)
-            if time.monotonic() > deadline:
+            # Between steps: a deadline that passed during the last step's
+            # non-wait work stops here.
+            try:
+                deploy_deadline.check(description, component_name=component)
+            except deploy_deadline.DeployTimeout as e:
                 result = DeploymentResult(
                     component=component,
                     status=DeploymentStatus.FAILED,
-                    message=f"Global deployment timeout ({timeout}s) exceeded",
+                    message=str(e),
                 )
                 self.results.append(result)
                 if progress_callback:
@@ -775,10 +757,22 @@ class DeploymentEngine:
             result = None  # type: ignore[assignment]
             for attempt in range(2):  # 0 = first try, 1 = retry
                 try:
-                    result = deploy_fn()
+                    with deploy_deadline.component(component):
+                        result = deploy_fn()
+                    break
+                except deploy_deadline.DeployTimeout as e:
+                    result = DeploymentResult(
+                        component=component,
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
                     break
                 except Exception as e:
-                    if attempt == 0 and self._is_transient_error(e):
+                    if (
+                        attempt == 0
+                        and self._is_transient_error(e)
+                        and not deploy_deadline.expired()
+                    ):
                         logger.warning(
                             "Deployment step '%s' hit transient error, retrying in 5s: %s",
                             component,
@@ -818,6 +812,21 @@ class DeploymentEngine:
         if "MaxRetryError" in exc_name or "NewConnectionError" in exc_name:
             return True
         return False
+
+    def _existing_refusal(self, component: str, what: str, start: float) -> DeploymentResult:
+        """The refusal for an existing namespace or bucket under ``require_new``."""
+        import time
+
+        return DeploymentResult(
+            component=component,
+            status=DeploymentStatus.FAILED,
+            message=(
+                f"Refused: {what} already exists, and this deploy may only create new "
+                "resources (require_new). Nothing that existed was changed."
+            ),
+            elapsed_seconds=time.time() - start,
+            details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+        )
 
     def _namespace_already_using_name(self, namespace: str) -> str | None:
         """Return another namespace that carries this deployment's name, if any.
@@ -876,6 +885,9 @@ class DeploymentEngine:
         namespace = self.config.get_namespace()
 
         if self.dry_run:
+            if self.require_new and self.k8s.namespace_exists(namespace):
+                # A read only: the real run would refuse it.
+                return self._existing_refusal("namespace", f"namespace {namespace!r}", start)
             return DeploymentResult(
                 component="namespace",
                 status=DeploymentStatus.SUCCESS,
@@ -901,9 +913,27 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        # Under require_new a namespace that exists is refused, unless this
+        # engine's own create landed and only its response was lost: that
+        # create carried this deploy's nonce, so the retry can tell.
+        ours_from_retry = False
+        if self.require_new and self.k8s.namespace_exists(namespace):
+            from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE
+
+            ours_from_retry = (
+                namespace in self._namespace_created_this_run
+                and bool(self.deploy_nonce)
+                and self.k8s.get_namespace_annotation(namespace, ANNOTATION_DEPLOY_NONCE)
+                == self.deploy_nonce
+            )
+            if not ours_from_retry:
+                return self._existing_refusal(
+                    "namespace", f"namespace {namespace!r} (or it is still terminating)", start
+                )
+
         # Check if namespace exists and wait if it's terminating
         pre_existing = False
-        if self.k8s.namespace_exists(namespace):
+        if not ours_from_retry and self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
                 # LB-157: an earlier destroy of this name is still finishing.
@@ -911,9 +941,11 @@ class DeploymentEngine:
                 # server, so wait a bounded time and then say what is wrong.
                 try:
                     self.k8s.wait_for_namespace_deleted(
-                        namespace, timeout=_TERMINATING_NAMESPACE_WAIT_SECONDS
+                        namespace,
+                        timeout=deploy_deadline.clamp(_TERMINATING_NAMESPACE_WAIT_SECONDS),
                     )
                 except K8sResourceError:
+                    deploy_deadline.check(f"namespace {namespace} to finish terminating")
                     blockers: list[str] = []
                     try:
                         _, blockers = self.k8s.get_namespace_termination_status(namespace)
@@ -937,8 +969,8 @@ class DeploymentEngine:
                 pre_existing = True
 
         # Create namespace when missing.
-        created = False
-        if not pre_existing:
+        created = ours_from_retry
+        if not pre_existing and not ours_from_retry:
             if not self.config.platform.kubernetes.create_namespace:
                 return DeploymentResult(
                     component="namespace",
@@ -961,7 +993,30 @@ class DeploymentEngine:
             # branch still catches it before writing.
             self._namespace_created_this_run.add(namespace)
             try:
-                self.k8s.apply_manifest(manifest)
+                if self.require_new:
+                    from kubernetes import client as _kc
+                    from kubernetes.client.rest import ApiException as _ApiException
+
+                    from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE
+
+                    if self.deploy_nonce:
+                        meta = manifest.setdefault("metadata", {})
+                        anns = meta.get("annotations") or {}
+                        anns[ANNOTATION_DEPLOY_NONCE] = self.deploy_nonce
+                        meta["annotations"] = anns
+                    try:
+                        # A plain create: 409 when the namespace appeared
+                        # since the check above, never an adopting patch.
+                        _kc.CoreV1Api().create_namespace(body=manifest)
+                    except _ApiException as e:
+                        if e.status != 409:
+                            raise
+                        self._namespace_created_this_run.discard(namespace)
+                        return self._existing_refusal(
+                            "namespace", f"namespace {namespace!r} (created meanwhile)", start
+                        )
+                else:
+                    self.k8s.apply_manifest(manifest)
             except Exception as e:
                 # F2-A: on a non-transient failure (K8s definitively
                 # rejected the create), un-seed the tracking so a
@@ -1022,6 +1077,7 @@ class DeploymentEngine:
                 status=DeploymentStatus.FAILED,
                 message=f"Namespace ownership refused: {stamp.hint}{extra}",
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
         if stamp.verdict is IdentityVerdict.ABSENT:
             return DeploymentResult(
@@ -1039,6 +1095,7 @@ class DeploymentEngine:
                     "migrate-deployment command ships)."
                 ),
                 elapsed_seconds=time.time() - start,
+                details={REFUSAL_DETAIL: "deploy.identity_foreign"},
             )
 
         # Every deploy stamps a new nonce, so a destroy already running on
@@ -1047,7 +1104,7 @@ class DeploymentEngine:
         from lakebench.deploy.ownership import write_deploy_nonce
 
         try:
-            write_deploy_nonce(core_v1, namespace)
+            write_deploy_nonce(core_v1, namespace, nonce=self.deploy_nonce)
         except Exception as e:  # noqa: BLE001
             return DeploymentResult(
                 component="namespace",
@@ -1090,6 +1147,44 @@ class DeploymentEngine:
             )
 
         namespace = self.config.get_namespace()
+
+        # The Hive metastore DB password is this deployment's own: the
+        # stored one, the v1.6 default when only the Postgres PVC survives,
+        # or a new one. Rendered into the Secret and hive-site below.
+        from kubernetes import client as k8s_client
+
+        from .deployment_secrets import (
+            HIVE_DB_KEY,
+            HIVE_DB_SECRET,
+            DeploymentSecretError,
+            create_secret,
+            hive_db_password,
+            read_secret_key,
+        )
+
+        try:
+            core_v1 = k8s_client.CoreV1Api()
+            password = hive_db_password(core_v1, namespace)
+            if read_secret_key(core_v1, namespace, HIVE_DB_SECRET, HIVE_DB_KEY) is None:
+                # Create first (409-safe): two overlapping deploys of one
+                # config end with one value, the one Postgres initialises.
+                password = create_secret(
+                    core_v1,
+                    self.config,
+                    namespace,
+                    HIVE_DB_SECRET,
+                    HIVE_DB_KEY,
+                    password,
+                    "postgres",
+                )
+            self.context["postgres_password"] = password
+        except DeploymentSecretError as e:
+            return DeploymentResult(
+                component="secrets",
+                status=DeploymentStatus.FAILED,
+                message=str(e),
+                elapsed_seconds=time.time() - start,
+            )
 
         # Render and apply secrets
         yaml_content = self.renderer.render("secrets.yaml.j2", self.context)
@@ -1221,22 +1316,33 @@ class DeploymentEngine:
             detail=self.SILVER_STATE_CONFIGMAP,
         )
 
-    def _record_preprovisioned_empty_buckets(self) -> None:
+    def _record_preprovisioned_empty_buckets(self, force_legacy: bool = False) -> None:
         """create_buckets=false on a backend without tagging: record empty buckets.
 
         Pre-provisioned buckets are never created by lakebench, so without a
-        record destroy, clean and the continuous reset would refuse to empty
-        them on a tagless backend. One that is empty now, whose name gives
-        this deployment the longest-prefix claim, holds only this
-        deployment's data from here on. Best effort: any failure just leaves
-        it unrecorded, which is the safe side.
+        record destroy, clean and the continuous reset refuse to empty them
+        on a tagless backend. An empty, unmarked bucket may be another
+        cluster's bucket that has not been written yet; nothing visible from
+        here tells them apart (ownership row 7, the cross-cluster hole). So one
+        is recorded as adopted while empty only with ``--force-legacy``, the
+        operator's statement that no other cluster uses the name. Best
+        effort: any failure just leaves it unrecorded, which is the safe side.
         """
+        if not force_legacy:
+            logger.info(
+                "create_buckets is false on a backend without tagging: pre-provisioned "
+                "buckets are used but not owned, so destroy will not empty them. "
+                "Deploy with --force-legacy once if no other cluster uses these names."
+            )
+            return
         try:
             from kubernetes import client as _kclient
 
             from lakebench.deploy.ownership import (
                 IdentityVerdict,
+                api_server_fingerprint,
                 bucket_name_matches_deployment,
+                cluster_stamp,
                 list_lakebench_deployment_names,
                 record_adopted_empty_buckets,
                 verify_bucket_ownership,
@@ -1267,18 +1373,77 @@ class DeploymentEngine:
                 return
             empty: list[str] = []
             b = s3_cfg.buckets
+            fp = api_server_fingerprint(self.config.platform.kubernetes.context or "")
             for name in dict.fromkeys([b.bronze, b.silver, b.gold]):
-                v = verify_bucket_ownership(s3.raw_client, name, self.config.name)
+                v = verify_bucket_ownership(
+                    s3.raw_client,
+                    name,
+                    self.config.name,
+                    expected_cluster=fp,
+                    created_record=(),
+                )
+                # Only a tagless bucket with no owner marker can be adopted here.
                 if v.verdict is not IdentityVerdict.UNSUPPORTED:
                     continue
                 if not bucket_name_matches_deployment(name, self.config.name, others):
                     continue
-                resp = s3.raw_client.list_objects_v2(Bucket=name, MaxKeys=1)
-                if int(resp.get("KeyCount", 0)) == 0:
+                if not s3.has_user_objects(name):
                     empty.append(name)
-            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), empty)
+            stamp = cluster_stamp(fp)
+            if stamp is None:
+                logger.warning(
+                    "cannot compute this cluster's fingerprint; pre-provisioned buckets "
+                    "are not claimed"
+                )
+                return
+            # Claim first (the owner marker decides a race), record only what
+            # this deployment won.
+            ours: list[str] = []
+            for name in empty:
+                refused = self._stamp_owner_marker(s3.raw_client, name, self.config.name, stamp)
+                if refused:
+                    logger.warning("pre-provisioned bucket not claimed: %s", refused)
+                    continue
+                ours.append(name)
+            record_adopted_empty_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), ours)
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not record pre-provisioned empty buckets: %s", e)
+
+    def _stamp_owner_marker(self, boto: Any, bucket: str, deployment: str, cluster: str) -> str:
+        """Write the owner marker on a tagless bucket; "" when it is ours.
+
+        Returns the refusal text when the bucket turns out to carry another
+        deployment's or another cluster's marker (a racing claim won).
+        """
+        from lakebench.deploy.ownership import owner_marker_identity, write_owner_marker
+
+        namespace = self.config.get_namespace()
+        try:
+            uid = self.k8s.get_namespace_uid(namespace)
+        except Exception:  # noqa: BLE001 -- informational in the marker
+            uid = ""
+        identity = owner_marker_identity(
+            deployment, cluster, namespace, uid if isinstance(uid, str) else ""
+        )
+        result = write_owner_marker(boto, bucket, identity)
+        try:
+            from kubernetes import client as _kclient
+
+            from lakebench.deploy.ownership import ANNOTATION_MARKER_WRITE
+
+            _kclient.CoreV1Api().patch_namespace(
+                namespace, {"metadata": {"annotations": {ANNOTATION_MARKER_WRITE: result.mode}}}
+            )
+        except Exception as e:  # noqa: BLE001 -- the record is informational
+            logger.warning("could not record the marker write mode on %s: %s", namespace, e)
+        if result.ours:
+            return ""
+        found = result.marker or {}
+        return (
+            f"bucket {bucket!r} is claimed by deployment {found.get('deployment')!r} on "
+            f"cluster {found.get('cluster')!r} (.lakebench/owner.json), not by "
+            f"{deployment!r} on this cluster"
+        )
 
     def _deploy_buckets(self, force_legacy: bool = False) -> DeploymentResult:
         """Create S3 buckets if create_buckets is enabled.
@@ -1292,8 +1457,14 @@ class DeploymentEngine:
 
         s3_cfg = self.config.platform.storage.s3
         if not s3_cfg.create_buckets:
+            if self.require_new and not self.dry_run:
+                # Pre-provisioned buckets exist by definition; adopting them
+                # is what require_new refuses.
+                return self._existing_refusal(
+                    "s3-buckets", "pre-provisioned buckets (create_buckets=false)", start
+                )
             if not self.dry_run and s3_cfg.endpoint:
-                self._record_preprovisioned_empty_buckets()
+                self._record_preprovisioned_empty_buckets(force_legacy=force_legacy)
             return DeploymentResult(
                 component="s3-buckets",
                 status=DeploymentStatus.SKIPPED,
@@ -1319,7 +1490,8 @@ class DeploymentEngine:
             return DeploymentResult(
                 component="s3-buckets",
                 status=DeploymentStatus.SUCCESS,
-                message=f"Would create buckets: {', '.join(bucket_names)}",
+                message=f"Would create buckets: {', '.join(bucket_names)}"
+                + (" (existing ones refused on the real run)" if self.require_new else ""),
                 elapsed_seconds=0,
             )
 
@@ -1342,6 +1514,15 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        if self.require_new:
+            # Check all of them before creating any, so a refusal leaves no
+            # bucket behind; names repeated across tiers are created once.
+            bucket_names = list(dict.fromkeys(bucket_names))
+            present = [b for b in bucket_names if s3.bucket_exists(b)]
+            if present:
+                return self._existing_refusal(
+                    "s3-buckets", "bucket(s) " + ", ".join(present), start
+                )
         results = s3.ensure_buckets(bucket_names)
         created = [name for name, was_created in results.items() if was_created]
         existed = [name for name, was_created in results.items() if not was_created]
@@ -1359,17 +1540,33 @@ class DeploymentEngine:
             IdentityVerdict,
             bucket_name_matches_deployment,
             build_identity_from_config,
+            cluster_stamp,
             list_lakebench_deployment_names,
             read_bucket_ownership_tag,
             record_created_buckets,
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
+        from lakebench.s3.client import has_user_objects
 
         identity = build_identity_from_config(
             self.config,
             context=self.config.platform.kubernetes.context or "",
         )
+        # Every bucket this deployment claims carries this cluster's
+        # stamp, so a deployment of the same name on another cluster sharing
+        # the object store cannot adopt it.
+        my_cluster = cluster_stamp(identity.api_server)
+        if my_cluster is None:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    "cannot compute this cluster's fingerprint (kubeconfig has no CA "
+                    "data); ownership cannot be stamped"
+                ),
+                elapsed_seconds=time.time() - start,
+            )
         boto = s3.raw_client  # boto3 client under the hood
         unsupported_warned = False  # log the tagging fallback once per deploy
         # Enumerate other lakebench deployments on the cluster once so
@@ -1404,6 +1601,11 @@ class DeploymentEngine:
                     self.config.get_namespace(),
                     e,
                 )
+        if self.require_new and existed:
+            # One appeared between the check above and its create. Checked
+            # before any tag is written, so it is left as it was; the buckets
+            # created above are recorded, so destroy removes them.
+            return self._existing_refusal("s3-buckets", "bucket(s) " + ", ".join(existed), start)
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )
@@ -1425,13 +1627,48 @@ class DeploymentEngine:
             return _created_cache[0]
 
         for name in bucket_names:
-            v = verify_bucket_ownership(boto, name, identity.name)
+            # Only the created record proves this cluster made a
+            # bucket (a 1.6 adopted-empty record does not).
+            record = _recorded_created() | set(created)
+            v = verify_bucket_ownership(
+                boto,
+                name,
+                identity.name,
+                expected_cluster=identity.api_server,
+                created_record=record,
+            )
+            if v.verdict in (
+                IdentityVerdict.FOREIGN_CLUSTER,
+                IdentityVerdict.UNVERIFIED_CLUSTER,
+            ):
+                return DeploymentResult(
+                    component="s3-buckets",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Bucket ownership refused: {v.hint}",
+                    elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
+                )
+            if v.verdict is IdentityVerdict.LEGACY_UNPROVEN:
+                # Ownership row 4: ours by name, claimed by an earlier lakebench
+                # without a cluster stamp, and nothing here proves this
+                # cluster made it. Use it as 1.6 did; never stamp it.
+                logger.warning("%s", v.hint)
+                continue
+            if v.verdict is IdentityVerdict.LEGACY_PROVEN and not v.tagged:
+                # Tagless, recorded by this namespace: handled by the
+                # record branch below like any tagless bucket.
+                v = dataclasses.replace(v, verdict=IdentityVerdict.UNSUPPORTED)
+            if not v.tagged and v.verdict is IdentityVerdict.MATCH:
+                # Tagless with this deployment's and this cluster's owner
+                # marker: nothing to write.
+                continue
             if v.verdict is IdentityVerdict.MISMATCH:
                 return DeploymentResult(
                     component="s3-buckets",
                     status=DeploymentStatus.FAILED,
                     message=f"Bucket ownership refused: {v.hint}",
                     elapsed_seconds=time.time() - start,
+                    details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
             # R2: an ABSENT (legacy, untagged) bucket must NOT be claimed
             # silently. Freshly-created buckets ARE our own untagged
@@ -1458,6 +1695,7 @@ class DeploymentEngine:
                             "with another team's storage). " + (v.hint or "")
                         ),
                         elapsed_seconds=time.time() - start,
+                        details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                     )
             if v.verdict is IdentityVerdict.NOT_FOUND:
                 # Should not happen after ensure_buckets returned. Skip.
@@ -1510,6 +1748,13 @@ class DeploymentEngine:
                         status=DeploymentStatus.FAILED,
                         message=msg,
                         elapsed_seconds=time.time() - start,
+                        # No name-prefix claim is a refusal; a sibling list
+                        # that could not be read is a permission gap (1).
+                        details=(
+                            {}
+                            if enumeration_failed
+                            else {REFUSAL_DETAIL: "deploy.identity_foreign"}
+                        ),
                     )
                 if not unsupported_warned:
                     logger.warning(
@@ -1520,23 +1765,34 @@ class DeploymentEngine:
                         identity.name,
                     )
                     unsupported_warned = True
+                stamp = was_created or name in _recorded_created()
                 if was_created:
                     logger.info(
                         "bucket %s: created under name-prefix ownership; "
                         "no tag written (backend unsupported).",
                         name,
                     )
-                elif name not in _recorded_created():
+                elif not stamp:
                     # The name does not prove ownership of a pre-existing
-                    # bucket, so destroy will not empty it on name alone.
-                    # One adopted while empty holds only this deployment's
-                    # data from here on; record that so destroy may empty it
-                    # (never delete). A bucket that already holds objects
-                    # stays unrecorded and destroy leaves its data alone.
+                    # bucket, so destroy will not empty it on name alone. An
+                    # empty, unmarked one may be another cluster's bucket not
+                    # yet written (ownership row 7): it is adopted (recorded as
+                    # adopted while empty, so destroy may empty but never
+                    # delete it) only with --force-legacy. Without the flag
+                    # it is used but not owned.
+                    if not force_legacy:
+                        logger.warning(
+                            "bucket %s pre-exists on a backend without bucket tagging "
+                            "and has no lakebench owner marker; it is used but not "
+                            "owned, so destroy will not empty it. Deploy with "
+                            "--force-legacy once if no other cluster uses this name.",
+                            name,
+                        )
+                        continue
                     try:
-                        resp = boto.list_objects_v2(Bucket=name, MaxKeys=1)
-                        if int(resp.get("KeyCount", 0)) == 0:
+                        if not has_user_objects(boto, name):
                             adopted_empty.append(name)
+                            stamp = True
                         else:
                             logger.warning(
                                 "bucket %s already holds objects and the backend has no "
@@ -1546,6 +1802,18 @@ class DeploymentEngine:
                             )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("could not check whether bucket %s is empty: %s", name, e)
+                if stamp:
+                    # Claim it for this deployment on this cluster
+                    # with the owner marker (created, recorded, or adopted
+                    # empty with --force-legacy).
+                    refused = self._stamp_owner_marker(boto, name, identity.name, my_cluster)
+                    if refused:
+                        return DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.FAILED,
+                            message=f"Bucket ownership refused: {refused}",
+                            elapsed_seconds=time.time() - start,
+                        )
                 continue
             # LB-159: keep the created-by-lakebench marker across redeploys
             # (the tag set is rewritten each time) and add it on create.
@@ -1566,6 +1834,7 @@ class DeploymentEngine:
                     identity.name,
                     workload_schema=identity.workload_schema,
                     created=created_here,
+                    cluster=my_cluster,
                 )
             except BucketTaggingUnsupported:
                 # Rare race: verify said tags exist earlier in this
@@ -1645,7 +1914,7 @@ class DeploymentEngine:
         parallel deploys, a destroy would strip the class out from under
         every other user of the cluster). We verify presence at deploy
         preflight and refuse with a pointer to
-        ``lakebench admin install-scratch-storage-class`` when the class
+        ``lakebench admin install --component scratch-storage-class`` when the class
         is missing.
         """
         import time
@@ -1680,7 +1949,7 @@ class DeploymentEngine:
                 hint = (
                     f"StorageClass '{scratch_cfg.storage_class}' does not exist. "
                     "A cluster admin can install it with: "
-                    "`lakebench admin install-scratch-storage-class`. "
+                    "`lakebench admin install --component scratch-storage-class <config>`. "
                     "Or set scratch.enabled=false to disable scratch PVCs."
                 )
                 return DeploymentResult(
@@ -1723,13 +1992,14 @@ class DeploymentEngine:
             return False
 
     def _deploy_spark_operator(self) -> DeploymentResult:
-        """Ensure the Spark Operator is ready and watches the target namespace.
+        """Verify the Spark Operator and add the namespace to its watch list.
 
-        When ``install=true``, installs the operator if missing.
-        When ``install=false``, still verifies the operator exists and
-        watches the target namespace -- adds it via ``helm upgrade`` if
-        needed.  Fails deployment if the operator is missing or broken,
-        rather than silently skipping and letting ``run`` fail later.
+        Deploy never installs, upgrades or repairs the shared operator: a
+        cluster admin installs it once with ``lakebench admin install
+        --component spark-operator``. The only shared change deploy makes is
+        the watch-list add (and the RBAC recreate), under the cluster lease.
+        A missing or broken operator fails the step rather than letting
+        ``run`` fail later.
         """
         import time
 
@@ -1739,13 +2009,12 @@ class DeploymentEngine:
         job_ns = self.config.get_namespace()
 
         if self.dry_run:
-            action = "install" if spark_op_cfg.install else "verify"
             return DeploymentResult(
                 component="spark-operator",
                 status=DeploymentStatus.SUCCESS,
                 message=(
-                    f"Would {action} Spark Operator v{spark_op_cfg.version} "
-                    f"in namespace '{spark_op_cfg.namespace}'"
+                    f"Would verify the Spark Operator in namespace '{spark_op_cfg.namespace}' "
+                    f"and add '{job_ns}' to its watch list"
                 ),
                 elapsed_seconds=0,
             )
@@ -1753,32 +2022,28 @@ class DeploymentEngine:
         try:
             from lakebench.spark import SparkOperatorManager
 
+            # No version: the watch-list edits pin the installed chart, read
+            # inside the lease, and never fall back to this config's pin.
             operator = SparkOperatorManager(
                 namespace=spark_op_cfg.namespace,
-                version=spark_op_cfg.version,
                 job_namespace=job_ns,
                 kube_context=self.config.platform.kubernetes.context,
             )
-
-            if spark_op_cfg.install:
-                # Full install/upgrade path
-                status = operator.ensure_installed()
-            else:
-                # install=false: don't install, but DO ensure the operator
-                # watches the target namespace (add via helm upgrade).
-                status = operator.ensure_namespace_watched(can_heal=True)
+            status = operator.ensure_namespace_watched(can_heal=True)
 
             if not status.ready:
-                hint = ""
-                if not spark_op_cfg.install:
-                    hint = (
-                        " (operator.install is false -- set to true for "
-                        "auto-install, or install the operator manually)"
+                if status.installed is False:
+                    message = (
+                        f"Spark Operator not installed: {status.message}. A cluster admin "
+                        "installs it once: lakebench admin install --component spark-operator "
+                        "<config>"
                     )
+                else:
+                    message = f"Spark Operator not ready: {status.message}"
                 return DeploymentResult(
                     component="spark-operator",
                     status=DeploymentStatus.FAILED,
-                    message=f"Spark Operator not ready: {status.message}{hint}",
+                    message=message,
                     elapsed_seconds=time.time() - start,
                 )
 
@@ -1836,6 +2101,7 @@ class DeploymentEngine:
         force_legacy: bool = False,
         namespace_wait_timeout: int | None = None,
         delete_buckets: bool = True,
+        expected_incarnation: str | None = None,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
@@ -1858,4 +2124,5 @@ class DeploymentEngine:
                 else namespace_wait_timeout
             ),
             delete_buckets=delete_buckets,
+            expected_incarnation=expected_incarnation,
         )

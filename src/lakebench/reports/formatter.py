@@ -46,6 +46,13 @@ def _cap_short_name(cap_line: str) -> str:
     import re as _re
 
     text = str(cap_line)
+    if text.startswith("trickle"):
+        # The bound line ("trickle: max_files_per_trigger 2 ...") and the
+        # card label ("trickle 2 files per trigger; ...") both name the
+        # trickle; the card keeps its sentence in the tooltip.
+        if "not shown to keep pace" in text:
+            return "trickle (not a capacity)"
+        return "trickle (offered load, not capacity)"
     if "executor cap" in text:
         m = _re.search(r"executor cap\s+(\d+)", text)
         cap = m.group(1) if m else "?"
@@ -76,6 +83,9 @@ def format_measurement(
     n_runs: int | None = None,
     spread: float | None = None,
     support_state: str | None = None,
+    samples: int | None = None,
+    rounds: int | None = None,
+    rounds_html: str | None = None,
 ) -> str:
     """Render a headline value with qualifiers.
 
@@ -85,9 +95,15 @@ def format_measurement(
         unit: Optional unit suffix (``"rows/s"``, ``"GB/s"``, ``"QpH"``).
         caps_bound: The ``limits.bound`` entries from ``experiment_block``;
             when non-empty a ``BOUNDED BY: <cap>`` tag is appended.
-        n_runs: The number of independent samples behind the value. ``1``
+        n_runs: The number of independent runs behind the value. ``1``
             renders as ``n=1``; ``>=2`` renders as ``n=N``; ``None`` and
-            ``0`` add no tag.
+            ``0`` add no tag. Samples within a run are never passed here.
+        samples: Samples per query inside the run(s) (a power benchmark's
+            iterations). With it the tag reads ``n=1 run, 3 samples/query``,
+            so within-run repetition is not read as independent runs.
+        rounds: In-stream benchmark rounds inside the run. The tag reads
+            ``n=1 run, 4 rounds``; *rounds_html*, when given, is the same
+            count already rendered (a derived count) and is shown instead.
         spread: Optional coefficient of variation, as a decimal fraction
             (``0.008`` for 0.8%). Ignored today; kept in the signature so
             the confidence chip can grow into it without a fan-out change.
@@ -116,9 +132,18 @@ def format_measurement(
         )
 
     if n_runs and n_runs > 0:
+        n = int(n_runs)
+        n_html = f"n={n}"
+        if (samples and samples > 0) or rounds:
+            n_html += " run" if n == 1 else " runs"
+            if samples and samples > 0:
+                n_html += f", {int(samples)} sample{'' if int(samples) == 1 else 's'}/query"
+            else:
+                shown = rounds_html or str(int(rounds or 0))
+                n_html += f", {shown} round{'' if rounds == 1 else 's'}"
         tags.append(
             f'<span class="qual qual-n" style="color: var(--text-muted); '
-            f'font-size: 0.55em; margin-left: 0.4em;">n={int(n_runs)}</span>'
+            f'font-size: 0.55em; margin-left: 0.4em;">{n_html}</span>'
         )
 
     if support_state:
@@ -173,8 +198,12 @@ def confidence_chip_html(n_runs: int | None, spread: float | None = None) -> str
     )
 
 
-def caps_bound_from(metrics: object) -> list[str]:
-    """Extract ``limits.bound`` from a ``PipelineMetrics`` if present."""
+def caps_bound_from(metrics: object, *, include_trickle: bool = False) -> list[str]:
+    """Extract ``limits.bound`` from a ``PipelineMetrics`` if present.
+
+    The trickle line is left out unless *include_trickle*: the trickle bounds
+    intake only (the throughput and efficiency cards add it with
+    ``trickle_caps_from``), not every number of the run."""
     exp_block = getattr(metrics, "experiment_block", None)
     if not callable(exp_block):
         return []
@@ -186,7 +215,26 @@ def caps_bound_from(metrics: object) -> list[str]:
         return []
     limits = exp.get("limits") or {}
     bound = limits.get("bound") or []
-    return [str(x) for x in bound if x]
+    from lakebench.metrics.bounds import TRICKLE_LINE_PREFIX
+
+    return [
+        str(x)
+        for x in bound
+        if x and (include_trickle or not str(x).startswith(TRICKLE_LINE_PREFIX))
+    ]
+
+
+def trickle_caps_from(metrics: object) -> list[str]:
+    """The card label for the trickle when it bounded the run's intake
+    (``bounds.record_trickle_bound``: the stored ``limits.trickle_bound``,
+    or computed for a record from before it); [] otherwise."""
+    from lakebench.metrics.bounds import record_trickle_bound, trickle_label
+
+    try:
+        bound = record_trickle_bound(metrics)
+    except Exception:  # noqa: BLE001 -- formatting must not raise on a bad record
+        return []
+    return [trickle_label(bound)] if bound else []
 
 
 def n_runs_of(metrics: object) -> int | None:

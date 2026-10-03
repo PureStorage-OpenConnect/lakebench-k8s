@@ -2,49 +2,24 @@
 micro-batch introduces, with KYC, and a replayed batch writes nothing twice
 (continuous mode never runs the batch silver_build that fills them).
 
-The append path needs a V2 (Iceberg) table, so the checks run in a child
-process with a fresh JVM that has the iceberg runtime jar on its classpath:
-an earlier test module in the same pytest run has already started a JVM
-without it, and spark.jars cannot be added to a running JVM.
+The append path needs a V2 (Iceberg) table, so the checks run in a Spark
+child (``spark_subprocess``) whose fresh JVM has the Iceberg runtime jar from
+``LB_SPARK_TEST_JARS`` on its classpath.
 """
 
 from __future__ import annotations
 
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    """LB_TEST_ICEBERG_JAR, or an iceberg-spark-runtime-4.0 jar in a local ivy cache."""
-    import glob
-    import os
-
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_continuous_dimensions_in_a_fresh_jvm():
+@pytest.mark.requires_jars("iceberg")
+def test_continuous_dimensions_in_a_fresh_jvm(spark_subprocess, spark_jars):
     pytest.importorskip("pyspark")
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-3000:] + res.stderr[-3000:]
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     assert "OK dims" in res.stdout and "OK kyc" in res.stdout
 
 
@@ -99,10 +74,8 @@ def _check_kyc_absent(spark, tmp: Path) -> None:
 
 
 if __name__ == "__main__":
-    import os
-
-    sys.path[:0] = [str(SCRIPTS), str(HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH; argv[1] is the comma-separated jar classpath.
     from pyspark.sql import SparkSession
 
     with tempfile.TemporaryDirectory() as d:

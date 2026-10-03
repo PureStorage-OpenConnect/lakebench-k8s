@@ -5,6 +5,14 @@ name: Release
 #   ci -> verify-tag + gate -> build-dist + build-binary-{linux,macos} -> github-release
 #      -> publish (PyPI)
 #
+# github-release and publish run only in the upstream repository. On a fork
+# they are skipped and release-dry-run downloads the same artifacts, lists
+# them, writes SHA256SUMS and runs install.sh against them, so a tag on a fork
+# exercises the build and the artifact round trip without writing a release
+# or uploading anywhere.
+# There is deliberately no workflow_dispatch trigger: a manual run in the
+# upstream repository would reach publish.
+#
 # The GitHub Release is created before the PyPI upload, so a version on PyPI
 # always has its binaries; if the upload fails the tag has binaries only and
 # the publish job can be re-run.
@@ -13,7 +21,7 @@ name: Release
 # pushed on an older commit runs that commit's release workflow, which may
 # have no gates. Protection against that lives in repository settings (a
 # required reviewer on the pypi environment and a v* tag ruleset); see
-# docs/releasing.md.
+# RELEASING.md.
 
 on:
   push:
@@ -30,13 +38,13 @@ jobs:
   verify-tag:
     name: Tag is on main and matches the version
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -62,30 +70,48 @@ jobs:
   gate:
     name: Release gate
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      # Full history: the freeze and expected-results checks compare commits.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # The package guard runs gitleaks over the built members; without it
+      # that part is SKIP, which --require-all fails.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
       - name: Release gate (release-only checks)
         run: >-
           python scripts/release_gate.py --tag "${GITHUB_REF_NAME}" --require-all
-          --only examples,version,changelog,em-dashes,uat-results
+          --only examples,version,changelog,prose,package-guard,uat-results,records,support-record,freeze,expected-results,perf-baselines
 
   build-dist:
     name: Build wheel and sdist
     needs: [verify-tag, gate]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -95,7 +121,25 @@ jobs:
       - name: Verify wheel installs
         run: pip install dist/*.whl && lakebench version
 
-      - uses: actions/upload-artifact@v4
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The files this job uploads are the ones published, so they are the
+      # ones guarded; any SKIP or PENDING-OA5 stops the release here too.
+      - name: Package guard (published artifacts)
+        run: python scripts/package_guard.py --dist dist --require-all
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dist
           path: dist/
@@ -108,13 +152,13 @@ jobs:
   build-binary-linux:
     name: Build binary (linux-amd64, glibc 2.28)
     needs: [verify-tag, gate]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container: rockylinux:8
     steps:
       - name: Install build tools
         run: dnf install -y python3.11 python3.11-pip python3.11-devel git binutils
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - name: Install dependencies
         run: python3.11 -m pip install -e ".[build]"
@@ -141,7 +185,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: lakebench-linux-amd64
           path: dist/lakebench
@@ -151,6 +195,9 @@ jobs:
     needs: [verify-tag, gate]
     runs-on: ${{ matrix.runner }}
     strategy:
+      # Build both macOS binaries even if one fails, so a release attempt
+      # shows every broken platform at once.
+      fail-fast: false
       matrix:
         include:
           # macos-latest is arm64; the Intel binary needs an Intel runner.
@@ -161,9 +208,9 @@ jobs:
             runner: macos-15
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
@@ -188,7 +235,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: lakebench-${{ matrix.os }}
           path: dist/lakebench
@@ -196,11 +243,12 @@ jobs:
   github-release:
     name: Create GitHub Release
     needs: [build-dist, build-binary-linux, build-binary-macos]
-    runs-on: ubuntu-latest
+    if: github.repository == 'PureStorage-OpenConnect/lakebench-k8s'
+    runs-on: ubuntu-24.04
     permissions:
       contents: write  # create the release
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: lakebench-*
           path: artifacts
@@ -213,15 +261,26 @@ jobs:
           done
           ls -la lakebench-*
 
-      - uses: softprops/action-gh-release@v2
+      # install.sh downloads this file from the same release and refuses a
+      # binary whose checksum does not match it.
+      - name: Write SHA256SUMS
+        run: |
+          sha256sum lakebench-* > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "::error::SHA256SUMS does not list 3 binaries"; exit 1; }
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          files: lakebench-*
+          files: |
+            lakebench-*
+            SHA256SUMS
           generate_release_notes: true
 
   publish:
     name: Publish to PyPI
     needs: github-release
-    runs-on: ubuntu-latest
+    if: github.repository == 'PureStorage-OpenConnect/lakebench-k8s'
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write  # trusted publishing
@@ -229,9 +288,78 @@ jobs:
       name: pypi
       url: https://pypi.org/p/lakebench-k8s
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: dist
           path: dist
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 (the release/v1 branch on 2026-09-30)
+
+  # Forks only. Same downloads, rename and SHA256SUMS as github-release and
+  # publish, then a listing, and install.sh run against those files served
+  # the way the release serves them, so a fork tag exercises the download,
+  # checksum and install path end to end.
+  release-dry-run:
+    name: Release dry run (fork)
+    needs: [build-dist, build-binary-linux, build-binary-macos]
+    if: github.repository != 'PureStorage-OpenConnect/lakebench-k8s'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # Only for install.sh; checked out to repo/ so the downloads below stay
+      # at the job root as in github-release.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: repo
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: lakebench-*
+          path: artifacts
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: dist
+
+      - name: List downloads
+        run: ls -R artifacts dist
+
+      - name: Rename binaries
+        run: |
+          for dir in artifacts/lakebench-*; do
+            os=$(basename "$dir" | sed 's/lakebench-//')
+            mv "$dir/lakebench" "lakebench-${os}"
+          done
+          ls -la lakebench-*
+
+      - name: Expected files and checksums
+        run: |
+          for f in lakebench-linux-amd64 lakebench-macos-amd64 lakebench-macos-arm64; do
+            test -s "$f" || { echo "::error::missing release binary $f"; exit 1; }
+          done
+          ls dist/*.whl dist/*.tar.gz
+          sha256sum lakebench-* > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "::error::SHA256SUMS does not list 3 binaries"; exit 1; }
+          sha256sum dist/*
+
+      # The release layout is <base>/<tag>/<asset>; install.sh reads
+      # LB_INSTALL_BASE_URL in place of the GitHub download base.
+      - name: install.sh round trip
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p "srv/${TAG}" "${RUNNER_TEMP}/lb-bin"
+          cp lakebench-* SHA256SUMS "srv/${TAG}/"
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory srv &
+          for _ in $(seq 1 30); do
+            curl -fs -o /dev/null http://127.0.0.1:8765/ && break
+            sleep 1
+          done
+          curl -fs -o /dev/null http://127.0.0.1:8765/ \
+            || { echo "::error::the local http.server did not start"; exit 1; }
+          INSTALL_DIR="${RUNNER_TEMP}/lb-bin" VERSION="${TAG}" \
+            LB_INSTALL_BASE_URL=http://127.0.0.1:8765 bash repo/install.sh
+          cmp "${RUNNER_TEMP}/lb-bin/lakebench" lakebench-linux-amd64

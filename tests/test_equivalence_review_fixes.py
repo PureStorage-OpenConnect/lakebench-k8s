@@ -3,7 +3,7 @@ work (lane compare-equiv). Each test fails with its fix reverted."""
 
 from __future__ import annotations
 
-import io
+import copy
 import json
 from types import SimpleNamespace
 from unittest import mock
@@ -56,8 +56,13 @@ def _run(cfg=None, fps=None, fleet=None):
     # A2b wiring: compare and perf_gate now refuse a run whose verdict is
     # FAILED. Mark the synthetic collector as successful so its computed
     # verdict is PASSED; these tests exercise the comparability ladder,
-    # not the failed-run refusal path.
+    # not the failed-run refusal path. Every layer has rows, so the
+    # verdict's layer_rows gate passes too.
     run.success = True
+    run.jobs = [
+        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
+        for s in ("bronze-verify", "silver-build", "gold-finalize")
+    ]
     return run
 
 
@@ -270,53 +275,47 @@ class TestFailedQueries:
 
 
 class TestNotEstablished:
-    def _comparison(self, a, b):
-        from lakebench.cli._compare import _build_comparison
-
+    def _pair(self, a, b):
+        b = dict(b)
+        b["run_id"] = "20260926-120000-bbbbbb"
         for m in (a, b):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"time_to_value_seconds": 100.0}
+            # scale_ratio: a batch pipeline benchmark always records it, and
+            # the verdict fails a ratio of 0.
+            m.setdefault("pipeline_benchmark", {})["scores"] = {
+                "time_to_value_seconds": 100.0,
+                "scale_ratio": 1.0,
+            }
         b["pipeline_benchmark"]["scores"]["time_to_value_seconds"] = 50.0
-        return _build_comparison("A", a, "B", b)
+        return a, b
+
+    def _comparison(self, a, b):
+        from lakebench.metrics.compare import compare_records
+
+        return compare_records(*[[m] for m in self._pair(a, b)])
 
     def test_runs_without_results_are_not_established(self):
-        a = _run(fps={}).to_dict()
-        b = _run(fps={}).to_dict()
-        c = self._comparison(a, b)
-        assert c["verdict"] == "not_established"
-        assert c["comparable"] is False and c["like_for_like"] is False
-        assert all(r["not_comparable"] for r in c["metrics"])
-
-    def test_table_shows_no_winner(self):
-        from rich.console import Console
-
-        from lakebench.cli import _compare
-
         c = self._comparison(_run(fps={}).to_dict(), _run(fps={}).to_dict())
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(c)
-        text = buf.getvalue()
-        assert "NOT ESTABLISHED" in text and "-50.0%" not in text
+        assert c["verdict"] == "NOT ESTABLISHED" and c["exit_code"] == 11
+        assert all(r["assessment"] == "withheld" for r in c["metrics"])
+        assert all(r["delta_pct"] is None for r in c["metrics"])
+        assert c["missing"]["condition"] == "checked results"
 
-    def test_compare_exits_zero_when_not_established(self, tmp_path):
+    def test_compare_exits_11_and_shows_no_winner_when_not_established(self, tmp_path):
         from typer.testing import CliRunner
 
         from lakebench.cli import app
 
-        for p in ("a.yaml", "b.yaml"):
-            (tmp_path / p).write_text("name: x\n")
-        a, b = _run(fps={}).to_dict(), _run(fps={}).to_dict()
-        with (
-            mock.patch("lakebench.cli._compare.load_config", side_effect=[_cfg(), _cfg()]),
-            mock.patch("lakebench.cli._compare._run_single", side_effect=[a, b]),
-            mock.patch("lakebench.cli._compare.DEFAULT_OUTPUT_DIR", str(tmp_path / "out")),
-        ):
-            result = CliRunner().invoke(
-                app, ["compare", str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml"), "--yes"]
-            )
-        assert result.exit_code == 0, result.output
-        saved = next((tmp_path / "out" / "comparisons").glob("*/comparison.json"))
-        assert json.loads(saved.read_text())["verdict"] == "not_established"
+        a, b = self._pair(_run(fps={}).to_dict(), _run(fps={}).to_dict())
+        runs = tmp_path / "runs"
+        for m in (a, b):
+            d = runs / f"run-{m['run_id']}"
+            d.mkdir(parents=True)
+            (d / "metrics.json").write_text(json.dumps(m))
+        result = CliRunner().invoke(
+            app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)]
+        )
+        assert result.exit_code == 11, result.output
+        assert "NOT ESTABLISHED" in result.output and "-50.00%" not in result.output
 
     def test_stored_references_refuse_a_batch_run_without_results(self):
         exp = stub_experiment(["Q1"])
@@ -380,8 +379,9 @@ class TestStamps:
         assert e["architecture"]["query_engine"]["type"] == "duckdb"
         assert e["architecture"]["query_access_path"] == "direct_storage"
         assert "not_supported" in e["effective_maintenance"]["id"]
+        # The system is its own OD-2 group, not an execution condition.
         cluster = _run(_cfg(query_engine={"type": "duckdb"})).to_dict()
-        assert any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
+        assert not any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
 
     def test_streaming_budget_cap_and_tm_cap_are_bound(self):
         run = _run(
@@ -435,9 +435,21 @@ class TestBlockFollowsTheRecord:
         loaded = storage.load_run(run.run_id)
         assert loaded.to_dict()["experiment"]["results"]["not_checked"]
         loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
+        stored = copy.deepcopy(loaded.to_dict()["experiment"])
+        assert stored["results"]["not_checked"], "a stored block is never rebuilt"
+        ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
+        # ... under its own run id: the run's record is written once.
+        loaded.run_id = "bench-1"
         storage.save_run(loaded)
-        e = storage.load_run(run.run_id).to_dict()["experiment"]
+        e = storage.load_run("bench-1").to_dict()["experiment"]
         assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+        assert e["benchmark_source"].startswith("lakebench benchmark")
+        moved = ("results", "limits", "repetitions", "stages", "benchmark_source")
+        assert {k: v for k, v in e.items() if k not in moved} == {
+            k: v for k, v in stored.items() if k not in moved
+        }
+        assert "benchmark (not run)" in stored["stages"]["skipped"]
+        assert not any(x.startswith("benchmark (") for x in e["stages"]["skipped"])
 
     def test_run_ending_before_maintenance_is_not_run(self):
         run = _run()
@@ -493,7 +505,12 @@ class TestFixPass:
         exp = stub_experiment(["Q1_full_aggregation_scan"], mode="sustained")
         exp["results"]["fingerprints"] = {"Q1_full_aggregation_scan": None}  # aggregated rounds
         exp["results"]["by_design"] = True  # the old deviation's marker no longer excuses it
-        run = SimpleNamespace(raw={"experiment": exp}, run_id="r", mode="sustained", scores={})
+        run = SimpleNamespace(
+            raw={"experiment": exp, "provenance": {"deps": {"pinset_sha256": "a" * 64}}},
+            run_id="r",
+            mode="sustained",
+            scores={},
+        )
         with (
             mock.patch.object(pg, "run_refusals", return_value=[]),
             mock.patch.object(pg.BaselineStore, "pinned", return_value=SimpleNamespace()),

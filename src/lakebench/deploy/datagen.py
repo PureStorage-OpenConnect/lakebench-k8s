@@ -5,12 +5,23 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.config.seed_secret import (
+    SEED_REF_ANNOTATION,
+    SEED_SECRET_COMPONENT,
+    SEED_SECRET_KEY,
+    config_seed_ref,
+    seed_secret_name,
+    seed_secret_selector,
+    uses_seed_secret,
+)
+from lakebench.exit_codes import REFUSAL_DETAIL, ExitCode
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -40,17 +51,579 @@ if TYPE_CHECKING:
 def bronze_datagen_prefix(config: LakebenchConfig) -> str:
     """Return the S3 prefix under bronze where datagen writes.
 
-    Kept in one place so the deployer, the CLI's ``--regenerate`` guard and
-    tests all read the same mapping. Financial (AML) datagen writes under
-    ``pacs008/`` on the C360 default ``customer/interactions/`` template
-    (see ``_build_datagen_context``); every other schema writes under
-    ``bronze.path_template`` unchanged.
+    The one prefix function: the deployer, the CLI's ``--regenerate`` guard,
+    the continuous reset and the financial Spark jobs
+    (``LB_FINANCIAL_BRONZE_PREFIX``) all read it. The layout is fixed per
+    workload, because the Spark stages read a fixed path: ``pacs008`` for
+    financial (AML), ``customer/interactions`` otherwise.
     """
-    schema_value = config.architecture.workload.schema_type.value
-    path_prefix = config.architecture.pipeline.medallion.bronze.path_template
-    if schema_value == "financial" and path_prefix == "customer/interactions":
-        path_prefix = "pacs008"
-    return path_prefix
+    if config.architecture.workload.schema_type.value == "financial":
+        return "pacs008"
+    return "customer/interactions"
+
+
+def clear_bronze_data_clock(namespace: str) -> None:
+    """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "".
+
+    The clock is bronze-verify's max(event_ts) of the bronze data; once that
+    data is gone or replaced (destroy emptied bronze, a fresh generate or
+    regenerate) it is stale, and silver's LB_DATA_CLOCK ladder must fall
+    through instead. Conditional on the resourceVersion read. A missing
+    ConfigMap or namespace raises a 404 ApiException for the caller to
+    ignore; the rebuild-epoch counters are never touched.
+    """
+    from kubernetes import client as k8s_client
+
+    from lakebench.deploy.engine import DeploymentEngine
+
+    core_v1 = k8s_client.CoreV1Api()
+    cm = core_v1.read_namespaced_config_map(DeploymentEngine.SILVER_STATE_CONFIGMAP, namespace)
+    key = DeploymentEngine._SILVER_STATE_CLOCK_KEY  # noqa: SLF001
+    if not (cm.data or {}).get(key):
+        return
+    core_v1.patch_namespaced_config_map(
+        DeploymentEngine.SILVER_STATE_CONFIGMAP,
+        namespace,
+        {"data": {key: ""}, "metadata": {"resourceVersion": cm.metadata.resource_version}},
+    )
+
+
+def _clear_clock_best_effort(cfg: Any) -> None:
+    try:
+        clear_bronze_data_clock(cfg.get_namespace())
+    except Exception as e:  # noqa: BLE001
+        if getattr(e, "status", None) != 404:
+            logger.warning("could not clear the bronze data clock: %s", e)
+
+
+class DatagenRefused(RuntimeError):
+    """Datagen did not start because starting it could corrupt the corpus.
+
+    ``exit_path`` names the ``lakebench.exit_codes`` path a caller reports
+    (``deploy`` puts it in ``details[REFUSAL_DETAIL]``); None means the
+    state could not be checked, an ordinary failure.
+    """
+
+    exit_path: str | None = None
+
+
+class StaleBronzeRefused(DatagenRefused):
+    """Datagen would write over objects in a bronze bucket this deployment may not empty.
+
+    Raised by ``DatagenDeployer``'s cycle-0 path when the CLI gate was
+    skipped: stale ``part-*`` files there would be read by silver as
+    this run's data and over-counted.
+    """
+
+    exit_path = "run.bronze_nonempty"
+
+
+class DatagenPodsStillRunning(DatagenRefused):
+    """An earlier datagen Job's pods were still running when the wait ran out."""
+
+    exit_path = "datagen.pods_live"
+
+
+class DatagenPodsUnknown(DatagenRefused):
+    """The datagen pods could not be listed, so a fresh generate cannot start."""
+
+
+class SeedSecretError(DatagenRefused):
+    """The registered-corpus seed Secret could not be written. The message
+    names the Secret and the failure, never the seed."""
+
+
+def _secret_labels(cfg: Any) -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": "lakebench",
+        "app.kubernetes.io/instance": cfg.name,
+        "app.kubernetes.io/component": SEED_SECRET_COMPONENT,
+        "app.kubernetes.io/managed-by": "lakebench",
+    }
+
+
+def _seed_secret_call(what: str, namespace: str, fn: Any, *args: Any) -> Any:
+    """Run one seed-Secret API call; a failure becomes a SeedSecretError that
+    names the call and the HTTP status or exception type, never a value."""
+    from kubernetes.client.rest import ApiException
+
+    try:
+        return fn(*args)
+    except ApiException as e:
+        raise SeedSecretError(
+            f"could not {what} in {namespace} (HTTP {e.status}); the registered seed "
+            "Secret is required"
+        ) from None
+    except Exception as e:  # noqa: BLE001 -- transport errors
+        raise SeedSecretError(
+            f"could not {what} in {namespace} ({type(e).__name__}); the registered seed "
+            "Secret is required"
+        ) from None
+
+
+def _own_seed_secrets(core_v1: Any, cfg: Any) -> list[str]:
+    """Names of this deployment's seed Secrets (listed by label, then checked
+    again, so a fake or a lax server cannot widen the set)."""
+    namespace = cfg.get_namespace()
+    listed = _seed_secret_call(
+        "list the seed Secrets",
+        namespace,
+        lambda: core_v1.list_namespaced_secret(
+            namespace, label_selector=seed_secret_selector(cfg.name)
+        ),
+    )
+    out = []
+    for item in getattr(listed, "items", None) or []:
+        labels = item.metadata.labels or {}
+        if (
+            labels.get("app.kubernetes.io/component") == SEED_SECRET_COMPONENT
+            and labels.get("app.kubernetes.io/instance") == cfg.name
+        ):
+            out.append(item.metadata.name)
+    return out
+
+
+def ensure_seed_secret(cfg: Any, core_v1: Any) -> None:
+    """Write the registered corpus's seed into its seed Secret, the only place
+    the cluster holds it, and delete this deployment's Secrets for other seeds.
+
+    The Secret is immutable and named after the seed's seed_ref, so a name is
+    never reused for another seed. An existing Secret of that name labelled
+    for this deployment and carrying the same seed_ref is kept; one labelled
+    for another deployment is refused. A failure to delete an older seed
+    Secret fails the generate too, so no other registered seed is left
+    behind silently. Call after ``stop_previous_datagen``. Raises
+    :class:`SeedSecretError`, whose message never holds the seed."""
+    from kubernetes.client.rest import ApiException
+
+    namespace = cfg.get_namespace()
+    name = seed_secret_name(cfg)
+    want = config_seed_ref(cfg)
+    current = None
+    try:
+        current = core_v1.read_namespaced_secret(name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise SeedSecretError(
+                f"could not read Secret {name} in {namespace} (HTTP {e.status})"
+            ) from None
+    except Exception as e:  # noqa: BLE001
+        raise SeedSecretError(
+            f"could not read Secret {name} in {namespace} ({type(e).__name__})"
+        ) from None
+    if current is not None:
+        meta = current.metadata
+        owner = (meta.labels or {}).get("app.kubernetes.io/instance")
+        if owner != cfg.name or (meta.annotations or {}).get(SEED_REF_ANNOTATION) != want:
+            raise SeedSecretError(
+                f"Secret {name} in {namespace} is not this deployment's seed Secret "
+                f"(labelled for {owner!r}); not using or replacing it"
+            )
+    else:
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": _secret_labels(cfg),
+                "annotations": {SEED_REF_ANNOTATION: want},
+            },
+            "type": "Opaque",
+            "immutable": True,
+            "stringData": {SEED_SECRET_KEY: str(config_seed(cfg))},
+        }
+        _seed_secret_call(
+            f"create Secret {name}", namespace, core_v1.create_namespaced_secret, namespace, body
+        )
+    for other in _own_seed_secrets(core_v1, cfg):
+        if other != name:
+            _drop_one(core_v1, other, namespace)
+
+
+def _drop_one(core_v1: Any, name: str, namespace: str) -> None:
+    from kubernetes.client.rest import ApiException
+
+    try:
+        core_v1.delete_namespaced_secret(name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            raise SeedSecretError(
+                f"could not delete Secret {name} in {namespace} (HTTP {e.status})"
+            ) from None
+    except Exception as e:  # noqa: BLE001
+        raise SeedSecretError(
+            f"could not delete Secret {name} in {namespace} ({type(e).__name__})"
+        ) from None
+
+
+#: The ConfigMap that carries heldout_hashes.json to the datagen pods.
+HELDOUT_MAP_NAME = "lakebench-heldout-hashes"
+#: Where the datagen container mounts it (LB_HELDOUT_HASHES names the file).
+HELDOUT_MOUNT_DIR = "/etc/lakebench/heldout"
+
+
+class HeldoutMapError(DatagenRefused):
+    """The held-out hash ConfigMap could not be applied."""
+
+
+def ensure_heldout_map(cfg: Any, k8s: Any) -> None:
+    """Apply ``HELDOUT_MAP_NAME`` with the packaged ``heldout_hashes.json`` for
+    a financial generate: the generator refuses the financial schema without
+    it. The hashes and the salt are public. Raises :class:`HeldoutMapError`
+    before any Job is created when the file cannot be read or the apply
+    fails."""
+    from lakebench.config.datagen_seed import HELDOUT_FILENAME, heldout_path
+
+    namespace = cfg.get_namespace()
+    try:
+        text = heldout_path().read_text(encoding="utf-8")
+    except OSError as e:
+        raise HeldoutMapError(
+            f"{HELDOUT_FILENAME} cannot be read ({type(e).__name__}); a financial corpus is "
+            "never generated without it"
+        ) from None
+    manifest = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": HELDOUT_MAP_NAME,
+            "namespace": namespace,
+            "labels": {
+                "app.kubernetes.io/name": "lakebench",
+                "app.kubernetes.io/instance": cfg.name,
+                "app.kubernetes.io/component": "datagen-heldout",
+                "app.kubernetes.io/managed-by": "lakebench",
+            },
+        },
+        "data": {HELDOUT_FILENAME: text},
+    }
+    try:
+        ok = k8s.apply_manifest(manifest, namespace=namespace)
+    except Exception as e:  # noqa: BLE001
+        raise HeldoutMapError(
+            f"could not apply ConfigMap {HELDOUT_MAP_NAME} in {namespace} ({type(e).__name__})"
+        ) from None
+    if ok is False:
+        raise HeldoutMapError(f"could not apply ConfigMap {HELDOUT_MAP_NAME} in {namespace}")
+
+
+def prepare_seed_secret(cfg: Any, k8s: Any) -> None:
+    """``ensure_seed_secret`` for a registered corpus; nothing for any other
+    (a development generate makes no Secret call, and an earlier registered
+    seed Secret stays until destroy). Call after the previous datagen Job's
+    pods have stopped."""
+    if uses_seed_secret(cfg):
+        ensure_seed_secret(cfg, k8s._core_v1)
+
+
+#: Label every datagen pod carries (templates/datagen/job.yaml.j2).
+DATAGEN_POD_SELECTOR = "app=lakebench-datagen"
+
+#: How long a fresh generate waits for an earlier datagen Job's pods to stop
+#: after the Job is deleted. The pods get SIGTERM and the default 30 s grace
+#: period; this leaves room for a slow kubelet.
+DATAGEN_POD_STOP_WAIT_S = 300.0
+_DATAGEN_POD_POLL_S = 3.0
+
+
+def _kubectl_pods_hint(cfg: Any) -> str:
+    ctx = cfg.platform.kubernetes.context or ""
+    ctx_arg = f" --context {ctx}" if ctx else ""
+    return f"kubectl get pods{ctx_arg} -n {cfg.get_namespace()} -l {DATAGEN_POD_SELECTOR}"
+
+
+def live_datagen_pods(namespace: str) -> list[str]:
+    """Names of the namespace's datagen pods that may still write.
+
+    A pod whose phase is Succeeded or Failed has stopped (its containers
+    exited and do not restart); any other pod, including one already being
+    deleted, may still land a file. Raises on an API error: a caller that
+    cannot list the pods must not assume there are none.
+    """
+    from kubernetes import client as k8s_client
+
+    pods = k8s_client.CoreV1Api().list_namespaced_pod(
+        namespace, label_selector=DATAGEN_POD_SELECTOR, _request_timeout=30
+    )
+    return sorted(
+        p.metadata.name
+        for p in (pods.items or [])
+        if getattr(p.status, "phase", None) not in ("Succeeded", "Failed")
+    )
+
+
+def wait_for_datagen_pods_stopped(
+    cfg: Any, *, timeout_s: float | None = None, poll_s: float | None = None
+) -> None:
+    """Return once no datagen pod in the namespace may still write.
+
+    Bounded: raises ``DatagenPodsStillRunning`` (refused) when a pod is
+    still running after ``timeout_s``, and ``DatagenPodsUnknown`` when the
+    pods could not be listed by then. Call it after the old Job is deleted
+    and before anything clears or checks the datagen prefix.
+    """
+    timeout_s = DATAGEN_POD_STOP_WAIT_S if timeout_s is None else timeout_s
+    poll_s = _DATAGEN_POD_POLL_S if poll_s is None else poll_s
+    namespace = cfg.get_namespace()
+    deadline = time.time() + timeout_s
+    announced = False
+    while True:
+        error: Exception | None = None
+        live: list[str] = []
+        try:
+            live = live_datagen_pods(namespace)
+        except Exception as e:  # noqa: BLE001 -- retried until the deadline
+            error = e
+        if error is None and not live:
+            return
+        if time.time() >= deadline:
+            if error is not None:
+                raise DatagenPodsUnknown(
+                    f"could not list the datagen pods in {namespace} ({error}); a fresh "
+                    "generate does not start while an earlier datagen pod may still write"
+                )
+            raise DatagenPodsStillRunning(
+                f"datagen pod(s) {', '.join(live)} of an earlier lakebench-datagen Job "
+                f"are still running {timeout_s:.0f}s after the Job was deleted. A fresh "
+                "generate would let them write into the new corpus, where silver would "
+                f"count their files as this run's rows. Re-run once `{_kubectl_pods_hint(cfg)}` "
+                "lists none. Do not force-delete a pod on an unreachable node until the "
+                "node is confirmed down: its container may still be writing."
+            )
+        if not announced and live:
+            logger.info(
+                "waiting up to %.0fs for %d earlier datagen pod(s) to stop", timeout_s, len(live)
+            )
+            announced = True
+        time.sleep(poll_s)
+
+
+def stop_previous_datagen(cfg: Any) -> None:
+    """Delete an earlier lakebench-datagen Job and wait for its pods to stop.
+
+    Every fresh generate calls this before it lists, clears or writes the
+    datagen prefix: the CLI before the bronze gate and before a continuous
+    reset, and the deployer before its cycle-0 clear. The delete uses
+    Background propagation, so the pods outlive the Job by their grace
+    period and may still land files; the wait is bounded
+    (``wait_for_datagen_pods_stopped``). Raises ``DatagenPodsStillRunning``
+    or ``DatagenPodsUnknown``; a failed delete is ``DatagenPodsUnknown``.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    namespace = cfg.get_namespace()
+    try:
+        k8s_client.BatchV1Api().delete_namespaced_job(
+            name="lakebench-datagen",
+            namespace=namespace,
+            body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
+            _request_timeout=30,
+        )
+    except ApiException as e:
+        if e.status != 404:
+            raise DatagenPodsUnknown(
+                f"could not delete the earlier lakebench-datagen Job in {namespace} "
+                f"(HTTP {e.status} {e.reason}); a fresh generate does not start while "
+                "its pods may still write"
+            ) from e
+    except Exception as e:  # noqa: BLE001 -- transport errors, a missing kubeconfig
+        raise DatagenPodsUnknown(
+            f"could not delete the earlier lakebench-datagen Job in {namespace} ({e}); a "
+            "fresh generate does not start while its pods may still write"
+        ) from e
+    wait_for_datagen_pods_stopped(cfg)
+
+
+def _refusal_details(e: BaseException) -> dict[str, Any]:
+    """``details`` for a failed deploy result: the refusal's exit path, if any."""
+    path = getattr(e, "exit_path", None) if isinstance(e, DatagenRefused) else None
+    return {REFUSAL_DETAIL: path} if path else {}
+
+
+def _s3_client_for(cfg: Any) -> Any:
+    from lakebench.s3 import S3Client
+
+    s3_cfg = cfg.platform.storage.s3
+    return S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+
+
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool = False) -> bool:
+    """Whether this deployment may delete data in ``bucket``.
+
+    ``lakebench.deploy.ownership.deployment_may_empty``: the rule destroy
+    uses to empty a bucket. Kept here as the gate's seam.
+    """
+    from lakebench.deploy.ownership import deployment_may_empty as _rule
+
+    if s3 is None:
+        s3 = _s3_client_for(cfg)
+    return _rule(cfg, bucket, s3, strict=strict)
+
+
+@dataclass
+class BronzeGateResult:
+    """What ``bronze_prefix_gate`` decided before datagen."""
+
+    proceed: bool
+    bucket: str
+    prefix: str
+    owned: bool
+    objects_before: int = 0
+    stale_allowed: bool = False
+    cleared: int = 0
+    message: str = ""
+    #: The exit code of a refusal: refused, or prerequisite when bronze could not
+    #: be read, or failed when --regenerate could not clear it.
+    exit_code: ExitCode = ExitCode.REFUSED
+
+    def record(self) -> dict[str, Any] | None:
+        """``metrics.json`` ``datagen.stale_bronze``, when stale objects were allowed."""
+        if not self.stale_allowed:
+            return None
+        return {
+            "allowed": True,
+            "objects_before": self.objects_before,
+            "bucket": self.bucket,
+            "prefix": self.prefix,
+        }
+
+
+def bronze_prefix_gate(
+    cfg: Any,
+    *,
+    regenerate: bool,
+    allow_stale_bronze: bool,
+    s3: Any = None,
+    clear_owned: bool = False,
+) -> BronzeGateResult:
+    """The one bronze safety gate, on the CLI host before any datagen Job.
+
+    ``owned`` is ``deployment_may_empty``; ``nonempty`` means the datagen
+    prefix holds an object that is not Lakebench's own.
+
+    ======  =========  ======================  ====================================
+    owned   non-empty  flags                   result
+    ======  =========  ======================  ====================================
+    yes     no         any                     proceed
+    yes     yes        none                    refuse (pass --regenerate)
+    yes     yes        --regenerate            clear the datagen prefix, proceed
+    no      no         any                     proceed
+    no      yes        none                    refuse (--allow-stale-bronze or clear
+                                               it yourself)
+    no      yes        --regenerate            refuse: never empties a bucket this
+                                               deployment did not create
+    no      yes        --allow-stale-bronze    proceed, recorded
+    ======  =========  ======================  ====================================
+
+    ``--regenerate`` deletes only the datagen prefix, aborting its incomplete
+    multipart uploads (GOTCHAS 2); an empty prefix is refused, never widened
+    to the bucket. A read failure refuses. The caller exits with the
+    result's ``exit_code``. Every "proceed" means bronze is about to be
+    replaced, so the silver-state data clock is cleared.
+
+    ``clear_owned`` (the multi-cycle loop before cycle 0, which clears an
+    owned prefix as 1.6 did): an owned non-empty prefix is cleared as with
+    ``--regenerate``, and an unowned one takes the ordinary rows, so
+    ``--allow-stale-bronze`` still applies.
+    """
+    bucket = cfg.platform.storage.s3.buckets.bronze
+    prefix = bronze_datagen_prefix(cfg).strip("/")
+    shown = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+
+    def refuse(
+        message: str, owned: bool, n: int = 0, code: ExitCode = ExitCode.REFUSED
+    ) -> BronzeGateResult:
+        return BronzeGateResult(False, bucket, prefix, owned, n, message=message, exit_code=code)
+
+    if s3 is None:
+        s3 = _s3_client_for(cfg)
+    if getattr(s3, "_init_error", None):
+        return refuse(
+            f"cannot check {shown} for existing data ({s3._init_error}); refusing to generate",
+            owned=False,
+            code=ExitCode.PREREQUISITE,
+        )
+    try:
+        if not s3.bucket_exists(bucket):
+            _clear_clock_best_effort(cfg)
+            return BronzeGateResult(True, bucket, prefix, owned=False)
+        nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
+    except Exception as e:  # noqa: BLE001
+        return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
+    if not nonempty:
+        _clear_clock_best_effort(cfg)
+        return BronzeGateResult(True, bucket, prefix, deployment_may_empty(cfg, bucket, s3))
+    try:
+        owned = deployment_may_empty(cfg, bucket, s3, strict=True)
+    except Exception as e:  # noqa: BLE001
+        # Not knowing who owns the bucket is not a refusal on ownership.
+        return refuse(
+            f"could not check who owns {bucket} ({e}); refusing to generate over {shown}",
+            owned=False,
+            code=ExitCode.PREREQUISITE,
+        )
+    try:
+        info = s3.get_bucket_size(bucket, prefix=prefix + "/" if prefix else "")
+        n = int(info.object_count or 0)
+        size_gb = (info.size_bytes or 0) / (1024**3)
+    except Exception:  # noqa: BLE001 -- the count is for the message only
+        n, size_gb = 0, 0.0
+    held = f"{shown} holds {n} object(s) ({size_gb:.2f} GB)"
+    if regenerate and not prefix:
+        return refuse(
+            f"{held}, and the datagen prefix is empty: --regenerate clears only the "
+            "datagen prefix and never a whole bucket. Clear the bucket yourself.",
+            owned,
+            n,
+        )
+    if owned:
+        if not (regenerate or clear_owned):
+            return refuse(
+                f"Bronze prefix {held}. Refusing to generate over it: pass --regenerate "
+                "to clear the datagen prefix first, or --skip-generate to reuse the "
+                "existing data.",
+                owned,
+                n,
+            )
+        try:
+            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+        except Exception as e:  # noqa: BLE001
+            return refuse(
+                f"--regenerate: could not clear {shown}: {e}", owned, n, code=ExitCode.FAILED
+            )
+        _clear_clock_best_effort(cfg)
+        return BronzeGateResult(True, bucket, prefix, owned, n, cleared=cleared)
+    if regenerate:
+        return refuse(
+            f"{held} and this deployment cannot prove it owns {bucket}: Lakebench does "
+            "not empty a bucket this deployment did not create. Clear the prefix "
+            "yourself, or claim the bucket with `lakebench admin reclaim-bucket` (owner) "
+            "and use --regenerate; --allow-stale-bronze generates over it.",
+            owned,
+            n,
+        )
+    if not allow_stale_bronze:
+        return refuse(
+            f"{held} and this deployment cannot prove it owns {bucket} (it did not "
+            "create it, or no cluster stamp or record proves it). Clear the prefix "
+            "yourself, or claim the bucket with `lakebench admin reclaim-bucket` "
+            "(owner) and use --regenerate; --allow-stale-bronze generates over the "
+            "objects, and rows may then be over-counted.",
+            owned,
+            n,
+        )
+    _clear_clock_best_effort(cfg)
+    return BronzeGateResult(True, bucket, prefix, owned, n, stale_allowed=True)
 
 
 class DatagenDeployer:
@@ -58,7 +631,18 @@ class DatagenDeployer:
 
     TEMPLATES = ["datagen/job.yaml.j2"]
 
-    def __init__(self, engine: DeploymentEngine):
+    def __init__(
+        self,
+        engine: DeploymentEngine,
+        allow_stale_bronze: bool = False,
+        *,
+        continuous: bool = False,
+    ):
+        self.allow_stale_bronze = allow_stale_bronze
+        # A continuous run's datagen: it never takes --allow-stale-bronze,
+        # and its reset has already cleared the datagen prefix, so a refusal
+        # names that path's remedy instead of the flag.
+        self.continuous = continuous
         self.engine = engine
         self.config = engine.config
         self.k8s = engine.k8s
@@ -89,11 +673,10 @@ class DatagenDeployer:
 
         effective_mode = _resolve_datagen_mode(cfg)
 
-        # Route datagen to the right Generator + schema-appropriate S3 prefix.
-        # When path_template is still the C360 default and schema=financial,
-        # substitute the pacs.008 prefix the Financial Spark scripts read from
-        # (LB_FINANCIAL_BRONZE_PREFIX default). Keeps the datagen upload and
-        # bronze_verify_financial.py pointed at the same S3 location.
+        # Route datagen to the right Generator + schema-appropriate S3 prefix,
+        # the same prefix the financial Spark scripts read from
+        # (LB_FINANCIAL_BRONZE_PREFIX), so the datagen upload and
+        # bronze_verify_financial.py point at the same S3 location.
         schema_value = workload.schema_type.value
         path_prefix = bronze_datagen_prefix(cfg)
 
@@ -118,7 +701,13 @@ class DatagenDeployer:
                 "datagen_schema": schema_value,
                 # From config, or the pre-registration's calibration seed for
                 # financial (config/datagen_seed.py); spent seeds are refused.
-                "datagen_seed": config_seed(cfg),
+                # A registered corpus's seed is in the Secret instead, never
+                # in the Job's arguments (owner, 10-03).
+                "datagen_seed": None if uses_seed_secret(cfg) else config_seed(cfg),
+                "datagen_seed_secret": seed_secret_name(cfg) if uses_seed_secret(cfg) else "",
+                "datagen_seed_secret_key": SEED_SECRET_KEY,
+                "datagen_heldout_map": HELDOUT_MAP_NAME,
+                "datagen_heldout_dir": HELDOUT_MOUNT_DIR,
                 # Robustness corpus flag (financial only), checked against
                 # the declared corpus role (config/datagen_seed.py).
                 "datagen_robustness_perturbation": config_perturbation(cfg),
@@ -261,11 +850,12 @@ class DatagenDeployer:
             target_tb = (dims.approx_bronze_gb / total_cycles) / 1024.0
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
-            self._delete_existing_job(namespace)
+            self.stop_previous_job()
+            self._prepare_generator_inputs()
 
             # Cycle 0 is a fresh write: clear stale files a prior generate left,
-            # after the previous job is gone so nothing writes mid-clear. Append
-            # cycles (n > 0) keep the earlier cycles' files (LB-185).
+            # after the previous job's pods have stopped so nothing writes
+            # mid-clear. Append cycles (n > 0) keep the earlier cycles' files.
             self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
 
             for template_name in self.TEMPLATES:
@@ -291,109 +881,94 @@ class DatagenDeployer:
             )
 
         except Exception as e:
-            logger.exception("Datagen cycle deployment failed")
+            if isinstance(e, DatagenRefused):
+                logger.warning("Datagen cycle deployment failed: %s", e)
+            else:
+                logger.exception("Datagen cycle deployment failed")
             return DeploymentResult(
                 component="datagen",
                 status=DeploymentStatus.FAILED,
                 message=f"Datagen cycle {cycle_index + 1} failed: {e}",
                 elapsed_seconds=time.time() - start,
+                details=_refusal_details(e),
             )
-
-    def _bronze_bucket_is_owned(self, bucket: str) -> bool:
-        """True only when this deployment's namespace records creating ``bucket``.
-
-        The clear below is destructive, so it must respect the same ownership
-        model as destroy and clean: on FlashBlade bucket tagging is unsupported
-        (LB-088), so the namespace's created-buckets record is the authoritative
-        proof of ownership. Fail-safe: any uncertainty (record unreadable,
-        namespace absent, bucket not listed) returns False, so a generate into a
-        shared, adopted or foreign bronze bucket never deletes another
-        deployment's data (invariant 4). `lakebench generate` calls the deployer
-        directly and never runs the deploy engine's bucket-ownership guard, so
-        this check is the only thing standing between the clear and foreign data.
-        """
-        try:
-            from kubernetes import client as k8s_client
-
-            from lakebench.deploy.ownership import read_created_buckets
-
-            core_v1 = k8s_client.CoreV1Api()
-            namespace = self.config.get_namespace()
-            return bucket in read_created_buckets(core_v1, namespace)
-        except Exception as e:  # noqa: BLE001
-            logger.info(
-                "LB-185: could not confirm this deployment created %s (%s); not clearing it",
-                bucket,
-                e,
-            )
-            return False
 
     def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
-        """Clear stale datagen files before a fresh generate (LB-185).
+        """Before cycle 0: clear stale datagen files, or refuse to write over them.
 
-        A re-generate into a reused bronze bucket must not inherit part-* files
-        a larger earlier generate left behind: they share the ``part-NNNNNN``
-        naming, so the bronze read cannot tell them apart and silver over-counts
-        (a smaller generate over a larger one's leftovers). Clear the workload's
-        bronze prefix before cycle 0 writes; append cycles (n > 0) keep the
-        earlier cycles' files. Skipped when the operator manages the bucket
-        (``create_buckets`` false) or when this deployment cannot prove it
-        created the bucket (invariant 4). Scoped to the datagen prefix via
-        ``delete_prefix``, which refuses an empty or root prefix.
-
-        For an owned bucket the clear MUST succeed: a half-cleared prefix leaves
-        stale files that silver over-counts, the exact LB-185 bug, so a clearing
-        failure raises and fails the generate rather than proceeding with a PASS
-        on wrong data (invariant 3).
+        A re-generate into a reused bronze bucket must not inherit part-*
+        files a larger earlier generate left behind: they share the
+        ``part-NNNNNN`` naming, so silver cannot tell them apart and
+        over-counts. Append cycles (n > 0) keep earlier cycles'
+        files. On a bucket this deployment may empty
+        (``deployment_may_empty``) the datagen prefix is cleared, scoped by
+        ``delete_prefix`` with its incomplete uploads aborted; a failure
+        raises and fails the generate (invariant 3). On any other bucket a
+        non-empty prefix raises ``StaleBronzeRefused`` unless the deployer was
+        built with ``allow_stale_bronze`` (the defence for a caller
+        that skipped the CLI's ``bronze_prefix_gate``).
         """
         if cycle_index != 0:
             return
-        s3_cfg = self.config.platform.storage.s3
-        if not s3_cfg.create_buckets:
-            logger.info(
-                "LB-185: create_buckets is false; leaving the bronze prefix for "
-                "the operator to manage"
-            )
-            return
         prefix = path_prefix.strip("/")
-        if not prefix:
-            logger.warning("LB-185: datagen path prefix is empty; not clearing the bronze bucket")
-            return
-        bucket = s3_cfg.buckets.bronze
-        if not self._bronze_bucket_is_owned(bucket):
-            logger.info(
-                "LB-185: %s is not recorded as created by this deployment; not clearing it "
-                "(a re-generate into a reused bucket may inherit stale files)",
-                bucket,
-            )
-            return
-        # Owned: the prefix must be empty before datagen writes. Any failure
-        # propagates so deploy()/deploy_cycle() report FAILED rather than
-        # generating over a half-cleared prefix.
-        from lakebench.s3 import S3Client
-
-        s3 = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        bucket = self.config.platform.storage.s3.buckets.bronze
+        s3 = _s3_client_for(self.config)
         if s3._init_error:
             raise RuntimeError(
-                f"LB-185: cannot clear the bronze prefix s3://{bucket}/{prefix} before a "
+                f"cannot check the bronze prefix s3://{bucket}/{prefix} before a "
                 f"fresh generate: {s3._init_error}"
             )
-        n = s3.delete_prefix(bucket, prefix)
-        if n:
-            logger.info(
-                "LB-185: cleared %d stale object(s) under s3://%s/%s before a fresh generate",
-                n,
+        if not s3.bucket_exists(bucket):
+            return
+        if not prefix:
+            # Nothing to scope a clear to: a whole bucket is never cleared here.
+            if s3.has_user_objects(bucket) and not self.allow_stale_bronze:
+                raise StaleBronzeRefused(
+                    f"s3://{bucket} holds objects and the datagen prefix is empty, so "
+                    "they cannot be cleared before a fresh generate. Clear the bucket "
+                    + (
+                        "yourself."
+                        if self.continuous
+                        else "yourself, or pass --allow-stale-bronze."
+                    )
+                )
+            return
+        if deployment_may_empty(self.config, bucket, s3):
+            n = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            if n:
+                logger.info(
+                    "cleared %d stale object(s) under s3://%s/%s before a fresh generate",
+                    n,
+                    bucket,
+                    prefix,
+                )
+            return
+        if not s3.has_user_objects(bucket, prefix + "/"):
+            return
+        if self.allow_stale_bronze:
+            logger.warning(
+                "s3://%s/%s holds objects and this deployment did not create %s; "
+                "generating over them (--allow-stale-bronze)",
                 bucket,
                 prefix,
+                bucket,
             )
+            return
+        if self.continuous:
+            raise StaleBronzeRefused(
+                f"s3://{bucket}/{prefix} holds objects and this deployment cannot prove "
+                f"it may empty {bucket}. This run's continuous reset cleared the prefix "
+                "before datagen, so another writer put them there since. Re-run once "
+                f"`{_kubectl_pods_hint(self.config)}` lists none and nothing else writes "
+                "there; the reset clears the prefix again. A continuous run's own "
+                "datagen does not take --allow-stale-bronze, and --force-reset does not "
+                "change this check."
+            )
+        raise StaleBronzeRefused(
+            f"s3://{bucket}/{prefix} holds objects and this deployment did not create "
+            f"{bucket}. Pass --allow-stale-bronze to generate over them, or clear the "
+            "prefix yourself."
+        )
 
     def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.
@@ -415,11 +990,12 @@ class DatagenDeployer:
         try:
             context = self._build_datagen_context()
 
-            self._delete_existing_job(namespace)
+            self.stop_previous_job()
+            self._prepare_generator_inputs()
 
             # A single-cycle generate is a fresh write: clear stale files after
-            # the previous job is gone, so nothing writes into the prefix
-            # mid-clear.
+            # the previous job's pods have stopped, so nothing writes into the
+            # prefix mid-clear.
             self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
 
             # Render and apply job template
@@ -442,13 +1018,29 @@ class DatagenDeployer:
             )
 
         except Exception as e:
-            logger.exception("Datagen deployment failed")
+            if isinstance(e, DatagenRefused):
+                logger.warning("Datagen deployment failed: %s", e)
+            else:
+                logger.exception("Datagen deployment failed")
             return DeploymentResult(
                 component="datagen",
                 status=DeploymentStatus.FAILED,
                 message=f"Datagen job submission failed: {e}",
                 elapsed_seconds=time.time() - start,
+                details=_refusal_details(e),
             )
+
+    def _prepare_generator_inputs(self) -> None:
+        """The cluster objects the Job reads, written after the previous
+        Job's pods stop and before the Job: the held-out hash ConfigMap for
+        the financial schema, and a registered corpus's seed Secret."""
+        if self.config.architecture.workload.schema_type.value == "financial":
+            ensure_heldout_map(self.config, self.k8s)
+        prepare_seed_secret(self.config, self.k8s)
+
+    def stop_previous_job(self) -> None:
+        """``stop_previous_datagen`` for this deployer's config."""
+        stop_previous_datagen(self.config)
 
     def _delete_existing_job(self, namespace: str, *, request_timeout: int | None = None) -> None:
         """Delete existing datagen job if present.
@@ -635,6 +1227,25 @@ class DatagenDeployer:
                                 crash_details[pod_name] = f"exit {terminated.exit_code}" + (
                                     f" ({terminated.reason})" if terminated.reason else ""
                                 )
+
+                    # A Secret or ConfigMap the container needs does not exist
+                    # (the registered seed Secret, the CA secret): the pod
+                    # never starts, so fail now instead of at the timeout. A
+                    # transient secret-cache timeout has another message and
+                    # is left to recover.
+                    for cs in pod.status.container_statuses:
+                        waiting = cs.state.waiting if cs.state is not None else None
+                        if (
+                            waiting is not None
+                            and waiting.reason == "CreateContainerConfigError"
+                            and "not found" in (waiting.message or "")
+                            and pod_name not in crash_pods
+                        ):
+                            crash_pods.append(pod_name)
+                            crash_details[pod_name] = (
+                                "CreateContainerConfigError (a Secret or ConfigMap the pod "
+                                "needs is missing)"
+                            )
 
                 # Detect pending pods
                 if pod.status.phase == "Pending":

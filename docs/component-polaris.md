@@ -63,8 +63,7 @@ architecture:
   catalog:
     type: polaris
     polaris:
-      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"  # Required, no default
-      version: "1.6.0"                # Not read by the deployer (see below)
+      # client_secret: optional; deploy generates one per deployment
       port: 8181                      # REST API port
       resources:
         cpu: "1"                      # CPU request and limit
@@ -76,8 +75,7 @@ architecture:
 | Field | Default | Description |
 |---|---|---|
 | `catalog.type` | `hive` | Set to `polaris` to deploy Polaris instead of Hive Metastore. |
-| `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. Required: `deploy` and `run` refuse a Polaris config without it. Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. It must stay the same across `deploy`, `run` and `destroy`. |
-| `polaris.version` | `1.6.0` | Not read by the deployer. The Polaris version that runs is the tag of `images.polaris` (and `images.polaris_admin_tool` for bootstrap). |
+| `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. Optional. Empty: `deploy` generates one per deployment, once, and stores it in the Secret `lakebench-polaris-client` in the namespace; `run`, `benchmark`, Trino and Spark Thrift read it from there. Set before the first deploy: it is used as is and stored in that Secret. A Polaris already bootstrapped keeps its secret: `deploy` refuses a config value that differs from the stored one, and stops when neither the config nor the Secret holds it. The Polaris DB password is per deployment too (Secret `lakebench-polaris-db`), and each deploy sets the `polaris` role to it. |
 | `images.polaris` | `apache/polaris:1.6.0` | Polaris server image. 1.4.0+ (including this default) has no `-incubating` suffix; only 1.3.0 specifically needs the suffix -- `apache/polaris:1.3.0` (without it) does not exist. |
 | `polaris.port` | `8181` | REST API port. Rarely needs changing. |
 | `polaris.resources.cpu` | `"1"` | CPU request and limit for the Polaris pod. |

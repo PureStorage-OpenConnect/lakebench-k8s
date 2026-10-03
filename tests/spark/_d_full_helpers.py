@@ -6,20 +6,17 @@ account_statements) plus silver.accounts / silver.entities for the
 current_balance MERGE. Instead of repeating the ~150 lines of DDL and
 Spark bootstrap in each file, this module centralises the shape.
 
-The tests each spawn a subprocess with an Iceberg jar on the classpath
-(see ``test_aml_stream_one_delete_per_restart.py`` for the pattern) and
-import this module to build the catalog. Nothing in this file runs Spark
+The tests each run a Spark child through the ``spark_subprocess`` fixture
+(tests/spark/conftest.py), which passes the test jars, and import this
+module there to build the catalog. Nothing in this file runs Spark
 at import time -- ``pyspark`` and the Iceberg jar are only touched from
-inside ``run_in_subprocess``.
+inside the child.
 """
 
 from __future__ import annotations
 
-import glob
-import os
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 PACS_SCHEMA = (
     "txn_id string, uetr string, "
@@ -144,18 +141,6 @@ CREATE TABLE lh.silver.entities (
 """
 
 
-def iceberg_jar() -> str | None:
-    """LB_TEST_ICEBERG_JAR, or an iceberg-spark-runtime-4.0 jar on disk."""
-    env_jar = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env_jar and Path(env_jar).exists():
-        return env_jar
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
 def bronze_row(spark, txn_id, ts, dbtr_iban="GB01", cdtr_iban="US02", amt="100.00"):
     """One-row bronze DataFrame in pacs.008 shape."""
 
@@ -193,14 +178,14 @@ def bronze_batch(spark, rows):
     return out
 
 
-def build_spark(work_dir, jar):
+def build_spark(work_dir, jars):
     """Local[1] SparkSession with a Hadoop-catalog Iceberg pointing at work_dir."""
     from pyspark.sql import SparkSession
 
     return (
         SparkSession.builder.master("local[1]")
         .config("spark.ui.enabled", "false")
-        .config("spark.jars", jar)
+        .config("spark.jars", jars)
         .config("spark.sql.shuffle.partitions", "2")
         .config(
             "spark.sql.extensions",
@@ -216,10 +201,33 @@ def build_spark(work_dir, jar):
 
 
 def bootstrap_catalog(spark):
-    """Create silver namespace and every table _maintain_statements needs."""
+    """Create the silver namespace and every table ``_merge_batch`` writes:
+    the trimmed copies above, plus silver.entity_profiles and
+    silver.silver_batch_versions from the product's own DDL (the stream
+    maintains both on every micro-batch)."""
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl in (TXNS_DDL, EDGES_DDL, STATEMENTS_DDL, ACCOUNTS_DDL, ENTITIES_DDL):
         spark.sql(ddl)
+    for ddl in product_ddls("SILVER_PROFILES", "SILVER_BATCH_VERSIONS"):
+        spark.sql(ddl)
+
+
+def product_ddls(*names):
+    """silver_build_financial's DDL for each table attribute in *names*
+    (``SILVER_PROFILES`` -> ``DDL_PROFILES``), pointed at catalog lh. The
+    module renders its DDL with the catalog it read at import, so the
+    catalog-qualified table name is swapped for lh's."""
+    import silver_build_financial as sbf
+
+    ddl_attr = {"SILVER_PROFILES": "DDL_PROFILES", "SILVER_BATCH_VERSIONS": "DDL_BATCH_VERSIONS"}
+    out = []
+    for name in names:
+        table = getattr(sbf, name)
+        ddl = getattr(sbf, ddl_attr[name])
+        qualified = f"{sbf.CATALOG}.{table}"
+        assert ddl.count(qualified) == 1, (name, qualified)
+        out.append(ddl.replace(qualified, f"lh.{table}"))
+    return out
 
 
 def seed_account(spark, iban, holder_entity_id=1, bank_bic="BICFI", currency="USD"):
@@ -255,6 +263,8 @@ def bind_stream_module(spark):
     ss.SILVER_STATEMENTS = "silver.account_statements"
     ss.SILVER_ACCOUNTS = "silver.accounts"
     ss.SILVER_ENTITIES = "silver.entities"
+    ss.SILVER_PROFILES = "silver.entity_profiles"
+    ss.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
 
     ss._KYC = None
     ss._KYC_LOADED = True

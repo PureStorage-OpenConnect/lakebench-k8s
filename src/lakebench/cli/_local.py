@@ -378,6 +378,10 @@ def generate_local(
         "-e",
         f"AWS_REGION={deployment.credentials.region}",
         cfg.images.datagen,
+        # The entrypoint defaults to the financial schema, which needs the
+        # held-out hash file mounted; local mode runs Customer 360 only.
+        "--schema",
+        cfg.architecture.workload.schema_type.value,
         "--bucket",
         cfg.platform.storage.s3.buckets.bronze,
         "--target-tb",

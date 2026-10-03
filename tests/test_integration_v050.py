@@ -143,22 +143,20 @@ class TestObservabilityConfigPropagation:
     def test_observability_enabled_propagates(self):
         cfg = make_config(observability={"enabled": True})
         assert cfg.observability.enabled is True
-        assert cfg.observability.prometheus_stack_enabled is True
+        # observability.enabled installs the whole stack; there is no
+        # separate Prometheus switch (removed in v1.7).
+        assert not hasattr(cfg.observability, "prometheus_stack_enabled")
 
     def test_dashboards_disabled_while_observability_enabled(self):
         cfg = make_config(observability={"enabled": True, "dashboards_enabled": False})
         assert cfg.observability.enabled is True
         assert cfg.observability.dashboards_enabled is False
 
-    def test_s3_metrics_default(self):
-        # Dead field: default is None (sentinel). See ObservabilityConfig
-        # comment in schema.py -- nothing wires this to PodMonitor deploy.
+    def test_unwired_metric_flags_are_removed(self):
+        # Nothing wired them to PodMonitor deployment; removed in v1.7.
         cfg = make_config(observability={"enabled": True})
-        assert cfg.observability.s3_metrics_enabled is None
-
-    def test_spark_metrics_default(self):
-        cfg = make_config(observability={"enabled": True})
-        assert cfg.observability.spark_metrics_enabled is None
+        assert not hasattr(cfg.observability, "s3_metrics_enabled")
+        assert not hasattr(cfg.observability, "spark_metrics_enabled")
 
 
 # ===========================================================================

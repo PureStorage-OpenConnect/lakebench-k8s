@@ -314,7 +314,7 @@ class TestRecipeSystem:
 
     def test_recipe_unknown_raises(self):
         """Unknown recipe name raises ValueError."""
-        with pytest.raises(Exception, match="Unknown recipe"):
+        with pytest.raises(Exception, match="(?i)unknown recipe"):
             _make_config(recipe="nonexistent-recipe")
 
     def test_recipe_default_alias(self):
@@ -373,7 +373,7 @@ class TestRecipeSystem:
         """Unity + Delta excluded from v1.2 (UCSingleCatalog STS limitation)."""
         for suffix in ("trino", "thrift", "none"):
             with pytest.raises(
-                ValueError, match="Unsupported component combination|Unknown recipe"
+                ValueError, match="(?i)Unsupported component combination|unknown recipe"
             ):
                 _make_config(recipe=f"unity-delta-spark-{suffix}")
 
@@ -504,16 +504,16 @@ class TestCoResidentCpu:
 
         cfg = _make_config(recipe="hive-iceberg-spark-thrift")
         result = _co_resident_cpu_m(cfg)
-        # Spark thrift: default 2 cores = 2000m + 1000m infra = 3000m
-        assert result == 3000
+        # Spark thrift: default 2 cores = 2000m + 1000m infra + 1000m lb-deps
+        assert result == 4000
 
     def test_co_resident_cpu_none(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
         cfg = _make_config(recipe="hive-iceberg-spark-none")
         result = _co_resident_cpu_m(cfg)
-        # No engine: just infra = 1000m
-        assert result == 1000
+        # No engine: infra 1000m + the lb-deps pod 1000m (DEP-2)
+        assert result == 2000
 
 
 # ===========================================================================

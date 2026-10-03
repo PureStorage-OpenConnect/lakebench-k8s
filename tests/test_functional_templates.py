@@ -102,14 +102,19 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     """
     ctx = dict(engine.context)
     cfg = engine.config
+    # The Thrift and DuckDB deployers add where the dependency set is served
+    # (deploy.deps.consumer_context); offline, the placeholder set.
+    from lakebench.deps.manifest import consumer_context, placeholder_handle
 
-    # Grafana deployer injects these (see grafana.py line 107)
-    ctx.setdefault("grafana_image", cfg.images.grafana)
-    # Prometheus deployer injects these (see prometheus.py lines 127-130)
-    ctx.setdefault("prometheus_image", cfg.images.prometheus)
+    ctx.update(consumer_context(placeholder_handle(cfg)))
+
+    # The Prometheus and Grafana deployers that injected image, retention and
+    # storage-class variables are gone (the kube-prometheus-stack chart
+    # deploys both); no template reads those variables.
+    # The secrets step injects the per-deployment Hive DB password (SAF-8)
+    ctx.setdefault("postgres_password", "test-hive-db-password")
     ctx.setdefault("prometheus_retention", cfg.observability.retention)
     ctx.setdefault("prometheus_storage", cfg.observability.storage)
-    ctx.setdefault("prometheus_storage_class", cfg.observability.storage_class or "")
     # Both grafana and prometheus templates use ``pull_policy`` (not image_pull_policy)
     ctx.setdefault("pull_policy", cfg.images.pull_policy.value)
 

@@ -240,7 +240,7 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         // The beneficiary can be an external counterparty (a listed party or
         // a decoy, crate::screening): cp_* resolves both. Originators are
         // always population entities. Attributes are recomputed on demand
-        // (LB-204): the world no longer holds the name/street/town/country
+        // (to bound pod memory): the world no longer holds the name/street/town/country
         // columns, so recompute the originator's country once and reuse it.
         let o_country = w.country(o);
         let c_country = w.cp_country(c);

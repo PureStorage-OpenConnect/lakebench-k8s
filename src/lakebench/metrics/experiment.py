@@ -26,20 +26,64 @@ rules, or the benchmark queries; a run under another version compares with
 nothing measured under this one):
 
 - ``c360-1``, ``aml-1``: first stamped versions (2026-09-26).
+- ``aml-1`` kept (2026-10-02): continuous ``silver.entity_profiles`` now
+  leaves ``total_sent_usd`` and ``total_received_usd`` NULL for a side an
+  entity never used, as batch always did, instead of 0.00. No detection
+  rule, score, gold table or query reads these two columns, so no result
+  changes and the version is not bumped.
+- ``c360-2``: gold-finalize no longer switches to the incremental strategy
+  when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
+  every gold day; incremental gold runs only for multi-cycle cycles 2+, and
+  the strategy that ran is recorded per job (2026-10-02).
+- ``aml-2``: W4's related_txn_ids and related_entity_ids are sorted and cut
+  to 1,000 per alert, and its evidence map gains txn_total, txns_truncated,
+  entity_total and entities_truncated, so W4 alerts and possibly W4 recall,
+  false positives, continuous time to detect and TM alert identity for
+  hubs change; W2 and the W5 rescreen gain txn_total and txns_truncated,
+  and W2's beneficiary sender list is sorted before its cut (2026-10-02).
+  The first AML result change of v1.7.
+- ``aml-2`` also covers (both land before any release record, so v1.7 has
+  the one version): AML continuous in-stream rounds run the investigator
+  queries (IQ1 to IQ4) once the run has a case, so the continuous query set
+  changes from 8 queries to 12; a round before the first TM pass runs the 8
+  and is labelled (2026-10-02).
+
+Identity versions. A block is stamped ``exp2``
+(``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
+present: corpus id v2 (from the generator's markers), the run-start
+``identity_version`` and a system identity with at least one observed
+part. Otherwise it is ``exp1`` and names what was missing in
+``v2_unavailable``. ``identity()``
+reads exp1 blocks with the frozen ``_identity_v1`` and exp2 blocks with
+``_identity_v2``; a stored block is never rebuilt
+(``PipelineMetrics.experiment_block``), so no stored id or digest moves.
+Which keys say what (workload, corpus, architecture, system, conditions) is
+``metrics/comparability.py``.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any
 
-EXPERIMENT_SCHEMA = "exp1"
+from lakebench.metrics import comparability as _cmp
+from lakebench.metrics.provenance import experiment_lakebench
+
+EXPERIMENT_SCHEMA_V1 = "exp1"
+EXPERIMENT_SCHEMA_V2 = "exp2"
+#: The newest schema; written only when every V2_REQUIRED_INPUTS entry exists.
+EXPERIMENT_SCHEMA = EXPERIMENT_SCHEMA_V2
+IDENTITY_VERSION = 2
+
+#: What an exp2 block needs, by the name ``v2_unavailable`` lists when absent.
+V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
-    "customer360": "c360-1",
-    "financial": "aml-1",
+    "customer360": "c360-2",
+    "financial": "aml-2",
     "custom": "custom-1",
 }
 
@@ -56,14 +100,6 @@ DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
 NO_PROVENANCE = "not comparable: no provenance"
 
 # Batch and continuous Spark job types -> snapshot executor-override key.
-_OVERRIDE_KEY = {
-    "bronze-verify": "bronze",
-    "silver-build": "silver",
-    "gold-finalize": "gold",
-    "bronze-ingest": "bronze_ingest",
-    "silver-stream": "silver_stream",
-    "gold-refresh": "gold_refresh",
-}
 
 
 def _short_hash(obj: Any) -> str:
@@ -123,13 +159,14 @@ def effective_trickle(cfg: Any) -> int | None:
 
 
 def _stackable_hive(cfg: Any) -> str:
-    """The Hive the Stackable operator runs: images.hive is only the
-    HiveCluster productVersion, and the image is resolved by the operator
-    from it and the SDP release (oci.stackable.tech/sdp/hive:<v>-stackable<sdp>).
-    Derived from the configured versions, not read from the pod."""
-    from lakebench.deploy.engine import image_tag
+    """The Hive the Stackable operator runs: the HiveCluster productVersion
+    the template renders (STACKABLE_HIVE_VERSION, never images.hive),
+    resolved by the operator with the SDP release to
+    oci.stackable.tech/sdp/hive:<v>-stackable<sdp>. Derived from the rendered
+    and configured versions, not read from the pod."""
+    from lakebench.config.schema import STACKABLE_HIVE_VERSION
 
-    version = image_tag(cfg.images.hive)
+    version = STACKABLE_HIVE_VERSION
     sdp = cfg.architecture.catalog.hive.operator.version
     return f"oci.stackable.tech/sdp/hive:{version}-stackable{sdp} (derived, not read from the pod)"
 
@@ -195,6 +232,13 @@ def experiment_inputs(
     dg = workload.datagen
     schema = workload.schema_type.value
     images = cfg.images
+    # A --local run submits to its own Spark image, not images.spark.
+    if system == "local":
+        from lakebench.modules.pipeline_engines.spark.local_job import DEFAULT_SPARK_IMAGE
+
+        spark_image = DEFAULT_SPARK_IMAGE
+    else:
+        spark_image = images.spark
 
     seed: int | None
     seed_error = None
@@ -218,9 +262,64 @@ def experiment_inputs(
         # before the resolved values were stamped stay comparable; what they
         # resolve to is a function of scale and the timestamp window, both
         # already corpus identity.
-        declared = {"customer360": workload.customer360.model_dump(mode="json")}
+        # date_range_days is no longer a config key (nothing read it); the
+        # null it always hashed to stays, so ids recorded before stay put.
+        declared = {
+            "customer360": {
+                **workload.customer360.model_dump(mode="json"),
+                "date_range_days": None,
+            }
+        }
         params_id = _short_hash(declared)
         params = {"customer360": _c360_resolved(cfg)}
+
+    from lakebench.metrics.fingerprint_inputs import record_spark_conf
+    from lakebench.modules.pipeline_engines.spark.conf_keys import user_spark_overrides
+
+    # Local runs build no Spark job manifest, so the user conf never ran.
+    buckets = cfg.platform.storage.s3.buckets
+    layers = {buckets.bronze: "bronze", buckets.silver: "silver", buckets.gold: "gold"}
+    user_conf = (
+        record_spark_conf(user_spark_overrides(cfg.spark.conf or {}), layers)
+        if system != "local"
+        else {}
+    )
+
+    # The executor and driver overrides the run applies (identity keys
+    # "spark executor overrides" and "spark driver overrides"), only when set
+    # and not for --local (no executors). Executor counts are keyed as in
+    # config_snapshot.spark.executor_overrides, for the run's mode only.
+    from lakebench.modules.pipeline_engines.spark.job import (
+        BATCH_JOB_TYPES,
+        EXECUTOR_OVERRIDE_FIELDS,
+        STREAMING_JOB_TYPES,
+        executor_override,
+    )
+
+    mode_of_run = _canonical_mode(run_mode) if run_mode else _canonical_mode(arch.pipeline.mode)
+    job_types = STREAMING_JOB_TYPES if mode_of_run == "continuous" else BATCH_JOB_TYPES
+    executor_overrides = (
+        {
+            EXECUTOR_OVERRIDE_FIELDS[jt][1]: n
+            for jt in sorted(job_types)
+            if (n := executor_override(jt, cfg)) is not None
+        }
+        if system != "local"
+        else {}
+    )
+    spark_compute = cfg.platform.compute.spark
+    driver_overrides = (
+        {
+            k: v
+            for k, v in (
+                ("driver_cores", spark_compute.driver_cores),
+                ("driver_memory", spark_compute.driver_memory),
+            )
+            if v is not None
+        }
+        if system != "local"
+        else {}
+    )
 
     corpus = {
         "schema": schema,
@@ -233,7 +332,8 @@ def experiment_inputs(
         "timestamp_end": dg.timestamp_end,
         "dirty_data_ratio": dg.dirty_data_ratio,
         "unique_customers": workload.customer360.unique_customers,
-        "date_range_days": workload.customer360.date_range_days,
+        # Constant: no longer a config key; see the parameters id above.
+        "date_range_days": None,
     }
     corpus["id"] = _short_hash(corpus)
     # The id keeps hashing the declared overrides (null when unset), so ids
@@ -251,19 +351,11 @@ def experiment_inputs(
     if seed_error:
         corpus["seed_error"] = seed_error
 
-    table_format = arch.table_format.type.value
-    format_version: str | None
-    try:
-        from lakebench.modules.pipeline_engines.spark.job import resolve_format_version
+    from lakebench.config.support import resolved_format_version
 
-        requested = (
-            arch.table_format.iceberg.version
-            if table_format == "iceberg"
-            else arch.table_format.delta.version
-        )
-        format_version = resolve_format_version(images.spark, table_format, requested)
-    except Exception:  # noqa: BLE001
-        format_version = None
+    table_format = arch.table_format.type.value
+    # One reading with the support stamp (config.support.config_versions).
+    format_version = resolved_format_version(cfg)
 
     catalog = arch.catalog.type.value
     catalog_version = {
@@ -281,6 +373,9 @@ def experiment_inputs(
 
     sustained = arch.pipeline.sustained
     return {
+        # Written at run start by 1.7 and later: the run asks for identity
+        # v2, which build_experiment stamps only when its inputs exist.
+        "identity_version": IDENTITY_VERSION,
         "workload": {
             "name": schema,
             "version": WORKLOAD_VERSIONS.get(schema, f"{schema}-unversioned"),
@@ -300,7 +395,7 @@ def experiment_inputs(
             ),
             "catalog": {"type": catalog, "version": catalog_version},
             "table_format": {"type": table_format, "version": format_version},
-            "pipeline_engine": {"type": arch.pipeline_engine.value, "image": images.spark},
+            "pipeline_engine": {"type": arch.pipeline_engine.value, "image": spark_image},
             "query_engine": {"type": query_engine, "version": engine_version},
             # How the query engine reaches the tables: through the catalog
             # (Trino, Spark Thrift) or straight from object storage (DuckDB
@@ -310,6 +405,15 @@ def experiment_inputs(
                 "spark-thrift": "catalog",
                 "duckdb": "direct_storage",
             }.get(query_engine),
+            # The user's Spark conf over the job defaults, only when it
+            # changes something, so a default config's block is unchanged.
+            **({"spark_conf_user": user_conf} if user_conf else {}),
+            **(
+                {"spark_executor_overrides": dict(sorted(executor_overrides.items()))}
+                if executor_overrides
+                else {}
+            ),
+            **({"spark_driver_overrides": driver_overrides} if driver_overrides else {}),
         },
         "maintenance_config": {
             "pre_benchmark_maintenance": arch.pipeline.pre_benchmark_maintenance,
@@ -359,23 +463,27 @@ def experiment_inputs(
 
 
 def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> list[dict]:
-    from lakebench.modules.pipeline_engines.spark.job import get_job_profile
+    from lakebench.modules.pipeline_engines.spark.job import (
+        EXECUTOR_OVERRIDE_FIELDS,
+        executor_count,
+        get_job_profile,
+    )
 
     scale = float(snapshot.get("scale") or 0)
-    overrides = ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
+    # A --local run has no executors, so no override applied.
+    overrides = (
+        {}
+        if snapshot.get("local")
+        else ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
+    )
     out = []
     job_types = [j.job_type for j in metrics.jobs] + [s.job_type for s in metrics.streaming]
     for job_type in dict.fromkeys(job_types):
         profile = get_job_profile(job_type, schema)
         if not profile or "base_executors" not in profile:
             continue
-        base = int(profile["base_executors"])
-        uncapped = (
-            base
-            if scale <= 10
-            else base + int((scale - 10) * profile["executors_per_100_scale"] // 100)
-        )
-        override = overrides.get(_OVERRIDE_KEY.get(job_type, ""))
+        uncapped = executor_count(profile, scale, capped=False)
+        override = overrides.get(EXECUTOR_OVERRIDE_FIELDS.get(job_type, ("", ""))[1])
         cap = int(profile["max_executors"])
         observed = next(
             (j.executor_count for j in metrics.jobs if j.job_type == job_type and j.executor_count),
@@ -393,9 +501,15 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
             "scale_derived": uncapped,
             "cap": cap,
             "override": override,
-            "cap_hit": override is None and uncapped > cap,
+            # A count pinned at the cap is the cap binding too (a pinned
+            # perf-gate config must pin the profile's count, the cap there).
+            "cap_hit": uncapped > cap and (override is None or override == cap),
             "observed": observed,
         }
+        if override is not None and override < min(uncapped, cap):
+            # The config gave the job fewer executors than its proven
+            # profile asks for at this scale: the run measures the override.
+            entry["override_bound"] = True
         if streaming and override is None and observed is not None and observed < wanted:
             # Continuous streams share a concurrent executor budget
             # (job.py): the cluster granted fewer than the profile asks.
@@ -457,51 +571,18 @@ def _rules(metrics: Any) -> dict[str, Any]:
 def _caps_bound(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
     """The Lakebench limits that bound this run (invariant 4), one line each.
     A figure measured under one of these is not what the system can do."""
-    out = [
-        f"{x['job_type']}: executor cap {x['cap']} (scale asks for {x['scale_derived']})"
-        for x in limits.get("executors") or []
-        if x.get("cap_hit")
-    ]
-    out += [
-        f"{x['job_type']}: concurrent executor budget granted {x['budget_cap']['granted']} "
-        f"of {x['budget_cap']['requested']}"
-        for x in limits.get("executors") or []
-        if x.get("budget_cap")
-    ]
-    if limits.get("tm_alerts_over_capacity"):
-        out.append(
-            f"TM max_alerts_per_customer ({limits.get('tm_max_alerts_per_customer')}): "
-            f"{limits['tm_alerts_over_capacity']} alerts over capacity"
-        )
-    out += [f"auto-sizing: {c}" for c in limits.get("autosize_cuts") or []]
-    if limits.get("maintenance_stopped"):
-        out.append("pre-benchmark maintenance stopped on its time budget")
-    for rule, why in (rules.get("skipped") or {}).items():
-        if "cap" in str(why):
-            out.append(f"rule {rule} skipped: {why}")
-    return out
+    from lakebench.metrics.bounds import bound_entries
+
+    return [line for _kind, line in bound_entries(limits, rules)]
 
 
 def _bound_kinds(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
     """Which limits bound, without the counts: the like-for-like condition.
     The counts (a concurrent budget granted from live cluster capacity)
     vary between runs of one config and stay in ``bound`` as evidence."""
-    out = {
-        f"{x['job_type']}: executor cap" for x in limits.get("executors") or [] if x.get("cap_hit")
-    }
-    out |= {
-        f"{x['job_type']}: concurrent executor budget"
-        for x in limits.get("executors") or []
-        if x.get("budget_cap")
-    }
-    if limits.get("tm_alerts_over_capacity"):
-        out.add("TM max_alerts_per_customer")
-    if limits.get("autosize_cuts"):
-        out.add("auto-sizing cuts")
-    if limits.get("maintenance_stopped"):
-        out.add("pre-benchmark maintenance budget")
-    out |= {f"rule {r} cap" for r, why in (rules.get("skipped") or {}).items() if "cap" in str(why)}
-    return sorted(out)
+    from lakebench.metrics.bounds import bound_entries
+
+    return sorted({kind for kind, _line in bound_entries(limits, rules)})
 
 
 def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
@@ -516,21 +597,36 @@ def _continuous_results(metrics: Any) -> dict[str, Any]:
     CLI runs once the whole corpus has passed through the pipeline and the
     streams have stopped (cli/_sustained.py), when every table is a function
     of the corpus alone. The in-stream rounds read tables still being
-    written and are never fingerprinted."""
+    written and are never fingerprinted.
+
+    An AML run also carries ``alert_set_continuous``: the alert-set
+    fingerprint of gold.alerts at the scored tick's commit, computed once
+    after the drain by
+    the covered score (cli/_aml_post.py), never per tick. Diagnostic only:
+    continuous alerts depend on when ticks ran."""
     check = (getattr(metrics, "continuous", None) or {}).get("result_check") or {}
     fps = dict(check.get("fingerprints") or {})
     if fps and not check.get("not_checked"):
-        return {
+        out: dict[str, Any] = {
             "query_set_id": check.get("query_set_id"),
             "fingerprints": fps,
             "basis": "continuous result check after the corpus settled",
         }
-    return {
-        "query_set_id": check.get("query_set_id"),
-        "fingerprints": {},
-        "not_checked": "continuous: "
-        + str(check.get("not_checked") or "no end-of-run result check was recorded"),
-    }
+    else:
+        out = {
+            "query_set_id": check.get("query_set_id"),
+            "fingerprints": {},
+            "not_checked": "continuous: "
+            + str(check.get("not_checked") or "no end-of-run result check was recorded"),
+        }
+    scoring = getattr(metrics, "financial_scoring", None) or {}
+    if (
+        scoring.get("mode") == "covered"
+        and scoring.get("status") == "scored"
+        and scoring.get("alert_set")
+    ):
+        out["alert_set_continuous"] = scoring["alert_set"]
+    return out
 
 
 def _results(metrics: Any, mode: str) -> dict[str, Any]:
@@ -623,13 +719,17 @@ def support_state(
 ) -> dict[str, Any]:
     """The DESIGN 6.5 support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
-    validation record (config/validated_combinations.yaml)."""
+    validation record (config/validated_combinations.yaml), at the Spark
+    minor and table format version the architecture block names."""
+    from lakebench.config.support import spark_minor
     from lakebench.config.support import support_state as _state
 
     def t(key: str) -> str | None:
         v = arch.get(key)
         return (v or {}).get("type") if isinstance(v, Mapping) else v
 
+    engine, fmt = arch.get("pipeline_engine"), arch.get("table_format")
+    version = fmt.get("version") if isinstance(fmt, Mapping) else None
     return _state(
         workload,
         t("catalog"),
@@ -638,6 +738,8 @@ def support_state(
         t("query_engine"),
         mode,
         system=system,
+        spark=spark_minor(engine.get("image") if isinstance(engine, Mapping) else None),
+        table_format_version=version if isinstance(version, str) else None,
     )
 
 
@@ -673,6 +775,40 @@ def _repetitions(metrics: Any) -> dict[str, Any]:
         "benchmark_samples_per_query": samples_per_query(queries) if queries else None,
         "benchmark_rounds": len(getattr(metrics, "benchmark_rounds", None) or []) or None,
     }
+
+
+def _corpus_v2(
+    corpus: dict[str, Any],
+    problems: list[str],
+    inputs: Mapping[str, Any],
+    dg: Mapping[str, Any],
+    fleet: Any = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Add corpus id v2 from the persisted run-end observation and,
+    for a series repetition, the inherited block (metrics/corpus_identity).
+    ``corpus.id`` (v1) is untouched. A record with neither input (every
+    v1.6 record) is returned unchanged."""
+    from lakebench.metrics.corpus_identity import corpus_v2_fields
+
+    obs = inputs.get("corpus_observation")
+    inherited = inputs.get("inherited_corpus")
+    v2 = corpus_v2_fields(
+        dict(inputs.get("corpus") or {}),
+        obs=obs if isinstance(obs, Mapping) else None,
+        inherited=inherited if isinstance(inherited, Mapping) else None,
+        model_version=(inputs.get("workload") or {}).get("generator_model_version"),
+        fleet_digest=dg.get("digest"),
+        fleet=fleet if isinstance(fleet, Mapping) else None,
+    )
+    if v2 is None:
+        return corpus, problems
+    if v2.replace is not None:
+        # Series case (b): repetition 1's block, verbatim (its problems
+        # included); this repetition's observation found no markers.
+        block = v2.replace
+        return block, list(block.pop("problems", None) or [])
+    corpus.update(v2.fields)
+    return corpus, [*problems, *v2.problems]
 
 
 def build_experiment(metrics: Any) -> dict[str, Any] | None:
@@ -721,6 +857,20 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
     limits["bound_kinds"] = _bound_kinds(limits, rules)
+    from lakebench.metrics.attribution import attribution, headroom_pct
+
+    headroom = headroom_pct(metrics) if mode == "batch" else None
+    if headroom is not None:
+        # Diagnostic: how close each stage came to the per-job timeout.
+        limits["headroom_pct"] = headroom
+    if mode == "sustained":
+        # The trickle is shown with the limits but is not a bound kind:
+        # every continuous run sets one (metrics/bounds.py).
+        from lakebench.metrics.bounds import trickle_bound, trickle_line
+
+        limits["trickle_bound"] = trickle_bound(metrics)
+        if limits["trickle_bound"] is not None:
+            limits["bound"].append(trickle_line(limits["trickle_bound"]))
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
@@ -768,10 +918,59 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     dg = _datagen(metrics, inputs)
     corpus, corpus_problems = _observed_corpus(dict(inputs.get("corpus") or {}), dg)
     corpus["datagen"] = dg
+    corpus, corpus_problems = _corpus_v2(
+        corpus, corpus_problems, inputs, dg, getattr(metrics, "datagen_fleet", None)
+    )
     if corpus_problems:
         corpus["problems"] = corpus_problems
-    return {
-        "schema": EXPERIMENT_SCHEMA,
+    v17 = inputs.get("identity_version") == IDENTITY_VERSION
+    sysid = inputs.get("system_identity")
+    sysid = dict(sysid) if isinstance(sysid, Mapping) and sysid.get("parts") else None
+    missing: list[str] = []
+    if v17:
+        if corpus.get("id_v2") is None and not corpus.get("id_v2_unavailable"):
+            from lakebench.metrics.corpus_identity import NOT_OBSERVED
+
+            corpus["id_v2"] = None
+            corpus["id_v2_unavailable"] = NOT_OBSERVED
+        if corpus.get("id_v2") is None:
+            missing.append("corpus id v2")
+        from lakebench.metrics.system_identity import CLUSTER_PARTS, observed_parts
+
+        if sysid is None or (
+            not local and not observed_parts(sysid.get("parts") or {}) & set(CLUSTER_PARTS)
+        ):
+            # A cluster run's identity counts only with a part read from the
+            # cluster itself; a stub from a failed sample, or one built from
+            # the config alone, is kept as evidence but is not one. A local
+            # run's identity observes no part by design and is complete.
+            missing.append("system identity")
+        from lakebench.metrics.comparability import access_paths
+
+        arch["access_paths"] = {"pipeline": "catalog", **access_paths({"architecture": arch})}
+    else:
+        missing.append("identity version")
+    exp2 = not missing
+    if exp2:
+        # exp2 ids name the compaction operation; exp1 ids never move.
+        from lakebench.metrics.maintenance_policy import with_compaction_operation
+
+        effective = with_compaction_operation(effective)
+    block: dict[str, Any] = {
+        "schema": EXPERIMENT_SCHEMA_V2 if exp2 else EXPERIMENT_SCHEMA_V1,
+        **({"identity_version": IDENTITY_VERSION} if exp2 else {}),
+        **({"v2_unavailable": missing} if v17 and missing else {}),
+        **({"system_identity": sysid} if sysid is not None else {}),
+        # Allocatable and co-tenant load at run start and end:
+        # Observational, never compared.
+        **(
+            {"observed": copy.deepcopy(dict(inputs["observed"]))}
+            if isinstance(inputs.get("observed"), Mapping)
+            else {}
+        ),
+    }
+    exp: dict[str, Any] = {
+        **block,
         "system": "local" if local else "cluster",
         "support": _recorded_support(inputs, schema, arch, mode, local),
         "repetitions": _repetitions(metrics),
@@ -785,9 +984,94 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "stages": {"executed": executed, "skipped": skipped},
         "rules": rules,
         "limits": limits,
+        **_requested_effective(metrics, limits),
         "results": _results(metrics, mode),
-        "lakebench": dict(metrics.provenance or {}),
+        "lakebench": experiment_lakebench(metrics.provenance),
     }
+    # Diagnostic, AML batch only: where gold-finalize's time went.
+    gold_attribution = attribution(metrics) if mode == "batch" else None
+    if gold_attribution is not None:
+        exp["attribution"] = gold_attribution
+    return exp
+
+
+def _requested_effective(metrics: Any, limits: Mapping[str, Any]) -> dict[str, Any]:
+    """``requested_effective`` (what the run asked for against what it did,
+    per decision) and ``requested_effective_mismatches`` (the keys of the
+    requests not met; metrics/requested_effective.py). Observational, never
+    identity."""
+    from lakebench.metrics import requested_effective as re_
+
+    entries = re_.derive(metrics, limits)
+    return {
+        "requested_effective": entries,
+        "requested_effective_mismatches": re_.mismatches(entries),
+    }
+
+
+def refresh_benchmark(metrics: Any) -> None:
+    """Bring a stored block's benchmark half up to date after ``lakebench
+    benchmark`` replaced the record's benchmark (``cli/_query.py``).
+
+    A stored block is never rebuilt, so without this its result
+    fingerprints, benchmark iterations and mode would still describe the
+    benchmark that was replaced. Only those keys, the sample count, the
+    "benchmark (not run)" entry of the skipped stages and a
+    ``benchmark_source`` note change; schema, corpus, architecture and every
+    other key stay as stored. The identity digest moves with the benchmark
+    iterations and mode (and on exp2 the query set id), as the record now
+    describes a different benchmark. A record with no stored block is left alone
+    (its block is built from the record when it is saved). For a continuous
+    record the results stay its end-of-run result check, which a later
+    benchmark does not change."""
+    exp = getattr(metrics, "experiment", None)
+    if not isinstance(exp, dict) or not exp.get("schema"):
+        return
+    bench = metrics.benchmark
+    if bench is None:
+        return
+    mode = exp.get("mode") or "batch"
+    if mode != "sustained":
+        old = exp.get("results") or {}
+        new = _results(metrics, mode)
+        # Keys another writer put in results stay; the benchmark's own
+        # three are replaced.
+        exp["results"] = {
+            **{
+                k: v
+                for k, v in old.items()
+                if k not in ("query_set_id", "fingerprints", "not_checked")
+            },
+            **new,
+        }
+        stages = exp.get("stages") or {}
+        if isinstance(stages.get("skipped"), list):
+            stages["skipped"] = [
+                x for x in stages["skipped"] if not str(x).startswith("benchmark (")
+            ]
+    limits = exp.setdefault("limits", {})
+    limits["benchmark_iterations"] = getattr(bench, "iterations", None) or limits.get(
+        "benchmark_iterations"
+    )
+    limits["benchmark_mode"] = getattr(bench, "mode", None)
+    headroom = limits.get("headroom_pct")
+    if isinstance(headroom, dict) and "benchmark_query" in headroom:
+        # The run's per-query timeout does not describe the replacement
+        # benchmark: its headroom is not known.
+        headroom["benchmark_query"] = None
+    if "benchmark_rounds" in limits:
+        # The rounds behind the QpH, as build_experiment counts them: a
+        # benchmark record of a continuous run carries none of its rounds.
+        pb = getattr(metrics, "pipeline_benchmark", None)
+        limits["benchmark_rounds"] = sum(
+            1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0
+        )
+    reps = exp.setdefault("repetitions", {})
+    now = _repetitions(metrics)
+    reps["benchmark_samples_per_query"] = now.get("benchmark_samples_per_query")
+    if "benchmark_rounds" in reps:
+        reps["benchmark_rounds"] = now.get("benchmark_rounds")
+    exp["benchmark_source"] = "lakebench benchmark, after the run (replaced the run's benchmark)"
 
 
 def planned_experiment(cfg: Any) -> dict[str, Any]:
@@ -802,7 +1086,9 @@ def planned_experiment(cfg: Any) -> dict[str, Any]:
     return {
         "workload": inputs["workload"],
         "corpus": inputs["corpus"],
-        "architecture": {"query_access_path": arch.get("query_access_path")},
+        # The whole composition, so the classifier sees the components and
+        # the compaction operation a run of this config will use.
+        "architecture": dict(arch),
         "system": "cluster",
         "limits": {"benchmark_iterations": inputs["config_limits"].get("benchmark_iterations")},
         "maintenance_settings": dict(mcfg.get("settings") or {}),
@@ -824,7 +1110,21 @@ def planned_experiment(cfg: Any) -> dict[str, Any]:
 
 
 def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
-    """The fields that must match for two runs to be compared at all."""
+    """The experiment identity of a block as stored: ``_identity_v1`` for an
+    exp1 block (and any block without ``identity_version`` 2), else
+    ``_identity_v2``. Its digest is ``identity_hash``."""
+    from lakebench.metrics.comparability import EXP2, block_generation
+
+    if block_generation(exp) == EXP2:
+        return _identity_v2(exp)
+    return _identity_v1(exp)
+
+
+def _identity_v1(exp: Mapping[str, Any]) -> dict[str, Any]:
+    """The v1.6 identity, frozen: its output, and so every stored exp1
+    digest, never changes (tests/test_stored_records.py pins the 24 stored
+    records). New keys go in ``_identity_v2`` or in the read-time
+    classification of ``metrics/comparability.py``."""
     w = exp.get("workload") or {}
     c = exp.get("corpus") or {}
     dg = c.get("datagen") or {}
@@ -840,9 +1140,6 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
         "scale": c.get("scale"),
         "mode": exp.get("mode"),
         "generator digest": dg.get("digest"),
-        # Execution conditions (CONDITION_KEYS): a difference makes a pair
-        # comparable but not like-for-like (DESIGN 2.4, 6.5). The perf gate
-        # and reproduce, which need the same experiment, refuse on them too.
         "effective maintenance": (exp.get("effective_maintenance") or {}).get("id"),
         "maintenance settings": exp.get("maintenance_settings"),
         "query access path": (exp.get("architecture") or {}).get("query_access_path"),
@@ -858,27 +1155,62 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: identity() keys that are execution conditions, not experiment identity.
-CONDITION_KEYS = frozenset(
-    {
-        "effective maintenance",
-        "maintenance settings",
-        "query access path",
-        "system",
-        "benchmark iterations",
-        "benchmark mode",
-        "benchmark rounds",
-        "Lakebench limits that bound",
-    }
-)
+def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
+    """The v2 identity: the v1 keys without the generator image tag
+    and the ``cluster``/``local`` string, with corpus id v2, the query set
+    id, the system fingerprint, the access paths and the dependency pinset,
+    plus each ``OPTIONAL_IDENTITY_KEYS`` key whose value is not its
+    default. ``identity version`` names the version, so a stored identity
+    dict says which rules wrote it."""
+    from lakebench.metrics import comparability as cmp
 
+    w = exp.get("workload") or {}
+    c = exp.get("corpus") or {}
+    dg = c.get("datagen") or {}
+    limits = exp.get("limits") or {}
+    _, pinset, _ = cmp.dependency_pinset(exp)
+    out: dict[str, Any] = {
+        "identity version": IDENTITY_VERSION,
+        "workload": w.get("name"),
+        "workload version": w.get("version"),
+        "generator model version": w.get("generator_model_version"),
+        "workload parameters": w.get("parameters_id"),
+        "query set id": (exp.get("results") or {}).get("query_set_id"),
+        "corpus id v2": c.get("id_v2"),
+        "seed": c.get("seed"),
+        "corpus role": c.get("corpus_role"),
+        "scale": c.get("scale"),
+        "mode": exp.get("mode"),
+        "generator digest": dg.get("digest"),
+        "access paths": cmp.access_paths(exp),
+        "dependency pinset": pinset or cmp.PINSET_NOT_RECORDED,
+        "system fingerprint": (exp.get("system_identity") or {}).get("fingerprint"),
+        "effective maintenance": (exp.get("effective_maintenance") or {}).get("id"),
+        "maintenance settings": exp.get("maintenance_settings"),
+        "benchmark iterations": limits.get("benchmark_iterations"),
+        "benchmark mode": limits.get("benchmark_mode"),
+        "Lakebench limits that bound": list(limits.get("bound_kinds") or []),
+    }
+    if exp.get("mode") == "sustained":
+        out["benchmark rounds"] = limits.get("benchmark_rounds")
+    out.update(cmp.optional_keys(exp))
+    return out
+
+
+#: Identity keys that are execution conditions (the Conditions group of
+#: metrics/comparability.py, its one definition): a difference makes a pair
+#: comparable but not like-for-like. ``system`` and ``query access path``
+#: moved out in 1.7 (System and Architecture groups); ``compaction
+#: operation`` is a read-time key, not an identity() key.
+CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
 
 #: Conditions that are also outcomes of the run: the in-stream round count
-#: depends on how long each round took, so a slower build fits fewer rounds.
+#: depends on how long each round took, so a slower build fits fewer rounds,
+#: and the investigator sessions that ran depend on the cases open.
 #: compare reports a difference (not like-for-like); the perf gate and
 #: reproduce do not refuse on it, or a regression that costs a round would
 #: read as "not comparable" instead of a regression.
-OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds"})
+OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
 
 
 def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
@@ -899,6 +1231,8 @@ def results_established(exp: Mapping[str, Any] | None) -> bool | str:
 
 
 def identity_hash(exp: Mapping[str, Any]) -> str:
+    """The identity digest of a block as stored (``identity`` minus the
+    generator digest). For exp1 blocks it is the v1.6 digest unchanged."""
     ident = identity(exp)
     # A digest is evidence when both sides have one; an unresolved digest on
     # one side is not a difference (the image reference still is).
@@ -906,9 +1240,25 @@ def identity_hash(exp: Mapping[str, Any]) -> str:
     return _short_hash(ident)
 
 
+def identity_digest(record_or_block: Mapping[str, Any]) -> str | None:
+    """``identity_hash`` of a metrics.json dict's stored block (or of a
+    block passed directly); None for a record without one."""
+    exp = (
+        experiment_of(record_or_block)
+        if "experiment" in record_or_block or "run_id" in record_or_block
+        else record_or_block
+    )
+    return identity_hash(exp) if exp else None
+
+
 def experiment_of(record: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The record's experiment block when it is one this Lakebench reads
+    (exp1, or exp2 with identity version 2), else None: a block of another
+    schema reads as no provenance, as the comparison ladder reads it."""
     exp = (record or {}).get("experiment")
-    return exp if isinstance(exp, Mapping) and exp.get("schema") else None
+    if not isinstance(exp, Mapping) or _cmp.generation(record) == _cmp.LEGACY:
+        return None
+    return exp
 
 
 def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = None) -> list[str]:
@@ -926,15 +1276,37 @@ def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = No
     return out
 
 
-def identity_differences(a: Mapping[str, Any], b: Mapping[str, Any]) -> list[str]:
-    """Experiment-identity differences (not execution conditions)."""
-    ia, ib = identity(a), identity(b)
-    return diff_identities(ia, ib, [k for k in {**ia, **ib} if k not in CONDITION_KEYS])
+def identity_differences(
+    a: Mapping[str, Any],
+    b: Mapping[str, Any],
+    record_a: Mapping[str, Any] | None = None,
+    record_b: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Experiment-identity differences: the Workload and Corpus groups
+    (metrics/comparability.py). Architecture, System and Conditions
+    differences are not identity differences. Blocks of different identity
+    versions differ as a whole. *record_a* and *record_b* are the blocks'
+    metrics.json dicts, when known, for the read-time derivations."""
+    from lakebench.metrics import comparability as cmp
+
+    ca, cb = cmp.classify(a, record_a), cmp.classify(b, record_b)
+    if ca.generation != cb.generation:
+        return [f"identity version differs ({ca.generation} vs {cb.generation})"]
+    return [str(d) for g in (cmp.WORKLOAD, cmp.CORPUS) for d in cmp.diff_group(ca, cb, g)]
 
 
-def condition_differences(a: Mapping[str, Any], b: Mapping[str, Any]) -> list[str]:
-    """Execution-condition differences: comparable, not like-for-like."""
-    return diff_identities(identity(a), identity(b), CONDITION_KEYS)
+def condition_differences(
+    a: Mapping[str, Any],
+    b: Mapping[str, Any],
+    record_a: Mapping[str, Any] | None = None,
+    record_b: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Execution-condition differences (the Conditions group, with the
+    compaction operation): comparable, not like-for-like."""
+    from lakebench.metrics import comparability as cmp
+
+    ca, cb = cmp.classify(a, record_a), cmp.classify(b, record_b)
+    return [str(d) for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
 
 
 def result_fingerprints(exp: Mapping[str, Any]) -> dict[str, Any]:
@@ -998,7 +1370,14 @@ def refusals(
     if prov:
         return prov, [], []
     assert ea is not None and eb is not None
-    prov = identity_differences(ea, eb)
+    from lakebench.metrics import comparability as cmp
+
+    # Ladder step 0 (identity versions, required keys, a withheld seed).
+    step0 = cmp.pair_verdict([record_a or {}], [record_b or {}], label_a, label_b)
+    prov = list(step0.reasons) if step0.step == "0" else []
+    if _cmp.block_generation(ea) == _cmp.block_generation(eb):
+        # (A version mismatch is already the step 0 line.)
+        prov += identity_differences(ea, eb, record_a, record_b)
     for label, exp in ((label_a, ea), (label_b, eb)):
         prov.extend(f"{label}: {p}" for p in corpus_problems(exp))
     notes: list[str] = []
@@ -1018,14 +1397,25 @@ def refusals(
 def like_for_like(
     record_a: Mapping[str, Any] | None, record_b: Mapping[str, Any] | None
 ) -> list[str]:
-    """Execution conditions that differ between two metrics.json dicts
-    (effective maintenance, query access path). A comparable pair with any
-    is comparable but not like-for-like (DESIGN 6.5). Empty when either has
+    """Why two metrics.json dicts are not like-for-like: the execution
+    conditions that differ (effective maintenance, the compaction
+    operation and the rest of the Conditions group), preceded by the
+    ladder's confounded line (architecture and system both differ) or its
+    step 7a line (only the dependency set differs). Empty when either has
     no experiment block (that pair is refused before this matters)."""
     ea, eb = experiment_of(record_a), experiment_of(record_b)
     if ea is None or eb is None:
         return []
-    return condition_differences(ea, eb)
+    from lakebench.metrics import comparability as cmp
+
+    out = condition_differences(ea, eb, record_a, record_b)
+    verdict = cmp.pair_verdict([record_a or {}], [record_b or {}])
+    if verdict.verdict == cmp.CONFOUNDED or verdict.step == "7a":
+        # Not conditions, but just as fatal to like-for-like (ladder steps
+        # 6 and 7a): shown with the conditions until compare reads the
+        # ladder itself.
+        out = list(verdict.reasons) + out
+    return out
 
 
 def support_of(record: Mapping[str, Any] | None) -> str:
@@ -1057,8 +1447,25 @@ def stored_identity_refusals(
         return [f"{NO_PROVENANCE} (the run has no experiment block)"]
     if not expected_identity:
         return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
-    actual_identity = {k: v for k, v in identity(actual).items() if k not in OUTCOME_CONDITION_KEYS}
-    missing = [k for k in actual_identity if k not in expected_identity]
+    full_actual = identity(actual)
+    version_refusal = _identity_version_refusal(expected_identity, full_actual, actual, what)
+    if version_refusal:
+        return [version_refusal]
+    unobserved = (
+        _unobserved_system(expected_identity.get("system fingerprint"), actual)
+        if full_actual.get("identity version") == IDENTITY_VERSION
+        else None
+    )
+    if unobserved:
+        return [f"not comparable: {unobserved}; the {what} cannot be matched to a system"]
+    actual_identity = {k: v for k, v in full_actual.items() if k not in OUTCOME_CONDITION_KEYS}
+    # An optional key (set only when non-default) absent from the reference
+    # is a difference in that key, not an older identity.
+    missing = [
+        k
+        for k in actual_identity
+        if k not in expected_identity and k not in _cmp.OPTIONAL_IDENTITY_KEYS
+    ]
     if missing:
         return [
             f"not comparable: the {what} was recorded with an older experiment identity "
@@ -1095,6 +1502,56 @@ def stored_identity_refusals(
     want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
     reasons.extend(diff_fingerprints(want, got, what, "run"))
     return reasons
+
+
+def _unobserved_system(expected_fingerprint: Any, actual: Mapping[str, Any]) -> str | None:
+    """Why a v2 reference or run names no observed system, or None. The
+    fingerprint of an identity with no observed part is one constant per
+    system type, so two such runs on different clusters would match."""
+    from lakebench.metrics.system_identity import PARTS, fingerprint_of, observed_parts
+
+    sysid = actual.get("system_identity")
+    if isinstance(sysid, Mapping) and not observed_parts(sysid.get("parts") or {}):
+        return "the run observed no part of its system"
+    blank = {
+        fingerprint_of({p: {"not_observed": ""} for p in PARTS}, system_type=t)
+        for t in ("cluster", "local")
+    }
+    if expected_fingerprint in blank:
+        return "the reference observed no part of its system"
+    return None
+
+
+def _identity_version_refusal(
+    expected: Mapping[str, Any], actual_identity: Mapping[str, Any], actual: Any, what: str
+) -> str | None:
+    """One refusal naming both identity versions when a stored reference
+    and a run were recorded under different ones (L8), else None. A v1
+    reference against a v2 run is refused, and so is the reverse: the
+    workload version bumps of 1.7 make them different experiments anyway."""
+    want = expected.get("identity version", 1)
+    got = actual_identity.get("identity version", 1)
+    if want == got:
+        return None
+    if want < got:
+        return (
+            f"not comparable: the {what} was recorded with experiment identity v{want} and "
+            f"this run is v{got}; record the {what} again from a current run"
+        )
+    missing = list((actual or {}).get("v2_unavailable") or [])
+    why = (
+        "its corpus has no generator marker; re-run it on the current datagen image"
+        if "corpus id v2" in missing
+        else (
+            f"it recorded no {', '.join(missing)}; re-run it with the current Lakebench"
+            if missing
+            else "re-run it with the current Lakebench"
+        )
+    )
+    return (
+        f"not comparable: the {what} was recorded with experiment identity v{want} and "
+        f"this run is v{got} ({why})"
+    )
 
 
 def failed_queries(record: Mapping[str, Any] | None) -> set[str]:

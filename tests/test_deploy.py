@@ -29,6 +29,15 @@ def _no_live_namespace_listing():
         yield core
 
 
+@pytest.fixture(autouse=True)
+def _cluster_fingerprint():
+    """SAF-10: deploy stamps buckets with this cluster's fingerprint and
+    refuses without one; give the tests a cluster (tests that need none
+    patch it themselves)."""
+    with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value="fp-test"):
+        yield
+
+
 def _make_config(**overrides) -> LakebenchConfig:
     """Create a LakebenchConfig with sensible defaults for testing.
 
@@ -195,7 +204,8 @@ class TestDeploymentEngine:
         assert ctx["namespace"] == "test-deploy"
         assert ctx["s3_endpoint"] == "http://minio:9000"
         assert ctx["s3_access_key"] == "minioadmin"
-        assert "spark_executor_instances" in ctx
+        # No template reads Spark executor sizing: it is the job profiles'.
+        assert not [k for k in ctx if k.startswith(("spark_executor_", "spark_driver_"))]
         assert "trino_worker_replicas" in ctx
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
@@ -351,7 +361,7 @@ class TestContextStorageVars:
             result = engine._deploy_scratch_storageclass()
 
         assert result.status == DeploymentStatus.FAILED
-        assert "admin install-scratch-storage-class" in result.message
+        assert "admin install --component scratch-storage-class" in result.message
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     def test_scratch_sc_verified_when_present(self, _mock_ocp):
@@ -527,9 +537,7 @@ class TestAutoSizerIntegration:
         k8s = _mock_k8s()
         engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
 
-        # scale=1 → minimal tier: 2 executors, 4g memory
-        assert engine.context["spark_executor_instances"] == 2
-        assert engine.context["spark_executor_memory"] == "4g"
+        # scale=1 → minimal tier: 1 Trino worker
         assert engine.context["trino_worker_replicas"] == 1
 
 
@@ -707,7 +715,8 @@ class TestPolarisDeployer:
         ctx = engine.context
         assert ctx["catalog_type"] == "polaris"
         assert ctx["polaris_port"] == 8181
-        assert ctx["polaris_version"] == "1.6.0"
+        # The Polaris that runs is the images.polaris tag.
+        assert "polaris_version" not in ctx
         assert ctx["polaris_cpu"] == "1"
         assert ctx["polaris_memory"] == "2Gi"
 
@@ -908,6 +917,7 @@ class TestOwnershipHooksFire:
         result = engine._deploy_namespace()
         assert result.status == DeploymentStatus.FAILED
         assert "ownership refused" in result.message
+        assert result.details["refusal"] == "deploy.identity_foreign"  # exit 3 (CLI-1)
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
@@ -1162,19 +1172,18 @@ class TestOwnershipHooksFire:
 
         with pytest.raises(typer.Exit) as exc:
             clean(
-                target="data",
+                target="silver",
                 config_file=Path(cfg_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
-        assert exc.value.exit_code == 1
+        assert exc.value.exit_code == 3  # refused: the bucket belongs to another deployment
 
         # empty_bucket must never fire on any bucket.
         assert s3.empty_bucket.call_count == 0
 
-    @pytest.mark.parametrize("target", ["bronze", "silver", "gold"])
+    @pytest.mark.parametrize("target", ["silver", "gold"])
     @patch("lakebench.deploy.ownership.verify_namespace_identity")
     @patch("lakebench.deploy.ownership.build_identity_from_config")
     @patch("kubernetes.client.CoreV1Api")
@@ -1243,7 +1252,6 @@ class TestOwnershipHooksFire:
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
 
         # verify_bucket_ownership was called with the specific bucket.
@@ -1295,22 +1303,25 @@ class TestOwnershipHooksFire:
         # Without --force-legacy: refuse.
         with pytest.raises(typer.Exit):
             clean(
-                target="data",
+                target="silver",
                 config_file=Path(cfg_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
         assert s3.empty_bucket.call_count == 0
 
+    @patch(
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+        return_value=(None, None, None),
+    )
     @patch("lakebench.deploy.ownership.verify_namespace_identity")
     @patch("lakebench.deploy.ownership.build_identity_from_config")
     @patch("kubernetes.client.BatchV1Api")
     @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
     def test_clean_absent_bucket_proceeds_with_force_legacy(
-        self, mock_s3_cls, mock_verify, _mock_batch, _mock_ident, mock_ns_identity
+        self, mock_s3_cls, mock_verify, _mock_batch, _mock_ident, mock_ns_identity, _mock_engine
     ):
         """--force-legacy on an untagged bucket proceeds. Confirms the
         opt-in escape hatch works so users can clean legacy state."""
@@ -1354,14 +1365,13 @@ class TestOwnershipHooksFire:
 
         # With --force-legacy: empty_bucket fires.
         clean(
-            target="data",
+            target="silver",
             config_file=Path(cfg_path),
             file_option=None,
             force=True,
             force_legacy=True,
-            metrics_dir=Path("/tmp/nonexistent-metrics"),
         )
-        assert s3.empty_bucket.call_count == 3
+        assert s3.empty_bucket.call_count == 1
 
 
 class TestBucketCreationRecord:
@@ -1380,7 +1390,7 @@ class TestBucketCreationRecord:
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
-                side_effect=lambda _b, name, _id: IdentityReport(
+                side_effect=lambda _b, name, _id, **_k: IdentityReport(
                     verdict=(
                         IdentityVerdict.MISMATCH if name in mismatch else IdentityVerdict.MATCH
                     ),
@@ -1451,11 +1461,14 @@ class TestBucketCreationRecord:
 
 
 class TestTaglessAdoptionRecord:
-    """Backends without bucket tagging: deploy records a pre-existing bucket
-    it adopts while empty, so destroy may empty it later; one that already
-    holds objects is not recorded (its data may not be lakebench's)."""
+    """Backends without bucket tagging: with --force-legacy deploy records a
+    pre-existing bucket it adopts while empty, so destroy may empty it later;
+    one that already holds objects is not recorded (its data may not be
+    lakebench's). Without the flag nothing is adopted: an empty, unmarked
+    bucket may be another cluster's not yet written (SAF-10 row 7)."""
 
-    def test_empty_adopted_bucket_is_recorded_non_empty_is_not(self):
+    @pytest.mark.parametrize("force_legacy", [True, False])
+    def test_empty_adopted_bucket_is_recorded_non_empty_is_not(self, force_legacy):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         config = _make_config(name="td")
@@ -1469,15 +1482,17 @@ class TestTaglessAdoptionRecord:
             "td-silver": False,
             "td-gold": True,
         }
-        client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
-            "KeyCount": 1 if Bucket == "td-silver" else 0
-        }
+        client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys, **_k: (
+            {"KeyCount": 1, "Contents": [{"Key": "d/1"}]} if Bucket == "td-silver" else {}
+        )
         with (
             patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False),
+            # The marker itself is tested on the S3 fake (test_owner_marker.py).
+            patch("lakebench.deploy.engine.DeploymentEngine._stamp_owner_marker", return_value=""),
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
-                side_effect=lambda _b, name, _id: IdentityReport(
+                side_effect=lambda _b, name, _id, **_k: IdentityReport(
                     verdict=IdentityVerdict.UNSUPPORTED,
                     resource_name=name,
                     expected_deployment="td",
@@ -1489,15 +1504,21 @@ class TestTaglessAdoptionRecord:
             patch("lakebench.k8s.get_k8s_client"),
             patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
         ):
-            result = engine._deploy_buckets()
+            result = engine._deploy_buckets(force_legacy=force_legacy)
         assert result.status == DeploymentStatus.SUCCESS, result.message
-        adopted.assert_called_once()
-        assert adopted.call_args.args[2] == ["td-bronze"]
+        if force_legacy:
+            adopted.assert_called_once()
+            assert adopted.call_args.args[2] == ["td-bronze"]
+        else:
+            adopted.assert_not_called()
 
 
-def test_preprovisioned_empty_tagless_buckets_are_recorded():
+@pytest.mark.parametrize("force_legacy", [True, False])
+def test_preprovisioned_empty_tagless_buckets_are_recorded(force_legacy):
     """Review: with create_buckets=false nothing was recorded, so clean and
-    the continuous reset refused pre-provisioned FlashBlade buckets forever."""
+    the continuous reset refused pre-provisioned FlashBlade buckets forever.
+    SAF-10 row 7: only with --force-legacy (the operator's word that no
+    other cluster uses the names)."""
     from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
     config = _make_config(name="td")
@@ -1507,14 +1528,13 @@ def test_preprovisioned_empty_tagless_buckets_are_recorded():
     engine = DeploymentEngine(config, k8s_client=_mock_k8s())
     client = MagicMock()
     client._init_error = None
-    client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
-        "KeyCount": 1 if Bucket == "td-gold" else 0
-    }
+    client.has_user_objects.side_effect = lambda bucket: bucket == "td-gold"
     with (
         patch("lakebench.s3.S3Client", return_value=client),
+        patch("lakebench.deploy.engine.DeploymentEngine._stamp_owner_marker", return_value=""),
         patch(
             "lakebench.deploy.ownership.verify_bucket_ownership",
-            side_effect=lambda _b, name, _id: IdentityReport(
+            side_effect=lambda _b, name, _id, **_k: IdentityReport(
                 verdict=IdentityVerdict.UNSUPPORTED, resource_name=name, expected_deployment="td"
             ),
         ),
@@ -1522,6 +1542,9 @@ def test_preprovisioned_empty_tagless_buckets_are_recorded():
         patch("lakebench.k8s.get_k8s_client"),
         patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
     ):
-        result = engine._deploy_buckets()
+        result = engine._deploy_buckets(force_legacy=force_legacy)
     assert result.status == DeploymentStatus.SKIPPED
-    assert adopted.call_args.args[2] == ["td-bronze"]
+    if force_legacy:
+        assert adopted.call_args.args[2] == ["td-bronze"]
+    else:
+        adopted.assert_not_called()

@@ -5,39 +5,24 @@ them, and records the count in gold.detection_status. Also: earlier runs'
 alerts are cleared only after this run's 'pending' status is written, and a
 rule that skips leaves no rows behind.
 
-Needs the Iceberg Spark runtime jar for the installed Spark: LB_TEST_ICEBERG_JAR
-names it, or LB_SPARK_TEST_JARS (comma-separated, as Lane D and integrate use)
-contains it. Otherwise the test is skipped.
+Needs the Iceberg Spark runtime jar for the installed Spark in
+LB_SPARK_TEST_JARS (see tests/spark/conftest.py).
 """
 
 from __future__ import annotations
 
-import os
 import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
 
-def _find_jar() -> str | None:
-    cands = [os.environ.get("LB_TEST_ICEBERG_JAR", "")]
-    cands += os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
-    for c in (c.strip() for c in cands):
-        if c and "iceberg-spark-runtime" in Path(c).name and Path(c).is_file():
-            return c
-    return None
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-_JAR = _find_jar()
-pytestmark = pytest.mark.skipif(
-    _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
-)
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
-
-
-def _session(warehouse):
+def _session(warehouse, jars):
+    """*jars*: the comma-separated test jar classpath."""
     from pyspark.sql import SparkSession
 
     return (
@@ -45,7 +30,7 @@ def _session(warehouse):
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars", _JAR)
+        .config("spark.jars", jars)
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -57,20 +42,11 @@ def _session(warehouse):
     )
 
 
-def test_each_rule_computed_once(tmp_path):
-    """Runs in a fresh interpreter: spark.jars only takes effect in a JVM
-    that has not started yet, and other Spark tests share this process."""
-    import subprocess
-
-    env = dict(os.environ, PYSPARK_PYTHON=sys.executable)
-    proc = subprocess.run(
-        [sys.executable, __file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=600,
-    )
-    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+def test_each_rule_computed_once(tmp_path, spark_subprocess, spark_jars):
+    """Runs in a fresh interpreter: a JVM with its own static Spark conf
+    (catalogs, extensions), apart from the other Spark tests in this
+    process."""
+    proc = spark_subprocess(__file__, tmp_path, spark_jars.classpath, timeout=600)
     assert "CHECK OK" in proc.stdout
 
 
@@ -120,6 +96,7 @@ def _check(spark):
             "narrative": lit("n"),
             "evidence": lit(None).cast("map<string,string>"),
             "detected_ts": current_timestamp(),
+            "reason_codes": array(lit("X_CODE")),
         }
         return base.select(*[cols[f.name].alias(f.name) for f in template.schema.fields])
 
@@ -159,7 +136,7 @@ def _check(spark):
             "INSERT INTO lakehouse.gold.alerts SELECT alert_id, 'WX_skip', rule_version, "
             "model_id, model_version, entity_id, related_txn_ids, related_entity_ids, "
             "alert_ts, alert_score, priority, status, disposition, alert_type, 'run-2', "
-            "narrative, evidence, detected_ts FROM lakehouse.gold.alerts LIMIT 1"
+            "narrative, evidence, detected_ts, reason_codes FROM lakehouse.gold.alerts LIMIT 1"
         )
         gf.run_detection_rules(spark, txns, "run-2", rules=("WX_skip",))
     finally:
@@ -171,6 +148,77 @@ def _check(spark):
     assert [(r["rule_id"], r["status"], r["reason"]) for r in status] == [
         ("WX_skip", "skipped", "test-skip")
     ]
+
+
+def _check_stage_profile(spark):
+    """AML-1: with profile_stages, each rule runs in its own job group, logs a
+    [stage-profile] line (stages, none, or unavailable) whatever its outcome,
+    and the caller's job group is back after the pass. Without it nothing
+    changes."""
+    import common
+    import detection_rules
+    import gold_finalize_financial as gf
+
+    from lakebench.metrics.stage_profile import parse_stage_profile
+
+    sc = spark.sparkContext
+    sc.setJobGroup("caller-group", "caller description", interruptOnCancel=False)
+    template = detection_rules._empty_alerts_df(spark, "x")
+    groups = {}
+
+    def ran_rule(silver_txns, run_id="unknown"):
+        groups["WX_ran"] = sc.getLocalProperty("spark.jobGroup.id")
+        # A shuffle, so the rule's group runs more than one stage.
+        silver_txns.groupBy("uetr").count().collect()
+        return template
+
+    def skip_rule(silver_txns, run_id="unknown"):
+        groups["WX_skip"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise detection_rules.RuleSkipped("test-skip")
+
+    def error_rule(silver_txns, run_id="unknown"):
+        groups["WX_error"] = sc.getLocalProperty("spark.jobGroup.id")
+        raise RuntimeError("boom")
+
+    rules = {"WX_ran": ran_rule, "WX_skip": skip_rule, "WX_error": error_rule}
+    logged = []
+    real = (gf.log, common.log)
+
+    def capture(m):
+        logged.append(m)
+        real[1](m)
+
+    detection_rules._RULE_DISPATCH.update(rules)
+    gf.log = common.log = capture
+    try:
+        txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+        # Default (the continuous tick): no group, no profile.
+        gf.run_detection_rules(spark, txns, "run-sp", rules=("WX_ran",))
+        assert groups.pop("WX_ran") == "caller-group"
+        assert not [m for m in logged if m.startswith("[stage-profile]")], logged
+        gf.run_detection_rules(spark, txns, "run-sp", rules=tuple(rules), profile_stages=True)
+    finally:
+        gf.log, common.log = real
+        for r in rules:
+            del detection_rules._RULE_DISPATCH[r]
+
+    assert sc.getLocalProperty("spark.jobGroup.id") == "caller-group"
+    assert sc.getLocalProperty("spark.job.description") == "caller description"
+    for rule, group in groups.items():
+        assert group.startswith(f"lb-rule-{rule}-"), groups
+    assert len(set(groups.values())) == 3, groups
+    lines = [m for m in logged if m.startswith("[stage-profile]")]
+    for rule in rules:
+        assert any(f"rule={rule} group={groups[rule]} " in m for m in lines), (rule, lines)
+    profile, unavailable, _cost = parse_stage_profile("\n".join(lines))
+    assert unavailable == {}, unavailable
+    assert profile["WX_ran"], lines
+    top = profile["WX_ran"][0]
+    assert top["tasks"] >= 1 and top["exec_s"] >= 0 and top["stages"] >= 2, top
+    assert profile["WX_skip"] == [] and profile["WX_error"] == [], profile
+    sc.setLocalProperty("spark.jobGroup.id", None)
+    sc.setLocalProperty("spark.job.description", None)
+    sc.setLocalProperty("spark.job.interruptOnCancel", None)
 
 
 def _check_late_entity(spark):
@@ -212,12 +260,76 @@ def _check_late_entity(spark):
     assert w2_alerts() == [1]
 
 
+def _cached(df):
+    """Whether Spark's cache manager holds *df* (DataFrame.is_cached is a
+    Python-side flag that clearCache does not reset)."""
+    level = df.storageLevel
+    return bool(level.useMemory or level.useDisk)
+
+
+def _check_screen_base(spark):
+    """AML-3: when W5 and W6 both run, the driver builds their screening
+    input once, passes the same persisted frame to both, keeps it cached
+    from W5 to W6 (only W5's alerts frame is dropped), and the cache is
+    cleared after W6. silver.entities exists here (_check_late_entity made
+    it)."""
+    import detection_rules as dr
+    import gold_finalize_financial as gf
+
+    txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+    template = dr._empty_alerts_df(spark, "x")
+    built, seen = [], []
+
+    def fake_base(silver_txns, silver_entities):
+        built.append(silver_entities is not None)
+        return silver_txns.select("uetr")
+
+    def screening(rule):
+        def fn(silver_txns, silver_entities=None, run_id="unknown", screen_base=None):
+            seen.append((rule, screen_base, screen_base is not None and _cached(screen_base)))
+            return template
+
+        return fn
+
+    real = (dr.screen_base_frame, dict(dr._RULE_DISPATCH))
+    dr.screen_base_frame = fake_base
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    dr._RULE_DISPATCH["W6_pep_counterparty"] = screening("W6")
+    try:
+        gf.run_detection_rules(
+            spark, txns, "run-sb", rules=("W5_sanctions_match", "W6_pep_counterparty")
+        )
+    finally:
+        dr.screen_base_frame = real[0]
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert built == [True]
+    (r5, b5, cached5), (r6, b6, cached6) = seen
+    assert (r5, r6) == ("W5", "W6")
+    assert b5 is b6 and b5 is not None
+    assert cached5 and cached6, seen
+    assert not _cached(b5)
+
+    # One screening rule alone: no shared base.
+    seen.clear()
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    try:
+        gf.run_detection_rules(spark, txns, "run-sb", rules=("W5_sanctions_match",))
+    finally:
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert seen == [("W5", None, False)]
+
+
 if __name__ == "__main__":
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    _spark = _session(sys.argv[1])
+    # Run by spark_subprocess (argv: <warehouse> <jars>), which puts the
+    # scripts on PYTHONPATH.
+    _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
+        _check_stage_profile(_spark)
         _check_late_entity(_spark)
+        _check_screen_base(_spark)
     finally:
         _spark.stop()
     print("CHECK OK")

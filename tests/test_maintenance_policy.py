@@ -96,7 +96,7 @@ def test_skip_maintenance_stamps_a_distinct_id():
     import lakebench.cli._run as run_mod
     import lakebench.cli._sustained as sus
 
-    for src in (inspect.getsource(run_mod.run), inspect.getsource(sus._run_sustained)):
+    for src in (inspect.getsource(run_mod._run_once), inspect.getsource(sus._run_sustained)):
         assert "if skip_maintenance and collector.current_run is not None:" in src
         assert "collector.current_run.maintenance_policy_id = skipped_policy_id()" in src
     assert skipped_policy_id() == MAINTENANCE_POLICY_ID + "+skipped"
@@ -185,7 +185,10 @@ def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
 
 
 def test_lakebench_compare_warns_across_policies():
-    from lakebench.cli._compare import _build_comparison
+    from lakebench.metrics.compare import compare_records
+
+    def _build_comparison(_la, a, _lb, b):
+        return compare_records([a], [b])
 
     a = {"run_id": "a", "pipeline_benchmark": {"scores": {}}}
     b = {
@@ -196,7 +199,7 @@ def test_lakebench_compare_warns_across_policies():
     assert any(
         "maintenance policy differs" in w for w in _build_comparison("A", a, "B", b)["warnings"]
     )
-    assert not _build_comparison("A", a, "B", dict(a))["warnings"]
+    assert not _build_comparison("A", a, "B", {**a, "run_id": "a2"})["warnings"]
 
 
 def test_turned_down_maintenance_is_a_fingerprint_difference(env):  # noqa: F811
@@ -483,7 +486,9 @@ def _continuous_report(tmp_path, pb, fmt: str) -> str:
     m.pipeline_benchmark = pb
     storage.save_run(m)
     out = ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path).generate_report(m.run_id)
-    return out.read_text()
+    from tests.fixtures.report_goldens import page_text
+
+    return page_text(out.read_text())
 
 
 def test_report_shows_the_limitation_and_the_trend(tmp_path):

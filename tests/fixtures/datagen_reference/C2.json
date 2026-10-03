@@ -1,0 +1,927 @@
+{
+ "format": 1,
+ "case": "C2",
+ "image": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+ "seed_ref": "42",
+ "runs": [
+  [
+   "--schema",
+   "customer360",
+   "--target-tb",
+   "0.004883",
+   "--customer-id-max",
+   "100000",
+   "--mode",
+   "all",
+   "--delivery-mode",
+   "continuous",
+   "--file-size-mb",
+   "64",
+   "--bucket",
+   "lbref",
+   "--prefix",
+   "customer/interactions",
+   "--seed",
+   "42",
+   "--dirty-ratio",
+   "0.08",
+   "--total-nodes",
+   "4",
+   "--workers",
+   "0",
+   "--timestamp-start",
+   "2024-01-01",
+   "--timestamp-end",
+   "2024-12-31",
+   "--cycle",
+   "0",
+   "--cycles",
+   "2"
+  ],
+  [
+   "--schema",
+   "customer360",
+   "--target-tb",
+   "0.004883",
+   "--customer-id-max",
+   "100000",
+   "--mode",
+   "all",
+   "--delivery-mode",
+   "continuous",
+   "--file-size-mb",
+   "64",
+   "--bucket",
+   "lbref",
+   "--prefix",
+   "customer/interactions",
+   "--seed",
+   "42",
+   "--dirty-ratio",
+   "0.08",
+   "--total-nodes",
+   "4",
+   "--workers",
+   "0",
+   "--timestamp-start",
+   "2024-12-31",
+   "--timestamp-end",
+   "2025-12-31",
+   "--cycle",
+   "1",
+   "--cycles",
+   "2"
+  ]
+ ],
+ "nodes": 4,
+ "env": {
+  "CPU_LIMIT": "8"
+ },
+ "threads": [
+  [
+   8,
+   8,
+   8,
+   8
+  ],
+  [
+   8,
+   8,
+   8,
+   8
+  ]
+ ],
+ "excluded": [
+  "_corpus/"
+ ],
+ "excluded_objects": 0,
+ "pin_proof": {
+  "c360": {
+   "digest": 7884786140200387728,
+   "files": 5,
+   "trees": 2
+  },
+  "financial": {
+   "digest": 14946780858166320800,
+   "files": 179,
+   "trees": 1
+  },
+  "financial_perturbed": {
+   "digest": 2899328701438880645,
+   "files": 179,
+   "trees": 1
+  },
+  "financial_two_cycle": {
+   "digest": 6502905751768177657,
+   "files": 181,
+   "trees": 1
+  },
+  "c360_two_cycle": {
+   "digest": 9956579246127600639,
+   "files": 10,
+   "trees": 1
+  }
+ },
+ "objects": [
+  {
+   "key": "customer/interactions/part-000000.parquet",
+   "size": 66579835,
+   "sha256": "e50a7b90ad02bf049310d69c1a633d2688db3169bb410b70424acefeb7e9931d"
+  },
+  {
+   "key": "customer/interactions/part-000001.parquet",
+   "size": 66540363,
+   "sha256": "6e75162fc95cef9b373d71827c8165acce10f9519b3e5445bc685444cb33b4c9"
+  },
+  {
+   "key": "customer/interactions/part-000002.parquet",
+   "size": 66557224,
+   "sha256": "08d5b318c6d713b2222f691ba1c2455dac4d23c6f91bad0901ffa0440a12f298"
+  },
+  {
+   "key": "customer/interactions/part-000003.parquet",
+   "size": 66547289,
+   "sha256": "b7874409b3be747a1de71bf75be3cbf6148b303369ce398c318073087423162b"
+  },
+  {
+   "key": "customer/interactions/part-000004.parquet",
+   "size": 66553693,
+   "sha256": "a0950271567591ae7ec8ef1f5873875025c34c8267ddbdd51308b3036f41515d"
+  },
+  {
+   "key": "customer/interactions/part-000005.parquet",
+   "size": 66569366,
+   "sha256": "d3f422621024d0ed9c9add3c95b114a62fcb54d345af39b6a94fbd966eac40cd"
+  },
+  {
+   "key": "customer/interactions/part-000006.parquet",
+   "size": 66558882,
+   "sha256": "b1834255649e7dcd7e24c6ac354459455e5f61783c8b0e79f7dbd2661201079c"
+  },
+  {
+   "key": "customer/interactions/part-000007.parquet",
+   "size": 66560929,
+   "sha256": "a36b8378a7526b0c87c90e6e049b802a6660ddfe3be7d3fc32c75b8705bda933"
+  },
+  {
+   "key": "customer/interactions/part-000008.parquet",
+   "size": 66570365,
+   "sha256": "a0f470a675bbf40cb0cf8a8180a1f2059a5dd2348dcb4d7f9c6b1dbc26c5e1c6"
+  },
+  {
+   "key": "customer/interactions/part-000009.parquet",
+   "size": 66560562,
+   "sha256": "0df473765ca9afc2ac99fa8dfc8b51cb65495288141dbfe7a9a461fcee864517"
+  },
+  {
+   "key": "customer/interactions/part-000010.parquet",
+   "size": 66561550,
+   "sha256": "aecb0b23fcc684cbaa3c1f601e6cbc3433e609458cbd4bdf2f6c438d58da06f3"
+  },
+  {
+   "key": "customer/interactions/part-000011.parquet",
+   "size": 66567740,
+   "sha256": "6297207060d1f5083dc6900a0aa7244a0d627542dee16fe3d9e8323e3dc0b996"
+  },
+  {
+   "key": "customer/interactions/part-000012.parquet",
+   "size": 66556076,
+   "sha256": "3ab53c9c4509b1530d20cea397e2271adae748a56a340ab9ec135b1ba5bcc44d"
+  },
+  {
+   "key": "customer/interactions/part-000013.parquet",
+   "size": 66555472,
+   "sha256": "85fc91c39ff50bee700bcf5b7e91752f880f91ff80deb2dd61d686ffbf9d69af"
+  },
+  {
+   "key": "customer/interactions/part-000014.parquet",
+   "size": 66558965,
+   "sha256": "1f64d6414323f9c694879573e808a28c709730e9311f76ee3d3a1b4c73a0153e"
+  },
+  {
+   "key": "customer/interactions/part-000015.parquet",
+   "size": 66557657,
+   "sha256": "4772bd4468f0b35d665d2562f2dcf2ea7061528857803e9c4a81181271780f7b"
+  },
+  {
+   "key": "customer/interactions/part-000016.parquet",
+   "size": 66577843,
+   "sha256": "25b274c4a497cfc76ac31f2f0c1c864beba91f16f22cc7e79c798f9a8baae929"
+  },
+  {
+   "key": "customer/interactions/part-000017.parquet",
+   "size": 66553346,
+   "sha256": "279ac9961a05e702c008193070a2226f193b9aeb036b7862e1a083afb41fec2d"
+  },
+  {
+   "key": "customer/interactions/part-000018.parquet",
+   "size": 66555640,
+   "sha256": "a3d935e90de90fe9e757df787c758a4e60240e60f17eab1c12adf1c532539c53"
+  },
+  {
+   "key": "customer/interactions/part-000019.parquet",
+   "size": 66576583,
+   "sha256": "e32e662e45e4233f9bcbbef3e5cc654b15cce7fcb03d00c2e0ff2ce62663acef"
+  },
+  {
+   "key": "customer/interactions/part-000020.parquet",
+   "size": 66552902,
+   "sha256": "5551eb5ec68fd2706da0b76b3f5c7d998a557e7d54ad2e7c1b8967f035e78c2f"
+  },
+  {
+   "key": "customer/interactions/part-000021.parquet",
+   "size": 66555143,
+   "sha256": "fc087932acabe44cde83818ab92aa3c04a8d29225cdaa33cabb04cb16b3761af"
+  },
+  {
+   "key": "customer/interactions/part-000022.parquet",
+   "size": 66564014,
+   "sha256": "a39da8b5c4b957a6650bd4221a825d5eca1f2798478dfa760d81fdee7cfcbe84"
+  },
+  {
+   "key": "customer/interactions/part-000023.parquet",
+   "size": 66558899,
+   "sha256": "6d6143ef77096ab2d50b71db984e3ebe6928bb9e096a85aae24c6fc5a9b05184"
+  },
+  {
+   "key": "customer/interactions/part-000024.parquet",
+   "size": 66553633,
+   "sha256": "84176db16be1f41cc4bcf6b562e80b571e09a978eca6d2adc6853818b8bdbc1c"
+  },
+  {
+   "key": "customer/interactions/part-000025.parquet",
+   "size": 66575087,
+   "sha256": "d0e3838c76f3be358bfd8b4b6d9b0210933c3cd9d90e63fd9ee5fafba262aeec"
+  },
+  {
+   "key": "customer/interactions/part-000026.parquet",
+   "size": 66577974,
+   "sha256": "ec9900fd803b66f15167364d2a74e164eb91d7ff2fceb8325caccb215c4391ad"
+  },
+  {
+   "key": "customer/interactions/part-000027.parquet",
+   "size": 66564595,
+   "sha256": "fb980b1aa30715baa5d4ac873a27fa16a0511a41e1de253b2ab6df263cb50f7e"
+  },
+  {
+   "key": "customer/interactions/part-000028.parquet",
+   "size": 66590475,
+   "sha256": "97768dc8dff7ddce6f57bb6a8f5376e6efca13992cd64f7d19988d35d1cb9e1d"
+  },
+  {
+   "key": "customer/interactions/part-000029.parquet",
+   "size": 66548217,
+   "sha256": "4ce2dffb7b86882525579e57f3c1aa965fc97674df9113a26530b2f54a434ad2"
+  },
+  {
+   "key": "customer/interactions/part-000030.parquet",
+   "size": 66556981,
+   "sha256": "7dcb59b04a2c1f5ffdaae2536b4d8a078f3a462995deb11c078cdbc0884821a0"
+  },
+  {
+   "key": "customer/interactions/part-000031.parquet",
+   "size": 66556694,
+   "sha256": "e3887a2ea1115d9448e1281b4e5087ea6b1efc94b33a40ac82641e550cf83729"
+  },
+  {
+   "key": "customer/interactions/part-000032.parquet",
+   "size": 66535052,
+   "sha256": "bd9cd6cfb250084986acf99d976db1a0df1ff6ce50bcc1e25b7eccbadd508ae3"
+  },
+  {
+   "key": "customer/interactions/part-000033.parquet",
+   "size": 66565312,
+   "sha256": "287fa7a8ac024463111a99ad71bea2cb0ded5ccb8680daa1bc7c11634e81da78"
+  },
+  {
+   "key": "customer/interactions/part-000034.parquet",
+   "size": 66572439,
+   "sha256": "ddd4fa72608ce647d4229bd51d6ccaec3935fe68ca6e6365becab20c5568a4c4"
+  },
+  {
+   "key": "customer/interactions/part-000035.parquet",
+   "size": 66569133,
+   "sha256": "aa66babae76280efbb8d6096723ef698ac6da4a6d8576b6df59454f00db7b431"
+  },
+  {
+   "key": "customer/interactions/part-000036.parquet",
+   "size": 66554962,
+   "sha256": "c3baf161721bc384ca167551fccc19997519df16e1a31c8079ba09c7b9ec27c9"
+  },
+  {
+   "key": "customer/interactions/part-000037.parquet",
+   "size": 66543369,
+   "sha256": "92032e31ef44168316267c5f102ebdfedf011dc691804da8c5dbae044f8b611d"
+  },
+  {
+   "key": "customer/interactions/part-000038.parquet",
+   "size": 66569782,
+   "sha256": "301355e27e1fb49d2de533c9722730c095f247492bdcff0a985bafcf82f97f75"
+  },
+  {
+   "key": "customer/interactions/part-000039.parquet",
+   "size": 66548063,
+   "sha256": "59697eade515bcb107c3d40faa6533460c5bfece449faa076bf3ba87b96d231e"
+  },
+  {
+   "key": "customer/interactions/part-000040.parquet",
+   "size": 66553647,
+   "sha256": "3e297d91db5bc545e16417f1a934442daf33e2008b8803df9d94f448cc454613"
+  },
+  {
+   "key": "customer/interactions/part-000041.parquet",
+   "size": 66551648,
+   "sha256": "1342ab25efe33cdcc0c6348f49dfbd9044364b45aa4b99fd25f2ded903eaa0f2"
+  },
+  {
+   "key": "customer/interactions/part-000042.parquet",
+   "size": 66576844,
+   "sha256": "bd463cceb81a8e8806e2d838920c196bc21f008ac11aa209faa72995443f1565"
+  },
+  {
+   "key": "customer/interactions/part-000043.parquet",
+   "size": 66536800,
+   "sha256": "4652d0487319d58a0aac92f3fb7331e2ece9f9948e5f7ef1d9ab541132a64197"
+  },
+  {
+   "key": "customer/interactions/part-000044.parquet",
+   "size": 66541877,
+   "sha256": "1bbdbe6e7961d9143ba2afee113c35a243aafcd1207766c48779761134123bd4"
+  },
+  {
+   "key": "customer/interactions/part-000045.parquet",
+   "size": 66559870,
+   "sha256": "ab4fce03765037eb2444ffb88f03eca59fb7a75517fb52c729c03ce74fde6183"
+  },
+  {
+   "key": "customer/interactions/part-000046.parquet",
+   "size": 66575705,
+   "sha256": "1474d2b1297d42bb02b4c7cd81b2643a92053421a7c9f589ecc798ab3d1650a6"
+  },
+  {
+   "key": "customer/interactions/part-000047.parquet",
+   "size": 66547426,
+   "sha256": "cef8467edcfbeb1cae9296689b9cc3c57740736f35576485640c41ab6b9b6dd2"
+  },
+  {
+   "key": "customer/interactions/part-000048.parquet",
+   "size": 66565194,
+   "sha256": "a31e12403456c5d640b132be8c7046a8167127767e13c3fd98ade45118a9cbfb"
+  },
+  {
+   "key": "customer/interactions/part-000049.parquet",
+   "size": 66554749,
+   "sha256": "57bfa9c11856d28955aa9a61e34c1afc03e2ce2418e4de8ce747aa5136e68a6b"
+  },
+  {
+   "key": "customer/interactions/part-000050.parquet",
+   "size": 66541431,
+   "sha256": "fd579f5c537569860e81a1d2ff8a8b5b28de0e679e7d43d71d10f4d13b6009a9"
+  },
+  {
+   "key": "customer/interactions/part-000051.parquet",
+   "size": 66554732,
+   "sha256": "d9f43c3f78c497412a61a175c6a9c2be1c70d425e490105ce8489d79fe6603d5"
+  },
+  {
+   "key": "customer/interactions/part-000052.parquet",
+   "size": 66566776,
+   "sha256": "66616750656a55c97db96941c2c1f208bf5371df597b8e8dcc9626be818c0716"
+  },
+  {
+   "key": "customer/interactions/part-000053.parquet",
+   "size": 66546405,
+   "sha256": "040bf8804e43a37e54b2998db01cfa8f8947a5c4572051e24843d0375c8e3ec1"
+  },
+  {
+   "key": "customer/interactions/part-000054.parquet",
+   "size": 66561070,
+   "sha256": "51718dbf5c362aa61998937350a4b2b52b4ab33ccd781ef83f76c6178b0e92d8"
+  },
+  {
+   "key": "customer/interactions/part-000055.parquet",
+   "size": 66565867,
+   "sha256": "2ca2337ab90e790e2a43b6486813fb567d740999c9bf333105cda942078eb9ac"
+  },
+  {
+   "key": "customer/interactions/part-000056.parquet",
+   "size": 66575160,
+   "sha256": "be3cefa485eacbb7ce836d32c384f5910fcff7e8226346a24d2ca3ff59fb51e6"
+  },
+  {
+   "key": "customer/interactions/part-000057.parquet",
+   "size": 66551660,
+   "sha256": "84fe1c628bd26846815e2adaf075e32853850a6722f1eec005ee014e272bd6e8"
+  },
+  {
+   "key": "customer/interactions/part-000058.parquet",
+   "size": 66555796,
+   "sha256": "062aea2cd0a133e3dfe7132e9f239a9b972ffaa082d134f1aa722cedb6437821"
+  },
+  {
+   "key": "customer/interactions/part-000059.parquet",
+   "size": 66564513,
+   "sha256": "589ecc84fea3cd4a25b8ee30b8d8a50a39e68b9c4bac4ae9e2239c15b32a3594"
+  },
+  {
+   "key": "customer/interactions/part-000060.parquet",
+   "size": 66548127,
+   "sha256": "4eaade29dab21703eda499157d644450020e8d473d24b2830f37e25d46f5dc85"
+  },
+  {
+   "key": "customer/interactions/part-000061.parquet",
+   "size": 66556327,
+   "sha256": "474531164821d076a74ffff19b14ce1439264350cb72d0bc15d384de69beb6ce"
+  },
+  {
+   "key": "customer/interactions/part-000062.parquet",
+   "size": 66536850,
+   "sha256": "5fcad5e7dfc15512e5f56a5a92eaf516e0d66cf3b8badf75ac4614078d9e6742"
+  },
+  {
+   "key": "customer/interactions/part-000063.parquet",
+   "size": 66592094,
+   "sha256": "96c07ae80018b43a805cac5e03c5494d0e36d72a736227486a603be5b66a0f97"
+  },
+  {
+   "key": "customer/interactions/part-000064.parquet",
+   "size": 66568630,
+   "sha256": "b0461520aaea4f6c4674e39c994787f28c49063366c23b27140a6e707aa01beb"
+  },
+  {
+   "key": "customer/interactions/part-000065.parquet",
+   "size": 66587948,
+   "sha256": "571d2b3a679c487a2a1a407e10756937887d8d5337f99353eb011b4bdd545013"
+  },
+  {
+   "key": "customer/interactions/part-000066.parquet",
+   "size": 66574401,
+   "sha256": "95385ab9583f59f447e0c1319353bb2a62273cc77306af08f62a28c4b57efef7"
+  },
+  {
+   "key": "customer/interactions/part-000067.parquet",
+   "size": 66551773,
+   "sha256": "fb5b50cfb0df5441dfa13d5ea5e8929916d2378f083d1f5e14f6618f5447cdb0"
+  },
+  {
+   "key": "customer/interactions/part-000068.parquet",
+   "size": 66557264,
+   "sha256": "531a07477c53d63bb0d533f5c35505011699b3fd43df0041c832df9d8d9ddd10"
+  },
+  {
+   "key": "customer/interactions/part-000069.parquet",
+   "size": 66551294,
+   "sha256": "106079fe958787e51f513c2869509816f618c95aad16059defa6ddb32b6a8b0e"
+  },
+  {
+   "key": "customer/interactions/part-000070.parquet",
+   "size": 66549864,
+   "sha256": "13872b74ef524be7bc8bcd275ecdb50d956038a41b6ed7d1bf25d79051281ff4"
+  },
+  {
+   "key": "customer/interactions/part-000071.parquet",
+   "size": 66558348,
+   "sha256": "79b800d0478de0c3a81aad23fca6ffefcfcd4f77c8e044949a5fb42964da0426"
+  },
+  {
+   "key": "customer/interactions/part-000072.parquet",
+   "size": 66562483,
+   "sha256": "6e9e84f3bcbd2e1530850c6e5de74b8bd0d8bdf53f5e0311e06c8564e96f72fc"
+  },
+  {
+   "key": "customer/interactions/part-000073.parquet",
+   "size": 66554797,
+   "sha256": "e84eee684590406f4fe841da79fdacb7988c7606df9dc9d7f5b361f4933f85e5"
+  },
+  {
+   "key": "customer/interactions/part-000074.parquet",
+   "size": 66562331,
+   "sha256": "b29935571ae332ca05436486a863c6ed62dbc45274318043e781189b943eaed2"
+  },
+  {
+   "key": "customer/interactions/part-000075.parquet",
+   "size": 66565435,
+   "sha256": "4f7a21a7b504d6e1fac82da7af532fa9de6b670b25145ebadca20ad89173d9f2"
+  },
+  {
+   "key": "customer/interactions/part-000076.parquet",
+   "size": 66559358,
+   "sha256": "dce6c8fc56aa1be5dc80caaff8db818ea42390cbac1ff0b6224ec0d2e6ce5b21"
+  },
+  {
+   "key": "customer/interactions/part-000077.parquet",
+   "size": 66572944,
+   "sha256": "6952d3899e68b2aca7aa38f98909b856f593e3260e15044d79a3ee68bfaa9fc9"
+  },
+  {
+   "key": "customer/interactions/part-000078.parquet",
+   "size": 66547655,
+   "sha256": "9da7438411634d7a84dc61f803ed4eb0e11788c6ff8568cee29c43d72829f32d"
+  },
+  {
+   "key": "customer/interactions/part-000079.parquet",
+   "size": 66571823,
+   "sha256": "24dee77c2e74b99591015836fb223ead563b199875d275e3fac81ac50877fbe2"
+  },
+  {
+   "key": "customer/interactions/part-c001-000000.parquet",
+   "size": 66555148,
+   "sha256": "5e1db2cc9bb069ff81d6dca1061085c6abcf6920301b3e34c2bc8aebc1a444ad"
+  },
+  {
+   "key": "customer/interactions/part-c001-000001.parquet",
+   "size": 66566677,
+   "sha256": "279d79df8eff885ec7565c437a5a762cbc66d3bf42af3777718e7d243a370486"
+  },
+  {
+   "key": "customer/interactions/part-c001-000002.parquet",
+   "size": 66566509,
+   "sha256": "e076130e86beb98d421b250348142ffdc5359e8a5fdbd05ffdc00810ad922d0c"
+  },
+  {
+   "key": "customer/interactions/part-c001-000003.parquet",
+   "size": 66562689,
+   "sha256": "d3057c9bf05e1e92215c857df205aa4961fcef79f6ec21a6d2f6a04cc8a31be2"
+  },
+  {
+   "key": "customer/interactions/part-c001-000004.parquet",
+   "size": 66547218,
+   "sha256": "df262a214ffeefc3ea7331be090048fd092964cc658bd92bfde3ee6523efd102"
+  },
+  {
+   "key": "customer/interactions/part-c001-000005.parquet",
+   "size": 66548356,
+   "sha256": "8e0fbcf5e956e622801291f26c14e951b709b07ec8fc6bf4aba3edec0f7c7ba8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000006.parquet",
+   "size": 66567019,
+   "sha256": "f258abda6ed9b17b03eb61545e6d72174b1472656a41f335faced4968d1a7b26"
+  },
+  {
+   "key": "customer/interactions/part-c001-000007.parquet",
+   "size": 66568235,
+   "sha256": "9129831581f672a23176a33a39e00e6f4d7eb8f75d10374cd6e106ea3f73f2d8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000008.parquet",
+   "size": 66538707,
+   "sha256": "72985afba943fae0538ba577792897fae33aa465c0d2636c7abad2f756ed7397"
+  },
+  {
+   "key": "customer/interactions/part-c001-000009.parquet",
+   "size": 66552932,
+   "sha256": "d84ba4532c3e4b65979c0332fdd6f699dbbdb11a58fd3580f036c346a869d238"
+  },
+  {
+   "key": "customer/interactions/part-c001-000010.parquet",
+   "size": 66546485,
+   "sha256": "735a038fd33dd54b1bb39d77b88ccfa0205f029ef68652ce6d1ca8f508fc8da7"
+  },
+  {
+   "key": "customer/interactions/part-c001-000011.parquet",
+   "size": 66557259,
+   "sha256": "528eb90c7a39d92ddab74db1cc307691605edb836285b3ee442f22b9957f9a98"
+  },
+  {
+   "key": "customer/interactions/part-c001-000012.parquet",
+   "size": 66556804,
+   "sha256": "e253d5541ee9af85c630f575756f63da946f040d5fa9e650f01e76d8261544ee"
+  },
+  {
+   "key": "customer/interactions/part-c001-000013.parquet",
+   "size": 66554563,
+   "sha256": "903ef75e64e57d992796c587eac6b44cd50293b748453279e2d55f6d5c627e90"
+  },
+  {
+   "key": "customer/interactions/part-c001-000014.parquet",
+   "size": 66574744,
+   "sha256": "2d46df8f38ab21453bc7c76dd3a06395d5981e0fcc1a75bbacc9ec98f4932aa2"
+  },
+  {
+   "key": "customer/interactions/part-c001-000015.parquet",
+   "size": 66544139,
+   "sha256": "42361223c236b1ea08e745d1f6b123fa79489ef71b1485ca803f2aff6e9872ed"
+  },
+  {
+   "key": "customer/interactions/part-c001-000016.parquet",
+   "size": 66541998,
+   "sha256": "c81329b1074feebecdd283f32d14b5aaf2c9d04acf993c98ecc9c3cb50e8d516"
+  },
+  {
+   "key": "customer/interactions/part-c001-000017.parquet",
+   "size": 66578693,
+   "sha256": "ad1899e1525f644a65e7e6268fa9d80b71bbbf0225e66a93efc84d43c867497a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000018.parquet",
+   "size": 66565446,
+   "sha256": "ff6ae35df6f734b2504e0a054ea1d9aa004c5fba66b6953c0387906cd4829f6f"
+  },
+  {
+   "key": "customer/interactions/part-c001-000019.parquet",
+   "size": 66568539,
+   "sha256": "a3b06372074baeace52d8d136c78f5114c5cdd2e006d6d5cd958db2202f9fe17"
+  },
+  {
+   "key": "customer/interactions/part-c001-000020.parquet",
+   "size": 66561445,
+   "sha256": "b85e18857c4c3cc7559d8ec8ac09b666f975a9dfe542b4d2eda895d05cb384b4"
+  },
+  {
+   "key": "customer/interactions/part-c001-000021.parquet",
+   "size": 66563928,
+   "sha256": "5fd75ca54efca812d3f69bdd084ef3963b41df4c782ae3f1442c2fdea2b82dfd"
+  },
+  {
+   "key": "customer/interactions/part-c001-000022.parquet",
+   "size": 66579289,
+   "sha256": "43b43c9fe09eec0b793116919ad4097d35ae54dc556c7afb45d03643492c5ab3"
+  },
+  {
+   "key": "customer/interactions/part-c001-000023.parquet",
+   "size": 66551196,
+   "sha256": "672a7aa51d12dbe9a6a77a6d678066dfe483ee08bfc62279a0e8c0ea49271540"
+  },
+  {
+   "key": "customer/interactions/part-c001-000024.parquet",
+   "size": 66557935,
+   "sha256": "529bae5f4f75c3fe253fdeb4c9ba101096a85751c0e1db809ddbf5ecaab13d83"
+  },
+  {
+   "key": "customer/interactions/part-c001-000025.parquet",
+   "size": 66548420,
+   "sha256": "919a0483e35b36a2d48b71317248a82c9cc67652d2d683af1dffddf9e8fe57e8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000026.parquet",
+   "size": 66557610,
+   "sha256": "f4c40e5fa2df0e070d4ff4c991278c0e3a070d830313428a091653eef829ca5b"
+  },
+  {
+   "key": "customer/interactions/part-c001-000027.parquet",
+   "size": 66566968,
+   "sha256": "fde23b32b5daeff036b3354ee2ea345d32c878589f4d9f2b0f4a7abf250a5d00"
+  },
+  {
+   "key": "customer/interactions/part-c001-000028.parquet",
+   "size": 66526219,
+   "sha256": "d43b73dbd125ad02b8c95a5c44fa32fe23e7082f9e223d0ad369a9a0d7e8e679"
+  },
+  {
+   "key": "customer/interactions/part-c001-000029.parquet",
+   "size": 66567183,
+   "sha256": "078ce2def9dcaa8ff7e4d1563cf1cbca56d329e08c86924c4eba920c51bcda59"
+  },
+  {
+   "key": "customer/interactions/part-c001-000030.parquet",
+   "size": 66568475,
+   "sha256": "cb6528c9140c69507584f27be84ff2efbe3119f5a105a1dbe19a59947970ccda"
+  },
+  {
+   "key": "customer/interactions/part-c001-000031.parquet",
+   "size": 66552788,
+   "sha256": "a16ffc1bd5156bac0418e43963b7ecc07bc8c7f09877c264f929246b11e06b43"
+  },
+  {
+   "key": "customer/interactions/part-c001-000032.parquet",
+   "size": 66557289,
+   "sha256": "98311de9aebf360813c595bdeb4ebf95466d90f2e2d55947f9904877b2c7182c"
+  },
+  {
+   "key": "customer/interactions/part-c001-000033.parquet",
+   "size": 66566542,
+   "sha256": "121578a5ce0d6616a7e666b97df83cb50fe5b5460835378b4f3d53f12344deaf"
+  },
+  {
+   "key": "customer/interactions/part-c001-000034.parquet",
+   "size": 66538095,
+   "sha256": "bafacfa930b2a8ebf2a4bf4579a1111fb24fbac71e55a5f79392702aa716f5bd"
+  },
+  {
+   "key": "customer/interactions/part-c001-000035.parquet",
+   "size": 66586589,
+   "sha256": "9c011a7183329a15c961486495f9438b2709df892d143badd84b61eece71b312"
+  },
+  {
+   "key": "customer/interactions/part-c001-000036.parquet",
+   "size": 66566953,
+   "sha256": "43bb82a74842e40db75217676a98de845f2f7a78ecea4fb54a209b9701149cd1"
+  },
+  {
+   "key": "customer/interactions/part-c001-000037.parquet",
+   "size": 66558682,
+   "sha256": "2159bd57f2445869683e1a76be28360fe2c754d817c400abbe0a6c462198509a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000038.parquet",
+   "size": 66548895,
+   "sha256": "45784d43f649cdf236a553eaa86b231567359403b90b35225ce44f0de5ccabb8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000039.parquet",
+   "size": 66554904,
+   "sha256": "8b6bd8f135b33e10cab39303927a3d41b76b5fa81640f5a3909544fcae21788e"
+  },
+  {
+   "key": "customer/interactions/part-c001-000040.parquet",
+   "size": 66546713,
+   "sha256": "0597ac35479d7267d47020d1dca9919db2dc1027f036d9f68217f1c432326d3d"
+  },
+  {
+   "key": "customer/interactions/part-c001-000041.parquet",
+   "size": 66541051,
+   "sha256": "e8964063a1e9dfba3197c1ba20442ae8741b9de83926c559855f69c76d980ca8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000042.parquet",
+   "size": 66553738,
+   "sha256": "fd459f95b63e52096e73d62a9987a1ef0ae25e5b93628fe306572ce8fb3b2aa3"
+  },
+  {
+   "key": "customer/interactions/part-c001-000043.parquet",
+   "size": 66557560,
+   "sha256": "46d9450a86be6b1f83b3e0ca26256840878ea1dcd36de1bc5b68b08506d9c0ef"
+  },
+  {
+   "key": "customer/interactions/part-c001-000044.parquet",
+   "size": 66562156,
+   "sha256": "6a75aefe9c7a4e45e37e7c57091a67ce899ad90c7db9ef849e7075033e65fadb"
+  },
+  {
+   "key": "customer/interactions/part-c001-000045.parquet",
+   "size": 66572170,
+   "sha256": "0addd45e8e9cb6400c7a273bb28b434a664d4b1d8d289ff87d812ae3bab13901"
+  },
+  {
+   "key": "customer/interactions/part-c001-000046.parquet",
+   "size": 66563449,
+   "sha256": "acc6e66efe3214fc17bb8bcafece3ff9edf70898e6630fcd1b0f6baf1334d6e0"
+  },
+  {
+   "key": "customer/interactions/part-c001-000047.parquet",
+   "size": 66567909,
+   "sha256": "cd20a9c9655afc523fb6c5b4aa09885c38b436ad693547e01cda9460a8f9787f"
+  },
+  {
+   "key": "customer/interactions/part-c001-000048.parquet",
+   "size": 66555522,
+   "sha256": "fdd5a16acb6e5486f689c85410d9c980faed33f8c751e712601f5e90480da2d2"
+  },
+  {
+   "key": "customer/interactions/part-c001-000049.parquet",
+   "size": 66568255,
+   "sha256": "476fc8b4b5be8be9a03469c7e9796e74ad07c978ac3d26ed479aa8191e94cb1a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000050.parquet",
+   "size": 66546389,
+   "sha256": "febc6fc5781d2a61db58582fa7d74ca058563353c9b7093b5c7925da2e6cb97b"
+  },
+  {
+   "key": "customer/interactions/part-c001-000051.parquet",
+   "size": 66571592,
+   "sha256": "fa8eef24a5eec5d37c7dfe0a559aa659b8c576214a8307c6f200397641ab1f5f"
+  },
+  {
+   "key": "customer/interactions/part-c001-000052.parquet",
+   "size": 66547770,
+   "sha256": "990211e2cb2301d6f1e551b94c7ab1607136e4baf8f4a989aedd5359a02558e7"
+  },
+  {
+   "key": "customer/interactions/part-c001-000053.parquet",
+   "size": 66567463,
+   "sha256": "d7054c370354942dea36d80ad92b808aea3180107de3373ec9fadc2c32bb201a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000054.parquet",
+   "size": 66568870,
+   "sha256": "f6a5f7c14f73fe235a7a72e844338a2bf976530582d14fd80b212744d5136f3d"
+  },
+  {
+   "key": "customer/interactions/part-c001-000055.parquet",
+   "size": 66558428,
+   "sha256": "9341755cd9515a1b37a6f19948a759f4cee9ae73c46a9b274eeb9ca8de7268bf"
+  },
+  {
+   "key": "customer/interactions/part-c001-000056.parquet",
+   "size": 66561825,
+   "sha256": "2491a6338d84b805b45df2c1da4e396a66cab98d53d7405a72ad54d69479d40a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000057.parquet",
+   "size": 66547190,
+   "sha256": "3a739e00d7ee14c2d1780fa845523ec27be3f35499753fbefa9683a329722ba8"
+  },
+  {
+   "key": "customer/interactions/part-c001-000058.parquet",
+   "size": 66578594,
+   "sha256": "b44889ebcd70dcc6eac217e375b73bc33b46a3bca7fdf5c127c3f04587980f5c"
+  },
+  {
+   "key": "customer/interactions/part-c001-000059.parquet",
+   "size": 66566506,
+   "sha256": "cdf52cf10e3e22575468394d3e0d25c9e89cf82a9376b2e93d7687ec437365f6"
+  },
+  {
+   "key": "customer/interactions/part-c001-000060.parquet",
+   "size": 66575076,
+   "sha256": "a53bb6ca4e6f012b0e114d6b997045281522f05cf8b7d32332aa6f2226dcf843"
+  },
+  {
+   "key": "customer/interactions/part-c001-000061.parquet",
+   "size": 66565860,
+   "sha256": "13741bfefdb867125dd404bb4a016573a8d3ae0e7e262a68b0e72b50d6642055"
+  },
+  {
+   "key": "customer/interactions/part-c001-000062.parquet",
+   "size": 66529814,
+   "sha256": "d0808f3d446b654a0888a33478842e2c95ecc1c7bad51d6a498ac0b19c120944"
+  },
+  {
+   "key": "customer/interactions/part-c001-000063.parquet",
+   "size": 66574000,
+   "sha256": "16ea55435afc3f8f886d5f5b0126c9b45651a6fc7af0ecc8f6817ad03eeddc70"
+  },
+  {
+   "key": "customer/interactions/part-c001-000064.parquet",
+   "size": 66544521,
+   "sha256": "96ced81c38e1f04d8d102ef293f1fa26d954b4ab559b13bb71f59e0ea8e5d2b4"
+  },
+  {
+   "key": "customer/interactions/part-c001-000065.parquet",
+   "size": 66558060,
+   "sha256": "eca156516ee0b5e4e6241b690eb91ca138daf86de4316e0e87e78eaa66b2bb76"
+  },
+  {
+   "key": "customer/interactions/part-c001-000066.parquet",
+   "size": 66552453,
+   "sha256": "f0cae19d7b9845d64cf8dc41e150dc974f399936c8b52be33b38e4f6646055f7"
+  },
+  {
+   "key": "customer/interactions/part-c001-000067.parquet",
+   "size": 66565319,
+   "sha256": "5bf60257af3359712137fb73e715c19c5bd54ecab06579657561917506a8bc5a"
+  },
+  {
+   "key": "customer/interactions/part-c001-000068.parquet",
+   "size": 66553668,
+   "sha256": "a76cc0c9710ff5fa3e2f834861b9ddec4180560b5bd1f840d106c3f6d1274e8b"
+  },
+  {
+   "key": "customer/interactions/part-c001-000069.parquet",
+   "size": 66566822,
+   "sha256": "3bc163681ced39c2c724b5a44c24dda754e1c6e036edbf641fdf4bce9529ae95"
+  },
+  {
+   "key": "customer/interactions/part-c001-000070.parquet",
+   "size": 66571565,
+   "sha256": "0d0b5f11a9959844c14027db1b4a800c0fc1f3abc03c0573220aacb0e3e5c539"
+  },
+  {
+   "key": "customer/interactions/part-c001-000071.parquet",
+   "size": 66560311,
+   "sha256": "72450116adfd40e7ecbcad8a64cb5f0a5861652ba0db46c671af57d4be64e74e"
+  },
+  {
+   "key": "customer/interactions/part-c001-000072.parquet",
+   "size": 66558412,
+   "sha256": "e7bf4c32b2eada9c67e91a638bfdc1951139577a97a3a8ece88afc106b2d046d"
+  },
+  {
+   "key": "customer/interactions/part-c001-000073.parquet",
+   "size": 66549726,
+   "sha256": "6c87829e8efa2ac6eb15e16e0cf43e28c6164d4bf4eb3a6404ec85bf1059194e"
+  },
+  {
+   "key": "customer/interactions/part-c001-000074.parquet",
+   "size": 66569301,
+   "sha256": "cf490384a5dd8a8881ddb5b425cf7c9500c2c06be183174b4169f76285c25ee4"
+  },
+  {
+   "key": "customer/interactions/part-c001-000075.parquet",
+   "size": 66548315,
+   "sha256": "f9cc2b96562813eedc1d0b84e9b275616a1366a774a8bd9eae290e290ab0d3e5"
+  },
+  {
+   "key": "customer/interactions/part-c001-000076.parquet",
+   "size": 66540004,
+   "sha256": "96b124f134f3fe46f09e9878599a4316dd21e3ba6e3760c46857dce8af9575d1"
+  },
+  {
+   "key": "customer/interactions/part-c001-000077.parquet",
+   "size": 66574294,
+   "sha256": "da5709e7fa89dc46c62bc12ac8838057613844bf97b396e7e47856607f8d84be"
+  },
+  {
+   "key": "customer/interactions/part-c001-000078.parquet",
+   "size": 66549417,
+   "sha256": "084eb401f3ff0906c6396c4bbee6114b8e577df77daf29e47b3dc00beeda43ae"
+  },
+  {
+   "key": "customer/interactions/part-c001-000079.parquet",
+   "size": 66556639,
+   "sha256": "91701d2154705f12a4f03f89bfcd01a1306f3e98071b6e690ff7a84e6176d0be"
+  }
+ ]
+}

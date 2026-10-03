@@ -154,6 +154,7 @@ class TestPreconditionRefusal:
         # Not completed: the old incarnation's delete never happened here.
         assert result.status is DeploymentStatus.FAILED
         assert "newer" in result.message
+        assert result.details["refusal"] == "destroy.redeployed"  # exit 3 (CLI-1)
         cluster.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
 
 
@@ -306,6 +307,10 @@ class TestDestroyAllWiring:
         assert not apps.delete_namespaced_deployment.called, "new components must survive"
         ns = [r for r in results if r.component == "namespace"]
         assert "newer deployment" in ns[-1].message
+        from lakebench.cli._exit import refused_result_code
+        from lakebench.exit_codes import ExitCode
+
+        assert refused_result_code(results) == ExitCode.REFUSED  # destroy.redeployed
 
     def test_recreated_during_infra_teardown_is_not_deleted(self):
         """The guard at the namespace step still catches a late redeploy."""
@@ -687,9 +692,9 @@ class TestCliExitCode:
         with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
             return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
 
-    def test_still_terminating_exits_4(self, monkeypatch, tmp_path):
-        from lakebench.cli._destroy import EXIT_NAMESPACE_STILL_TERMINATING
+    def test_still_terminating_exits_incomplete(self, monkeypatch, tmp_path):
         from lakebench.deploy.engine import DeploymentResult
+        from lakebench.exit_codes import ExitCode
 
         results = [
             DeploymentResult("postgres", DeploymentStatus.SUCCESS, "removed"),
@@ -701,8 +706,9 @@ class TestCliExitCode:
             ),
         ]
         out = self._invoke(results, monkeypatch, tmp_path)
-        assert EXIT_NAMESPACE_STILL_TERMINATING == 4
-        assert out.exit_code == 4, out.output
+        # CLI-1: incomplete and safe to re-run is 6 (it was 4 in 1.6).
+        assert ExitCode.INCOMPLETE == 6
+        assert out.exit_code == 6, out.output
         assert "Destroy Complete\n" not in out.output
 
     def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):

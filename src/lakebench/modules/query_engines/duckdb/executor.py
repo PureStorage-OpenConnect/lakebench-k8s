@@ -103,10 +103,15 @@ class DuckDBExecutor:
         return "duckdb"
 
     def _kubectl_prefix(self) -> list[str]:
-        """The ``kubectl`` argv prefix with the configured context pinned."""
-        if self.kube_context:
-            return ["kubectl", "--context", self.kube_context]
-        return ["kubectl"]
+        """The ``kubectl`` argv prefix with the configured context pinned.
+
+        With no configured context, the process's active cluster target
+        supplies it (``k8s/target.py``), so a current-context switch
+        mid-run does not move the queries.
+        """
+        from lakebench.k8s.target import cli_args
+
+        return ["kubectl", *cli_args("kubectl", self.kube_context)]
 
     def _discover_pod(self) -> str:
         """Find the DuckDB pod."""
@@ -155,6 +160,9 @@ class DuckDBExecutor:
             f"{alarm}"
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
+            # The extensions are the deployment's pre-fetched files; a missing
+            # one errors instead of downloading from extensions.duckdb.org.
+            "conn.execute('SET autoinstall_known_extensions=false'); "
             f"conn.load_extension('{'delta' if self.table_format == 'delta' else 'iceberg'}'); "
             "conn.load_extension('httpfs'); "
             f"conn.execute(\"SET s3_endpoint='{self.s3_endpoint.replace('http://', '').replace('https://', '')}'\"); "

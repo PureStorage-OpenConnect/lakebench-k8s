@@ -125,8 +125,7 @@ def test_bootstraps_all_gold_tables_in_continuous_mode():
         assert ddl in src, f"continuous bootstrap missing {ddl}"
     # All five must be imported from the batch module and issued in the bootstrap.
     assert "for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS)" in src
-    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in src
-    assert '"detected_ts" not in cols' in src
+    assert "ensure_alert_columns(spark," in src  # reused-catalog upgrade of gold.alerts
 
 
 def test_continuous_logs_cumulative_alert_count_for_gate():
@@ -207,7 +206,7 @@ def test_sustained_gate_is_financial_scoped_and_fails_on_zero():
 
 def test_sustained_failure_raises_nonzero_exit():
     """Adversarial-review P0 regression guard: flagging pipeline_success=False
-    is NOT enough -- the function MUST raise typer.Exit(1) so an exit-code-only
+    is NOT enough -- the function MUST exit 1 (ExitCode.FAILED) so an exit-code-only
     UAT runner sees the failure (the exact LB-044 gap). Assert the control
     flow, not just that a string is present."""
     src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
@@ -225,9 +224,12 @@ def test_sustained_failure_raises_nonzero_exit():
             and node.test.operand.id == "pipeline_success"
         ):
             body_src = ast.get_source_segment(src, node)
-            if body_src and "raise typer.Exit(1)" in body_src:
+            # CLI-1 spells the code by name; 1 is ExitCode.FAILED.
+            if body_src and "raise typer.Exit(ExitCode.FAILED)" in body_src:
                 found_exit_guard = True
-    assert found_exit_guard, "no `if not pipeline_success: raise typer.Exit(1)` guard found"
+    assert found_exit_guard, (
+        "no `if not pipeline_success: raise typer.Exit(ExitCode.FAILED)` guard found"
+    )
 
 
 def test_sustained_success_panel_is_guarded():

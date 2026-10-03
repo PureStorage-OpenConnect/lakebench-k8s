@@ -69,6 +69,14 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # only when it carries this marker (or is listed in the namespace annotation
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
+# DESIGN ch01 section 4: the cluster that claimed a bucket. Tagged
+# backends carry it as a tag, tagless ones (FlashBlade) in the owner marker
+# object. Without it, a deployment of the same name on another cluster that
+# shares the object store could adopt, and later empty, this one's bucket.
+TAG_CLUSTER = "lakebench.cluster"
+# Keys under this prefix are Lakebench's own bookkeeping, never user data.
+MARKER_PREFIX = ".lakebench/"
+OWNER_MARKER_KEY = ".lakebench/owner.json"
 ANNOTATION_CREATED_BUCKETS = "lakebench.deployment/created-buckets"
 # Buckets deploy adopted while they held no objects, on a backend without
 # bucket tagging. Everything in them was written by this deployment, so
@@ -78,6 +86,13 @@ ANNOTATION_ADOPTED_EMPTY_BUCKETS = "lakebench.deployment/adopted-empty-buckets"
 # and stops if it changes: that is a redeploy into the same namespace, which
 # the UID cannot show (same incarnation, or create_namespace=false).
 ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
+# Written beside the nonce by a v1.7 deploy that recorded the nonce in its
+# directory's state. A v1.6 directory with no state is refused a
+# nameless teardown of a namespace carrying it: the deployment moved on.
+ANNOTATION_STATE_SCHEMA = "lakebench.deployment/state-schema"
+# How this deployment's owner markers were written ("conditional" or
+# "unconditional"), so a backend that ignores IfNoneMatch is on record (R12).
+ANNOTATION_MARKER_WRITE = "lakebench.deployment/marker-write"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
 # guard: AWS caps tag values at 256, so 63 chars is well within bounds).
@@ -99,7 +114,25 @@ class IdentityVerdict(str, Enum):
     #: ``NotImplemented`` on ``GetBucketTagging`` / ``PutBucketTagging``).
     #: Tag-based ownership is impossible; callers must fall back to a
     #: weaker check (name-prefix on buckets) or refuse. See LB-088.
+    #: Among the ownership verdicts it means: tagless, no owner marker, and not
+    #: in this namespace's created or adopted-empty record (row 7 of the
+    #: matrix in ``verify_bucket_ownership``).
     UNSUPPORTED = "unsupported"
+    #: Ownership row 2 (and 5): the bucket is this deployment's by name but
+    #: was claimed from another cluster (or this cluster's API-server CA
+    #: changed). Refuse; never empty it.
+    FOREIGN_CLUSTER = "foreign_cluster"
+    #: Ownership row 3: no cluster stamp, but this namespace's created or
+    #: adopted-empty record proves this cluster made or adopted it. Stamp
+    #: the cluster, then treat it as MATCH.
+    LEGACY_PROVEN = "legacy_proven"
+    #: Ownership row 4: tagged with this deployment's name but no cluster stamp
+    #: and not in the record (a bucket an earlier lakebench adopted). Usable
+    #: for reads and writes, never stamped, never emptied or deleted.
+    LEGACY_UNPROVEN = "legacy_unproven"
+    #: Ownership row 8: the bucket carries a cluster stamp, but this run cannot
+    #: compute its own cluster fingerprint. Keep it.
+    UNVERIFIED_CLUSTER = "unverified_cluster"
 
 
 class BucketTaggingUnsupported(Exception):
@@ -126,6 +159,9 @@ class IdentityReport:
     found_api_server: str | None = None
     current_api_server: str | None = None
     hint: str | None = None
+    #: Buckets only: False when the backend has no bucket tagging (the
+    #: verdict then came from the owner marker or the namespace record).
+    tagged: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +202,34 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
         from kubernetes import config as _kube_config
     except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
         return None
+
+    # The cluster this process's API clients are pinned to: its CA
+    # was hashed when the context was loaded, so a kubeconfig rewritten
+    # since cannot change what a deploy stamps or a destroy compares.
+    from lakebench.k8s.target import active_target
+
+    pinned = active_target()
+    if pinned is not None and (not context or context == pinned.context):
+        if pinned.ca_fp_known:
+            return pinned.ca_fingerprint
+        # The cluster entry could not be read at activation: read it now,
+        # but only from an entry that still names the pinned server; a
+        # rewritten one would hash another cluster's CA.
+        if pinned.in_cluster:
+            return _try_incluster_fingerprint()
+        from lakebench.k8s.target import _ca_fingerprint, _kubeconfig_cluster_block
+
+        block = _kubeconfig_cluster_block(str(pinned.context))
+        server = str((block or {}).get("server") or "").rstrip("/")
+        if block is None or (pinned.api_server and server != pinned.api_server):
+            logger.debug(
+                "api_server_fingerprint: context %r no longer names %s",
+                pinned.context,
+                pinned.api_server,
+            )
+            return None
+        # Hash the entry just checked, not a second read of the file.
+        return _ca_fingerprint(block)
 
     try:
         contexts, active = _kube_config.list_kube_config_contexts()
@@ -233,43 +297,10 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
 
 
 def _load_ca_bytes(cluster_block: dict[str, Any]) -> bytes:
-    """Return the CA certificate bytes for a kubeconfig cluster block.
+    """CA bytes of a kubeconfig cluster block (``k8s.target.load_ca_bytes``)."""
+    from lakebench.k8s.target import load_ca_bytes
 
-    kubeconfig stores the CA as either:
-    - ``certificate-authority-data``: base64-encoded PEM (inline),
-    - ``certificate-authority``: path to a PEM file on disk.
-
-    Some producers write hex instead of base64 into
-    ``certificate-authority-data`` when they emit the file. We treat
-    both encodings as valid CA material and decode to raw bytes so all
-    paths (workstation, in-cluster, inline, file) hash the same thing.
-    """
-    import base64
-    import binascii
-
-    inline = cluster_block.get("certificate-authority-data", "")
-    if isinstance(inline, bytes):
-        return inline
-    if isinstance(inline, str) and inline:
-        # Try base64 first (the standard); fall back to hex.
-        try:
-            return base64.b64decode(inline, validate=True)
-        except (binascii.Error, ValueError):
-            try:
-                return bytes.fromhex(inline)
-            except ValueError:
-                # Not decodable -- treat as the raw string bytes.
-                return inline.encode()
-
-    ca_path = cluster_block.get("certificate-authority")
-    if isinstance(ca_path, str) and ca_path:
-        try:
-            with open(ca_path, "rb") as f:
-                return f.read()
-        except OSError:
-            return b""
-
-    return b""
+    return load_ca_bytes(cluster_block)
 
 
 def _try_incluster_fingerprint() -> str | None:
@@ -327,9 +358,11 @@ def stamp_namespace(
 
     from kubernetes.client.rest import ApiException  # local import: light dep
 
+    from lakebench.k8s.lease_state import request_timeout_kw
+
     for attempt in range(max_retries):
         try:
-            ns = core_v1.read_namespace(namespace)
+            ns = core_v1.read_namespace(namespace, **request_timeout_kw())
         except ApiException as e:
             if e.status == 404:
                 return IdentityReport(
@@ -360,8 +393,45 @@ def stamp_namespace(
                 ),
             )
 
-        # Already stamped with our identity -- idempotent no-op.
+        # Already stamped with our identity. The committed-sha stamp says
+        # which code deployed last, so a redeploy from other code refreshes
+        # it (or drops it when this deploy cannot name its commit); the
+        # identity annotations and stamped-at are left as they are.
         if existing_name == deployment_name and existing_server == api_server:
+            if (existing.get(ANNOTATION_COMMITTED_SHA) or None) == (committed_sha or None):
+                return IdentityReport(
+                    verdict=IdentityVerdict.MATCH,
+                    resource_name=namespace,
+                    expected_deployment=deployment_name,
+                    found_deployment=existing_name,
+                    found_api_server=existing_server,
+                    current_api_server=api_server,
+                )
+            # Only that annotation, under the read's resourceVersion: a
+            # strategic merge patch leaves the other keys alone and deletes a
+            # key set to None.
+            body = {
+                "metadata": {
+                    "annotations": {ANNOTATION_COMMITTED_SHA: committed_sha or None},
+                    "resourceVersion": ns.metadata.resource_version,
+                }
+            }
+            try:
+                core_v1.patch_namespace(namespace, body, **request_timeout_kw())
+            except Exception as e:  # noqa: BLE001 -- see below
+                if isinstance(e, ApiException) and e.status == 409 and attempt + 1 < max_retries:
+                    # Re-read: the identity checks above run again on it.
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                # The identity is verified; the sha stamp is informational,
+                # so failing to refresh it (API or transport error) never
+                # refuses the deploy.
+                logger.warning(
+                    "stamp_namespace: could not refresh %s on %s: %s",
+                    ANNOTATION_COMMITTED_SHA,
+                    namespace,
+                    e,
+                )
             return IdentityReport(
                 verdict=IdentityVerdict.MATCH,
                 resource_name=namespace,
@@ -406,7 +476,7 @@ def stamp_namespace(
             }
         }
         try:
-            core_v1.patch_namespace(namespace, body)
+            core_v1.patch_namespace(namespace, body, **request_timeout_kw())
         except ApiException as e:
             if e.status == 409:
                 # Conflict: someone else patched the namespace between our
@@ -576,8 +646,13 @@ def write_bucket_ownership_tag(
     deployment_name: str,
     workload_schema: str | None = None,
     created: bool = False,
+    cluster: str | None = None,
 ) -> None:
     """Write the ownership tag and verify the round trip.
+
+    ``cluster`` is this cluster's stamp (``cluster_stamp``); when
+    given it is written as ``lakebench.cluster`` and verified too. A row-4
+    bucket (``LEGACY_UNPROVEN``) is never passed here.
 
     ``created`` adds the created-by-lakebench marker (LB-159). The whole tag
     set is rewritten, so a caller re-tagging a bucket lakebench created on an
@@ -616,6 +691,8 @@ def write_bucket_ownership_tag(
         tag_set.append({"Key": TAG_WORKLOAD_SCHEMA, "Value": workload_schema})
     if created:
         tag_set.append({"Key": TAG_CREATED_BY_LAKEBENCH, "Value": "true"})
+    if cluster:
+        tag_set.append({"Key": TAG_CLUSTER, "Value": cluster})
 
     from botocore.exceptions import ClientError
 
@@ -658,6 +735,11 @@ def write_bucket_ownership_tag(
         raise BucketOwnershipError(
             f"bucket {bucket!r}: tag round-trip mismatch. Wrote "
             f"{deployment_name!r}, read {got.get(TAG_DEPLOYMENT_NAME)!r}."
+        )
+    if cluster and got.get(TAG_CLUSTER) != cluster:
+        raise BucketOwnershipError(
+            f"bucket {bucket!r}: cluster tag round-trip mismatch. Wrote "
+            f"{cluster!r}, read {got.get(TAG_CLUSTER)!r}."
         )
 
 
@@ -749,13 +831,12 @@ def tagless_contents_are_ours(core_v1: Any, namespace: str, bucket: str) -> bool
 
     The name alone is not proof (deploy adopts a pre-existing bucket that
     merely prefix-matches). True only when the namespace records that
-    lakebench created the bucket or adopted it while it was empty. Callers
-    still apply the longest-prefix name check. Read errors propagate; the
-    caller refuses on them.
+    lakebench created the bucket (the adopted-empty record a 1.6
+    deploy wrote is not proof; a 1.7 adoption carries an owner marker
+    instead). Callers still apply the longest-prefix name check. Read errors
+    propagate; the caller refuses on them.
     """
-    return bucket in read_created_buckets(core_v1, namespace) or bucket in (
-        read_adopted_empty_buckets(core_v1, namespace)
-    )
+    return bucket in read_created_buckets(core_v1, namespace)
 
 
 def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
@@ -771,15 +852,269 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
     core_v1.patch_namespace(namespace, body)
 
 
-def write_deploy_nonce(core_v1: Any, namespace: str) -> str:
-    """Stamp a new deploy nonce on the namespace and return it."""
+# ---------------------------------------------------------------------------
+# Owner marker on backends without bucket tagging
+# ---------------------------------------------------------------------------
+
+# How this process writes markers, per S3 endpoint: "conditional" when the
+# backend enforced IfNoneMatch on the probe, "unconditional" otherwise.
+_MARKER_WRITE_MODE: dict[str, str] = {}
+# Codes a backend that has no conditional writes answers with.
+_NO_CONDITIONAL_CODES = frozenset({"NotImplemented", "InvalidArgument", "InvalidRequest"})
+# Fallback (no conditional writes): wait this long and read the marker again,
+# so a second cluster writing in the same window is seen by at least one.
+MARKER_FALLBACK_WAIT_S = 2.0
+_marker_sleep = time.sleep
+
+
+@dataclass(frozen=True)
+class MarkerResult:
+    """What ``write_owner_marker`` found: whose marker the bucket now carries."""
+
+    ours: bool
+    marker: dict[str, Any] | None
+    mode: str  # "conditional" or "unconditional"
+
+
+def _error_code(e: Exception) -> str:
+    response = getattr(e, "response", None) or {}
+    return str(response.get("Error", {}).get("Code", ""))
+
+
+def _http_status(e: Exception) -> int:
+    response = getattr(e, "response", None) or {}
+    try:
+        return int(response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _endpoint_of(boto_client: Any) -> str:
+    return str(getattr(getattr(boto_client, "meta", None), "endpoint_url", "") or "")
+
+
+def probe_conditional_put(boto_client: Any, bucket: str) -> bool:
+    """Whether the backend enforces ``IfNoneMatch="*"`` on PutObject.
+
+    Writes a throwaway key, ``.lakebench/probe-<uuid4>``, twice with the
+    header: enforced means 200 then 412. The probe key is deleted after. It
+    never touches the owner marker, so it cannot overwrite a marker another
+    cluster wrote meanwhile (DESIGN ch01 d3 N2).
+    """
     import uuid
 
-    nonce = uuid.uuid4().hex
-    core_v1.patch_namespace(
-        namespace, {"metadata": {"annotations": {ANNOTATION_DEPLOY_NONCE: nonce}}}
+    from botocore.exceptions import ClientError
+
+    key = f"{MARKER_PREFIX}probe-{uuid.uuid4().hex}"
+    try:
+        try:
+            boto_client.put_object(Bucket=bucket, Key=key, Body=b"", IfNoneMatch="*")
+        except ClientError as e:
+            if _error_code(e) in _NO_CONDITIONAL_CODES:
+                return False
+            raise
+        try:
+            boto_client.put_object(Bucket=bucket, Key=key, Body=b"", IfNoneMatch="*")
+        except ClientError as e:
+            if _error_code(e) == "PreconditionFailed" or _http_status(e) == 412:
+                return True
+            if _error_code(e) in _NO_CONDITIONAL_CODES:
+                return False
+            raise
+        return False  # a second 200: the header was ignored
+    finally:
+        try:
+            boto_client.delete_object(Bucket=bucket, Key=key)
+        except Exception as e:  # noqa: BLE001 -- a leftover probe key is harmless
+            logger.debug("could not delete probe key %s/%s: %s", bucket, key, e)
+
+
+def _marker_is_ours(marker: dict[str, Any] | None, identity: dict[str, Any]) -> bool:
+    return (
+        marker is not None
+        and marker.get("deployment") == identity["deployment"]
+        and marker.get("cluster") == identity["cluster"]
     )
-    return nonce
+
+
+def write_owner_marker(
+    boto_client: Any, bucket: str, identity: dict[str, Any], *, mode: str | None = None
+) -> MarkerResult:
+    """Claim a tagless bucket with ``.lakebench/owner.json``.
+
+    ``identity`` carries at least ``deployment`` and ``cluster`` (and the
+    namespace, its uid, the time and the Lakebench version). The marker key
+    is written once per attempt:
+
+    - ``conditional`` (the backend enforces ``IfNoneMatch``, proved by
+      ``probe_conditional_put`` on a throwaway key): a conditional PUT; a 412
+      means a marker already exists, and that marker decides. Two clusters
+      racing for one empty bucket get one winner.
+    - ``unconditional`` (no conditional writes): read first and stop on a
+      foreign marker, then a plain PUT, a read and compare, a
+      ``MARKER_FALLBACK_WAIT_S`` wait and a second read. Two clusters writing
+      inside that window can both believe they won (open risk R12).
+
+    ``mode`` skips the probe (the caller's cached answer); otherwise the
+    answer is cached per endpoint for this process. Returns whose marker the
+    bucket carries afterwards. Read and write errors raise.
+    """
+    import json
+
+    from botocore.exceptions import ClientError
+
+    endpoint = _endpoint_of(boto_client)
+    if mode is None:
+        mode = _MARKER_WRITE_MODE.get(endpoint)
+    if mode is None:
+        mode = "conditional" if probe_conditional_put(boto_client, bucket) else "unconditional"
+        _MARKER_WRITE_MODE[endpoint] = mode
+        if mode == "unconditional":
+            logger.warning(
+                "S3 endpoint %s does not enforce conditional writes; owner markers are "
+                "written with a read-back check only (two clusters claiming one empty "
+                "bucket at the same moment could both believe they won)",
+                endpoint or "(default)",
+            )
+    body = json.dumps(identity, sort_keys=True).encode("utf-8")
+    if mode == "conditional":
+        try:
+            boto_client.put_object(
+                Bucket=bucket,
+                Key=OWNER_MARKER_KEY,
+                Body=body,
+                IfNoneMatch="*",
+                ContentType="application/json",
+            )
+        except ClientError as e:
+            if not (_error_code(e) == "PreconditionFailed" or _http_status(e) == 412):
+                raise
+            existing = read_owner_marker(boto_client, bucket)
+            return MarkerResult(_marker_is_ours(existing, identity), existing, mode)
+        got = read_owner_marker(boto_client, bucket)
+        return MarkerResult(_marker_is_ours(got, identity), got, mode)
+    existing = read_owner_marker(boto_client, bucket)
+    if existing is not None and not _marker_is_ours(existing, identity):
+        return MarkerResult(False, existing, mode)
+    boto_client.put_object(
+        Bucket=bucket, Key=OWNER_MARKER_KEY, Body=body, ContentType="application/json"
+    )
+    got = read_owner_marker(boto_client, bucket)
+    if not _marker_is_ours(got, identity):
+        return MarkerResult(False, got, mode)
+    _marker_sleep(MARKER_FALLBACK_WAIT_S)
+    got = read_owner_marker(boto_client, bucket)
+    return MarkerResult(_marker_is_ours(got, identity), got, mode)
+
+
+def owner_marker_identity(
+    deployment: str, cluster: str, namespace: str, namespace_uid: str = ""
+) -> dict[str, Any]:
+    """The marker body for this deployment on this cluster."""
+    from datetime import datetime, timezone
+
+    try:
+        from lakebench import __version__ as lb_version
+    except Exception:  # noqa: BLE001 -- informational only
+        lb_version = "unknown"
+    return {
+        "deployment": deployment,
+        "cluster": cluster,
+        "namespace": namespace,
+        "namespace_uid": namespace_uid,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "lakebench_version": lb_version,
+    }
+
+
+def bucket_may_be_emptied(
+    boto_client: Any,
+    bucket: str,
+    deployment: str,
+    *,
+    cluster_fp: str | None,
+    created_record: Iterable[str],
+    other_deployments: Iterable[str] | None,
+) -> bool:
+    """The one rule for "may this deployment delete data in ``bucket``".
+
+    True for MATCH (this deployment's and this cluster's stamp: tag, or
+    owner marker), and for LEGACY_PROVEN (no cluster stamp, in the created
+    record) on a tagged backend; on a tagless one LEGACY_PROVEN also needs
+    the longest-prefix name claim, which needs the other deployments' names
+    (``None``: they could not be listed, so False), as destroy requires.
+    Everything else is False. Read errors raise.
+    """
+    v = verify_bucket_ownership(
+        boto_client,
+        bucket,
+        deployment,
+        expected_cluster=cluster_fp,
+        created_record=created_record,
+    )
+    if v.verdict is IdentityVerdict.MATCH:
+        return True
+    if v.verdict is IdentityVerdict.LEGACY_PROVEN:
+        if v.tagged:
+            return True
+        return other_deployments is not None and bucket_name_matches_deployment(
+            bucket, deployment, other_deployments
+        )
+    return False
+
+
+def deployment_may_empty(cfg: Any, bucket: str, s3: Any, *, strict: bool = False) -> bool:
+    """``bucket_may_be_emptied`` for a config, on its own cluster context. Fail-safe.
+
+    The kube client is loaded for the config's context first, so the
+    namespace record, the other deployments and the fingerprint all come
+    from the same cluster. Any error is False, or raises with ``strict``
+    (a caller that must tell "not ours" from "could not check").
+    """
+    try:
+        from kubernetes import client as k8s_client
+
+        from lakebench.k8s import get_k8s_client
+
+        if getattr(s3, "_init_error", None):
+            return False
+        context = cfg.platform.kubernetes.context or ""
+        namespace = cfg.get_namespace()
+        get_k8s_client(context=context, namespace=namespace)
+        core_v1 = k8s_client.CoreV1Api()
+        return bucket_may_be_emptied(
+            s3.raw_client,
+            bucket,
+            cfg.name,
+            cluster_fp=api_server_fingerprint(context),
+            created_record=read_created_buckets(core_v1, namespace),
+            other_deployments=list_lakebench_deployment_names(core_v1, exclude=namespace),
+        )
+    except Exception as e:  # noqa: BLE001
+        if strict:
+            raise
+        logger.info("could not prove this deployment may empty %s (%s); it may not", bucket, e)
+        return False
+
+
+def write_deploy_nonce(core_v1: Any, namespace: str, nonce: str | None = None) -> str:
+    """Stamp a deploy nonce on the namespace and return it.
+
+    ``nonce`` is the one ``deploy`` already recorded in the directory's state
+    so a nameless teardown can prove it; the namespace then also gets
+    ``state-schema: lb-state/1``, which
+    says a v1.7 deploy recorded this nonce in some directory. Without one a
+    fresh nonce is stamped and the schema annotation is left as it is.
+    """
+    import uuid
+
+    annotations = {ANNOTATION_DEPLOY_NONCE: nonce or uuid.uuid4().hex}
+    if nonce:
+        from lakebench.config.deploy_state import STATE_SCHEMA
+
+        annotations[ANNOTATION_STATE_SCHEMA] = STATE_SCHEMA
+    core_v1.patch_namespace(namespace, {"metadata": {"annotations": annotations}})
+    return annotations[ANNOTATION_DEPLOY_NONCE]
 
 
 def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
@@ -808,31 +1143,167 @@ def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
             raise
 
 
+def cluster_stamp(fingerprint: str | None) -> str | None:
+    """The cluster stamp a bucket carries: ``api_server_fingerprint(...)[:32]``."""
+    return fingerprint[:32] if fingerprint else None
+
+
+def read_owner_marker(boto_client: Any, bucket: str) -> dict[str, Any] | None:
+    """The bucket's ``.lakebench/owner.json``, or None when it has none.
+
+    Raises on any other error, including a marker that is not a JSON
+    object (a corrupt claim is never read as "no claim").
+    """
+    import json
+
+    from botocore.exceptions import ClientError
+
+    try:
+        resp = boto_client.get_object(Bucket=bucket, Key=OWNER_MARKER_KEY)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise
+    body = resp["Body"].read()
+    marker = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+    if not isinstance(marker, dict):
+        raise BucketOwnershipError(f"bucket {bucket!r}: owner marker is not a JSON object")
+    return marker
+
+
+def _cluster_verdict(
+    bucket: str,
+    expected_deployment: str,
+    found_cluster: str | None,
+    expected_cluster: str | None,
+    record: set[str],
+    *,
+    tagged: bool,
+) -> IdentityReport:
+    """Rows 1 to 5 and 8 of the ownership matrix, for a bucket whose name stamp is ours."""
+    if found_cluster:
+        mine = cluster_stamp(expected_cluster)
+        if mine is None:
+            return IdentityReport(
+                verdict=IdentityVerdict.UNVERIFIED_CLUSTER,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                found_deployment=expected_deployment,
+                found_api_server=found_cluster,
+                tagged=tagged,
+                hint=(
+                    f"bucket {bucket!r}: cannot compute this cluster's fingerprint; "
+                    "buckets kept. `lakebench admin reclaim-bucket` (owner) can release them"
+                ),
+            )
+        if found_cluster != mine:
+            return IdentityReport(
+                verdict=IdentityVerdict.FOREIGN_CLUSTER,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                found_deployment=expected_deployment,
+                found_api_server=found_cluster,
+                current_api_server=mine,
+                tagged=tagged,
+                hint=(
+                    f"bucket {bucket!r} belongs to deployment {expected_deployment!r} on "
+                    f"another cluster (fp {found_cluster}, this cluster {mine}). If this "
+                    "cluster's API-server CA changed, an owner can re-claim it with "
+                    "`lakebench admin reclaim-bucket`"
+                ),
+            )
+        return IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            found_api_server=found_cluster,
+            tagged=tagged,
+        )
+    if bucket in record and cluster_stamp(expected_cluster) is None:
+        # Row 3 would stamp this cluster; with no fingerprint nothing may be
+        # claimed or emptied on the record's word (design: "no bucket is
+        # emptied or deleted").
+        return IdentityReport(
+            verdict=IdentityVerdict.UNVERIFIED_CLUSTER,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            tagged=tagged,
+            hint=(
+                f"bucket {bucket!r}: cannot compute this cluster's fingerprint; "
+                "buckets kept. `lakebench admin reclaim-bucket` (owner) can release them"
+            ),
+        )
+    if bucket in record:
+        return IdentityReport(
+            verdict=IdentityVerdict.LEGACY_PROVEN,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=expected_deployment,
+            tagged=tagged,
+            hint=(
+                f"bucket {bucket!r} has no cluster stamp; this namespace's record "
+                "proves this cluster created or adopted it"
+            ),
+        )
+    return IdentityReport(
+        verdict=IdentityVerdict.LEGACY_UNPROVEN,
+        resource_name=bucket,
+        expected_deployment=expected_deployment,
+        found_deployment=expected_deployment,
+        tagged=tagged,
+        hint=(
+            f"bucket {bucket!r} carries this deployment's name but no cluster stamp, "
+            "and this namespace does not record creating or adopting it (a bucket an "
+            "earlier lakebench adopted). It is used but never emptied or deleted; an "
+            "owner can claim it with `lakebench admin reclaim-bucket`"
+        ),
+    )
+
+
 def verify_bucket_ownership(
     boto_client: Any,
     bucket: str,
     expected_deployment: str,
+    *,
+    expected_cluster: str | None,
+    created_record: Iterable[str],
 ) -> IdentityReport:
-    """Read a bucket's ownership tag and return the verdict.
+    """Read a bucket's ownership stamp and return its ownership verdict.
 
-    Returns ``IdentityVerdict.UNSUPPORTED`` when the backend does not
-    implement the tagging API (LB-088). Callers MUST handle this verdict
-    explicitly: it is not "no tag found" (that is ABSENT) and it is not
-    "cannot reach the bucket" (that is NOT_FOUND). It is "the answer to
-    'who owns this?' cannot be obtained from tags on this backend at all."
-    Deploy s3-buckets and destroy s3-buckets fall back to a weaker
-    name-prefix check.
+    ``expected_cluster`` is this run's ``api_server_fingerprint`` (None when
+    it cannot be computed); ``created_record`` is this namespace's
+    created-buckets record. Only that record proves this cluster made a
+    bucket (the cross-cluster ownership rule): the adopted-empty record is what 1.6 wrote when it
+    adopted another cluster's empty bucket, so it proves nothing. The
+    matrix (DESIGN ch01 section 4):
+
+    - row 1, name and cluster ours: MATCH;
+    - rows 2 and 5, name ours, cluster not: FOREIGN_CLUSTER;
+    - row 3, name ours (or tagless with no marker), no cluster stamp, in the
+      record: LEGACY_PROVEN;
+    - row 4, tagged with our name, no cluster stamp, not in the record:
+      LEGACY_UNPROVEN;
+    - row 6, name not ours: MISMATCH;
+    - row 7, no stamp and not in the record: ABSENT on a tagged backend,
+      UNSUPPORTED on a tagless one;
+    - row 8, a cluster stamp (or row 3's record) but no fingerprint for this
+      run: UNVERIFIED_CLUSTER.
+
+    On a backend without tagging the stamp is the owner marker
+    (``.lakebench/owner.json``) and ``tagged`` is False on the report. A
+    missing bucket is NOT_FOUND. Read errors raise.
     """
     from botocore.exceptions import ClientError
 
+    record = set(created_record)
     try:
         tags = read_bucket_ownership_tag(boto_client, bucket)
     except BucketTaggingUnsupported as e:
-        return IdentityReport(
-            verdict=IdentityVerdict.UNSUPPORTED,
-            resource_name=bucket,
-            expected_deployment=expected_deployment,
-            hint=str(e),
+        return _verify_tagless(
+            boto_client, bucket, expected_deployment, expected_cluster, record, str(e)
         )
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
@@ -881,11 +1352,66 @@ def verify_bucket_ownership(
             ),
         )
 
-    return IdentityReport(
-        verdict=IdentityVerdict.MATCH,
-        resource_name=bucket,
-        expected_deployment=expected_deployment,
-        found_deployment=found,
+    return _cluster_verdict(
+        bucket, expected_deployment, tags.get(TAG_CLUSTER), expected_cluster, record, tagged=True
+    )
+
+
+def _verify_tagless(
+    boto_client: Any,
+    bucket: str,
+    expected_deployment: str,
+    expected_cluster: str | None,
+    record: set[str],
+    unsupported_hint: str,
+) -> IdentityReport:
+    """The ownership verdict on a backend without tagging, from the owner marker."""
+    from botocore.exceptions import ClientError
+
+    try:
+        marker = read_owner_marker(boto_client, bucket)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "NoSuchBucket":
+            return IdentityReport(
+                verdict=IdentityVerdict.NOT_FOUND,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+                tagged=False,
+            )
+        raise
+    if marker is None:
+        if bucket in record:
+            return _cluster_verdict(
+                bucket, expected_deployment, None, expected_cluster, record, tagged=False
+            )
+        return IdentityReport(
+            verdict=IdentityVerdict.UNSUPPORTED,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            tagged=False,
+            hint=unsupported_hint,
+        )
+    found = marker.get("deployment")
+    if found != expected_deployment:
+        return IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=str(found),
+            tagged=False,
+            hint=(
+                f"bucket {bucket!r} is claimed by deployment {found!r} "
+                f"({OWNER_MARKER_KEY}), not {expected_deployment!r}. Refusing."
+            ),
+        )
+    return _cluster_verdict(
+        bucket,
+        expected_deployment,
+        str(marker.get("cluster") or "") or None,
+        expected_cluster,
+        record,
+        tagged=False,
     )
 
 
@@ -905,21 +1431,33 @@ class DeploymentIdentity:
 
 
 def build_identity_from_config(cfg: Any, context: str | None = None) -> DeploymentIdentity:
-    """Assemble a DeploymentIdentity from a loaded LakebenchConfig."""
-    import subprocess
+    """Assemble a DeploymentIdentity from a loaded LakebenchConfig.
+
+    The committed sha is the short commit of the checkout the lakebench
+    package runs from (found from the package's own path, the reading the
+    run record's ``provenance.git_sha`` makes in a checkout), never the
+    working directory's repository, with ``-dirty`` when the package has
+    uncommitted changes or its state could not be read. With no checkout,
+    a wheel's build-info commit (``_build_info.py``, written by the build
+    hook) is stamped with ``-buildinfo`` so it is never read as a checkout
+    commit, plus ``-dirty`` when the build was not from a clean tree. It is
+    None when no commit can be read (an unknown install, a wheel built
+    without the hook, git unavailable)."""
+    from lakebench.metrics.provenance import INSTALL_CHECKOUT, INSTALL_WHEEL, sample
 
     committed_sha: str | None = None
     try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
+        code = sample()
+    except Exception:  # noqa: BLE001 -- a stamp, never a reason to fail the caller
+        code = {}
+    sha = code.get("git_sha")
+    if code.get("install") == INSTALL_CHECKOUT and isinstance(sha, str) and sha:
+        # An unknown state (git status failed) is not proven clean.
+        committed_sha = sha[:7] + ("" if code.get("git_dirty") is False else "-dirty")
+    elif code.get("install") == INSTALL_WHEEL and isinstance(sha, str) and sha:
+        committed_sha = (
+            sha[:7] + "-buildinfo" + ("" if code.get("git_dirty") is False else "-dirty")
         )
-        committed_sha = out.stdout.strip() or None
-    except (FileNotFoundError, subprocess.SubprocessError):
-        pass
 
     workload_schema: str | None = None
     try:
@@ -1077,6 +1615,10 @@ class DataOwnershipDecision:
     #: Why not (or, when allowed, any caveat worth printing). Never empty
     #: when ``allowed`` is False.
     hint: str = ""
+    #: True when ``allowed`` is False because a check could not run (the
+    #: namespace list was unreadable), not because ownership was disproved.
+    #: The CLI exits 1 for these and 3 for a refusal.
+    unverifiable: bool = False
 
 
 def check_data_ownership(
@@ -1149,6 +1691,7 @@ def check_data_ownership(
                     "and buckets were left untouched. Re-run with credentials that "
                     "can list namespaces."
                 ),
+                unverifiable=True,
             )
         caveat = (
             "Could not list namespaces to check for another deployment with the "
@@ -1165,6 +1708,11 @@ def check_data_ownership(
                     "buckets are handled by name without an identity record."
                 ),
             )
+        if not context_name:
+            from lakebench.k8s.target import active_target
+
+            pinned = active_target()
+            context_name = pinned.label if pinned is not None else ""
         ctx = context_name or "(current context)"
         return DataOwnershipDecision(
             allowed=False,

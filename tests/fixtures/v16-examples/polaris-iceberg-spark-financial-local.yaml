@@ -1,0 +1,72 @@
+# examples/polaris-iceberg-spark-financial-local.yaml at v1.6.0 (b774dad1), for tests/test_init_from.py.
+# Recipe: polaris-iceberg-spark-thrift, AML workload at scale 1
+#
+# Small AML config for a scale-1 developer sanity run on a small cluster.
+# Local mode (--local) runs Customer 360 batch only, so it refuses this file:
+#
+#   lakebench config validate examples/polaris-iceberg-spark-financial-local.yaml --local
+#
+# says so. Earlier versions of this file carried
+# platform.local, platform.garage and architecture.workloads.excluded blocks;
+# no code read them, and lakebench now rejects unknown keys. No detection rule
+# is excluded by config: the graph rules (W1-W4) run like the rest.
+
+name: polaris-iceberg-financial-local
+recipe: polaris-iceberg-spark-thrift
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  pull_policy: IfNotPresent
+
+platform:
+  storage:
+    s3:
+      endpoint: http://127.0.0.1:3900   # bundled Garage default
+      region: us-east-1
+      path_style: true
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      buckets:
+        bronze: lb-financial-bronze
+        silver: lb-financial-silver
+        gold: lb-financial-gold
+
+architecture:
+  catalog:
+    type: polaris
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+
+  pipeline:
+    mode: batch
+    medallion:
+      bronze:
+        format: parquet
+        path_template: pacs008     # <-- datagen + bronze_verify both read here
+
+  tables:
+    bronze: default.pacs008_raw
+    silver: silver.transactions
+    silver_entities: silver.entities
+    silver_accounts: silver.accounts
+    silver_counterparty_edges: silver.counterparty_edges
+    gold: gold.daily_dashboards
+    gold_alerts: gold.alerts
+    gold_risk_scores: gold.risk_scores
+    gold_entity_clusters: gold.entity_clusters
+    gold_daily_dashboards: gold.daily_dashboards
+
+  query_engine:
+    type: spark-thrift
+
+workload:
+  schema: financial
+  retention_workload: false    # W8/W10 not exercised in local recipe
+  datagen:
+    scale: 1                   # LOCAL_SCALE_ADVISORY_MAX = 1.0
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2024-04-01"    # narrower range for local disk budget
+

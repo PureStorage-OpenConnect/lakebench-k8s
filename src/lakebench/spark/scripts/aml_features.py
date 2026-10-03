@@ -1,4 +1,4 @@
-"""Per-entity AML features for the pre-registered fidelity gate (AML-GOALS D5, D9, A6).
+"""Per-entity AML features for the pre-registered fidelity gate.
 
 One feature definition, written once, fed by two adapters:
 
@@ -90,7 +90,7 @@ from pyspark.sql.functions import sum as sum_
 #: The generator's high-risk corridor pool (datagen_rs/src/typology.rs
 #: HIGH_RISK_CC; a drift test keeps the two in step). corridor_high_risk draws
 #: both participants from residents of these countries, so this is the
-#: attribute the generator conditions that label on (AML-GOALS 5a: the feature
+#: attribute the generator conditions that label on (the feature
 #: set must cover every generative attribute). It is NOT W7's FATF list.
 HIGH_RISK_COUNTRIES = ("AE", "CN", "SG", "HK", "MX", "IN")
 

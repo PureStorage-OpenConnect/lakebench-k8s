@@ -37,8 +37,10 @@ class FakeBoto:
         # Owned but not marked created (adopted); tests override as needed.
         return {"TagSet": [{"Key": "lakebench.deployment", "Value": "a"}]}
 
-    def list_objects_v2(self, Bucket, MaxKeys=1000):
-        keys = self.buckets.get(Bucket, [])[:MaxKeys]
+    def list_objects_v2(self, Bucket, MaxKeys=1000, Prefix="", StartAfter=""):
+        keys = sorted(
+            k for k in self.buckets.get(Bucket, []) if k.startswith(Prefix) and k > StartAfter
+        )[:MaxKeys]
         return {"KeyCount": len(keys), "Contents": [{"Key": k} for k in keys]}
 
     def head_bucket(self, Bucket):
@@ -281,7 +283,7 @@ class TestDestroyAllBuckets:
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
 
-        def verify(_boto, bucket, _name):
+        def verify(_boto, bucket, _name, **_kw):
             return IdentityReport(
                 verdict=getattr(IdentityVerdict, verdicts[bucket]),
                 resource_name=bucket,
@@ -393,6 +395,7 @@ class TestDestroyAllBuckets:
         assert boto.buckets == {"a-silver": ["theirs"]}, "only the refused bucket survives"
         assert "a-silver" not in boto.delete_bucket_calls
         assert "Bucket ownership refused" in r.message
+        assert r.details["refusal"] == "deploy.identity_foreign"  # exit 3 (CLI-1)
         # a-silver was on the record (the harness default) but another
         # deployment's tag proves it is not ours now: it leaves the record and
         # the namespace can go.
@@ -464,19 +467,23 @@ class TestDestroyAllBuckets:
         assert "lists neither as created nor as adopted while empty" in r.message
         assert "a-bronze" in r.message
 
-    def test_tagless_bucket_adopted_while_empty_is_emptied_not_deleted(self):
-        """--keep-buckets then redeploy, or create_buckets=false: deploy adopted
-        the bucket empty, so its data is this deployment's."""
-        boto = FakeBoto({"a-bronze": ["ours"], "a-silver": [], "a-gold": []})
+    def test_tagless_bucket_in_a_16_adopted_empty_record_is_kept(self):
+        """SAF-10: 1.6 recorded a bucket as adopted while empty even when it was
+        another cluster's bucket not yet written (the cross-cluster hole), so
+        that record proves nothing now. A 1.7 adoption carries an owner marker
+        instead (tests/test_bucket_fingerprint_matrix.py). Before 1.7 this
+        bucket was emptied."""
+        boto = FakeBoto({"a-bronze": ["theirs"], "a-silver": [], "a-gold": []})
         r = self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
             created={"a-silver", "a-gold"},
             adopted_empty={"a-bronze"},
         )
-        assert boto.buckets == {"a-bronze": []}
+        assert boto.buckets == {"a-bronze": ["theirs"]}
         assert "a-bronze" not in boto.delete_bucket_calls
-        assert r.status is DeploymentStatus.SUCCESS, r.message
+        assert r.status is DeploymentStatus.FAILED
+        assert "a-bronze" in r.message
 
     def test_tagless_unrecorded_bucket_is_emptied_only_on_force_legacy_never_deleted(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
@@ -543,6 +550,7 @@ class TestDestroyAllBuckets:
         assert boto.delete_bucket_calls == []
         assert "newer deployment" in r.message
         assert "newer deployment" in self._results[-1].message
+        assert r.details["refusal"] == "destroy.redeployed"
 
     def test_redeploy_between_buckets_stops_mid_step(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})
@@ -623,6 +631,45 @@ class TestDestroyAllBuckets:
         self.engine.k8s.delete_namespace.assert_not_called()
         ns = [x for x in self._results if x.component == "namespace"][-1]
         assert "NOT deleted" in ns.message
+
+    # -- CLI-1: a refusal exits 3 only when nothing else in the step failed --
+
+    def _exit_code_of_bucket_and_namespace(self):
+        from lakebench.cli._exit import refused_result_code
+
+        steps = [x for x in self._results if x.component in ("s3-buckets", "namespace")]
+        return refused_result_code(steps)
+
+    def test_refusal_with_a_retryable_failure_is_not_a_refusal(self):
+        """A foreign bucket plus an owned bucket whose delete failed: re-running
+        destroy can fix the second, so the step must not exit 3."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": ["theirs"], "a-gold": []})
+        boto.delete_bucket = MagicMock(side_effect=_err("AccessDenied"))
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "MISMATCH", "a-gold": "MATCH"},
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert "Bucket ownership refused" in r.message
+        assert "refusal" not in r.details
+        assert self._exit_code_of_bucket_and_namespace() is None  # exit 1
+
+    def test_refused_untagged_recorded_bucket_keeps_the_namespace_as_a_refusal(self):
+        """The namespace kept as a refused bucket's record follows the refusal."""
+        from lakebench.exit_codes import ExitCode
+
+        boto = FakeBoto({"a-bronze": [], "a-silver": ["x"], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "ABSENT", "a-gold": "MATCH"},
+            create_namespace=True,
+        )
+        assert r.details.get("refusal") == "deploy.identity_foreign", r.message
+        ns = [x for x in self._results if x.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.FAILED and "NOT deleted" in ns.message
+        assert ns.details.get("follows_refusal") is True
+        assert self._exit_code_of_bucket_and_namespace() == ExitCode.REFUSED
 
     # -- second full review ------------------------------------------------
 

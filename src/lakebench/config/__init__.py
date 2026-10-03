@@ -4,10 +4,11 @@ from .autosizer import resolve_auto_sizing
 from .loader import (
     ConfigError,
     ConfigFileNotFoundError,
+    ConfigNameRequired,
     ConfigParseError,
     ConfigValidationError,
+    LoadPurpose,
     generate_default_config,
-    generate_example_config_yaml,
     load_config,
     save_config,
 )
@@ -61,16 +62,17 @@ __all__ = [
     "TableFormatType",
     "WorkloadSchema",
     # Loader functions
+    "LoadPurpose",
     "load_config",
     "save_config",
     "generate_default_config",
-    "generate_example_config_yaml",
     # Helpers
     "parse_size_to_bytes",
     "parse_spark_memory",
     # Exceptions
     "ConfigError",
     "ConfigFileNotFoundError",
+    "ConfigNameRequired",
     "ConfigParseError",
     "ConfigValidationError",
 ]

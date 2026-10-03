@@ -20,7 +20,7 @@ ROOT_CMD = typer.main.get_command(app)
 DEPRECATED_F = {
     "destroy": ("force_short_f", "-y"),
     "clean": ("force_short_f", "-y"),
-    "init": ("force_short_f", "--force"),
+    "init": ("force_short_f", "--overwrite"),
     "results": ("format_short_f", "-o"),
     "logs": ("follow_short_f", "-F"),
 }
@@ -103,7 +103,7 @@ def test_init_old_short_f_still_overwrites_and_warns(tmp_path):
     out.write_text("old: true\n")
     result = runner.invoke(app, ["init", "--no-interactive", "--name", "t", "-o", str(out), "-f"])
     assert result.exit_code == 0, result.output
-    assert "deprecated" in result.output and "--force" in result.output
+    assert "deprecated" in result.output and "--overwrite" in result.output
     assert "old: true" not in out.read_text()
 
 
@@ -111,7 +111,7 @@ def test_init_without_force_refuses_to_overwrite(tmp_path):
     out = tmp_path / "lakebench.yaml"
     out.write_text("old: true\n")
     result = runner.invoke(app, ["init", "--no-interactive", "--name", "t", "-o", str(out)])
-    assert result.exit_code == 1
+    assert result.exit_code == 2  # usage: the file exists and --force was not given
     assert out.read_text() == "old: true\n"
 
 
@@ -152,12 +152,19 @@ def test_short_f_force_refused_with_closed_stdin(no_cluster, monkeypatch, comman
     assert result.exit_code == 2
 
 
+# The message of the check each command reaches after the -f handling.
+_PAST_SHORT_F = {"destroy": "File not found", "clean": "Invalid target"}
+
+
 @pytest.mark.parametrize("command", ["destroy", "clean"])
 def test_force_plus_short_f_is_not_refused(no_cluster, command):
     import lakebench.cli._helpers as helpers
 
     result = runner.invoke(app, [command, str(no_cluster / "missing.yaml"), "--force", "-f"])
-    assert result.exit_code != 2
+    # Past the -f gate, the command stops at its next check (exit 2 since
+    # CLI-1): destroy at the missing config, clean at the target, which this
+    # argument is for clean.
+    assert _PAST_SHORT_F[command] in result.output
     assert "no longer skips confirmation" not in result.output
     # Sanity: the -f handler returned force unchanged rather than exiting.
     assert helpers.deprecated_short_f_force("--force or -y", True) is True
@@ -169,7 +176,7 @@ def test_legacy_env_restores_old_meaning(no_cluster, monkeypatch, command):
     # The config does not exist, so the command stops before any cluster
     # call; it must get past the -f handling to fail there.
     result = runner.invoke(app, [command, str(no_cluster / "missing.yaml"), "-f"])
-    assert result.exit_code != 2
+    assert _PAST_SHORT_F[command] in result.output
     assert "deprecated" in result.output
 
 

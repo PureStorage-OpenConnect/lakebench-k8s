@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import re
 import statistics
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, ClassVar
 
 from lakebench._clock import utc_now
+from lakebench.metrics import provenance as _prov
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from lakebench.metrics.metric_registry import descriptions as _registry_descriptions
 from lakebench.metrics.provenance import run_provenance
 
 logger = logging.getLogger(__name__)
@@ -72,6 +78,22 @@ class JobMetrics:
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
+    # Wall seconds per rule from the same ``[detection]`` lines' trailing
+    # ``elapsed=Ts``: every rule that was attempted (ran, failed or skipped
+    # for a structural reason), not mode-excluded rules, which never start.
+    rule_elapsed_s: dict[str, float] = field(default_factory=dict)
+    # Heaviest Spark stages per rule from the ``[stage-profile]`` lines
+    # (common.rule_stage_profile, metrics/stage_profile.py), heaviest first:
+    # {"stage", "attempt", "status", "tasks", "wall_s", "exec_s",
+    # "shuffle_read_mb", "max_task_s", "stages", "truncated", "complete",
+    # "lossy", "name"}. An empty list means the rule's group ran no stage.
+    # ``stage_profile_unavailable`` holds the reason when there is no usable
+    # list for a rule (store unreadable, or empty while a flag is set).
+    stage_profile: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    stage_profile_unavailable: dict[str, str] = field(default_factory=dict)
+    # Seconds each rule's profile read took (Lakebench overhead inside the
+    # job's elapsed time, never part of a rule's time).
+    stage_profile_cost_s: dict[str, float] = field(default_factory=dict)
     # TM operations layer (GOALS P10, AML gold only), from the driver's
     # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
     # by cycle (as a string, the JSON key) then invariant name, each value
@@ -377,6 +399,10 @@ class PipelineMetrics:
     # Why the benchmark did not complete, when it raised (the run then fails
     # and no QpH is recorded). None when it completed or was not attempted.
     benchmark_error: str | None = None
+    # Failure reasons the run recorded itself, for a failure no other field
+    # shows (for example "datagen timed out", whose exit code is 1 like any
+    # failed run). Each one is a FAIL reason in ``verdict.reasons``.
+    failure_reasons: list[str] = field(default_factory=list)
 
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
@@ -395,13 +421,24 @@ class PipelineMetrics:
     # Shape: dict from FleetSummary.to_dict().
     datagen_fleet: dict[str, Any] | None = None
 
+    # Set when datagen wrote over objects already in the datagen
+    # prefix of a bronze bucket this deployment did not create
+    # (--allow-stale-bronze): {allowed, objects_before, bucket, prefix}.
+    # Serialised as ``datagen.stale_bronze``.
+    datagen_stale_bronze: dict[str, Any] | None = None
+
     # Financial (AML) recall scoring (optional -- populated for a batch
     # financial run when `financial score` is folded into `run` (LB-123)).
     # Shape: the recall.json sidecar written by score_financial.py --
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",
     # "rules" (every rule's status and skip reason), "total_alerts", "fp_alerts",
-    # "fp_rate", "run_id", "computed_by"}. The scorecard reads this to render
+    # "fp_rate", "run_id", "computed_by", "evidence_capped_alerts_by_rule"
+    # (rule -> alerts an evidence cap cut), "recall_bounded_by_evidence_cap"
+    # (typology -> those of its designated rules), and per typology
+    # "bounded_by_evidence_cap", and per reason code "recall_by_code",
+    # "fp_by_code", "alerts_by_code" ({rule: {code: value}}), "by_code_status",
+    # "reason_code_vocabulary"}. The scorecard reads this to render
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 
@@ -421,14 +458,24 @@ class PipelineMetrics:
     # loaded without one is the legacy policy (set by the storage loader).
     maintenance_policy_id: str = MAINTENANCE_POLICY_ID
 
-    # Which lakebench produced the run (metrics/provenance.py, GOALS P9.1):
-    # {lakebench_version, git_sha, git_dirty}. None on records from before
-    # the field existed.
+    # What produced the run (metrics/provenance.py): which lakebench
+    # ({lakebench_version, git_sha, git_dirty, install}, and end_sample at
+    # run end), config_sha256 and config_path, the scripts ConfigMaps, the
+    # dependency set, the images the pods ran and scratch as ran. Provenance,
+    # never identity. None on records from before the field existed.
     provenance: dict[str, Any] | None = None
 
     # Lakebench-imposed cuts to fit the cluster (config.autosizer), in the
     # words printed at run start. None: not recorded.
     autosize_cuts: list[str] | None = None
+
+    # The per-job timeout the batch run gave every stage (--timeout, or the
+    # scale-derived budget run computes). Headroom per stage is read against
+    # it (metrics/attribution.headroom_pct). None: not recorded.
+    job_timeout_seconds: int | None = None
+    # The per-query timeout of the run's timed benchmark: the limit that
+    # bounds the benchmark phase (no per-job timeout applies to it).
+    benchmark_query_timeout_seconds: int | None = None
 
     # What the run's table-maintenance calls actually did (cli/_sustained
     # _note_outcome): one dict per call with kind (expire, compaction),
@@ -447,31 +494,69 @@ class PipelineMetrics:
     # None on batch runs and on records from before it.
     continuous: dict[str, Any] | None = None
 
+    # Set when SIGINT or SIGTERM stopped the run (cli/_interrupt.py):
+    # {signal, at_stage, at_utc, prior_failure, stopped, left, skipped}. The
+    # verdict is then INTERRUPTED, or FAILED when something had already failed.
+    # None: the run was not interrupted.
+    interrupted: dict[str, Any] | None = None
+
+    # Set when a continuous run stopped because its namespace was deleted
+    # (or deleted and created again) mid-window (cli/_sustained.py
+    # NamespaceWatch): {reason, at_elapsed}. None otherwise.
+    abort_reason: dict[str, Any] | None = None
+
+    # A ``run --repeat N`` repetition: {id, index, size} (metrics/series.py).
+    # None for a run outside a series.
+    series: dict[str, Any] | None = None
+
+    # The one batch stage ``run --stage`` ran (bronze-verify, silver-build or
+    # gold-finalize). The verdict's record gates then judge that stage's
+    # layer only. None for a whole pipeline.
+    stage_only: str | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
-    # experiment_block() rebuilds it from the record when the snapshot holds
-    # experiment_inputs; a record from before the block has none and never
-    # gets one.
+    # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
 
+    # "run" for a pipeline run's own record. "benchmark" for the record
+    # `lakebench benchmark` writes: a copy of the run it measured
+    # (parent_run_id) with the new benchmark, under its own run id. Written
+    # to metrics.json only when not "run", so a run's record is unchanged and
+    # an absent key reads as "run".
+    record_kind: str = "run"
+    parent_run_id: str | None = None
+
+    # The verdict block as the loaded metrics.json stored it, for readers
+    # that show the strictest of stored and recomputed (reports/front_matter.py).
+    # Never written: to_dict computes the verdict it saves. None on a fresh run.
+    stored_verdict: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+
+    # Physical over logical bytes per table, layer and in total, measured at
+    # run end (metrics/storage_multiple.py). None when not measured.
+    storage_multiple: dict[str, Any] | None = None
+
     def experiment_block(self) -> dict[str, Any] | None:
-        """The experiment block, rebuilt from the record whenever its snapshot
-        carries the config half (``experiment_inputs``, frozen at run start):
-        the run half then always describes the record as it is now, including
-        after ``lakebench benchmark`` replaced its benchmark. A record from
-        before the block has no inputs and keeps what it was written with
-        (normally nothing)."""
+        """The experiment block: the stored one whenever the record has one,
+        whatever its schema, and otherwise built from the snapshot's
+        ``experiment_inputs`` (a fresh run, or a v1.6 record saved before the
+        block existed). A stored block is never rebuilt: rebuilding with
+        newer code re-stamped v1.6 records and moved their identity
+        digests. ``lakebench benchmark`` refreshes only the
+        benchmark half of a stored block (``experiment.refresh_benchmark``)."""
+        if self.experiment is not None:
+            return self.experiment
         from lakebench.metrics.experiment import build_experiment
 
-        built = build_experiment(self)
-        return built if built is not None else self.experiment
+        return build_experiment(self)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        # A2a: compute the Verdict alongside ``success``. This is the
-        # skeleton; no consumer of ``success`` changes yet (that is A2b).
-        from lakebench.metrics.verdict import compute_verdict
+        # The verdict is decided from the record as it is serialised
+        # (verdict_from_record, below), so the stored verdict is the one every
+        # reader recomputes: a value rounded on the way out (scale_ratio to 3
+        # places) is judged as stored, never as held in memory.
+        from lakebench.metrics.verdict import verdict_from_record
 
-        verdict = compute_verdict(self)
         d: dict[str, Any] = {
             "run_id": self.run_id,
             "deployment_name": self.deployment_name,
@@ -479,7 +564,7 @@ class PipelineMetrics:
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "total_elapsed_seconds": self.total_elapsed_seconds,
             "success": self.success,
-            "verdict": verdict.to_dict(),
+            "verdict": None,  # set last, from the finished dict
             "bronze_size_gb": self.bronze_size_gb,
             "silver_size_gb": self.silver_size_gb,
             "gold_size_gb": self.gold_size_gb,
@@ -493,10 +578,28 @@ class PipelineMetrics:
             d["provenance"] = self.provenance
         if self.autosize_cuts is not None:
             d["autosize_cuts"] = list(self.autosize_cuts)
+        if self.job_timeout_seconds is not None:
+            d["job_timeout_seconds"] = int(self.job_timeout_seconds)
+        if self.benchmark_query_timeout_seconds is not None:
+            d["benchmark_query_timeout_seconds"] = int(self.benchmark_query_timeout_seconds)
         if self.maintenance_outcomes is not None:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         if self.continuous is not None:
             d["continuous"] = self.continuous
+        if self.interrupted is not None:
+            d["interrupted"] = self.interrupted
+        if self.abort_reason is not None:
+            d["abort_reason"] = self.abort_reason
+        if self.series is not None:
+            d["series"] = self.series
+        if self.record_kind != "run":
+            d["record_kind"] = self.record_kind
+        if self.parent_run_id is not None:
+            d["parent_run_id"] = self.parent_run_id
+        if self.stage_only is not None:
+            d["stage_only"] = self.stage_only
+        if self.storage_multiple is not None:
+            d["storage_multiple"] = self.storage_multiple
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment
@@ -504,6 +607,8 @@ class PipelineMetrics:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_error is not None:
             d["benchmark_error"] = self.benchmark_error
+        if self.failure_reasons:
+            d["failure_reasons"] = list(self.failure_reasons)
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.pipeline_benchmark is not None:
@@ -514,13 +619,31 @@ class PipelineMetrics:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         if self.datagen_fleet is not None:
             d["datagen_fleet"] = self.datagen_fleet
+        if self.datagen_stale_bronze is not None:
+            d.setdefault("datagen", {})["stale_bronze"] = dict(self.datagen_stale_bronze)
         if self.financial_scoring is not None:
             d["financial_scoring"] = self.financial_scoring
         if self.tm_operations is not None:
             d["tm_operations"] = self.tm_operations
         if self.c360_correctness is not None:
             d["c360_correctness"] = self.c360_correctness
+        d["verdict"] = verdict_from_record(d).to_dict()
         return d
+
+
+#: The completeness threshold a stored ratio is judged against (the
+#: verdict's scale_ratio gate and the badge's ingest ratio).
+RATIO_THRESHOLD = 0.95
+
+
+def ratio_out(value: float, digits: int) -> float:
+    """*value* rounded for metrics.json, never across ``RATIO_THRESHOLD``:
+    a ratio just under it (0.9496 at 3 places) is rounded down, so the
+    verdict judged from the stored record agrees with the measurement."""
+    out = round(value, digits)
+    if value < RATIO_THRESHOLD <= out:
+        return math.floor(value * 10**digits) / 10**digits
+    return out
 
 
 @dataclass
@@ -551,6 +674,11 @@ class BenchmarkMetrics:
     # The query engine that ran it (trino, spark-thrift, duckdb). None on a
     # record from before the field whose benchmark_type does not name one.
     engine: str | None = None
+    # An in-stream round's record, written only by MetricsCollector.record_round:
+    # {index, started_at, ended_at, executed_queries, executed_query_set_id,
+    # investigator_queries}. Serialized beside the benchmark fields. None on
+    # an aggregate and on a round recorded before the field.
+    round_record: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.query_set_id is None:
@@ -589,6 +717,8 @@ class BenchmarkMetrics:
             d["stream_results"] = self.stream_results
         if self.round_meta is not None:
             d["round_meta"] = self.round_meta.to_dict()
+        if self.round_record is not None:
+            d.update(self.round_record)
         return d
 
 
@@ -796,75 +926,11 @@ class PipelineBenchmark:
     by stage name for spreadsheet/comparison use.
     """
 
-    # Human-readable descriptions for every JSON score key.
-    # Emitted as "score_descriptions" in to_dict() so downstream tools
-    # (and humans reading metrics.json) know what each field means.
-    _SCORE_DESCRIPTIONS: ClassVar[dict[str, str]] = {
-        # Both modes
-        "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
-        "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
-        "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
-        "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
-        "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
-        "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
-        "composite_qph_rounds": "Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
-        # Sustained
-        "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
-        "sustained_throughput_rps": "Rows bronze ingested inside the measurement window per second of the window that data was arriving (arrival_seconds), higher is better. Rows ingested before the window opened are not counted. When intake_limit is trickle_rate this is the configured offered load, not a capacity",
-        "window_seconds": "Length of the measurement window: from the moment every stream's driver was running, run_duration seconds",
-        "arrival_seconds": "Seconds of the window data was still arriving at bronze: the whole window while corpus was left, else until one bronze trigger after its last write inside the window",
-        "window_arrival_fraction": "arrival_seconds / window_seconds. Below 1 the corpus ran out inside the window; the window after that measured an idle pipeline",
-        "pre_window_rows": "Rows bronze ingested before the window opened (a stream that started while another waited to submit). Not part of any window score",
-        "ingest_ratio": "Bronze rows ingested by the window's end / rows the trickle had released to bronze by then (released_rows: max_files_per_trigger files per bronze trigger since bronze's first write, at the corpus's mean rows per file, capped at the corpus). 1.0 = bronze kept up with what arrived. Falls back to corpus_ingest_ratio when released_rows is unknown",
-        "corpus_ingest_ratio": "Bronze rows ingested by the window's end / datagen rows produced: the share of the whole corpus taken. Below 1 on a default run, whose trickle is sized to outlast the window",
-        "released_rows": "Rows the trickle had made available to bronze by the window's end (ingest_ratio's denominator); null when the corpus file count or window is unknown",
-        "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
-        "pipeline_saturated": "True when ingest_ratio < 0.95: bronze fell behind the rows the trickle released. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
-        "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
-        "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
-        "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
-        "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the commit of the rule's alerts on the tick that first raised it (lower is better)",
-        "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
-        "time_to_detect_max_seconds": "AML continuous. Longest time to detect of any newly raised alert",
-        "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
-        "time_to_detect_late_alerts": "AML continuous. Measured alerts whose related transactions were all in silver before the previous detection pass (re-raised after a rule error, or evidence outside related_txn_ids); included in the percentiles",
-        "time_to_detect_unmeasured_cycles": "AML continuous. Gold cycles that logged no time-to-detect line; their alerts are measured on the next cycle, late by one cycle",
-        "corpus_drained": "True when every datagen row reached bronze and silver committed all of them before the window ended: freshness covers only gold cycles that saw new data, and arrival_seconds stops at bronze's last write",
-        "total_rows_processed": "Rows taken in across all streaming stages inside the measurement window (gold re-reads of silver included)",
-        "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
-        "query_time_event_age_seconds": "Diagnostic, not freshness. Median age of the newest event date in gold at benchmark query time (query time minus MAX(interaction_date), day resolution). It tracks where the corpus's event timestamps sit, not how stale gold is; data_freshness_seconds is the freshness score. Replaces query_time_freshness_seconds, which carried this figure under a freshness name",
-        "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
-        "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
-        "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
-        # Batch
-        "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
-        "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
-        "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",
-        # Maintenance (v1.3)
-        "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
-        "maintenance_stopped": "True when pre-benchmark maintenance stopped early (a statement timed out or the 30 min cap hit); a statement may still have been running, so post_compaction_qph is not a clean measurement and maintenance_value_pct is null",
-        "maintenance_stop_reason": "Why pre-benchmark maintenance stopped",
-        "maintenance_live_streams": "True when stream apps were present (or could not be read) during pre-benchmark maintenance; the post-maintenance QpH was measured with writers live and is not gated",
-        "maintenance_live_streams_reason": "Which stream apps were present, and any read errors",
-        "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
-        "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
-        "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
-        "compaction_ratio": "pre/post file count ratio (higher = more compaction benefit)",
-        "snapshots_expired": "Number of snapshots removed by expire_snapshots",
-        "orphan_files_removed": "Number of orphan files cleaned up by remove_orphan_files",
-        "storage_reclaimed_mb": "MB of storage freed by maintenance operations",
-        "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
-        "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
-        "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable or within the within-round spread",
-        "maintenance_value_reason": "Why maintenance_value_pct is null: not measurable, one sample per query, or within noise",
-        "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
-        "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
-        "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
-        "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
-        "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
-        "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
-        "maintenance_settle_verified": "False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does",
-    }
+    # Human-readable descriptions for every JSON score key, emitted as
+    # "score_descriptions" in to_dict() so downstream tools (and humans
+    # reading metrics.json) know what each field means. Defined with each
+    # metric's unit and direction in metrics/metric_registry.py.
+    _SCORE_DESCRIPTIONS: ClassVar[dict[str, str]] = _registry_descriptions()
 
     run_id: str
     deployment_name: str
@@ -965,6 +1031,13 @@ class PipelineBenchmark:
     # Percent drop from first-half median to second-half median QpH.
     # Positive = degradation, negative = improvement, None = insufficient data.
     qph_degradation_pct: float | None = None
+    # Why qph_degradation_pct is withheld though there are enough rounds:
+    # the rounds ran different query sets (an AML continuous run's 8-query
+    # rounds before its first case, 12 after), so the halves time different
+    # work. This matches compare's rule for the blended case only
+    # (composite_qph_basis.blended); compare also marks a run whose every
+    # round missed the same query, which still records a figure here.
+    qph_degradation_withheld: str | None = None
 
     # Maintenance cost metrics (v1.3)
     maintenance_elapsed_seconds: float = 0.0
@@ -1085,8 +1158,12 @@ class PipelineBenchmark:
         expected_gb = self.config_snapshot.get("approx_bronze_gb", 0)
         if expected_gb > 0:
             bronze_stages = [s for s in self.stages if s.stage_name == "bronze"]
+            # The last bronze-verify: in a multi-cycle run each cycle's reads
+            # every cycle so far (C360: common.c360_bronze_run_path; AML: the
+            # whole pacs008 prefix, which each cycle appends to), so only the
+            # last one reads the whole corpus; the first read cycle 1 alone.
             bronze_gb = (
-                bronze_stages[0].input_size_gb if bronze_stages else self.total_data_processed_gb
+                bronze_stages[-1].input_size_gb if bronze_stages else self.total_data_processed_gb
             )
             self.scale_ratio = bronze_gb / expected_gb
 
@@ -1286,8 +1363,17 @@ class PipelineBenchmark:
             if round_event_age:
                 self.query_time_event_age_seconds = statistics.median(round_event_age)
 
-        # QpH degradation: compare first-half vs second-half median QpH
-        if self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
+        # QpH degradation: compare first-half vs second-half median QpH,
+        # withheld when the rounds ran different query sets.
+        self.qph_degradation_pct = None
+        self.qph_degradation_withheld = None
+        blended = bool(
+            self.benchmark_rounds and composite_qph_basis(self.benchmark_rounds)[0]["blended"]
+        )
+        if blended and len(self.benchmark_rounds) >= 4:
+            self.qph_degradation_pct = None
+            self.qph_degradation_withheld = QPH_DEGRADATION_BLENDED
+        elif self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
             mid = len(self.benchmark_rounds) // 2
             first_half = [r.qph for r in self.benchmark_rounds[:mid] if r.qph > 0]
             second_half = [r.qph for r in self.benchmark_rounds[mid:] if r.qph > 0]
@@ -1500,7 +1586,7 @@ class PipelineBenchmark:
                 ),
                 "total_core_hours": round(self.total_core_hours, 2),
                 "ingest_ratio": (
-                    round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                    ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
                 ),
                 "compute_efficiency_gb_per_core_hour": round(
                     self.compute_efficiency_gb_per_core_hour, 4
@@ -1566,8 +1652,13 @@ class PipelineBenchmark:
             if in_stream_qph > 0:
                 scores["in_stream_composite_qph"] = in_stream_qph
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
+                basis, by_set = composite_qph_basis(self.benchmark_rounds)
+                scores["composite_qph_basis"] = basis
+                scores["composite_qph_by_set"] = by_set
             if self.qph_degradation_pct is not None:
                 scores["qph_degradation_pct"] = self.qph_degradation_pct
+            if self.qph_degradation_withheld:
+                scores["qph_degradation_withheld"] = self.qph_degradation_withheld
             # Maintenance metrics (v1.3) -- same fields for sustained
             if self.maintenance_elapsed_seconds > 0:
                 scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
@@ -1595,7 +1686,7 @@ class PipelineBenchmark:
                 self.compute_efficiency_gb_per_core_hour, 4
             ),
             "composite_qph": qph,
-            "scale_ratio": round(self.scale_ratio, 3),
+            "scale_ratio": ratio_out(self.scale_ratio, 3),
         }
         if self.query_benchmark is None:
             # No benchmark ran (no query engine, --skip-benchmark, or the run
@@ -1703,10 +1794,10 @@ class PipelineBenchmark:
         }
         # Mode-specific top-level flags (spec Section 7.1)
         if self.pipeline_mode == "batch":
-            d["scale_ratio"] = round(self.scale_ratio, 3)
+            d["scale_ratio"] = ratio_out(self.scale_ratio, 3)
         else:
             d["ingest_ratio"] = (
-                round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                ratio_out(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
             )
             d["pipeline_saturated"] = self.pipeline_saturated
             d["corpus_drained"] = self.corpus_drained
@@ -1946,7 +2037,11 @@ def build_pipeline_benchmark(
                 _s_scale = run.config_snapshot.get("scale", 10)
                 _s_execs = _get_exec_count(sj.job_type, _s_scale, _s_schema)
                 # Check config overrides (streaming jobs may have explicit counts)
-                _override_key = sj.job_type.replace("-", "_")
+                from lakebench.modules.pipeline_engines.spark.job import (
+                    EXECUTOR_OVERRIDE_FIELDS,
+                )
+
+                _override_key = EXECUTOR_OVERRIDE_FIELDS.get(sj.job_type, ("", ""))[1]
                 _overrides = run.config_snapshot.get("spark", {}).get("executor_overrides", {})
                 _override_val = _overrides.get(_override_key)
                 if _override_val is not None:
@@ -2066,6 +2161,119 @@ def build_pipeline_benchmark(
     return benchmark
 
 
+#: ``scores.qph_degradation_withheld`` when the rounds ran different query
+#: sets: the first and second halves time different work.
+QPH_DEGRADATION_BLENDED = "rounds ran different query sets"
+
+#: ``investigator_queries`` of a round: the investigator queries ran in it,
+#: were left out because no case existed yet, or their case probe failed.
+INVESTIGATOR_QUERY_STATES = ("included", "absent_no_cases", "probe_failed")
+#: Key of the rounds whose executed query set was not recorded.
+QUERY_SET_NOT_RECORDED = "not_recorded"
+#: query_set_id of a median over rounds that executed different query sets.
+BLENDED_QUERY_SET = "blended"
+
+
+def executed_query_set(benchmark: BenchmarkMetrics) -> tuple[list[str], str | None]:
+    """The queries a round executed (succeeded) and their query set id."""
+    from lakebench.benchmark.queries import query_set_id
+
+    names = [
+        str(q.get("name") or q.get("query_name"))
+        for q in benchmark.queries or []
+        if isinstance(q, dict) and q.get("success", True) and (q.get("name") or q.get("query_name"))
+    ]
+    return names, (query_set_id(names) if names else None)
+
+
+def round_label(benchmark: BenchmarkMetrics) -> str:
+    """How a round's query set reads in a report: ``<n>-query set``, with
+    "(before cases exist)" when the investigator queries were left out for
+    want of a case (AML continuous before its first TM pass). The label
+    the AML continuous report renders per round; nothing in this module
+    calls it."""
+    rec = benchmark.round_record or {}
+    executed = rec.get("executed_queries")
+    n = len(executed) if isinstance(executed, list) else len(executed_query_set(benchmark)[0])
+    label = f"{n}-query set"
+    if rec.get("investigator_queries") == "absent_no_cases":
+        label += " (before cases exist)"
+    elif rec.get("investigator_queries") == "probe_failed":
+        label += " (case probe failed)"
+    return label
+
+
+def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[BenchmarkMetrics]]:
+    """Rounds that measured a QpH, grouped by the query set each executed
+    (``QUERY_SET_NOT_RECORDED`` for a round recorded before the field)."""
+    groups: dict[str, list[BenchmarkMetrics]] = {}
+    for r in rounds:
+        if (r.qph or 0) <= 0:
+            continue
+        key = (r.round_record or {}).get("executed_query_set_id")
+        if key is None and r.round_record is None:
+            # A round recorded before the field: its queries' success
+            # flags still say what it executed.
+            key = executed_query_set(r)[1]
+        groups.setdefault(str(key or QUERY_SET_NOT_RECORDED), []).append(r)
+    return groups
+
+
+def executed_subset_query_set(
+    rounds: list[BenchmarkMetrics], recorded_at: Any = None
+) -> str | None:
+    """The query set id in-stream rounds executed when they all executed the
+    same set and it is smaller than the set they listed (a query that failed
+    in every round); None otherwise, and the aggregate's id stands. Such a
+    QpH is over the smaller set. Rounds from before the round record map
+    their executed names through the legacy table (``"unknown"`` when it has
+    no entry), never through today's SQL."""
+    from lakebench.benchmark.queries import legacy_query_set_id
+
+    groups = rounds_by_query_set(rounds)
+    if len(groups) != 1:
+        return None
+    ((key, members),) = groups.items()
+    if key == QUERY_SET_NOT_RECORDED:
+        return None
+    listed = {
+        str(q.get("name") or q.get("query_name"))
+        for r in members
+        for q in r.queries or []
+        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
+    }
+    rec = members[0].round_record
+    executed = (rec or {}).get("executed_queries")
+    if not isinstance(executed, list):
+        executed = executed_query_set(members[0])[0]
+    if not listed or set(executed) == listed:
+        return None
+    return key if rec is not None else legacy_query_set_id(executed, recorded_at)
+
+
+def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any], dict[str, float]]:
+    """``(composite_qph_basis, composite_qph_by_set)`` for in-stream rounds.
+
+    The basis says whether the composite QpH (the median over rounds)
+    blends rounds that executed different query sets, and how many rounds
+    each set has; by_set is the median QpH per executed set. A round from
+    before the round record gets its set from its queries' success flags;
+    a round with no queries listed is ``QUERY_SET_NOT_RECORDED``, and the
+    basis says so."""
+    groups = rounds_by_query_set(rounds)
+    recorded = {k: v for k, v in groups.items() if k != QUERY_SET_NOT_RECORDED}
+    basis: dict[str, Any] = {
+        "blended": len(groups) > 1,
+        "sets": {k: len(v) for k, v in sorted(groups.items())},
+    }
+    if QUERY_SET_NOT_RECORDED in groups:
+        basis["note"] = "some rounds list no queries; their query set is not known"
+    by_set = {
+        k: round(statistics.median([r.qph for r in v]), 1) for k, v in sorted(recorded.items())
+    }
+    return basis, by_set
+
+
 def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:
     """Aggregate multiple in-stream benchmark rounds into a single result.
 
@@ -2114,6 +2322,12 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
             qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
         aggregated_queries.append(qd)
 
+    # The query set the median stands for: as before, the set of every
+    # query name the rounds ran, unless the rounds executed different sets,
+    # when it is "blended" (never comparable, not even with another blend;
+    # benchmark.queries.qph_comparable). The executed sets are in
+    # PipelineBenchmark's composite_qph_basis.
+    set_id = BLENDED_QUERY_SET if len(rounds_by_query_set(rounds)) > 1 else None
     return BenchmarkMetrics(
         mode=rounds[0].mode,
         cache=rounds[0].cache,
@@ -2124,6 +2338,7 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
         iterations=rounds[0].iterations,
         streams=rounds[0].streams,
         engine=rounds[0].engine,
+        query_set_id=set_id,
     )
 
 
@@ -2139,8 +2354,74 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
 }
 
 
+# The config fields build_config_snapshot records, as dotted schema paths.
+# tests/test_schema_walk.py derives the same set from the function and fails
+# when they differ, and every one of them must have a reader outside the
+# recording modules: a recorded setting nothing honours fails the walk.
+SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
+    {
+        "architecture.benchmark.iterations",
+        "architecture.benchmark.maintenance_settle.enabled",
+        "architecture.benchmark.maintenance_settle.interval_seconds",
+        "architecture.benchmark.maintenance_settle.max_seconds",
+        "architecture.benchmark.maintenance_settle.probe_query",
+        "architecture.benchmark.maintenance_settle.probe_samples",
+        "architecture.benchmark.maintenance_settle.tolerance_pct",
+        "architecture.catalog.type",
+        "architecture.pipeline.mode",
+        "architecture.pipeline.pattern",
+        "architecture.pipeline.pre_benchmark_maintenance",
+        "architecture.pipeline.sustained.benchmark_interval",
+        "architecture.pipeline.sustained.benchmark_warmup",
+        "architecture.pipeline.sustained.bronze_target_file_size_mb",
+        "architecture.pipeline.sustained.bronze_trigger_interval",
+        "architecture.pipeline.sustained.compaction_enabled",
+        "architecture.pipeline.sustained.gold_refresh_interval",
+        "architecture.pipeline.sustained.gold_target_file_size_mb",
+        "architecture.pipeline.sustained.retention_threshold",
+        "architecture.pipeline.sustained.run_duration",
+        "architecture.pipeline.sustained.silver_target_file_size_mb",
+        "architecture.pipeline.sustained.silver_trigger_interval",
+        "architecture.pipeline_engine",
+        "architecture.query_engine.trino.coordinator.cpu",
+        "architecture.query_engine.trino.coordinator.memory",
+        "architecture.query_engine.trino.worker.cpu",
+        "architecture.query_engine.trino.worker.memory",
+        "architecture.query_engine.trino.worker.replicas",
+        "architecture.query_engine.type",
+        "architecture.table_format.type",
+        "architecture.workload.datagen.file_size",
+        "architecture.workload.datagen.mode",
+        "architecture.workload.datagen.parallelism",
+        "architecture.workload.datagen.scale",
+        "architecture.workload.schema_type",
+        "images.datagen",
+        "images.spark",
+        "images.trino",
+        "name",
+        "platform.compute.spark.bronze_executors",
+        "platform.compute.spark.bronze_ingest_executors",
+        "platform.compute.spark.gold_executors",
+        "platform.compute.spark.gold_refresh_executors",
+        "platform.compute.spark.silver_executors",
+        "platform.compute.spark.silver_stream_executors",
+        "platform.storage.s3.buckets.bronze",
+        "platform.storage.s3.buckets.gold",
+        "platform.storage.s3.buckets.silver",
+        "platform.storage.s3.endpoint",
+        "platform.storage.scratch.enabled",
+        "platform.storage.scratch.storage_class",
+        "spark.conf",
+    }
+)
+
+
 def build_config_snapshot(
-    cfg: Any, *, run_mode: str | None = None, system: str = "cluster"
+    cfg: Any,
+    *,
+    run_mode: str | None = None,
+    system: str = "cluster",
+    config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build a config snapshot for metrics recording.
 
@@ -2149,11 +2430,19 @@ def build_config_snapshot(
 
     Args:
         cfg: A :class:`~lakebench.config.LakebenchConfig` instance.
+        config_path: The config file the run loaded. Its bytes' sha256 is
+            recorded as ``config_sha256``, which the perf gate compares with
+            the pinned file's.
 
     Returns:
         Dict suitable for JSON serialization.
     """
     from lakebench.config.schema import is_continuous_mode
+    from lakebench.metrics.fingerprint_inputs import (
+        FINGERPRINT_VERSION,
+        fingerprint_inputs,
+        scratch_size_per_job,
+    )
 
     spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
@@ -2178,19 +2467,10 @@ def build_config_snapshot(
         "scratch": {
             "enabled": scratch.enabled,
             "storage_class": scratch.storage_class,
-            "size": scratch.size,
+            # Each executor's scratch PVC is its job profile's size.
+            "size_per_job": scratch_size_per_job(cfg, _continuous),
         },
         "spark": {
-            "driver": {
-                "cores": spark.driver.cores,
-                "memory": spark.driver.memory,
-            },
-            "executor": {
-                "instances": spark.executor.instances,
-                "cores": spark.executor.cores,
-                "memory": spark.executor.memory,
-                "memory_overhead": spark.executor.memory_overhead,
-            },
             "executor_overrides": {
                 "bronze": spark.bronze_executors,
                 "silver": spark.silver_executors,
@@ -2239,18 +2519,23 @@ def build_config_snapshot(
                 "memory": cfg.architecture.query_engine.trino.worker.memory,
             },
         },
-        # What the benchmark runs with. Continuous mode ignores the
-        # benchmark block: its in-stream rounds are fixed (one hot power
-        # pass, one sample per query), so recording the config's iterations
-        # and streams there would claim runs that never happened.
+        # What the benchmark ran. Continuous mode ignores the benchmark
+        # block: its in-stream rounds are fixed (one hot power pass, one
+        # sample per query). Batch `run` always runs one hot power pass with
+        # one stream and the config's iterations (`run` refuses another mode,
+        # a cold cache or several streams at load), and waits for storage to
+        # settle after maintenance as maintenance_settle says.
         "benchmark": (
             dict(CONTINUOUS_ROUND_BENCHMARK)
-            if is_continuous_mode(pipeline.mode)
+            if _continuous
             else {
-                "mode": cfg.architecture.benchmark.mode.value,
-                "streams": cfg.architecture.benchmark.streams,
-                "cache": cfg.architecture.benchmark.cache,
+                "mode": "power",
+                "streams": 1,
+                "cache": "hot",
                 "iterations": cfg.architecture.benchmark.iterations,
+                "maintenance_settle": cfg.architecture.benchmark.maintenance_settle.model_dump(
+                    mode="json"
+                ),
             }
         ),
         # What table maintenance the config asks for. Part of the perf-gate
@@ -2274,7 +2559,25 @@ def build_config_snapshot(
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.
         "experiment_inputs": experiment_inputs(cfg, run_mode=run_mode, system=system),
+        # Perf-gate fingerprint version and the inputs it hashes beyond the
+        # fields above (metrics/fingerprint_inputs.py). Stamped here, at run
+        # start, so the gate reads them and never rebuilds them.
+        "fingerprint_version": FINGERPRINT_VERSION,
+        "fingerprint_inputs": fingerprint_inputs(cfg, _continuous, local=system == "local"),
     }
+    if config_path is not None:
+        try:
+            snapshot["config_sha256"] = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+        except OSError:
+            snapshot["config_sha256"] = None
+    if cfg.architecture.workload.schema_type.value == "customer360":
+        # What the config asked the gold scripts for, against what each gold
+        # job reports it ran (metrics/requested_effective.py). Outside the
+        # perf-gate fingerprint keys: the user conf is already hashed there.
+        from lakebench.config.c360_run import GOLD_STRATEGY_KEY
+
+        value = str((cfg.spark.conf or {}).get(GOLD_STRATEGY_KEY) or "auto").strip().lower()
+        snapshot["requested"] = {"gold_strategy": value or "auto"}
 
     return snapshot
 
@@ -2462,9 +2765,17 @@ class MetricsCollector:
     def __init__(self):
         """Initialize metrics collector."""
         self.current_run: PipelineMetrics | None = None
+        # The run's job manager, read again at run end (the scripts maps are
+        # recorded once applied; provenance.deps only when run recorded none).
+        self._job_manager: Any = None
 
     def start_run(
-        self, run_id: str, deployment_name: str, config: dict[str, Any]
+        self,
+        run_id: str,
+        deployment_name: str,
+        config: dict[str, Any],
+        *,
+        config_path: str | Path | None = None,
     ) -> PipelineMetrics:
         """Start a new pipeline run.
 
@@ -2472,18 +2783,94 @@ class MetricsCollector:
             run_id: Unique run identifier
             deployment_name: Name of the deployment
             config: Configuration snapshot
+            config_path: The config file the run loaded, recorded as
+                ``provenance.config_path``.
 
         Returns:
             New PipelineMetrics instance
         """
+        provenance: dict[str, Any] = dict(run_provenance())
+        # One source: the snapshot hashed the file's bytes when it was built
+        # (build_config_snapshot), and the perf gate compares that value.
+        provenance["config_sha256"] = config.get("config_sha256")
+        provenance["config_path"] = _prov.config_path_of(config_path)
+        provenance["deps"] = _prov.NOT_RECORDED
+        self._job_manager = None
         self.current_run = PipelineMetrics(
             run_id=run_id,
             deployment_name=deployment_name,
             start_time=utc_now(),
             config_snapshot=config,
-            provenance=dict(run_provenance()),
+            provenance=provenance,
         )
         return self.current_run
+
+    def _run_provenance(self) -> dict[str, Any] | None:
+        run = self.current_run
+        if run is None:
+            return None
+        if run.provenance is None:
+            run.provenance = {}
+        return run.provenance
+
+    def record_preflight(self, preflight: dict[str, Any] | None) -> None:
+        """Record the run preflight's capacity outcome as
+        ``provenance.preflight`` (provenance, not identity):
+        ``{capacity: checked|skipped, scratch: checked|not_measurable|
+        disabled|skipped, scratch_reason, storage_class}``. None records
+        nothing (a caller that ran no preflight)."""
+        prov = self._run_provenance()
+        if prov is not None and preflight is not None:
+            prov["preflight"] = dict(preflight)
+
+    def record_job_manager(self, job_manager: Any) -> None:
+        """Record the scripts ConfigMaps and dependency set *job_manager*
+        holds (call after ``deploy_scripts_configmap``); read again at run
+        end."""
+        self._job_manager = job_manager
+        prov = self._run_provenance()
+        if prov is None:
+            return
+        try:
+            _prov.merge_job_manager_fields(prov, _prov.job_manager_fields(job_manager))
+        except Exception as e:  # noqa: BLE001 -- provenance never fails a run
+            logger.warning("Could not record the job manager's provenance: %s", e)
+
+    def observe_images(self, namespace: str, at: str, apps: Collection[str]) -> set[str]:
+        """Read the images this run's pods run (one pod list): the Spark
+        applications in *apps*, the Trino coordinator and the Thrift server.
+        *at* names the point of the run. Returns the roles seen; never
+        raises."""
+        prov = self._run_provenance()
+        if prov is None:
+            return set()
+        return _prov.observe_images(prov, namespace, at, utc_now().isoformat(), apps)
+
+    def stage_image_watch(self, namespace: str, app: str, at: str) -> _prov.StageImageWatch:
+        """A watch that reads batch stage *app*'s images while it runs
+        (``on_status`` from the progress callback, ``finish`` after the
+        wait); a Spark role never seen is listed in
+        ``provenance.images_observed_missing``."""
+        collector = self
+
+        class _Watch(_prov.StageImageWatch):
+            def finish(self) -> list[str]:
+                missing = super().finish()
+                prov = collector._run_provenance()
+                if missing and prov is not None:
+                    prov.setdefault("images_observed_missing", []).append(
+                        {"at": at, "roles": missing}
+                    )
+                return missing
+
+        return _Watch(lambda: self.observe_images(namespace, at, {app}))
+
+    def record_scratch(self, job_type: str, status: Any) -> None:
+        """Record *job_type*'s scratch from the SparkApplication status the
+        monitor read (``JobStatus.scratch``)."""
+        prov = self._run_provenance()
+        if prov is not None:
+            _prov.record_scratch(prov, job_type, status)
 
     def end_run(self, success: bool = True) -> PipelineMetrics | None:
         """End the current pipeline run.
@@ -2502,8 +2889,38 @@ class MetricsCollector:
             self.current_run.end_time - self.current_run.start_time
         ).total_seconds()
         self.current_run.success = success
+        self._end_provenance()
 
         return self.current_run
+
+    def _end_provenance(self) -> None:
+        """Re-read which code is on disk, and say so when it is not the code
+        the run started with: a supported state frozen at start is then
+        withdrawn (config.support.withdraw_if_code_changed)."""
+        run = self.current_run
+        prov = self._run_provenance()
+        if run is None or prov is None:
+            return
+        try:
+            if self._job_manager is not None:
+                _prov.merge_job_manager_fields(prov, _prov.job_manager_fields(self._job_manager))
+            prov["end_sample"] = _prov.end_sample(prov)
+            if not prov.get("images_observed"):
+                prov["images_observed"] = {
+                    "not_observed": (
+                        "local run: no cluster pods"
+                        if (run.config_snapshot or {}).get("local")
+                        else "no pod of this run with a started container was seen"
+                    )
+                }
+            prov.setdefault("scratch_as_ran", {})
+            inputs = (run.config_snapshot or {}).get("experiment_inputs")
+            if isinstance(inputs, dict) and isinstance(inputs.get("support"), dict):
+                from lakebench.config.support import withdraw_if_code_changed
+
+                inputs["support"] = withdraw_if_code_changed(inputs["support"], prov)
+        except Exception as e:  # noqa: BLE001 -- provenance never fails a run
+            logger.warning("Could not take the run-end provenance sample: %s", e)
 
     def record_job(self, metrics: JobMetrics) -> None:
         """Record metrics for a job.
@@ -2532,15 +2949,40 @@ class MetricsCollector:
         if self.current_run:
             self.current_run.benchmark = benchmark
 
-    def record_benchmark_round(self, benchmark: BenchmarkMetrics) -> None:
-        """Record an in-stream benchmark round.
-
-        Args:
-            benchmark: BenchmarkMetrics from a single round (should have
-                ``round_meta`` set)
-        """
-        if self.current_run:
-            self.current_run.benchmark_rounds.append(benchmark)
+    def record_round(
+        self,
+        benchmark: BenchmarkMetrics,
+        *,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+        investigator_queries: str | None = None,
+    ) -> None:
+        """Record an in-stream benchmark round: the one writer of
+        ``benchmark_rounds[]`` and of each round's record (index, start and
+        end, the queries it executed and their query set id, and whether the
+        investigator queries ran: one of ``INVESTIGATOR_QUERY_STATES``, None
+        for a workload without them)."""
+        if investigator_queries is not None and investigator_queries not in (
+            INVESTIGATOR_QUERY_STATES
+        ):
+            raise ValueError(f"investigator_queries {investigator_queries!r} is not a known state")
+        if not self.current_run:
+            return
+        executed, set_id = executed_query_set(benchmark)
+        index = (
+            benchmark.round_meta.round_index
+            if benchmark.round_meta is not None
+            else len(self.current_run.benchmark_rounds)
+        )
+        benchmark.round_record = {
+            "index": index,
+            "started_at": started_at.isoformat() if started_at else None,
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "executed_queries": executed,
+            "executed_query_set_id": set_id,
+            "investigator_queries": investigator_queries,
+        }
+        self.current_run.benchmark_rounds.append(benchmark)
 
     def record_actual_sizes(
         self,
@@ -2706,7 +3148,7 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"alerts=(?P<n>\d+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in detection_re.finditer(logs):
@@ -2716,6 +3158,11 @@ class MetricsCollector:
             except ValueError:
                 continue
             mid = (m.group("mid") or "").strip()
+            if mid != "error=unknown-rule":  # never started
+                try:
+                    metrics.rule_elapsed_s[rule] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
             err_match = re.search(r"\berror=(.+)$", mid)
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()
@@ -2732,11 +3179,26 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=[\d.]+s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
             re.MULTILINE,
         )
         for m in skip_re.finditer(logs):
-            metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
+            reason = m.group("reason").strip()
+            metrics.rules_skipped[m.group("rule")] = reason
+            if reason != "mode-excluded":
+                try:
+                    metrics.rule_elapsed_s[m.group("rule")] = float(m.group("elapsed"))
+                except ValueError:
+                    pass
+
+        # AML-1: per-rule Spark stage profile (common.rule_stage_profile).
+        from lakebench.metrics.stage_profile import parse_stage_profile
+
+        (
+            metrics.stage_profile,
+            metrics.stage_profile_unavailable,
+            metrics.stage_profile_cost_s,
+        ) = parse_stage_profile(logs)
 
         # P10 TM operations lines (tm_operations.py).
         from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status

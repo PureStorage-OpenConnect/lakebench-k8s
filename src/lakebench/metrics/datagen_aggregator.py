@@ -27,6 +27,7 @@ import json
 import logging
 import statistics
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,8 @@ class PodMetrics:
     target_tb: float | None = None
     customer_id_max: int | None = None
     dirty_ratio: float | None = None
+    # "batch" or "continuous" (absent from images before v1.7).
+    delivery_mode: str | None = None
     pod_name: str = ""
 
     def effective_cores(self) -> float:
@@ -131,6 +134,7 @@ class PodMetrics:
             "target_tb",
             "customer_id_max",
             "dirty_ratio",
+            "delivery_mode",
         }
         kwargs = {k: obj[k] for k in obj if k in allowed}
         # rows_written was added later; older logs won't have it. Fall back
@@ -222,6 +226,10 @@ class FleetSummary:
     # the pods disagree (then it is listed in mixed_params).
     customer_id_max: int | None = None
     mixed_params: list[str] = field(default_factory=list)
+    # How the pods wrote bronze ("batch" or "continuous"; "mixed" when they
+    # disagree, None when no pod reported it). Delivery only: the bytes are
+    # the same either way, so it is not a corpus parameter.
+    delivery_mode: str | None = None
     # The datagen container's image as the pod spec named it, and the
     # resolved image ids (registry@sha256 digests) the kubelet reported in
     # pod status. More than one id means the pods did not all run one image.
@@ -261,6 +269,7 @@ class FleetSummary:
             "best_pod_elapsed_s": round(self.best_pod_elapsed_s, 3),
             "customer_id_max": self.customer_id_max,
             "mixed_params": list(self.mixed_params),
+            "delivery_mode": self.delivery_mode,
             "per_pod": [_pod_to_dict(p) for p in self.per_pod],
         }
 
@@ -316,6 +325,8 @@ def collect_from_pod_logs(
     images = pod_images or {}
     specs = sorted({img for img, _ in images.values() if img})
     summary.image = specs[0] if len(specs) == 1 else (", ".join(specs) or None)
+    modes = {p.delivery_mode for p in pods if p.delivery_mode}
+    summary.delivery_mode = modes.pop() if len(modes) == 1 else ("mixed" if modes else None)
     summary.image_ids = sorted({iid for _, iid in images.values() if iid})
     for key in ("seed", "scale"):
         values = {a.get(key) for a in (pod_args or {}).values() if a.get(key) is not None}
@@ -534,3 +545,61 @@ def collect_from_k8s(
         pod_images=pod_images,
         pod_args=pod_args,
     )
+
+
+def fleet_record(fleet: FleetSummary, namespace: str) -> dict[str, Any]:
+    """*fleet* as a run record's ``datagen_fleet`` and the namespace's
+    sidecar carry it: the summary stamped with the namespace and the UTC
+    time it was read (``lakebench generate`` writes the same shape)."""
+    from datetime import datetime, timezone
+
+    out = fleet.to_dict()
+    out["namespace"] = namespace
+    out["written_at"] = datetime.now(timezone.utc).isoformat()
+    return out
+
+
+def sidecar_path(namespace: str) -> Path:
+    """Where the namespace's fleet sidecar lives
+    (``lakebench-output/datagen/<namespace>-datagen-metrics.json``)."""
+    from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+    return Path(DEFAULT_OUTPUT_DIR) / "datagen" / f"{namespace}-datagen-metrics.json"
+
+
+def record_generated_fleet(namespace: str, job_completions: int | None) -> dict[str, Any] | None:
+    """After a run's own datagen Job finished: read the fleet from its pods,
+    write the namespace's sidecar (so a later run over this corpus finds
+    it), and return the record. When the fleet cannot be read the old
+    sidecar is removed, because it describes a corpus this run replaced.
+    Never raises."""
+    try:
+        record = fleet_record(
+            collect_from_k8s(namespace, job_completions=job_completions), namespace
+        )
+    except Exception as e:  # noqa: BLE001 -- best effort; the record says what is missing
+        logger.warning("could not read the datagen fleet of this run: %s", e)
+        drop_sidecar(namespace)
+        return None
+    write_sidecar(record, namespace)
+    return record
+
+
+def write_sidecar(record: dict[str, Any], namespace: str) -> None:
+    """Write *record* as the namespace's fleet sidecar. Never raises."""
+    path = sidecar_path(namespace)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, indent=2, default=str))
+    except (OSError, TypeError, ValueError) as e:
+        logger.warning("could not write the datagen sidecar %s: %s", path, e)
+
+
+def drop_sidecar(namespace: str) -> None:
+    """Remove the namespace's fleet sidecar: a run is replacing the corpus
+    it describes. Never raises."""
+    path = sidecar_path(namespace)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not remove the stale datagen sidecar %s: %s", path, e)

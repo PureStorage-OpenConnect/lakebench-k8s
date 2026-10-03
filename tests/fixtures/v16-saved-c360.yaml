@@ -1,0 +1,296 @@
+# A v1.6 config as v1.6 wrote it: generate_default_config() then save_config()
+# on integrate 9afa879 (before the v1.7 removals), endpoint and keys as
+# placeholders. Every removed key in it is at its v1.6 default.
+name: v16-saved
+description: 'Lakebench deployment: v16-saved'
+version: 1
+recipe: null
+images:
+  datagen: docker.io/sillidata/lb-datagen:1.6.0
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  hive: apache/hive:3.1.3
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  unity: unitycatalog/unitycatalog:main
+  trino: trinodb/trino:483
+  duckdb: python:3.11-slim
+  prometheus: prom/prometheus:v2.48.0
+  grafana: grafana/grafana:10.2.0
+  jmx_exporter: bitnami/jmx-exporter:latest
+  pull_policy: Always
+platform:
+  kubernetes:
+    context: ''
+    namespace: ''
+    create_namespace: true
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      region: us-east-1
+      path_style: true
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      secret_ref: ''
+      ca_cert: ''
+      verify_ssl: true
+      buckets:
+        bronze: v16-saved-bronze
+        silver: v16-saved-silver
+        gold: v16-saved-gold
+      create_buckets: true
+    scratch:
+      enabled: false
+      storage_class: px-csi-scratch
+      size: 100Gi
+      provisioner: pxd.portworx.com
+      parameters:
+        repl: '1'
+        io_profile: auto
+        priority_io: high
+  compute:
+    spark:
+      operator:
+        install: false
+        namespace: spark-operator
+        version: 2.5.1
+      driver:
+        cores: 4
+        memory: 8g
+      executor:
+        instances: 8
+        cores: 4
+        memory: 48g
+        memory_overhead: 12g
+      bronze_executors: null
+      silver_executors: null
+      gold_executors: null
+      bronze_ingest_executors: null
+      silver_stream_executors: null
+      gold_refresh_executors: null
+      driver_memory: null
+      driver_cores: null
+    postgres:
+      storage: 10Gi
+      storage_class: ''
+architecture:
+  catalog:
+    type: hive
+    hive:
+      operator:
+        install: false
+        namespace: stackable
+        version: 25.7.0
+      thrift:
+        min_threads: 10
+        max_threads: 50
+        client_timeout: 300s
+      resources:
+        cpu_min: 500m
+        cpu_max: '2'
+        memory: 4Gi
+    polaris:
+      version: 1.6.0
+      port: 8181
+      client_secret: ''
+      resources:
+        cpu: '1'
+        memory: 2Gi
+    unity:
+      version: 0.4.0
+      spark_connector_version: 0.4.0
+      port: 8080
+      resources:
+        cpu: '1'
+        memory: 2Gi
+  table_format:
+    type: iceberg
+    iceberg:
+      version: 1.11.0
+      file_format: parquet
+      properties: {}
+    delta:
+      version: auto
+      properties: {}
+  pipeline_engine: spark
+  query_engine:
+    type: trino
+    trino:
+      coordinator:
+        cpu: '2'
+        memory: 8Gi
+      worker:
+        replicas: 2
+        cpu: '4'
+        memory: 16Gi
+        spill_enabled: true
+        spill_max_per_node: 40Gi
+        storage: 50Gi
+        storage_class: ''
+      catalog_name: lakehouse
+    spark_thrift:
+      cores: 2
+      memory: 4g
+      catalog_name: lakehouse
+    duckdb:
+      cores: 2
+      memory: 4g
+      catalog_name: lakehouse
+      version: 1.5.5
+  pipeline:
+    pattern: medallion
+    mode: batch
+    cycles: 1
+    pre_benchmark_maintenance: true
+    medallion:
+      bronze:
+        format: parquet
+        path_template: customer/interactions
+      silver:
+        format: iceberg
+        table_name: customer_interactions_enriched
+        partition_by:
+        - date
+        transforms:
+        - normalize_email
+        - normalize_phone
+        - geo_enrichment
+        - customer_segmentation
+        - quality_flags
+      gold:
+        format: iceberg
+        tables:
+        - name: customer_executive_dashboard
+          partition_by:
+          - date
+          aggregations:
+          - daily_revenue
+          - daily_engagement
+          - churn_indicators
+          - channel_performance
+    continuous:
+      bronze_trigger_interval: 30 seconds
+      silver_trigger_interval: 60 seconds
+      gold_refresh_interval: 5 minutes
+      run_duration: 1800
+      checkpoint_base: checkpoints
+      max_files_per_trigger: null
+      bronze_target_file_size_mb: 512
+      silver_target_file_size_mb: 512
+      silver_bronze_wait_seconds: null
+      gold_target_file_size_mb: 128
+      retention_interval: null
+      retention_threshold: 30m
+      compaction_enabled: true
+      compaction_interval: 0
+      benchmark_interval: 300
+      benchmark_warmup: 300
+  benchmark:
+    mode: power
+    streams: 4
+    cache: hot
+    iterations: 3
+    maintenance_settle:
+      enabled: true
+      max_seconds: 2700
+      interval_seconds: 60
+      tolerance_pct: 10.0
+      probe_query: null
+      probe_samples: 1
+  tables:
+    bronze: default.bronze_raw
+    silver: silver.customer_interactions_enriched
+    gold: gold.customer_executive_dashboard
+    silver_entities: silver.entities
+    silver_accounts: silver.accounts
+    silver_account_statements: silver.account_statements
+    silver_counterparty_edges: silver.counterparty_edges
+    silver_entity_profiles: silver.entity_profiles
+    silver_batch_versions: silver.silver_batch_versions
+    gold_alerts: gold.alerts
+    gold_risk_scores: gold.risk_scores
+    gold_entity_clusters: gold.entity_clusters
+    gold_daily_dashboards: gold.daily_dashboards
+    gold_tm_reconciliation: gold.tm_reconciliation
+    gold_scenario_coverage: gold.scenario_coverage
+    gold_alert_dispositions: gold.alert_dispositions
+    gold_cases: gold.cases
+observability:
+  enabled: false
+  prometheus_stack_enabled: true
+  s3_metrics_enabled: null
+  spark_metrics_enabled: null
+  dashboards_enabled: true
+  retention: 7d
+  storage: 10Gi
+  storage_class: ''
+  chart_version: 87.19.2
+  pushgateway_enabled: true
+  pushgateway_image: prom/pushgateway:v1.11.1
+  pushgateway_storage: 1Gi
+  pushgateway_storage_class: px-csi-scratch
+  reports:
+    enabled: true
+    output_dir: ./lakebench-output/runs
+    format: html
+    include:
+      summary: true
+      stage_breakdown: true
+      storage_metrics: true
+      resource_utilization: true
+      recommendations: true
+      platform_metrics: true
+spark:
+  conf:
+    spark.hadoop.fs.s3a.connection.maximum: '500'
+    spark.hadoop.fs.s3a.threads.max: '200'
+    spark.hadoop.fs.s3a.fast.upload: 'true'
+    spark.hadoop.fs.s3a.multipart.size: '268435456'
+    spark.hadoop.fs.s3a.fast.upload.active.blocks: '16'
+    spark.hadoop.fs.s3a.attempts.maximum: '20'
+    spark.hadoop.fs.s3a.retry.limit: '10'
+    spark.hadoop.fs.s3a.retry.interval: 500ms
+    spark.sql.shuffle.partitions: '200'
+    spark.default.parallelism: '200'
+    spark.memory.fraction: '0.8'
+    spark.memory.storageFraction: '0.3'
+workload:
+  schema_type: customer360
+  datagen:
+    scale: 10.0
+    target_size: null
+    mode: auto
+    seed: null
+    corpus_role: null
+    robustness_perturbation: false
+    parallelism: 4
+    file_size: 64mb
+    dirty_data_ratio: 0.08
+    cpu: '2'
+    memory: 4Gi
+    generators: 0
+    timestamp_start: null
+    timestamp_end: null
+  customer360:
+    unique_customers: null
+    date_range_days: null
+  retention_workload: false
+  retention_months: 60
+  w1_max_vertices: 8000000
+  tm_operations:
+    enabled: true
+    seed: 20260924
+    analyst_accuracy: 0.9
+    investigator_accuracy: 0.95
+    qa_sample_rate: 0.05
+    alert_sla_days: 60
+    case_lookback_months: 12
+    late_filing_rate: 0.03
+    no_suspect_rate: 0.05
+    max_alerts_per_customer: 50000
+    continuous_interval_seconds: 1800
+    counterparty_scenarios:
+    - W1_connected_components
+    - W3_round_tripping
+    - W4_risk_propagation
+    - W17_layering_chain

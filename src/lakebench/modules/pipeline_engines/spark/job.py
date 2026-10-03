@@ -5,6 +5,7 @@ Handles SparkApplication submission and lifecycle.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -13,13 +14,39 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
-from lakebench.config.schema import require_polaris_client_secret
+from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
+    DEPENDENCY_SET_SPARK_KEYS,
+    LAKEBENCH_OWNED_SPARK_KEYS,
+    SPARK_CONF_DEFAULTS,
+)
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
+    from lakebench.deps.manifest import DepsHandle
     from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
+
+# Spark's default spark.redaction.regex plus `credential`.
+SPARK_REDACTION_REGEX = "(?i)secret|password|token|access[.]?key|credential"
+
+
+def redaction_regex(user: str | None) -> str:
+    """``spark.redaction.regex`` for a job: Lakebench's, or the user's with
+    Lakebench's terms in front, so it always hides the catalog ``credential``
+    key (the Polaris client secret in sparkConf). The terms go first so a
+    ``(?x)`` comment or an open ``\\Q`` in the user's part cannot swallow
+    them; Spark compiles the result with Java regex, which accepts the user's
+    inline flags after the alternation."""
+    if not user or user == SPARK_REDACTION_REGEX:
+        return SPARK_REDACTION_REGEX
+    return f"(?i:secret|password|token|access[.]?key|credential)|{user}"
+
+
+def _one_line(e: BaseException) -> str:
+    """First line of an exception's text (an ApiException runs to many)."""
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
 
 
 # ---------------------------------------------------------------------------
@@ -33,11 +60,11 @@ logger = logging.getLogger(__name__)
 # MINIMUM CLUSTER REQUIREMENTS (per executor, non-negotiable):
 #
 #   bronze-verify:  2 cores,  6g total (4g + 2g overhead),  50Gi Portworx PVC
-#   silver-build:   4 cores, 60g total (48g + 12g overhead), 150Gi Portworx PVC
+#   silver-build:   4 cores, 60g total (48g + 12g overhead), 300Gi Portworx PVC
 #   gold-finalize:  4 cores, 40g total (32g + 8g overhead),  300Gi Portworx PVC
 #
 # The silver job is the bottleneck -- at scale 100 (~1TB) it requests
-# 19 executors × 60g = ~1.14 TB RAM + 19 × 150Gi = 2.85 TB scratch PVC.
+# 19 executors × 60g = ~1.14 TB RAM + 19 × 300Gi = 5.7 TB scratch PVC.
 # The cluster must have enough capacity to schedule all executors plus
 # the driver (4 cores, 8g) and existing infra (Trino, Hive, Postgres).
 #
@@ -141,7 +168,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     # explode-and-join against gold.alerts (score_financial.py rewrote the
     # old N*M crossjoin to a single explode per side, so it stays linear in
     # the UETR footprint). Deliberately small: without this entry the job
-    # falls back to the silver-build profile (~36 cores / 512 GB at scale 1)
+    # falls back to the silver-build profile (~36 cores / 525 GB at scale 1)
     # just to score a handful of typologies, which under the 4-parallel UAT
     # limit fails to schedule and blocks on the per-job timeout after the
     # pipeline already reported success (adversarial-review finding).
@@ -156,6 +183,64 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executors_per_100_scale": 4,
         "max_executors": 10,
         "base_partitions": 32,
+    },
+    # The financial operations jobs (replay, reproduce, the reference
+    # detector) took silver-build's profile through a fallback that is now an
+    # error (MissingSizingProfile); these are literal copies of it, so their
+    # manifests do not change.
+    "replay-financial": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
+    },
+    "reproduce-financial": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
+    },
+    "score-financial-reference": {
+        "driver_cores": 4,
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "executor_cores": 4,
+        "executor_memory": "48g",
+        "executor_memory_overhead": "12g",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
+        "base_executors": 8,  # scale <= 10
+        "executors_per_100_scale": 12,  # add 12 per 100 scale units
+        "max_executors": _MAX_EXECUTORS_SAFE,
+        "base_partitions": 64,
     },
 }
 
@@ -383,11 +468,12 @@ def local_peak_memory_gb() -> int:
     return max(int(p["driver_memory"].rstrip("g")) for p in _LOCAL_JOB_PROFILES.values())
 
 
-def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
-    """Derive executor count from scale factor and job profile.
+def executor_count(profile: dict[str, Any], scale: float, *, capped: bool = True) -> int:
+    """The executor count *profile* asks for at *scale*: the one count function.
 
-    Uses base counts for small scales and adds more executors
-    linearly for larger datasets. Capped at max_executors.
+    Uses base counts for small scales and adds more executors linearly for
+    larger datasets; capped at ``max_executors`` unless *capped* is False
+    (the uncapped count is what the run record compares the cap with).
     """
     base = profile["base_executors"]
     if scale <= 10:
@@ -396,7 +482,54 @@ def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     # yields a float, which would put a non-integer executor count in the
     # manifest.
     extra = int((scale - 10) * profile["executors_per_100_scale"] // 100)
-    return min(base + extra, profile["max_executors"])
+    return min(base + extra, profile["max_executors"]) if capped else base + extra
+
+
+def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
+    return executor_count(profile, scale)
+
+
+class MissingSizingProfile(LookupError):
+    """A Spark job type with no ``_JOB_PROFILES`` entry: it has no proven sizing."""
+
+    def __init__(self, job_type: str) -> None:
+        super().__init__(f"no sizing profile for Spark job type {job_type!r}")
+        self.job_type = job_type
+
+
+#: The per-job executor overrides: job type -> (``platform.compute.spark``
+#: field, key in ``config_snapshot.spark.executor_overrides`` and in
+#: ``experiment.architecture.spark_executor_overrides``). The one table every
+#: reader of an override uses.
+EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
+    "bronze-verify": ("bronze_executors", "bronze"),
+    "silver-build": ("silver_executors", "silver"),
+    "gold-finalize": ("gold_executors", "gold"),
+    "bronze-ingest": ("bronze_ingest_executors", "bronze_ingest"),
+    "silver-stream": ("silver_stream_executors", "silver_stream"),
+    "gold-refresh": ("gold_refresh_executors", "gold_refresh"),
+}
+
+
+def executor_override(job_type: str, config: Any | None) -> int | None:
+    """The executor count *config* sets for *job_type*, or None (the scale
+    count applies). An explicit count wins over the scale count and the
+    continuous concurrent budget."""
+    if config is None:
+        return None
+    spark = config.platform.compute.spark
+    # Read by name (the schema walk proves each field has this reader); the
+    # names are the first column of EXECUTOR_OVERRIDE_FIELDS (a test holds
+    # the two equal).
+    value = {
+        "bronze-verify": spark.bronze_executors,
+        "silver-build": spark.silver_executors,
+        "gold-finalize": spark.gold_executors,
+        "bronze-ingest": spark.bronze_ingest_executors,
+        "silver-stream": spark.silver_stream_executors,
+        "gold-refresh": spark.gold_refresh_executors,
+    }.get(job_type)
+    return int(value) if value is not None else None
 
 
 def bronze_ingest_checkpoint_uri(cfg) -> str:
@@ -409,6 +542,30 @@ def bronze_ingest_checkpoint_uri(cfg) -> str:
     s3 = cfg.platform.storage.s3
     base = cfg.architecture.pipeline.sustained.checkpoint_base
     return f"s3a://{s3.buckets.bronze}/{base}/bronze-ingest/"
+
+
+def gold_refresh_checkpoint_uri(cfg) -> str:
+    """Checkpoint location of the continuous gold-refresh driver (its
+    CHECKPOINT_LOCATION). The drain marker lives under it."""
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    return f"s3a://{s3.buckets.gold}/{base}/gold-refresh/"
+
+
+#: The drain marker's name under the gold-refresh checkpoint. Must equal
+#: ``gold_refresh_financial.STOP_MARKER`` (a unit test holds them together).
+GOLD_REFRESH_STOP_MARKER = "_lb_stop"
+
+
+def gold_refresh_stop_marker(cfg) -> tuple[str, str]:
+    """(bucket, key) of the drain marker: the object the driver reads as
+    ``<CHECKPOINT_LOCATION>/_lb_stop``. Built from the same config fields as
+    ``gold_refresh_checkpoint_uri``, with empty path segments dropped, as
+    Hadoop's ``Path`` normalises them."""
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    parts = f"{base}/gold-refresh/{GOLD_REFRESH_STOP_MARKER}".split("/")
+    return s3.buckets.gold, "/".join(p for p in parts if p)
 
 
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
@@ -524,14 +681,50 @@ class PeakRequirement:
     per_job: tuple[JobRequirement, ...]
 
 
+def _driver_pod_bytes(driver_memory: str) -> int:
+    """The memory a driver pod requests for *driver_memory*: the heap plus
+    Spark's driver overhead. The manifest sets no driver overhead, so Spark
+    on Kubernetes applies its non-JVM default to these Python jobs:
+    max(0.4 x heap, 384 MiB) (BasicDriverFeatureStep, Spark 3.5 to 4.1)."""
+    from lakebench.config.schema import parse_spark_memory
+
+    mib = parse_spark_memory(driver_memory) // 1024**2
+    return (mib + max(int(0.4 * mib), 384)) * 1024**2
+
+
+def effective_driver(job_type: str, profile: dict, config: Any | None) -> tuple[int, str]:
+    """``(cores, memory)`` the manifest gives *job_type*'s driver: the
+    profile values; for a Spark 3 silver-build or gold-finalize driver 24g
+    (the profiles carry Spark 4's 32g, which the larger SDK v2 bundle and
+    the K8s API polling need; Spark 3 is fine with 24g); then the global
+    ``platform.compute.spark.driver_cores``/``driver_memory`` overrides.
+    Without a *config*, the profile values."""
+    cores, memory = profile["driver_cores"], profile["driver_memory"]
+    if config is None:
+        return cores, memory
+    spark_cfg = config.platform.compute.spark
+    if (
+        _parse_spark_major(config.images.spark) < 4
+        and spark_cfg.driver_memory is None
+        and job_type in (JobType.SILVER_BUILD.value, JobType.GOLD_FINALIZE.value)
+    ):
+        memory = "24g"
+    if spark_cfg.driver_cores is not None:
+        cores = spark_cfg.driver_cores
+    if spark_cfg.driver_memory is not None:
+        memory = spark_cfg.driver_memory
+    return cores, memory
+
+
 def _job_requirement(
-    job_type: str, scale: float, schema_type: str | None = None
+    job_type: str, scale: float, schema_type: str | None = None, config: Any | None = None
 ) -> JobRequirement | None:
     """Compute the resource request for one job at a given scale.
 
     ``schema_type`` (e.g. ``"financial"``) selects per-workload profile
     overrides. Omitted or unknown values fall through to the Customer360
-    baseline.
+    baseline. With *config*, the driver is the one the manifest builds
+    (``effective_driver``).
     """
     profile = _resolve_job_profile(job_type, schema_type)
     if not profile:
@@ -542,10 +735,14 @@ def _job_requirement(
     from lakebench.config.schema import parse_spark_memory
 
     executors = _scale_executor_count(profile, scale)
+    override = executor_override(job_type, config)
+    if override is not None:
+        executors = override
 
     exec_mem = parse_spark_memory(profile["executor_memory"])
     exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
-    driver_mem = parse_spark_memory(profile["driver_memory"])
+    driver_cores, driver_memory = effective_driver(job_type, profile, config)
+    driver_mem = _driver_pod_bytes(driver_memory)
     exec_total_bytes = exec_mem + exec_overhead
 
     gib = 1024**3
@@ -555,16 +752,16 @@ def _job_requirement(
     return JobRequirement(
         job_type=job_type,
         executors=executors,
-        cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
-        memory_gb=memory_bytes // gib,
+        cpu_cores=executors * profile["executor_cores"] + driver_cores,
+        memory_gb=-(-memory_bytes // gib),
         scratch_gb=scratch_gb,
-        max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
-        max_pod_memory_gb=max(exec_total_bytes, driver_mem) // gib,
+        max_pod_cpu_cores=max(profile["executor_cores"], driver_cores),
+        max_pod_memory_gb=-(-max(exec_total_bytes, driver_mem) // gib),
     )
 
 
 def compute_peak_requirements(
-    scale: float, mode: str = "batch", schema_type: str | None = None
+    scale: float, mode: str = "batch", schema_type: str | None = None, config: Any | None = None
 ) -> PeakRequirement:
     """Compute the peak resources the pipeline requests at a given scale.
 
@@ -583,6 +780,9 @@ def compute_peak_requirements(
             per-workload profile overrides; ``None`` uses the Customer360
             baseline. AML at scale >= 5 needs a larger bronze-verify PVC
             than c360 (LB-118).
+        config: The deployment's config, when there is one: the drivers are
+            then the ones its manifests request (driver overrides, the
+            Spark 3 driver size). Without it, the profile drivers.
 
     Returns:
         PeakRequirement describing the peak CPU, memory, and scratch request.
@@ -595,7 +795,7 @@ def compute_peak_requirements(
     job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
 
     reqs = tuple(
-        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type)) is not None
+        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type, config)) is not None
     )
     if not reqs:
         return PeakRequirement(
@@ -730,10 +930,8 @@ def _streaming_concurrent_budget(
     # overridden stages outgrow: take the drivers out before sharing, or a
     # capped AML run asks for a few cores more than the cluster has (100
     # cores at scale 10: 101 with Trino and datagen).
-    forced_driver = config.platform.compute.spark.driver_cores
     driver_m = sum(
-        (forced_driver if forced_driver is not None else resolved[jt]["driver_cores"]) * 1000
-        for jt in _STREAMING_JOB_TYPES
+        effective_driver(jt.value, resolved[jt], config)[0] * 1000 for jt in _STREAMING_JOB_TYPES
     )
     override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
     headroom_m = max(0, override_budget_m - used_m)
@@ -773,11 +971,11 @@ def streaming_request_under_budget(
     The capacity preflight uses this when the uncapped peak does not fit: the
     run caps the streams to what fits and warns, so the preflight fails only
     when even the capped request does not fit. The totals include what the
-    budget sets aside and the cluster must also hold (Trino, Hive/Postgres,
-    datagen), and an explicit per-job executor count, which the manifest
-    applies after the budget.
+    budget sets aside and the cluster must also hold
+    (``config.sizing.co_resident_request``: the query engine, catalog,
+    Postgres, lb-deps and running datagen), and an explicit per-job executor
+    count, which the manifest applies after the budget.
     """
-    from lakebench.config.autosizer import _parse_cpu_millicores, _parse_memory_gi
     from lakebench.config.schema import parse_spark_memory
 
     scale = config.architecture.workload.datagen.scale
@@ -785,12 +983,7 @@ def streaming_request_under_budget(
     budget = _streaming_concurrent_budget(
         config, cluster_cpu_millicores, datagen_running=datagen_running
     )
-    spark_cfg = config.platform.compute.spark
-    explicit = {
-        JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
-        JobType.SILVER_STREAM: spark_cfg.silver_stream_executors,
-        JobType.GOLD_REFRESH: spark_cfg.gold_refresh_executors,
-    }
+    explicit = {jt: executor_override(jt.value, config) for jt in _STREAMING_PIPELINE_ORDER}
     gib = 1024**3
     cores_m = mem = 0
     capped: list[str] = []
@@ -807,29 +1000,19 @@ def streaming_request_under_budget(
         exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
             prof["executor_memory_overhead"]
         )
-        # The manifest applies the global driver overrides to every job.
-        drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
-        drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
+        drv_cores, drv_mem = effective_driver(jt.value, prof, config)
         cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
-        mem += n * exec_bytes + parse_spark_memory(drv_mem)
+        mem += n * exec_bytes + _driver_pod_bytes(drv_mem)
 
-    trino = config.architecture.query_engine.trino
-    datagen = config.architecture.workload.datagen
-    dg_pods = datagen.parallelism if datagen_running else 0
-    cores_m += (
-        _parse_cpu_millicores(trino.coordinator.cpu)
-        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
-        + 1000  # Hive + Postgres, as the budget counts them
-        + dg_pods * _parse_cpu_millicores(datagen.cpu)
-    )
-    co_gi = (
-        _parse_memory_gi(trino.coordinator.memory)
-        + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
-        + dg_pods * _parse_memory_gi(datagen.memory)
-    )
+    # The pods beside the streams, counted as the capacity plan counts
+    # them (the query engine, catalog and Postgres, lb-deps once, and
+    # datagen while it runs).
+    from lakebench.config.sizing import co_resident_request
+
+    co = co_resident_request(config, True, datagen_runs=datagen_running)
     return BudgetedStreamingRequest(
-        cpu_cores=-(-cores_m // 1000),
-        memory_gb=int(-(-(mem + co_gi * gib) // gib)),
+        cpu_cores=-(-cores_m // 1000) + co.cpu_cores,
+        memory_gb=int(-(-mem // gib)) + co.memory_gb,
         capped=tuple(capped),
     )
 
@@ -942,14 +1125,14 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
 
-# Additional Maven repositories to include in ``spark.jars.repositories`` /
+# Additional Maven repository for ``spark.jars.repositories`` /
 # ``--repositories`` on every job. Google mirrors Maven Central at
 # ``maven-central.storage-download.googleapis.com`` and rate-limits
 # independently, so when Central returns HTTP 429 to the cluster's egress
 # IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
-# and the driver still resolves cleanly. Ordered mirror-first: Ivy tries
-# resolvers in list order, and Central 429s register as "not found" which
-# is exactly the signal that triggers the next resolver.
+# and the driver still resolves cleanly. Spark's default Ivy chain tries
+# Central and repos.spark-packages.org first and this entry last; a Central
+# 429 registers as "not found", which moves Ivy on down the chain.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
 # Python packages the AML reference detector (D9) needs on the driver. The
@@ -1388,6 +1571,45 @@ class JobType(Enum):
     SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
 
 
+def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
+    """A driver init container that waits (up to 2 min) until the
+    deployment's dependency server serves this job's set. The driver's jar
+    fetch does not retry, and a registered look runs once: a server that is
+    restarting delays the job instead of failing it, and a server on another
+    set fails it here with a clear line."""
+    from urllib.parse import urlsplit
+
+    from lakebench.deps.manifest import PORT
+
+    ready = f"http://{urlsplit(deps.base_url).hostname}:{PORT}/ready"
+    script = (
+        "import sys, time, urllib.request\n"
+        "got = ''\n"
+        "end = time.monotonic() + 120\n"
+        "while time.monotonic() < end:\n"
+        "    try:\n"
+        f"        got = urllib.request.urlopen('{ready}', timeout=5).read().decode()\n"
+        f"        if got == '{deps.pinset_sha256}':\n"
+        "            sys.exit(0)\n"
+        "    except Exception as e:\n"
+        "        got = str(e)\n"
+        "    time.sleep(2)\n"
+        f"sys.exit('LB_DEPS_ERROR lb-deps does not serve set {deps.pinset_sha256}: ' + got)\n"
+    )
+    return {
+        "name": "lb-deps-ready",
+        "image": cfg.images.spark,
+        "imagePullPolicy": cfg.images.pull_policy.value,
+        "securityContext": {"runAsUser": 185, "runAsGroup": 185},
+        "command": ["python3", "-c", script],
+    }
+
+
+# Jobs whose driver installs the reference wheels (py-reference group) from
+# the deployment's dependency set into REFERENCE_PY_DEPS_DIR.
+REFERENCE_SET_JOB_TYPES: tuple[JobType, ...] = (JobType.SCORE_FINANCIAL_REFERENCE,)
+
+
 # Streaming job types (for conditional manifest logic)
 _STREAMING_JOB_TYPES = frozenset(
     {
@@ -1478,6 +1700,13 @@ class JobStatus:
     executor_count: int = 0
     # Operator submission attempts (status.submissionAttempts); 0 when unknown.
     submission_attempts: int = 0
+    # metadata.uid of the SparkApplication submit_job created; None otherwise.
+    # The interrupt cleanup deletes only this object (cli/_interrupt.py).
+    uid: str | None = None
+    # Executor scratch PVC in the application's spec.sparkConf as the cluster
+    # holds it ({"size_limit", "storage_class"}, metrics/provenance.py); None
+    # when the spec was not read.
+    scratch: dict[str, Any] | None = None
 
 
 class SparkJobManager:
@@ -1505,6 +1734,13 @@ class SparkJobManager:
         # Whether the streaming budget reserves datagen's cores. The
         # continuous CLI clears it once the datagen Job has finished (LB-158).
         self.datagen_running: bool = True
+        # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
+        # for run provenance. None until the maps are applied.
+        self.scripts_provenance: dict[str, Any] | None = None
+        # The deployment's verified dependency set. run sets it from the
+        # lb-deps-manifest ConfigMap before the first submit; the run record's
+        # provenance.deps is built from it (metrics/provenance.py).
+        self.deps: DepsHandle | None = None
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1513,6 +1749,16 @@ class SparkJobManager:
         except Exception as e:
             logger.warning("Could not get cluster capacity for streaming budget: %s", e)
             self._cluster_cpu_m = None
+
+    def _polaris_client_secret(self) -> str:
+        """The Polaris client secret, read once per manager."""
+        cached = getattr(self, "_polaris_secret_cache", None)
+        if cached is None:
+            from lakebench.deploy.deployment_secrets import polaris_client_secret
+
+            cached = polaris_client_secret(self.config)
+            self._polaris_secret_cache = cached
+        return cached
 
     def submit_job(
         self,
@@ -1536,16 +1782,24 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
-        # Delete existing job if present
-        self._delete_job(job_name)
-
-        # Build SparkApplication manifest
+        # Built before the delete: a manifest that cannot be built (no
+        # verified set, a refused key) must not cost the previous application
+        # its record.
         manifest = self._build_manifest(
             job_type,
             extra_conf,
             cycle_env=cycle_env,
             arguments=arguments,
         )
+        # Delete existing job if present
+        self._delete_job(job_name)
+        # A later stage is not submitted on scripts other than the ones this
+        # run applied, so one run never mixes script versions. Checked after the delete, so a caller that
+        # ignores the FAILED status cannot read a previous run's result.
+        changed = self.scripts_changed_since_apply(job_type)
+        if changed:
+            logger.error("%s: %s", job_name, changed)
+            return JobStatus(name=job_name, state=JobState.FAILED, message=changed)
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -1558,13 +1812,15 @@ class SparkJobManager:
 
         for attempt in range(4):  # 1 initial + 3 retries
             try:
-                custom_api.create_namespaced_custom_object(
+                created = custom_api.create_namespaced_custom_object(
                     group="sparkoperator.k8s.io",
                     version="v1beta2",
                     namespace=self.namespace,
                     plural="sparkapplications",
                     body=manifest,
                 )
+                meta = created.get("metadata") if isinstance(created, dict) else None
+                uid = meta.get("uid") if isinstance(meta, dict) else None
 
                 logger.info(f"Submitted Spark job: {job_name}")
 
@@ -1575,6 +1831,7 @@ class SparkJobManager:
                     # What was requested after the concurrent budget and any
                     # override, so the scorecard's CPU-hours match it.
                     executor_count=int(manifest["spec"]["executor"].get("instances") or 0),
+                    uid=uid if isinstance(uid, str) and uid else None,
                 )
 
             except ApiException as e:
@@ -1650,6 +1907,8 @@ class SparkJobManager:
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
+        from lakebench.metrics.provenance import scratch_from_spark_conf
+
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
@@ -1709,6 +1968,7 @@ class SparkJobManager:
                 if status.get("executorState")
                 else 0,
                 submission_attempts=int(status.get("submissionAttempts") or 0),
+                scratch=scratch_from_spark_conf((obj.get("spec") or {}).get("sparkConf")),
             )
 
         except ApiException as e:
@@ -1744,15 +2004,31 @@ class SparkJobManager:
 
         job_name = f"lakebench-{job_type.value}"
         spark_major = _parse_spark_major(cfg.images.spark)
+        from lakebench.deps import manifest as deps_manifest
+
+        deps = self.deps
+        if deps is None:
+            raise deps_manifest.DepsSetMissing(f"build {job_name}")
+        owned = sorted(DEPENDENCY_SET_SPARK_KEYS & set(cfg.spark.conf))
+        if owned:
+            raise ValueError(
+                f"spark.conf sets {', '.join(owned)}, which Lakebench sets from the "
+                "deployment's verified dependency set; remove them"
+            )
+        if job_type in REFERENCE_SET_JOB_TYPES and not deps_manifest.has_group(
+            deps, "py-reference"
+        ):
+            raise deps_manifest.DepsSetMissing(
+                f"build {job_name}: the dependency set has no py-reference wheels"
+            )
 
         # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
         # the CTAS fallback path (LB-118).
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
-        profile = _resolve_job_profile(job_type.value, _schema) or _resolve_job_profile(
-            "silver-build", _schema
-        )
-        assert profile is not None  # silver-build always exists
+        profile = _resolve_job_profile(job_type.value, _schema)
+        if profile is None:
+            raise MissingSizingProfile(job_type.value)
         scale = cfg.architecture.workload.datagen.scale
         executor_count = _scale_executor_count(profile, scale)
 
@@ -1773,15 +2049,7 @@ class SparkJobManager:
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
-        override_map = {
-            JobType.BRONZE_VERIFY: cfg.platform.compute.spark.bronze_executors,
-            JobType.SILVER_BUILD: cfg.platform.compute.spark.silver_executors,
-            JobType.GOLD_FINALIZE: cfg.platform.compute.spark.gold_executors,
-            JobType.BRONZE_INGEST: cfg.platform.compute.spark.bronze_ingest_executors,
-            JobType.SILVER_STREAM: cfg.platform.compute.spark.silver_stream_executors,
-            JobType.GOLD_REFRESH: cfg.platform.compute.spark.gold_refresh_executors,
-        }
-        override = override_map.get(job_type)
+        override = executor_override(job_type.value, cfg)
         if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
             # After the override check: an explicit count wins over the
             # budget, so there is nothing to warn about then.
@@ -1805,35 +2073,18 @@ class SparkJobManager:
             profile["executor_cores"],
         )
 
-        # Driver resource overrides (global, applies to all jobs)
-        driver_cores = profile["driver_cores"]
-        driver_memory = profile["driver_memory"]
-
-        # Version-conditional driver memory: Spark 4 needs 32g for silver/gold
-        # due to 558MB SDK v2 bundle + K8s API polling overhead. Spark 3 is
-        # fine with 24g (280MB SDK v1 bundle).  Profile defaults are the Spark 4
-        # values (safe ceiling); downsize for Spark 3 when no user override.
-        if (
-            spark_major < 4
-            and spark_cfg.driver_memory is None
-            and job_type in (JobType.SILVER_BUILD, JobType.GOLD_FINALIZE)
-        ):
-            driver_memory = "24g"
-
-        if spark_cfg.driver_cores is not None:
+        # Driver resources: the Spark 3 driver size, then the global overrides
+        # (one rule with compute_peak_requirements, so the capacity check
+        # counts what this manifest requests).
+        driver_cores, driver_memory = effective_driver(job_type.value, profile, cfg)
+        if spark_cfg.driver_cores is not None or spark_cfg.driver_memory is not None:
             logger.info(
-                "Using driver cores override: %d (profile default: %d)",
-                spark_cfg.driver_cores,
+                "Using driver overrides: %s cores, %s memory (profile default: %d, %s)",
                 driver_cores,
-            )
-            driver_cores = spark_cfg.driver_cores
-        if spark_cfg.driver_memory is not None:
-            logger.info(
-                "Using driver memory override: %s (profile default: %s)",
-                spark_cfg.driver_memory,
                 driver_memory,
+                profile["driver_cores"],
+                profile["driver_memory"],
             )
-            driver_memory = spark_cfg.driver_memory
 
         # Warn when executor count is high and driver resources may be insufficient
         if executor_count > 24:
@@ -1921,11 +2172,18 @@ class SparkJobManager:
         script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
-        # (mounted from lakebench-spark-scripts ConfigMap)
+        # (projected from the lakebench-scripts-<role> ConfigMaps)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
 
-        # Build Spark configuration (start from user overrides, then apply profile)
-        spark_conf = dict(cfg.spark.conf)
+        # Spark conf in three layers: the defaults, the user's spark.conf, then
+        # the keys Lakebench owns (the config refuses a user value for one).
+        spark_conf = {**SPARK_CONF_DEFAULTS, **cfg.spark.conf}
+        # Spark's default redaction misses `...catalog.<name>.credential`
+        # (the Polaris client secret); add it so the UI and event log hide it.
+        # A user's own regex is kept but always widened to cover it.
+        spark_conf["spark.redaction.regex"] = redaction_regex(
+            spark_conf.get("spark.redaction.regex")
+        )
 
         # Apply per-job shuffle partition count (scales with executor count)
         spark_conf["spark.sql.shuffle.partitions"] = shuffle_partitions
@@ -1933,65 +2191,31 @@ class SparkJobManager:
 
         # Parse Spark version from image tag (e.g., apache/spark:3.5.4 -> 3.5)
         spark_image_tag = cfg.images.spark.split(":")[-1]
-        major_minor_key = _parse_spark_major_minor(cfg.images.spark)
-        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-        # Iceberg runtime artifact suffix. Depends on the Iceberg version too:
-        # only 1.11.0+ publishes a native Spark 4.1 runtime.
-        iceberg_runtime_suffix = iceberg_runtime_suffix_for(
-            major_minor_key, cfg.architecture.table_format.iceberg.version
-        )
 
         # Catalog type needed for packages and catalog config
         catalog_name = cfg.architecture.query_engine.trino.catalog_name
         catalog_type = cfg.architecture.catalog.type.value
 
-        # Build spark.jars.packages and extensions based on table format
+        # The jars come from the deployment's dependency server, in the
+        # order Spark's own --packages resolve listed them (the classpath
+        # order). The Operator controller resolves nothing: in cluster mode it
+        # passes remote jars to the driver, whose in-pod spark-submit fetches
+        # them; executors fetch from the driver.
+        spark_conf["spark.jars"] = ",".join(deps_manifest.jar_urls(deps))
         if table_format == "delta":
-            delta_version = cfg.architecture.table_format.delta.version
-            packages = [
-                _delta_spark_artifact(scala_suffix, delta_version),
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if spark_major < 4:
-                packages.append(
-                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+            # --packages used to put the resolved jars on the Python path;
+            # silver_stream_delta.py imports delta.tables from the jar.
+            delta_jar = deps_manifest.delta_jar(deps)
+            if delta_jar is None:
+                raise deps_manifest.DepsSetMissing(
+                    f"build {job_name}: the dependency set has no delta-spark jar"
                 )
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(
-                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
-                )
-            spark_conf["spark.jars.packages"] = ",".join(packages)
-            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
+            from urllib.parse import quote
+
+            spark_conf["spark.submit.pyFiles"] = f"{deps.base_url}/jars/{quote(delta_jar)}"
+        if table_format == "delta":
             spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
         else:
-            # Iceberg (default)
-            iceberg_version = cfg.architecture.table_format.iceberg.version
-            packages = [
-                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_runtime_suffix}{scala_suffix}:{iceberg_version}",
-                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            ]
-            if spark_major < 4:
-                packages.append(
-                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
-                )
-            if catalog_type == "unity":
-                unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(
-                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
-                )
-            spark_conf["spark.jars.packages"] = ",".join(packages)
-            # Central rate-limits per-egress-IP (HTTP 429), and a burst of
-            # UAT deploys can silently starve a fresh driver pod's Ivy
-            # resolve. Google's Central mirror at
-            # ``maven-central.storage-download.googleapis.com`` is
-            # rate-limited independently and works with a plain
-            # ``--repositories`` entry -- Ivy falls to it when Central
-            # returns 429 as "not found". Adding as spark_conf so both
-            # the SparkApplication CR and the ivy-warmer init container
-            # (which reads spark.jars.* from the same conf) see it.
-            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             )
@@ -2088,11 +2312,12 @@ class SparkJobManager:
                 f"spark.sql.catalog.{catalog_name}.s3.path-style-access": str(
                     s3.path_style
                 ).lower(),
-                # OAuth2 credential (client_id:client_secret).
-                # `require_polaris_client_secret` refuses an empty value
-                # (LB-090) -- a Spark job that submits with an empty
-                # secret would fail OAuth2 far from the config file.
-                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{require_polaris_client_secret(cfg)}",
+                # OAuth2 credential (client_id:client_secret): the config
+                # value, else the one deploy stored in the Secret
+                # lakebench-polaris-client. None stored raises,
+                # because a job with an empty secret fails OAuth2 far
+                # from the config. Literal in sparkConf until v1.8.
+                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{self._polaris_client_secret()}",
                 f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
                 f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
                 # FlashBlade: static S3 credentials on catalog (no STS vending)
@@ -2144,17 +2369,6 @@ class SparkJobManager:
                 }
             )
 
-        # Ivy cache must be writable. Two processes resolve spark.jars.packages
-        # into this path: the driver (the spark-ivy-cache emptyDir below) and,
-        # first, spark-submit inside the Spark Operator controller, whose /tmp
-        # is the chart's 1Gi emptyDir. This job's jars (~1.2 GB) overflow that
-        # and the kubelet evicts the shared controller; `lakebench admin
-        # install-spark-operator` / `repair-operator` size it to 8Gi
-        # (operator_scratch.py). Moving the path would not help: the
-        # controller's root filesystem is read-only, so /tmp is its only
-        # writable volume. The durable fix is jars baked into the Spark image
-        # so spark.jars.packages is empty at submit.
-        spark_conf["spark.jars.ivy"] = "/tmp/.ivy2"
         spark_conf["spark.files.useFetchCache"] = "false"
 
         # S3A performance tuning (proven FlashBlade defaults)
@@ -2184,8 +2398,6 @@ class SparkJobManager:
         # Memory and stability tuning
         spark_conf.update(
             {
-                "spark.memory.fraction": "0.8",
-                "spark.memory.storageFraction": "0.3",
                 "spark.dynamicAllocation.enabled": "false",
                 "spark.network.timeout": "600s",
                 "spark.executor.heartbeatInterval": "30s",
@@ -2271,6 +2483,13 @@ class SparkJobManager:
                 "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
             }
         )
+        if job_type == JobType.GOLD_FINALIZE and _schema == "financial":
+            # AML gold-finalize profiles each detection rule's stages from the
+            # driver's status store after the rule (common.rule_stage_profile);
+            # path-search rules (W3, W17) run more than 100 jobs and stages, so
+            # the store must hold a whole rule's. Completed entities only: the
+            # live-task flush above is unchanged.
+            spark_conf.update({"spark.ui.retainedJobs": "1000", "spark.ui.retainedStages": "1000"})
 
         # Prometheus metrics (for observability layer)
         if cfg.observability.enabled:
@@ -2298,74 +2517,52 @@ class SparkJobManager:
         # when it has RBAC).  ConfigMap volumes MUST go through the
         # pod template because Spark's KubernetesVolumeUtils does not
         # support the configMap type.
-        packages_str = ",".join(packages)
-        _pod_template_volumes: list[dict[str, Any]] = [
-            {
-                "name": "spark-scripts",
-                "configMap": {"name": "lakebench-spark-scripts"},
-            },
-            {
-                "name": "spark-work-dir",
-                "emptyDir": {"sizeLimit": "20Gi"},
-            },
-            {
-                "name": "spark-ivy-cache",
-                "emptyDir": {"sizeLimit": "5Gi"},
-            },
-        ]
-        _pod_template_volume_mounts = [
-            {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
-            {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
-            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-        ]
+        from lakebench.modules.pipeline_engines.spark.scripts_maps import scripts_volume
+
+        def _volumes() -> list[dict[str, Any]]:
+            return [
+                # One projected volume over the per-role scripts ConfigMaps
+                # (scripts_maps.MOUNTS_BY_JOB_TYPE), flat at /opt/spark/scripts.
+                scripts_volume(job_type),
+                {"name": "spark-work-dir", "emptyDir": {"sizeLimit": "20Gi"}},
+            ]
+
+        def _mounts() -> list[dict[str, Any]]:
+            return [
+                {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
+                {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
+            ]
+
+        # Each template owns its lists: a volume or mount added for the driver
+        # (the download dir, the reference wheels, the truststore) must not
+        # land on the executor template twice or at all.
         driver_pod_template: dict[str, Any] = {
             "spec": {
-                "volumes": _pod_template_volumes,
-                "initContainers": [
-                    {
-                        "name": "resolve-deps",
-                        "image": cfg.images.spark,
-                        "imagePullPolicy": cfg.images.pull_policy.value,
-                        "securityContext": {
-                            "runAsUser": 185,
-                            "runAsGroup": 185,
-                        },
-                        "command": [
-                            "/bin/bash",
-                            "-c",
-                            (
-                                "set -e; "
-                                "/opt/spark/bin/spark-submit "
-                                f'--packages "{packages_str}" '
-                                f'--repositories "{_MAVEN_MIRROR_REPOS}" '
-                                "--conf spark.jars.ivy=/tmp/.ivy2 "
-                                "--class org.apache.spark.deploy.DummyNonExistent "
-                                "local:///dev/null 2>&1 || true; "
-                                "echo 'Ivy cache warmed:'; "
-                                "ls /tmp/.ivy2/jars/ 2>/dev/null | wc -l; "
-                                "echo 'jars resolved'"
-                            ),
-                        ],
-                        "volumeMounts": [
-                            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-                        ],
-                    },
+                "volumes": [
+                    *_volumes(),
+                    # The driver's in-pod spark-submit downloads the remote jars
+                    # into java.io.tmpdir; bounded as the Ivy cache it replaces.
+                    {"name": "lb-deps-dl", "emptyDir": {"sizeLimit": "5Gi"}},
                 ],
+                "initContainers": [_deps_ready_init(cfg, deps)],
                 "containers": [
                     {
                         "name": "spark-kubernetes-driver",
-                        "volumeMounts": _pod_template_volume_mounts,
+                        "volumeMounts": [
+                            *_mounts(),
+                            {"name": "lb-deps-dl", "mountPath": "/tmp"},
+                        ],
                     },
                 ],
             },
         }
         executor_pod_template: dict[str, Any] = {
             "spec": {
-                "volumes": _pod_template_volumes,
+                "volumes": _volumes(),
                 "containers": [
                     {
                         "name": "spark-kubernetes-executor",
-                        "volumeMounts": _pod_template_volume_mounts,
+                        "volumeMounts": _mounts(),
                     },
                 ],
             },
@@ -2375,15 +2572,16 @@ class SparkJobManager:
         s3 = cfg.platform.storage.s3
         if s3.ca_cert:
             # Add CA cert secret + truststore emptyDir volumes
-            _pod_template_volumes.extend(
-                [
-                    {
-                        "name": "ca-cert",
-                        "secret": {"secretName": "lakebench-ca-certificate"},
-                    },
-                    {"name": "truststore", "emptyDir": {}},
-                ]
-            )
+            for template in (driver_pod_template, executor_pod_template):
+                template["spec"]["volumes"].extend(
+                    [
+                        {
+                            "name": "ca-cert",
+                            "secret": {"secretName": "lakebench-ca-certificate"},
+                        },
+                        {"name": "truststore", "emptyDir": {}},
+                    ]
+                )
             _truststore_mounts = [
                 {
                     "name": "ca-cert",
@@ -2428,17 +2626,34 @@ class SparkJobManager:
             ).strip()
 
         # The reference detector trains on the driver only; executors do not
-        # need the packages. Driver-side only: the volume is added to the
-        # driver template's own copy of the volume list.
-        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+        # need the packages. Driver-side only.
+        if job_type in REFERENCE_SET_JOB_TYPES:
+            # The frozen scorer reads its packages from /opt/lb-pydeps. They
+            # are installed from the deployment's set, hash-checked against
+            # the manifest ConfigMap, by the same pip into the same path as
+            # the PyPI install they replace.
+            from urllib.parse import urlsplit
+
+            host = urlsplit(deps.base_url).hostname
+            requirements = f"{deps_manifest.MANIFEST_MOUNT}/requirements-py-reference.txt"
             driver_pod_template["spec"]["volumes"] = [
                 *driver_pod_template["spec"]["volumes"],
                 {"name": "lb-pydeps", "emptyDir": {"sizeLimit": "2Gi"}},
+                {
+                    "name": "lb-deps-manifest",
+                    "configMap": {"name": deps_manifest.MANIFEST_CONFIGMAP},
+                },
             ]
             _deps_mount = {"name": "lb-pydeps", "mountPath": REFERENCE_PY_DEPS_DIR}
+            pip = (
+                "python3 -m pip install --no-index --no-deps --no-cache-dir "
+                f"--only-binary=:all: --trusted-host {host} "
+                f"--find-links {deps.base_url}/py-reference/ --require-hashes "
+                f"-r {requirements} --target {REFERENCE_PY_DEPS_DIR}"
+            )
             driver_pod_template["spec"]["initContainers"].append(
                 {
-                    "name": "install-pydeps",
+                    "name": "lb-deps-py-reference",
                     "image": cfg.images.spark,
                     "imagePullPolicy": cfg.images.pull_policy.value,
                     "securityContext": {"runAsUser": 185, "runAsGroup": 185},
@@ -2446,11 +2661,21 @@ class SparkJobManager:
                     "command": [
                         "/bin/bash",
                         "-c",
-                        "set -e; python3 -m pip install --no-cache-dir --no-deps "
-                        f"--only-binary=:all: --target {REFERENCE_PY_DEPS_DIR} "
-                        + " ".join(REFERENCE_PY_DEPS),
+                        # A driver pod is never restarted (restartPolicy
+                        # Never), and a registered look runs once: a dependency
+                        # server restart must not fail it, so the install is
+                        # retried from an empty target for up to about 2 min.
+                        f"for i in 1 2 3 4 5 6; do rm -rf {REFERENCE_PY_DEPS_DIR}/*; "
+                        f"if {pip}; then exit 0; fi; sleep 20; done; exit 1",
                     ],
-                    "volumeMounts": [_deps_mount],
+                    "volumeMounts": [
+                        _deps_mount,
+                        {
+                            "name": "lb-deps-manifest",
+                            "mountPath": deps_manifest.MANIFEST_MOUNT,
+                            "readOnly": True,
+                        },
+                    ],
                 }
             )
             for container in driver_pod_template["spec"]["containers"]:
@@ -2460,8 +2685,8 @@ class SparkJobManager:
         scratch = cfg.platform.storage.scratch
         if scratch.enabled and scratch.storage_class:
             # Dynamic PVC for executor local storage
-            # Use per-job profile PVC size -- silver needs 150Gi,
-            # gold needs 100Gi, bronze-verify needs 50Gi.
+            # Use per-job profile PVC size -- silver-build and
+            # gold-finalize need 300Gi, bronze-verify needs 50Gi.
             pvc_size = profile["scratch_size"]
             spark_conf.update(
                 {
@@ -2486,11 +2711,10 @@ class SparkJobManager:
                 "type": "OnFailure",
                 "onFailureRetries": 2,
                 "onFailureRetryInterval": 30,
-                # Submission runs spark-submit inside the SHARED operator,
-                # which resolves spark.jars.packages into one Ivy cache;
-                # concurrent deployments race there on a cold cache
-                # (SPARK-10878) and fail FAILED DOWNLOADS until one of them
-                # fills it. Retry more, and wait longer between attempts.
+                # Submission runs spark-submit inside the SHARED operator. It
+                # no longer resolves packages (the jars are lb-deps URLs), but
+                # a busy operator still fails submissions now and then; retry
+                # more, and wait longer between attempts.
                 "onSubmissionFailureRetries": 5,
                 "onSubmissionFailureRetryInterval": 60,
             }
@@ -2503,7 +2727,7 @@ class SparkJobManager:
             # A registered look runs once: an operator retry after the gate
             # computed AP (a crash or an error verdict) would look again.
             # Submission retries stay: they run before the driver starts,
-            # so no AP exists yet (shared Ivy cache race, see above).
+            # so no AP exists yet.
             _restart_policy = {
                 "type": "OnFailure",
                 "onFailureRetries": 0,
@@ -2554,6 +2778,7 @@ class SparkJobManager:
                     },
                     "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": driver_pod_template,
+                    "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
                 "executor": {
                     "cores": profile["executor_cores"],
@@ -2574,6 +2799,7 @@ class SparkJobManager:
                     },
                     "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": executor_pod_template,
+                    "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
                 "sparkConf": spark_conf,
             },
@@ -2771,7 +2997,13 @@ class SparkJobManager:
                 e,
             )
             _lb_seed = 0
-        env.append({"name": "LB_SEED", "value": str(_lb_seed)})
+        # A registered (held-out) corpus's seed is never in a SparkApplication
+        # spec (owner, 10-03); LB_SEED feeds only the Customer 360 silver
+        # sampler, so it is left out there.
+        from lakebench.config.seed_secret import uses_seed_secret
+
+        if not uses_seed_secret(cfg):
+            env.append({"name": "LB_SEED", "value": str(_lb_seed)})
 
         # B1 rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
         # stores one counter per (workload x format). The counter bumps on a
@@ -2801,12 +3033,12 @@ class SparkJobManager:
         env.append({"name": "LB_SCALE", "value": str(_scale)})
 
         # Financial workload: point bronze_verify_financial / silver_build_financial
-        # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
-        # `pacs008` when path_template is at its C360 default; mirror that here.
+        # at the same S3 prefix the datagen K8s Job wrote to. Imported here:
+        # deploy/datagen.py imports deploy/engine.py, which imports this module.
         if cfg.architecture.workload.schema_type.value == "financial":
-            _bronze_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
-            if _bronze_prefix == "customer/interactions":
-                _bronze_prefix = "pacs008"
+            from lakebench.deploy.datagen import bronze_datagen_prefix
+
+            _bronze_prefix = bronze_datagen_prefix(cfg)
             env.append(
                 {
                     "name": "LB_FINANCIAL_BRONZE_PREFIX",
@@ -2875,7 +3107,7 @@ class SparkJobManager:
                 ),
                 JobType.GOLD_REFRESH: (
                     sustained.gold_refresh_interval,
-                    f"s3a://{s3.buckets.gold}/{checkpoint_base}/gold-refresh/",
+                    gold_refresh_checkpoint_uri(cfg),
                 ),
             }
             trigger_interval, checkpoint_location = trigger_map[job_type]
@@ -2976,8 +3208,14 @@ class SparkJobManager:
         # the report scored and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
             from lakebench.config.datagen_seed import config_seed
+            from lakebench.config.seed_secret import seed_secret_env, uses_seed_secret
 
-            env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
+            if uses_seed_secret(cfg):
+                # A registered corpus's seed: from the Secret generate wrote,
+                # never in the SparkApplication spec (owner, 10-03).
+                env.append(seed_secret_env(cfg))
+            else:
+                env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
             role = cfg.architecture.workload.datagen.corpus_role
             if role is not None:
                 # The declared role of a registered run, recorded in the report.
@@ -2994,146 +3232,206 @@ class SparkJobManager:
         return env
 
     def deploy_scripts_configmap(self) -> bool:
-        """Deploy the Spark scripts as a ConfigMap.
+        """Apply the Spark scripts ConfigMaps, one per role.
 
-        Creates lakebench-spark-scripts ConfigMap containing all pipeline scripts.
-        These are mounted at /opt/spark/scripts in driver/executor pods.
+        The maps are rendered by ``scripts_maps.build_script_configmaps`` and
+        mounted together at /opt/spark/scripts through one projected volume.
+        Replacing a map is refused when another deployment owns it, or when
+        its content would change while a live SparkApplication mounts it.
+        Each map is read back; its data must hash to the
+        ``lakebench.io/scripts-sha256`` annotation written, and the annotation
+        must be the one written. Then the v1.6 single map
+        (``lakebench-spark-scripts``) is deleted when it is this deployment's
+        and no live SparkApplication still mounts it.
+
+        Raises:
+            ScriptsMapError: one line naming the file or map: a listed file is
+                missing or unreadable, a map is over budget, a map holds a
+                held-out AML seed (or the check cannot run), a replace is
+                refused, or an apply or read-back failed. The CLI prints it
+                and exits 1 before any job is submitted.
 
         Returns:
-            True if successful
+            True (every failure raises).
         """
-        cfg = self.config
+        # Lazy import: scripts_maps imports JobType from this module.
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
 
-        # Load script files (supports dev, pip install, and PyInstaller)
-        from lakebench._resources import get_scripts_dir
+        # The builder also runs the held-out absence check (it raises).
+        maps = sm.build_script_configmaps(self.config, self.namespace)
 
-        scripts_dir = get_scripts_dir()
-        script_files = [
-            "common.py",
-            "bronze_verify.py",
-            "silver_build.py",
-            "gold_finalize.py",
-            "bronze_ingest.py",
-            "silver_stream.py",
-            "gold_refresh.py",
-            # Delta variants (same pipeline logic, Delta write API)
-            "silver_build_delta.py",
-            "gold_finalize_delta.py",
-            "gold_refresh_delta.py",
-            "bronze_ingest_delta.py",
-            "silver_stream_delta.py",
-            # Financial (FinServ-Crime, AML) pipeline scripts
-            "bronze_verify_financial.py",
-            "silver_build_financial.py",
-            "gold_finalize_financial.py",
-            "bronze_ingest_financial.py",
-            "silver_stream_financial.py",
-            "gold_refresh_financial.py",
-            "replay_financial.py",
-            "reproduce_financial.py",
-            "score_financial.py",
-            "score_financial_reference.py",
-            # Library module imported by replay_financial (not a Spark
-            # entry point but must be mounted alongside so the local
-            # import resolves inside the driver pod).
-            "detection_rules.py",
-            # Library module imported by score_financial_reference: the
-            # pre-registered AML gate features (shared with the local
-            # harness scripts/aml_gate.py).
-            "aml_features.py",
-            # Library module imported by gold_finalize_financial and
-            # gold_refresh_financial: the P10 operations layer. Executors
-            # import it too (the per-customer workflow replay runs there).
-            "tm_operations.py",
-        ]
+        refusal = self._scripts_apply_refusal(maps)
+        if refusal:
+            raise sm.ScriptsApplyError(refusal)
 
-        # Build ConfigMap data
-        data = {}
-        for script_file in script_files:
-            script_path = scripts_dir / script_file
-            if script_path.exists():
-                data[script_file] = script_path.read_text()
-                logger.info(f"Loaded script: {script_file}")
+        written: dict[str, str] = {}
+        for cm in maps:
+            name = cm["metadata"]["name"]
+            try:
+                applied = self.k8s.apply_manifest(cm)
+            except Exception as e:  # noqa: BLE001
+                raise sm.ScriptsApplyError(f"could not apply {name}: {_one_line(e)}") from None
+            if not applied:
+                raise sm.ScriptsApplyError(f"could not apply {name}")
+            written[name] = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
+            logger.info("Applied scripts ConfigMap %s (%d files)", name, len(cm["data"]))
 
-        # reference_score.py is the single source of truth for the leakage
-        # gate + reference-detector logic and lives in the lakebench.aml
-        # package (unit-tested there as lakebench.aml.reference_score). The
-        # apache/spark image has no lakebench install, so it is packaged flat
-        # into the ConfigMap next to the scripts and imported by
-        # score_financial_reference.py as a bare `from reference_score import`
-        # -- the same pattern common.py and detection_rules.py use. It is
-        # self-contained (stdlib + optional sklearn/pandas at call time), so a
-        # flat mount resolves with no lakebench package on the driver.
-        from lakebench._resources import _package_dir
+        for name, want in written.items():
+            try:
+                got = self.k8s.get_configmap(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                raise sm.ScriptsApplyError(f"could not read back {name}: {_one_line(e)}") from None
+            ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
+            data_hash = sm.data_sha256((got or {}).get("data", {})) if got else None
+            if ann != want or data_hash != want:
+                raise sm.ScriptsApplyError(
+                    f"{name} reads back changed (annotation {ann}, data {data_hash}, written "
+                    f"{want}); another writer replaced it"
+                )
 
-        # fidelity_gate.py (the pre-registered AML gate evaluation) ships the
-        # same way, for the same reason; it reads aml_preregistration.json,
-        # which the AML data loop below also mounts flat.
-        for _aml_mod in ("reference_score.py", "fidelity_gate.py"):
-            _mod_path = _package_dir() / "aml" / _aml_mod
-            if _mod_path.exists():
-                data[_aml_mod] = _mod_path.read_text()
-                logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
-        # The AML seed guard (stdlib only) ships flat too, so the reference
-        # job refuses a corpus from a spent or unregistered protected seed.
-        # Fail at build time, not three driver attempts later.
-        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
-        if not _seed_mod.exists():
-            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
-        data["datagen_seed.py"] = _seed_mod.read_text()
+        self._delete_legacy_scripts_map(sm.LEGACY_MAP_NAME)
 
-        # AML reference JSON sidecars (sanctions, PEP, high-risk
-        # jurisdictions). Detection rules load these by filename via
-        # ``_load_reference`` in detection_rules.py; without them
-        # inside the driver, W5/W6/W7 silently return zero alerts,
-        # and W7 previously crashed with an opaque ImportError from
-        # ``import lakebench.spark.data`` because the lakebench
-        # package is not installed in the apache/spark image. The
-        # three files together are ~8 KB, well under the 1 MiB
-        # ConfigMap limit. ConfigMap keys cannot contain slashes so
-        # the files land flat next to the scripts under
-        # /opt/spark/scripts/; the reader's candidate-directory search
-        # finds them there.
-        from lakebench._resources import get_aml_data_dir
-
-        aml_data_dir = get_aml_data_dir()
-        if aml_data_dir is not None and aml_data_dir.is_dir():
-            for json_path in sorted(aml_data_dir.glob("*.json")):
-                data[json_path.name] = json_path.read_text()
-                logger.info(f"Loaded AML reference: {json_path.name}")
-
-        if not data:
-            logger.warning("No Spark scripts found")
-            return False
-
-        # Create ConfigMap manifest
-        configmap = {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {
-                "name": "lakebench-spark-scripts",
-                "namespace": self.namespace,
-                "labels": {
-                    "app.kubernetes.io/name": "lakebench",
-                    "app.kubernetes.io/instance": cfg.name,
-                    "app.kubernetes.io/component": "spark-scripts",
-                    "app.kubernetes.io/managed-by": "lakebench",
-                },
+        self.scripts_provenance = {
+            "scripts_sha256": sm.scripts_sha256(maps),
+            "scripts_maps": {
+                cm["metadata"]["labels"][sm.ROLE_LABEL]: cm["metadata"]["annotations"][
+                    sm.SCRIPTS_SHA256_ANNOTATION
+                ]
+                for cm in maps
             },
-            "data": data,
+            "files_sha256": {
+                key: hashlib.sha256(text.encode("utf-8")).hexdigest()
+                for cm in maps
+                for key, text in sorted(cm["data"].items())
+            },
         }
+        return True
 
-        # Apply ConfigMap
+    def _scripts_apply_refusal(self, maps: list[dict[str, Any]]) -> str | None:
+        """Why the role maps must not be replaced, or None.
+
+        A map that belongs to another deployment is never replaced. A map whose
+        content would change is not replaced while a SparkApplication that
+        mounts it is still live: kubelet would update its files under the
+        running pods, so they would run a mix of two trees' scripts. Fails
+        closed when the applications cannot be listed.
+        """
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+        for cm in maps:
+            name = cm["metadata"]["name"]
+            try:
+                current = self.k8s.get_configmap(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                return f"could not read {name}: {_one_line(e)}"
+            if current is None:
+                continue
+            owner = current.get("labels", {}).get("app.kubernetes.io/instance")
+            if owner != self.config.name:
+                return f"ConfigMap {name} belongs to deployment {owner!r}, not {self.config.name!r}"
+            want = cm["metadata"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION]
+            if current.get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION) == want:
+                continue
+            try:
+                live = self._live_apps_mounting(name)
+            except Exception as e:  # noqa: BLE001
+                return f"could not list SparkApplications to check {name} is unused: {_one_line(e)}"
+            if live:
+                return (
+                    f"{name} would change under running SparkApplication(s) "
+                    f"{', '.join(live)}; let them finish or delete them, then re-run"
+                )
+        return None
+
+    def _delete_legacy_scripts_map(self, name: str) -> None:
+        """Delete the v1.6 single scripts map if it is this deployment's and no
+        live SparkApplication mounts it. Best effort: a kept map is removed by
+        ``destroy`` (label selector), so a failure here is only logged."""
         try:
-            success = self.k8s.apply_manifest(configmap)
-            if success:
-                logger.info("Deployed spark-scripts ConfigMap with %d scripts", len(data))
-            else:
-                logger.error("Failed to deploy spark-scripts ConfigMap (apply returned False)")
-            return success
-        except Exception as e:
-            logger.error("Failed to deploy spark-scripts ConfigMap: %s", e)
-            return False
+            legacy = self.k8s.get_configmap(name, self.namespace)
+            if legacy is None:
+                return
+            owner = legacy.get("labels", {}).get("app.kubernetes.io/instance")
+            if owner != self.config.name:
+                logger.warning(
+                    "Kept ConfigMap %s: it belongs to deployment %r, not %r",
+                    name,
+                    owner,
+                    self.config.name,
+                )
+                return
+            in_use = self._live_apps_mounting(name)
+            if in_use:
+                logger.info(
+                    "Kept legacy ConfigMap %s: still mounted by %s; destroy removes it",
+                    name,
+                    ", ".join(in_use),
+                )
+                return
+            if self.k8s.delete_configmap(name, self.namespace):
+                logger.info("Deleted legacy ConfigMap %s", name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Could not delete legacy ConfigMap %s (%s); destroy removes it", name, _one_line(e)
+            )
+
+    def _live_apps_mounting(self, configmap: str) -> list[str]:
+        """SparkApplications in this namespace that are not finished and whose
+        pod templates mount ``configmap`` (directly or as a projected source).
+        Raises when they cannot be listed; callers then fail safe."""
+        from kubernetes import client as k8s_client
+
+        apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+            group="sparkoperator.k8s.io",
+            version="v1beta2",
+            namespace=self.namespace,
+            plural="sparkapplications",
+        )
+        out: list[str] = []
+        for app in apps.get("items", []):
+            spec = app.get("spec") or {}
+            state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
+            # COMPLETED and FAILED are final: the operator decides reruns in
+            # the SUCCEEDING and FAILING states, before these
+            # (internal/controller/sparkapplication/controller.go, v2.5.1).
+            # Anything else, including no status yet, counts as live.
+            if state in ("COMPLETED", "FAILED"):
+                continue
+            for side in ("driver", "executor"):
+                tpl = ((spec.get(side) or {}).get("template") or {}).get("spec") or {}
+                for v in tpl.get("volumes") or []:
+                    names = [(v.get("configMap") or {}).get("name")]
+                    names += [
+                        (src.get("configMap") or {}).get("name")
+                        for src in (v.get("projected") or {}).get("sources") or []
+                    ]
+                    if configmap in names:
+                        out.append(app["metadata"]["name"])
+        return sorted(set(out))
+
+    def scripts_changed_since_apply(self, job_type: JobType) -> str | None:
+        """None when every scripts map ``job_type`` mounts still carries the
+        hash this process applied; otherwise a one-line reason. None also
+        when no maps were applied by this process (nothing to compare)."""
+        if self.scripts_provenance is None:
+            return None
+        from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
+
+        recorded = self.scripts_provenance["scripts_maps"]
+        for role in sm.MOUNTS_BY_JOB_TYPE[job_type]:
+            name = sm.map_name(role)
+            try:
+                got = self.k8s.get_configmap(name, self.namespace)
+            except Exception as e:  # noqa: BLE001
+                return f"could not read scripts ConfigMap {name}: {_one_line(e)}"
+            ann = (got or {}).get("annotations", {}).get(sm.SCRIPTS_SHA256_ANNOTATION)
+            data_hash = sm.data_sha256(got["data"]) if got else None
+            if ann != recorded.get(role) or data_hash != recorded.get(role):
+                return (
+                    f"scripts ConfigMap {name} changed since this run applied it "
+                    "(another run or tree wrote it); not submitting"
+                )
+        return None
 
     # Alias for backward compatibility
     def deploy_scripts(self) -> bool:

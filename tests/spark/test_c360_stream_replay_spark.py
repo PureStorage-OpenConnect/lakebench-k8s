@@ -2,54 +2,34 @@
 micro-batch (E3, GOALS P4.3/P6.1).
 
 Runs ``c360_stream_scenarios.py`` in a fresh JVM with the Iceberg and Delta
-jars on the classpath. Set ``LB_SPARK_TEST_JARS`` to a directory holding
-iceberg-spark-runtime-4.0_2.13, delta-spark_2.13 and delta-storage jars;
-the test is skipped without it.
+jars from ``LB_SPARK_TEST_JARS`` on the classpath.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
-_NEEDED = ("iceberg-spark-runtime", "delta-spark", "delta-storage")
-
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return all(any(n.startswith(k) for n in names) for k in _NEEDED)
-
-
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg and Delta jars not set"
-)
+pytestmark = pytest.mark.requires_jars("iceberg", "delta")
 
 
 @pytest.fixture(scope="module")
-def result(tmp_path_factory):
+def result(tmp_path_factory, spark_subprocess, spark_jars):
     work = tmp_path_factory.mktemp("c360-replay")
-    env = dict(os.environ)
-    env.setdefault("PYSPARK_PYTHON", sys.executable)
     script = Path(__file__).with_name("c360_stream_scenarios.py")
-    proc = subprocess.run(
-        [sys.executable, str(script), _JARS, str(work)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=900,
-    )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+    proc = spark_subprocess(script, spark_jars.classpath, work, timeout=900)
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _section_ran(result, section):
+    """A Delta section that raised in the child fails its tests with the
+    child's error (the child records it so the Iceberg sections still run)."""
+    if f"{section}_error" in result:
+        pytest.fail(f"{section} failed in the child: {result[section + '_error']}", pytrace=False)
 
 
 # Each writer: 3 one-file micro-batches of 10 rows; the run crashes right
@@ -115,16 +95,19 @@ def test_iceberg_bronze_fresh_checkpoint_is_not_skipped(result):
 
 def test_delta_silver_replay_is_skipped_and_reported(result):
     """Delta skips the replay; the writer sees it and reports 0 rows."""
+    _section_ran(result, "delta_silver")
     assert result["delta_silver_log"] == [[0, 9], [1, 9], [1, 0], [2, 9]]
     assert result["delta_silver_rows"] == result["silver_rows"]
 
 
 def test_delta_silver_fresh_checkpoint_is_not_skipped(result):
     """txnAppId carries the query id, so a fresh checkpoint still writes."""
+    _section_ran(result, "delta_silver")
     assert result["delta_silver_rows_after_fresh"] == result["silver_rows"] + 9
 
 
 def test_delta_bronze_replay_is_skipped_and_reported(result):
+    _section_ran(result, "delta_bronze")
     assert result["delta_bronze_log"] == [[0, 10], [1, 10], [1, 0], [2, 10]]
     assert result["delta_bronze_rows"] == result["bronze_rows"]
 

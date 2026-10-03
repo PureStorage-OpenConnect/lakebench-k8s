@@ -13,8 +13,22 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 const SCALE: &str = "0.005";
 
+/// The tracked held-out hash file the generator needs for the financial
+/// schema (`LB_HELDOUT_HASHES`; a ConfigMap on a pod).
+fn heldout_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/lakebench/spark/data/aml/heldout_hashes.json")
+}
+
+/// The generator binary with the hash file set, as a pod runs it.
+fn generate_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_generate"));
+    c.env("LB_HELDOUT_HASHES", heldout_file());
+    c
+}
+
 fn run(dir: &Path, extra: &[&str]) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         .args([
             "--bucket",
@@ -187,7 +201,7 @@ fn cycle_arguments_are_strict() {
         vec!["--cycles", "0"],
         vec!["--cycle=x"],
     ] {
-        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let st = generate_cmd()
             .env(
                 "DG_LOCAL_DIR",
                 std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-cycles-bad"),
@@ -206,7 +220,7 @@ fn cycle_arguments_are_strict() {
 /// party.parquet, account.parquet, watchlist.parquet).
 #[test]
 fn reference_mode_refuses_multi_writer() {
-    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let st = generate_cmd()
         .env(
             "DG_LOCAL_DIR",
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-race"),
@@ -243,7 +257,7 @@ fn reference_mode_refuses_multi_writer() {
 fn reference_mode_with_one_node_runs() {
     let d = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-ok");
     let _ = std::fs::remove_dir_all(&d);
-    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let st = generate_cmd()
         .env("DG_LOCAL_DIR", &d)
         .args([
             "--bucket",
@@ -291,7 +305,7 @@ fn financial_seed_is_required_strict_and_never_spent() {
         vec!["--seed", "9223372036854775808"],
         vec!["--seed"],
     ] {
-        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let st = generate_cmd()
             .env(
                 "DG_LOCAL_DIR",
                 std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-bad"),
@@ -308,8 +322,60 @@ fn financial_seed_is_required_strict_and_never_spent() {
     }
 }
 
+#[test]
+fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
+    // A registered corpus's seed arrives in LB_DATAGEN_SEED (from a Secret)
+    // instead of --seed: the same seed must give the same bytes, the two
+    // together are refused, and a bad value is not printed.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-env");
+    let (a, b) = (base.join("argv"), base.join("env"));
+    for d in [&a, &b] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    run(&a, &[]);
+    let st = generate_cmd()
+        .env("DG_LOCAL_DIR", &b)
+        .env("LB_DATAGEN_SEED", "7777")
+        .args([
+            "--bucket",
+            "b",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "all",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    assert_eq!(tree_digest(&a), tree_digest(&b));
+    for (env, args) in [
+        ("7777", vec!["--seed", "7777"]),
+        ("77x77913", vec![]),
+        ("", vec![]),
+        ("-7777", vec![]),
+    ] {
+        let st = generate_cmd()
+            .env("DG_LOCAL_DIR", base.join("bad"))
+            .env("LB_DATAGEN_SEED", env)
+            .args(["--bucket", "b", "--scale", SCALE])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(2), "{env:?} {args:?} was accepted");
+        let err = String::from_utf8_lossy(&st.stderr);
+        assert!(err.contains("LB_DATAGEN_SEED"), "{err}");
+        assert!(env.is_empty() || !err.contains(env), "the value was echoed");
+    }
+}
+
 fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // Large enough that 1 MB files outnumber the 64-file floor.
         .args([
@@ -382,7 +448,7 @@ fn c360_driver_digest(threads: &str) -> (u64, usize) {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("lb-c360-{}-{threads}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", &dir)
         .args([
             "--schema",
@@ -411,6 +477,11 @@ fn c360_driver_digest(threads: &str) -> (u64, usize) {
         for e in std::fs::read_dir(&d).unwrap() {
             let p = e.unwrap().path();
             if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path, as in the image byte-compare.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
                 stack.push(p);
             } else {
                 paths.push(p);
@@ -464,7 +535,7 @@ fn c360_driver_output_is_pinned() {
 // ---------------------------------------------------------------------------
 
 fn run_c360_mode(dir: &Path, delivery: &str) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // DG_ROW_GROUP forces multiple row-groups per file so continuous
         // mode actually flushes mid-file via MpuWriter (parquet default is
@@ -575,7 +646,7 @@ fn c360_row_identity_across_delivery_modes() {
 }
 
 fn run_aml_mode(dir: &Path, delivery: &str) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // See run_c360_mode: DG_ROW_GROUP forces multi-row-group per file so
         // continuous mode actually flushes to S3 multipart mid-file. 100 rows
@@ -652,7 +723,7 @@ fn aml_row_identity_across_delivery_modes() {
 const NODE_SCALE: &str = "0.02";
 
 fn run_at(dir: &Path, scale: &str, extra: &[&str]) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         .args([
             "--bucket", "b", "--seed", "7777", "--scale", scale, "--mode", "all",
@@ -940,6 +1011,11 @@ fn tree_digest(dir: &Path) -> (u64, usize) {
         for e in std::fs::read_dir(&d).unwrap() {
             let p = e.unwrap().path();
             if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path, as in the image byte-compare.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
                 stack.push(p);
             } else {
                 paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
@@ -974,7 +1050,7 @@ fn financial_output_is_pinned_to_the_frozen_generator() {
         .join(format!("lb-fin-pin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for node in ["0", "1"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let out = generate_cmd()
             .env("DG_LOCAL_DIR", &dir)
             .args([
                 "--bucket",
@@ -1011,4 +1087,350 @@ fn financial_output_is_pinned_to_the_frozen_generator() {
         (14_946_780_858_166_320_800, 179),
         "financial generator output changed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Three more pins, captured at integrate 77a65d2 source (equal
+// to the v1.6 release generator, which passes the two pins above). With the
+// two above they cover the paths the look-image changes touch: the
+// perturbation branch, and cycle slicing with cycle-suffixed keys on both
+// schemas. A change here is a generator output change: on financial it
+// voids the AML freeze (docs/internal/aml-protocol.md).
+// ---------------------------------------------------------------------------
+
+/// Run `generate` once per argv into one fresh local tree and digest it.
+fn pin_tree(tag: &str, runs: &[Vec<&str>]) -> (u64, usize) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-pin-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for argv in runs {
+        let out = generate_cmd()
+            .env("DG_LOCAL_DIR", &dir)
+            .args(argv)
+            .output()
+            .expect("run generate");
+        assert!(
+            out.status.success(),
+            "generate {:?} failed: {}",
+            argv,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let got = tree_digest(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+/// The financial pin's argv (2 nodes, batch delivery) plus `extra`.
+fn financial_pin_runs<'a>(extra: &[&'a str]) -> Vec<Vec<&'a str>> {
+    ["0", "1"]
+        .iter()
+        .map(|node| {
+            let mut a = vec![
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                "0.02",
+                "--threads",
+                "2",
+                "--mode",
+                "all",
+                "--total-nodes",
+                "2",
+                "--node-id",
+                node,
+                "--file-size-mb",
+                "1",
+                "--delivery-mode",
+                "batch",
+            ];
+            a.extend_from_slice(extra);
+            a
+        })
+        .collect()
+}
+
+#[test]
+fn financial_perturbed_output_is_pinned() {
+    let got = pin_tree(
+        "fin-pert",
+        &financial_pin_runs(&["--robustness-perturbation"]),
+    );
+    assert_eq!(
+        got,
+        (2_899_328_701_438_880_645, 179),
+        "financial perturbed output changed"
+    );
+}
+
+#[test]
+fn financial_two_cycle_output_is_pinned() {
+    let mut runs = financial_pin_runs(&["--cycle", "0", "--cycles", "2"]);
+    runs.extend(financial_pin_runs(&["--cycle", "1", "--cycles", "2"]));
+    let got = pin_tree("fin-cyc", &runs);
+    assert_eq!(
+        got,
+        (6_502_905_751_768_177_657, 181),
+        "financial two-cycle output changed"
+    );
+}
+
+#[test]
+fn c360_two_cycle_output_is_pinned() {
+    // The c360 pin's argv as two cycles, with the windows the deployer gives
+    // two cycles over its default range.
+    let windows = [
+        ("0", "2024-01-01", "2024-12-31"),
+        ("1", "2024-12-31", "2025-12-31"),
+    ];
+    let runs: Vec<Vec<&str>> = windows
+        .iter()
+        .map(|(n, start, end)| {
+            vec![
+                "--schema",
+                "customer360",
+                "--bucket",
+                "b",
+                "--seed",
+                "43",
+                "--target-tb",
+                "0.00002",
+                "--file-size-mb",
+                "4",
+                "--threads",
+                "2",
+                "--timestamp-start",
+                start,
+                "--timestamp-end",
+                end,
+                "--cycle",
+                n,
+                "--cycles",
+                "2",
+            ]
+        })
+        .collect();
+    let got = pin_tree("c360-cyc", &runs);
+    assert_eq!(
+        got,
+        (9_956_579_246_127_600_639, 10),
+        "c360 two-cycle output changed"
+    );
+}
+
+fn strict_run(args: &[&str]) -> std::process::Output {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict");
+    let _ = std::fs::remove_dir_all(&dir);
+    generate_cmd()
+        .env("DG_LOCAL_DIR", &dir)
+        .args(["--bucket", "b", "--mode", "reference"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn rust_bad_node_id_exits_2() {
+    // Present but unparseable, missing its value, repeated, unknown,
+    // positional, and a bare flag given a value: each exits 2 naming the
+    // flag (a stray value is never printed) instead of a silent default.
+    let ok = ["--seed", "7777", "--scale", SCALE, "--total-nodes", "1"];
+    for (bad, names) in [
+        (vec!["--node-id", "abc"], "--node-id"),
+        (vec!["--corpus-months", "60x"], "--corpus-months"),
+        (vec!["--file-size-mb", "1.5"], "--file-size-mb"),
+        (vec!["--threads", "-2"], "--threads"),
+        (vec!["--node-id"], "--node-id needs a value"),
+        (vec!["--node-id", "0", "--node-id", "0"], "more than once"),
+        (vec!["--nope", "1"], "--nope"),
+        (vec!["--payload-kb", "2"], "--payload-kb"),
+        (vec!["--target-tb", "0.1"], "--target-tb"),
+        (vec!["4321"], "unexpected argument"),
+    ] {
+        let out = strict_run(&[&ok[..], &bad[..]].concat());
+        assert_eq!(out.status.code(), Some(2), "{bad:?} was accepted");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(names), "{bad:?}: {err}");
+        assert!(!err.contains("4321"), "a stray value was echoed");
+    }
+    // Missing values for flags that are otherwise required.
+    let out = strict_run(&["--seed", "7777", "--scale", SCALE, "--total-nodes"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--total-nodes needs a value"));
+    // The same run with valid flags works, and logs its delivery mode.
+    let out = strict_run(&ok);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("delivery_mode=continuous"));
+    assert!(
+        err.contains("\"delivery_mode\":\"continuous\""),
+        "delivery_mode not in metrics"
+    );
+}
+
+#[test]
+fn a_value_is_never_read_as_a_flag() {
+    // `--prefix --scale=5` gives --prefix the value "--scale=5"; scale stays
+    // the one given by --scale.
+    let out = strict_run(&[
+        "--seed",
+        "7777",
+        "--scale",
+        "1",
+        "--total-nodes",
+        "1",
+        "--prefix",
+        "--scale=5",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("\"scale\":1.000000"), "{err}");
+}
+
+#[test]
+fn s3_transport_env_is_read_and_checked() {
+    // Without DG_LOCAL_DIR the S3 sink reads S3_PATH_STYLE, S3_VERIFY_SSL and
+    // S3_CA_CERT; a value it cannot use exits 2 naming the variable.
+    for (var, val) in [
+        ("S3_PATH_STYLE", "maybe"),
+        ("S3_VERIFY_SSL", "off"),
+        ("S3_CA_CERT", "/nonexistent/ca.pem"),
+    ] {
+        let out = generate_cmd()
+            .env_remove("DG_LOCAL_DIR")
+            .env("S3_ENDPOINT", "http://127.0.0.1:1")
+            .env("AWS_ACCESS_KEY_ID", "k")
+            .env("AWS_SECRET_ACCESS_KEY", "s")
+            .env(var, val)
+            .args([
+                "--bucket",
+                "b",
+                "--seed",
+                "7777",
+                "--scale",
+                SCALE,
+                "--mode",
+                "reference",
+                "--total-nodes",
+                "1",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{var}={val}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(var), "{var}");
+    }
+}
+
+#[test]
+fn c360_refuses_financial_flags() {
+    let out = generate_cmd()
+        .env(
+            "DG_LOCAL_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict-c360"),
+        )
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "42",
+            "--target-tb",
+            "0.00002",
+            "--corpus-months",
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--corpus-months"));
+}
+
+#[test]
+fn financial_scale_defaults_to_one() {
+    let out = strict_run(&["--seed", "7777", "--total-nodes", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("\"scale\":1.000000"),
+        "default scale is not 1.0"
+    );
+}
+
+/// The output pins, by the generator version they were captured under: the
+/// sha256 of every pinned (digest, files) pair in this file, in order. A pin
+/// re-captured without a new MODEL_VERSION (model.rs) fails, because two
+/// corpora with different bytes would then carry one model_version in their
+/// markers' corpus_args.
+const PINS_BY_MODEL_VERSION: &[(&str, &str)] = &[(
+    "datagen-v2-rs-0.3",
+    "dd77637b7c743794752fff4c99c1472d7a83cf1775abddf4f9aa78650e328d90",
+)];
+
+/// Every pinned `(digest, files)` literal in the five pin tests, as text.
+fn pinned_pairs() -> Vec<String> {
+    let src = include_str!("cycles.rs");
+    let mut out = Vec::new();
+    for name in [
+        "fn c360_driver_output_is_pinned",
+        "fn financial_output_is_pinned_to_the_frozen_generator",
+        "fn financial_perturbed_output_is_pinned",
+        "fn financial_two_cycle_output_is_pinned",
+        "fn c360_two_cycle_output_is_pinned",
+    ] {
+        let body = &src[src.find(name).expect(name)..];
+        let body = &body[..body.find("\n#[test]").unwrap_or(body.len())];
+        let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        for part in flat.split("assert_eq!(").skip(1) {
+            let Some(rest) = part.split_once(",(").map(|(_, r)| r) else {
+                continue;
+            };
+            let pair = &rest[..rest.find(')').unwrap_or(0)];
+            let ok = pair.split(',').count() == 2
+                && pair
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '_' || c == ',');
+            if ok {
+                out.push(pair.replace('_', ""));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn output_pins_are_keyed_by_model_version() {
+    let pairs = pinned_pairs();
+    assert_eq!(
+        pairs.len(),
+        5,
+        "expected one pinned digest per pin test: {pairs:?}"
+    );
+    let got = datagen_rs::corpus::sha256_hex(&pairs.join(";"));
+    let version = datagen_rs::model::MODEL_VERSION;
+    match PINS_BY_MODEL_VERSION.iter().find(|(v, _)| *v == version) {
+        Some((_, want)) => assert_eq!(
+            &got, want,
+            "an output pin changed but MODEL_VERSION is still {version}: bump MODEL_VERSION \
+             (model.rs) and add the new pin set here"
+        ),
+        None => {
+            panic!("no pin set recorded for MODEL_VERSION {version}: add ({version:?}, {got:?})")
+        }
+    }
 }

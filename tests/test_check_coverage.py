@@ -45,3 +45,61 @@ def test_ci_checks_both_suites():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert "check_coverage.py --suite unit" in ci
     assert "check_coverage.py --suite spark" in ci
+
+
+def test_new_floor_fails_below():
+    """The 2026-10-01 floors are in force: one point under destroy.py's fails."""
+    pcts = dict.fromkeys(cc.FLOORS["unit"], 100.0)
+    pcts["lakebench/deploy/destroy.py"] = 78.0
+    failures, _ = cc.check(_report(**pcts), cc.FLOORS["unit"])
+    assert failures == ["lakebench/deploy/destroy.py: 78.00% is below the 79% floor"]
+    for name in (
+        "lakebench/deploy/ownership.py",
+        "lakebench/s3/client.py",
+        "lakebench/metrics/experiment.py",
+        "lakebench/metrics/c360_correctness.py",
+    ):
+        assert name in cc.FLOORS["unit"], name
+
+
+def test_slow_tests_import_no_floored_module():
+    """Deselecting the slow tests from the unit legs cannot lower a floored
+    number: the slow AML statistics modules import none of the floored ones."""
+    import subprocess
+    import sys
+
+    floored = sorted(
+        "lakebench." + k[len("lakebench/") : -len(".py")].replace("/", ".")
+        for k in cc.FLOORS["unit"]
+    )
+    code = (
+        "import sys\n"
+        "import lakebench.aml.fidelity_gate, lakebench.aml.scale_invariance\n"
+        "import lakebench.aml.d8_shards, lakebench.aml.predictions\n"
+        f"print([m for m in {floored!r} if m in sys.modules])\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env={"PYTHONPATH": str(ROOT / "src")},
+        check=True,
+    ).stdout.strip()
+    assert out == "[]", out
+
+
+def test_spark_floors_cover_the_stream_files_and_fail_below():
+    """The Spark suite floors the AML silver stream, common.py and the Delta
+    silver stream as well as detection_rules.py, and each fails one point
+    under its floor."""
+    spark = cc.FLOORS["spark"]
+    for name in (
+        "lakebench/spark/scripts/silver_stream_financial.py",
+        "lakebench/spark/scripts/common.py",
+        "lakebench/spark/scripts/silver_stream_delta.py",
+        "lakebench/spark/scripts/detection_rules.py",
+    ):
+        assert name in spark, name
+        values = {k: (v - 1.0 if k == name else 100.0) for k, v in spark.items()}
+        failures, _ = cc.check(_report(**values), spark)
+        assert len(failures) == 1 and name in failures[0], failures

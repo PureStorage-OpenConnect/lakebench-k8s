@@ -46,13 +46,22 @@ def _snapshot(config: Path) -> dict:
     try:
         cfg = load_config(config)
         resolve_auto_sizing(cfg, None)
-        return build_config_snapshot(cfg)
+        # A run records the sha256 of the file it loaded.
+        return build_config_snapshot(cfg, config_path=config)
     finally:
         for k in env:
             os.environ.pop(k, None)
 
 
 QUERIES = {"Q1_scan": 4.0, "Q2_filter": 3.0, "Q3_join": 6.0}
+
+# The dependency pinset every synthetic run records (provenance.deps); the
+# gate refuses a run on another set and records no baseline without one.
+PINSET = "a1" * 32
+
+
+def _provenance(pinset: str | None = PINSET) -> dict:
+    return {"deps": {"pinset_sha256": pinset}} if pinset else {}
 
 
 def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
@@ -120,6 +129,7 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
             "experiment", stub_experiment(QUERIES, failed=over.get("failed", ()))
         ),
         "maintenance_policy_id": over.get("policy", MAINTENANCE_POLICY_ID),
+        "provenance": _provenance(over.get("pinset", PINSET)),
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "batch",
@@ -177,6 +187,7 @@ def _cont_run(
         # A continuous run with its end-of-run result check (a settled corpus).
         "experiment": stub_experiment(QUERIES, mode="sustained"),
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
+        "provenance": _provenance(),
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "sustained",
@@ -205,7 +216,7 @@ def env(tmp_path):
         entry["status"] = "pending first run"
         # The gate-logic tests need required and optional configs whatever the
         # checked-in store currently requires.
-        entry["required"] = name.startswith("c360-")
+        entry["required"] = name in ("c360-batch-s10", "c360-continuous-s10")
     (store_dir / "baselines.yaml").write_text(yaml.safe_dump(store, sort_keys=False))
     runs = tmp_path / "runs"
     runs.mkdir()
@@ -674,15 +685,7 @@ _ALWAYS = [
     "architecture.benchmark.mode",
     "architecture.benchmark.cache",
     "architecture.benchmark.iterations",
-    "architecture.benchmark.streams",
     "platform.storage.scratch.storage_class",
-    "platform.storage.scratch.size",
-    "platform.compute.spark.driver.cores",
-    "platform.compute.spark.driver.memory",
-    "platform.compute.spark.executor.instances",
-    "platform.compute.spark.executor.cores",
-    "platform.compute.spark.executor.memory",
-    "platform.compute.spark.executor.memory_overhead",
 ]
 _BATCH = [
     "platform.compute.spark.bronze_executors",
@@ -767,25 +770,83 @@ def test_pinned_executor_counts_match_todays_auto_counts(path):
             assert spark[key] == get_executor_count(job, scale, schema), (path.name, key)
 
 
+#: The v1.7 re-baseline: AML batch scale 10 and Customer 360 batch scale 10
+#: on Hive and on Polaris; each baseline is one run (n=1) of a three-run series.
+REBASELINE_V17 = {"aml-batch-s10", "c360-batch-s10", "c360-batch-s10-polaris"}
+
+
 def test_checked_in_store_loads_and_references_pinned_configs():
     store = pg.load_store(PERF / "baselines.yaml")
-    assert {"c360-batch-s10", "c360-continuous-s10", "aml-batch-s1"} <= set(store.baselines)
+    assert {"c360-continuous-s10", "aml-batch-s1"} | REBASELINE_V17 <= set(store.baselines)
     for name in store.baselines:
         pinned = store.pinned(name)
         assert pinned.config_hash and pinned.fingerprint_hash
     assert store.pinned("c360-continuous-s10").mode == "sustained"
 
 
-def test_checked_in_store_requires_no_baseline_for_v16(tmp_path):
-    # v1.6 has no performance re-baseline (owner decision 2026-09-29): no
-    # pinned config is required, so the release gate passes with no runs and
-    # still reports every config.
+def test_checked_in_store_requires_exactly_the_v17_rebaseline_set(tmp_path):
+    # The v1.7 re-baseline set is pinned. Until the post-freeze data commit
+    # accepts its baselines nothing is required; from that commit on exactly
+    # the set is required, each with a fingerprint-v2 baseline, and the
+    # release check fails without their runs.
     store = pg.load_store(PERF / "baselines.yaml")
-    assert not [n for n, b in store.baselines.items() if b.required]
+    assert REBASELINE_V17 <= set(store.baselines)
+    required = {n for n, b in store.baselines.items() if b.required}
+    assert required in (set(), REBASELINE_V17), required
+    if required:
+        for name in REBASELINE_V17:
+            b = store.baselines[name]
+            assert b.accepted and b.fingerprint_version == 2, name
     passed, lines = pg.release_check(store, tmp_path)
-    assert passed, lines
+    assert passed == (not required), lines
     assert len(lines) == len(store.baselines)
-    assert all(ln.startswith(("warn", "ok")) for ln in lines)
+    if not required:
+        assert all(ln.startswith(("warn", "ok")) for ln in lines)
+
+
+def test_the_rebaseline_pins_name_the_trees_datagen_image_and_their_seeds():
+    # A pin whose image no registry holds cannot run; and records of one
+    # corpus need the image the release matrix rows use, the tree default.
+    from lakebench.config.schema import ImagesConfig
+
+    for name, seed in (
+        ("aml-batch-s10.yaml", 43),
+        ("c360-batch-s10.yaml", 42),
+        ("c360-batch-s10-polaris.yaml", 42),
+    ):
+        raw = yaml.safe_load((PERF / name).read_text())
+        assert raw["images"]["datagen"] == ImagesConfig().datagen, name
+        assert raw["architecture"]["workload"]["datagen"]["seed"] == seed, name
+
+
+def test_a_dated_170_changelog_requires_the_rebaseline_set():
+    # The tag must not pass without the data commit: once CHANGELOG dates the
+    # 1.7.0 section, exactly the re-baseline set is required.
+    import re
+
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text()
+    if not re.search(r"^## \[1\.7\.0\] - \d{4}-\d{2}-\d{2}", changelog, flags=re.M):
+        pytest.skip("1.7.0 is not dated yet")
+    store = pg.load_store(PERF / "baselines.yaml")
+    assert {n for n, b in store.baselines.items() if b.required} == REBASELINE_V17
+
+
+def test_the_rebaseline_twins_differ_only_in_the_catalog():
+    hive = yaml.safe_load((PERF / "c360-batch-s10.yaml").read_text())
+    polaris = yaml.safe_load((PERF / "c360-batch-s10-polaris.yaml").read_text())
+    for raw in (hive, polaris):
+        raw.pop("recipe")
+        raw.get("architecture", {}).pop("catalog", None)
+        raw["images"].pop("polaris", None)
+        raw["images"].pop("polaris_admin_tool", None)
+    text = yaml.safe_dump(polaris).replace("perf-c360-batch-s10-polaris", "perf-c360-batch-s10")
+    assert yaml.safe_load(text) == hive
+
+
+def test_rebaseline_pins_load_and_ask_the_profile_counts():
+    for name in ("aml-batch-s10.yaml", "c360-batch-s10-polaris.yaml"):
+        pinned = pg.load_pinned(PERF / name)
+        assert pinned.config_hash and pinned.mode == "batch"
 
 
 def test_store_rejects_accepted_entry_without_provenance(tmp_path):
@@ -1145,6 +1206,8 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
         silver_size_gb=90.0,
         gold_size_gb=40.0,
         config_snapshot=snap,
+        # What SD-5c's run start fills from the deployment's manifest.
+        provenance=_provenance(),
     )
     t += timedelta(seconds=300)  # generate inside the run
     for jt, secs, gb, ex in (
@@ -1162,6 +1225,7 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
                 elapsed_seconds=secs,
                 success=True,
                 input_size_gb=gb,
+                output_rows=1000,  # rows in every layer (the verdict's layer_rows gate)
                 executor_count=ex,
                 executor_cores=4,
             )
@@ -1635,3 +1699,16 @@ def test_v16_poll_fallback_is_not_the_old_15s_poll(env):
     run = pg.load_run(env.write_run(data))
     assert pg.stage_timing_basis(run) == "poll5s"
     assert pg.compare_run(env.store(), "c360-batch-s10", run).verdict == pg.REFUSED
+
+
+def test_single_stage_run_is_refused(env):
+    """A ``run --stage`` record times one stage, not the pipeline."""
+    from lakebench.metrics.storage import MetricsStorage
+
+    snap = env.snaps["c360-batch-s10"]
+    pm = _real_run(snap, "20260924-100000-aaaaaa")
+    pm.stage_only = "silver-build"
+    run = pg.load_run(MetricsStorage(env.runs).save_run(pm))
+    assert "run measured one stage only (silver-build)" in pg.run_refusals(
+        run, env.store().pinned("c360-batch-s10")
+    )

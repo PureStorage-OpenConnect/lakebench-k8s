@@ -8,42 +8,32 @@ per-entity ``txn_count_total`` is monotone non-decreasing across the run
 Welford / MERGE regression that stops updating a per-entity counter fails
 here).
 
-The test uses the same Iceberg-jar-guarded fixture as
-test_aml_stream_refuse_fresh_checkpoint.py: pyspark is required, and
-LB_SPARK_TEST_JARS must point at an Iceberg runtime.
+The test uses the shared ``spark_session`` with a Hadoop Iceberg catalog
+(``iceberg_catalog``), like test_aml_stream_refuse_fresh_checkpoint.py:
+pyspark is required, and LB_SPARK_TEST_JARS must list an Iceberg runtime
+jar (``requires_jars("iceberg")``).
 """
 
 from __future__ import annotations
 
-import glob
-import os
-import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
-
-# Point the stream / build modules at the test's Iceberg catalog before
-# they are imported: their DDL string literals interpolate `{CATALOG}` at
-# module import, so patching module attributes after import is too late.
-os.environ.setdefault("LB_ICEBERG_CATALOG", "lh")
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
+pytestmark = [
+    pytest.mark.requires_jars("iceberg"),
+    pytest.mark.usefixtures("load_script"),
+    # One core, as before the shared harness: the profile sums are compared
+    # with a tolerance, and merge order follows the partition count.
+    pytest.mark.spark_static_conf({"spark.master": "local[1]"}),
+]
 
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return any(n.startswith("iceberg-spark-runtime") for n in names)
-
-
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"
-)
+# The Iceberg catalog the scripts are pointed at (LB_ICEBERG_CATALOG) and the
+# one registered on the shared session.
+_CATALOG = "lh"
 
 
 _PACS_SCHEMA = (
@@ -89,31 +79,23 @@ def _bronze_row(spark, txn_id, orig_nm, ben_nm, ts, amount):
     return spark.createDataFrame([row], _PACS_SCHEMA)
 
 
-@pytest.fixture(scope="module")
-def spark(tmp_path_factory):
-    from pyspark.sql import SparkSession
+@pytest.fixture(scope="module", autouse=True)
+def _catalog_env():
+    """Point the stream / build modules at the test's Iceberg catalog
+    before a test imports them: their DDL literals interpolate
+    ``{CATALOG}`` at import, so patching module attributes after import is
+    too late."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LB_ICEBERG_CATALOG", _CATALOG)
+        yield
 
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    wh = tmp_path_factory.mktemp("aml-profiles-wh")
-    jars = ",".join(sorted(glob.glob(os.path.join(_JARS, "*.jar"))))
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.jars", jars)
-        .config("spark.sql.shuffle.partitions", "2")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config("spark.sql.catalog.lh", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.lh.type", "hadoop")
-        .config("spark.sql.catalog.lh.cache-enabled", "false")
-        .config("spark.sql.catalog.lh.warehouse", f"file://{wh}")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
+
+@pytest.fixture(scope="module")
+def spark(spark_session, iceberg_catalog, tmp_path_factory):
+    iceberg_catalog(
+        spark_session, _CATALOG, tmp_path_factory.mktemp("aml-profiles-wh"), cache_enabled=False
     )
-    yield s
-    s.stop()
+    return spark_session
 
 
 def _bootstrap_stream(spark, ss):
@@ -150,8 +132,6 @@ def _bootstrap_stream(spark, ss):
 
 
 def test_stream_maintains_profiles_monotone_across_five_batches(spark, tmp_path):
-    scripts = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
-    sys.path.insert(0, str(scripts))
     import silver_stream_financial as ss
 
     _bootstrap_stream(spark, ss)

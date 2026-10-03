@@ -19,20 +19,23 @@ This document tracks tested operators, catalog implementations, and migration pl
 
 ### Key Configuration
 
-Install or upgrade the shared operator with lakebench rather than raw Helm:
+Install the shared operator with lakebench rather than raw Helm:
 
 ```bash
-lakebench admin install-spark-operator \
-  --version 2.5.1 \
-  --operator-namespace spark-operator \
+lakebench admin install --component spark-operator lakebench.yaml \
+  --version spark-operator=2.5.1 \
   --controller-tmp-size 8Gi
 ```
 
+`--version` defaults to the config's `platform.compute.spark.operator.version`
+and the namespace is `platform.compute.spark.operator.namespace`.
 `--controller-tmp-size` sets the sizeLimit of the controller's `/tmp`
-emptyDir, which holds spark-submit's Ivy jar cache. The default is 8Gi, the
-floor is 4Gi, and an upgrade without the flag keeps a larger size already
-set. The command runs under the cluster lease, and an upgrade keeps the
-stored Helm values, including the watch list.
+emptyDir, which holds spark-submit's Ivy jar cache for applications that set
+`spark.jars.packages` (Lakebench's own jobs set none since 1.7), on a fresh
+install; the default is 8Gi and the floor is 4Gi. An installed operator is
+left as it is: the command never upgrades it, a different `--version` is
+refused, and `lakebench admin repair-operator --controller-tmp-size` resizes
+its `/tmp`. The command runs under the cluster lease.
 
 On OpenShift, lakebench grants the `anyuid` SCC to the
 `spark-operator-controller` and `spark-operator-webhook` service accounts
@@ -41,9 +44,9 @@ and patches `fsGroup` and `seccompProfile` out of the operator Deployments
 
 Do not edit `spark.jobNamespaces` by hand. `lakebench deploy` adds its
 namespace to the watch list and `lakebench destroy` removes it, both under
-the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy does this
-whatever `platform.compute.spark.operator.install` says; `install: true`
-only adds installing a missing operator.
+the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy never
+installs the operator; `platform.compute.spark.operator.install: true` is
+refused by the commands that change data.
 
 ### Learnings
 - Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.x / 4.0.x / 4.1.x)
@@ -143,8 +146,7 @@ platform:
   storage:
     scratch:
       enabled: true
-      storage_class: px-csi-scratch  # Portworx, repl=1
-      size: 100Gi
+      storage_class: px-csi-scratch  # Portworx, repl=1 (PVC size per job profile)
 ```
 
 ### Spark Conf Essentials
@@ -155,8 +157,13 @@ minor version -- see the Version Matrix below. Iceberg 1.11 needs Java 17, so
 with the default Iceberg version a Java 11 Spark 3.5 image falls back to
 Iceberg 1.10.1 with a warning; a java17 Spark 3.5 tag gets 1.11.0.
 
+The jars are resolved once at deploy by the deployment's dependency server
+(`lb-deps`) and named by URL, so the coordinates below are what it resolves:
+`org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1` and
+`org.apache.hadoop:hadoop-aws:3.3.4`.
+
 ```yaml
-spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1,org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars: http://lb-deps.<namespace>.svc.cluster.local:8080/sets/<pinset>/jars/org.apache.iceberg_iceberg-spark-runtime-3.5_2.12-1.10.1.jar,...
 spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.lakehouse.type: hive
 spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
@@ -169,34 +176,35 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Component | Version | Source |
 |-----------|---------|--------|
 | Spark Operator | 2.5.1 | Kubeflow helm chart |
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.0.2; 4.2 unsupported) | apache/spark image |
-| Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | spark.jars.packages |
-| Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | spark.jars.packages |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.1.1 on the Hive recipes, 4.0.2 on Polaris and hive-delta-spark-thrift; 4.2 unsupported) | apache/spark image |
+| Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | resolved by lb-deps |
+| Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | resolved by lb-deps |
 | Apache Polaris | 1.6.0 | apache/polaris image |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Secret Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Listener Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Hive Metastore | 3.1.3 | Managed by Stackable |
-| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | spark.jars.packages |
+| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | resolved by lb-deps |
 | PostgreSQL | 17 | postgres:17 |
 | Trino | 483 | trinodb/trino image |
-| DuckDB | 1.5.5 | pip package in python:3.11-slim |
+| DuckDB | 1.5.5 | wheel resolved by lb-deps, run on python:3.11-slim |
 
 ## Stackable Installation
 
-**Auto-install** -- set `architecture.catalog.hive.operator.install: true` in
-your config and `lakebench deploy` handles it. Requires cluster-admin.
-
-**Manual install:**
+A cluster admin installs the four Stackable operators (commons, listener,
+secret, hive) once, under the cluster lease, at the config's
+`architecture.catalog.hive.operator.version` (SDP 25.7.0 by default) in
+`architecture.catalog.hive.operator.namespace`:
 
 ```bash
-# Install Stackable operators (required for Hive)
-helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator --version 25.7.0 --namespace stackable --create-namespace
-helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator --version 25.7.0 --namespace stackable
-helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator --version 25.7.0 --namespace stackable
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator --version 25.7.0 --namespace stackable
+lakebench admin install --component stackable lakebench.yaml
 ```
+
+`lakebench deploy` never installs them; a missing operator fails the Hive
+step with that command. An installed SDP is left at its version: Lakebench
+does not automate an SDP upgrade (helm does not update the CRDs the charts
+ship in `crds/`).
 
 ---
 
@@ -215,7 +223,7 @@ Lakebench automatically detects the platform type:
 On OpenShift, Spark pods require the `anyuid` SCC because they run as UID 185 (spark user).
 
 **Automatic Configuration:**
-- During `lakebench deploy`, the RBAC deployer automatically grants `anyuid` SCC to `lakebench-spark-runner`
+- During `lakebench deploy`, the RBAC and PostgreSQL steps grant `anyuid` to `lakebench-spark-runner` and `lakebench-postgres` through the RBAC API (the RoleBinding `system:openshift:scc:anyuid`; no `oc` needed). A refused grant fails the step; see [Prerequisites](prerequisites.md#openshift-scc-clusterrole)
 - The `lakebench validate` command checks if SCCs are already configured
 
 **Manual Configuration:**
@@ -260,7 +268,7 @@ lakebench validate test-config.yaml --verbose
 
 ### PVC provisioning failed
 - **Cause:** Wrong storage class name
-- **Fix:** Use a storage class that exists on the cluster. The scratch default is `px-csi-scratch` (Portworx, repl=1), which a cluster admin installs once with `lakebench admin install-scratch-storage-class`
+- **Fix:** Use a storage class that exists on the cluster. The scratch default is `px-csi-scratch` (Portworx, repl=1), which a cluster admin installs once with `lakebench admin install --component scratch-storage-class`
 
 ### deletecollection forbidden
 - **Cause:** RBAC missing `deletecollection` verb
@@ -269,6 +277,6 @@ lakebench validate test-config.yaml --verbose
 ### OpenShift SCC forbidden (UID 185)
 - **Cause:** lakebench-spark-runner ServiceAccount lacks `anyuid` SCC
 - **Fix:**
-  - Run `lakebench deploy` to auto-configure SCC
-  - Or manually: `oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>`
+  - `lakebench deploy` makes the grant itself and fails the RBAC step if it is refused
+  - A cluster admin can make it instead: `oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>` (and the same with `-z lakebench-postgres`)
 - **Verification:** `oc get events -n <namespace> --sort-by='.lastTimestamp'` shows SCC errors

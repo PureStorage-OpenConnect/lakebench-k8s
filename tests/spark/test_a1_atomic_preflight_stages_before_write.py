@@ -32,14 +32,11 @@ intercepted, so the test does not need iceberg-spark-runtime jars.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("pyspark")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 @pytest.fixture

@@ -1,0 +1,28 @@
+# Datagen image lineage, the input of corpus id v2 (read by
+# metrics/corpus_identity.py).
+#
+# Corpus id v2 hashes the lineage of the image that generated a corpus: the
+# image digest, mapped through this table to the first digest of a chain of
+# output-neutral re-pins. A digest not listed here is its own lineage, so an
+# unlisted re-pin reads as a different corpus (the safe direction).
+#
+# A row whose digest equals its canonical is a root and needs no evidence.
+# Any other row names its byte-compare result and pins its sha256:
+#
+#   - digest: sha256:<re-pinned image, 64 hex>
+#     canonical: sha256:<a root row's digest>
+#     evidence: tests/fixtures/datagen_reference/compare-<first 12 hex of digest>.json
+#     evidence_sha256: "<sha256 of that file>"   # quoted: an all-digit hash is a YAML int
+#     build_commit: "<datagen_rs commit the image was built from>"   # optional
+#
+# The compare file holds the five cases F0, F1, C0, F2, C2, each equal with
+# _corpus/ excluded, on development seeds 43 (F) and 42 (C), as the datagen
+# byte-compare writes it (metrics/corpus_identity.validate_compare_file
+# states the rules). The unit suite checks
+# every pinned file on every commit, since the wheel does not ship tests/.
+# The digest is the one the datagen pods report as their imageID.
+lineage:
+  # docker.io/sillidata/lb-datagen:1.6.0, the v1.6 release image (registry
+  # manifest digest, equal to the pod imageID of run 20261001-091952-6d10e4).
+  - digest: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+    canonical: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a

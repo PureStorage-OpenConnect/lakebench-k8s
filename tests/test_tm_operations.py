@@ -7,15 +7,20 @@ tests/spark/test_tm_operations_spark.py.
 
 from __future__ import annotations
 
-import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"))
+# The module's private tm_operations, bound by _tm before the first test.
+tm = None
 
-import tm_operations as tm  # noqa: E402
+
+@pytest.fixture(scope="module", autouse=True)
+def _tm(load_script_module):
+    global tm
+    tm = load_script_module("tm_operations")
+
 
 PARAMS = {
     "seed": 7,

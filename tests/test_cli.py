@@ -109,6 +109,17 @@ class TestRecommendCommand:
 class TestPreflightCheck:
     """Tests for _preflight_check deploy guard."""
 
+    @pytest.fixture(autouse=True)
+    def _capacity_fits(self, monkeypatch):
+        # These tests are about the Stackable check; the capacity check has
+        # its own tests (tests/test_deploy_capacity.py).
+        from lakebench.cli._prerequisites import PrereqResult
+
+        monkeypatch.setattr(
+            "lakebench.cli._prerequisites.deploy_capacity_check",
+            lambda cfg: PrereqResult(name="cluster-capacity", passed=True, message="OK"),
+        )
+
     def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
         """Preflight exits 1 when Stackable CRDs are missing and install is false."""
         from unittest.mock import MagicMock, patch
@@ -136,8 +147,10 @@ class TestPreflightCheck:
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
             _preflight_check(cfg)
 
-    def test_preflight_warns_on_missing_stackable_with_install(self, monkeypatch):
-        """Preflight warns (not fails) when Stackable CRDs are missing and install is true."""
+    def test_preflight_blocks_on_missing_stackable_whatever_install_says(self, capsys):
+        """Deploy never installs Stackable, so a missing one stops the
+        preflight with the admin command even with install: true (which the
+        loader refuses anyway). Reverted, install: true only warned."""
         from unittest.mock import MagicMock, patch
 
         from lakebench.cli import _preflight_check
@@ -152,10 +165,40 @@ class TestPreflightCheck:
         mock_crd_list = MagicMock()
         mock_crd_list.items = []
 
-        with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
+        with (
+            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
+            pytest.raises(typer.Exit),
+        ):
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            # Should not raise -- warns instead of failing
             _preflight_check(cfg)
+        cap = capsys.readouterr()
+        out = " ".join((cap.out + cap.err).split())
+        assert "lakebench admin install --component stackable" in out
+        assert "helm install" not in out
+
+    def test_preflight_stops_when_observability_is_enabled_but_not_installed(self, capsys):
+        """Deploy no longer installs the shared stack, so a missing one stops
+        the preflight, before anything is created, rather than at the last
+        deploy step."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _preflight_check
+
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "polaris"
+        cfg.observability.enabled = True
+        cfg.platform.kubernetes.context = ""
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+        with (
+            patch("lakebench.deploy.observability.find_observability_release", return_value=None),
+            pytest.raises(typer.Exit),
+        ):
+            _preflight_check(cfg)
+        cap = capsys.readouterr()
+        out = " ".join((cap.out + cap.err).split())
+        assert "lakebench admin install --component observability" in out
 
     def test_preflight_passes_when_stackable_present(self, monkeypatch):
         """Preflight does not exit when Stackable CRDs are present."""
@@ -724,12 +767,13 @@ class TestRunIcebergCompaction:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_compaction(cfg, k8s, console, j)
 
-        # 2 tables * 1 compaction operation = 2 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 2
-        for call in k8s.exec_in_pod.call_args_list:
-            cmd = call[0][1]
-            assert cmd[0] == "trino"
-            assert "optimize" in cmd[2].lower()
+        # 2 tables * 1 compaction operation, after one partition read of
+        # the silver table (LB-210); the mock's output is unreadable, so
+        # silver falls back to one unchunked statement.
+        calls = [call[0][1] for call in k8s.exec_in_pod.call_args_list]
+        assert all(cmd[0] == "trino" for cmd in calls)
+        assert ["$partitions" in cmd[2] for cmd in calls] == [True, False, False]
+        assert all("optimize" in cmd[2].lower() for cmd in calls[1:])
 
     def test_skips_for_duckdb(self):
         """DuckDB is read-only -- compaction skipped."""

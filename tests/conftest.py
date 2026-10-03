@@ -55,12 +55,273 @@ os.environ.pop("FORCE_COLOR", None)
 # Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
 # this is its documented off switch.
 os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+# pytest-xdist starts its workers with COLUMNS=80. A Rich Console built at
+# import time (the CLI's module-level consoles) fixes its width from COLUMNS,
+# so in a worker every table was cut at 80 columns and a test's
+# CliRunner(env={"COLUMNS": ...}) had no effect. Without it, Rich reads
+# COLUMNS when it prints, as in a serial run.
+os.environ.pop("COLUMNS", None)
+os.environ.pop("LINES", None)
 
+import functools  # noqa: E402
+import importlib  # noqa: E402
+import importlib.abc  # noqa: E402
+import importlib.util  # noqa: E402
+import sys  # noqa: E402
+from collections.abc import Callable, Iterator  # noqa: E402
+from pathlib import Path  # noqa: E402
+from types import ModuleType  # noqa: E402
+from typing import Any  # noqa: E402
 from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest  # noqa: E402
 
 from lakebench.config import LakebenchConfig  # noqa: E402
+
+# SAF-4 / DEP-3 oracle (SD-9): `recording_k8s` is available to every test.
+from tests.fixtures.recording_k8s import recording_k8s  # noqa: E402, F401
+
+# ---------------------------------------------------------------------------
+# Spark script loader (QA-2). The Spark scripts import each other by plain
+# name (``from common import ...``), as they do in the driver pod, where the
+# scripts ConfigMap is one flat directory. Tests used to put the scripts
+# directory on sys.path and import them, so every test in the process shared
+# one ``common``: a monkeypatch or a ``sys.modules.pop("common")`` in one test
+# changed what a later test saw. ``load_script`` gives each test (or each test
+# module, with ``load_script_module``) its own private copy of the scripts it
+# loads, ``common`` included, and puts sys.modules back afterwards.
+# Two guards keep it that way: tests/test_script_loader_static.py fails on
+# the usual hand-made loads (sys.path edits, sys.modules pops), and the
+# pytest_runtest_teardown hook fails any test that leaves the scripts
+# directory on sys.path or a script module in sys.modules outside a namespace,
+# whatever code did it.
+# ---------------------------------------------------------------------------
+
+_SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
+SPARK_SCRIPTS_DIR = _SRC / "spark" / "scripts"
+
+
+@functools.cache
+def _shipped_script_modules() -> tuple[tuple[str, Path], ...]:
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import SCRIPT_MAPS
+
+    names = {p.stem: p for p in SPARK_SCRIPTS_DIR.glob("*.py")}
+    for sources in SCRIPT_MAPS.values():
+        for src in sources:
+            if src.key.endswith(".py"):
+                names[src.key[: -len(".py")]] = _SRC / src.path
+    return tuple(sorted(names.items()))
+
+
+def shipped_script_modules() -> dict[str, Path]:
+    """Every plain module name a Spark script can import in the driver pod,
+    with its file: the .py files the scripts ConfigMaps ship flat under one
+    directory (scripts_maps.SCRIPT_MAPS, which also ships reference_score,
+    fidelity_gate and datagen_seed from outside spark/scripts), plus any
+    script in spark/scripts the maps miss (tests/test_script_loader.py checks
+    there is none)."""
+    return dict(_shipped_script_modules())
+
+
+class _ScriptFinder(importlib.abc.MetaPathFinder):
+    """Resolves the shipped plain names to their files while a namespace is
+    active, without putting the scripts directory on sys.path."""
+
+    def __init__(self, files: dict[str, Path]) -> None:
+        self._files = files
+
+    def find_spec(self, fullname, path=None, target=None):  # noqa: ANN001
+        f = self._files.get(fullname)
+        if f is None or path is not None:
+            return None
+        return importlib.util.spec_from_file_location(fullname, f)
+
+
+class ScriptNamespace:
+    """One private set of script modules.
+
+    ``activate`` saves and removes every shipped name from sys.modules and
+    installs a finder, so the first import of ``common`` (by the test, or by
+    a script at top level or inside a function) executes a fresh copy, and
+    every later import in the same namespace gets that copy. ``deactivate``
+    removes the finder and every shipped name, then restores what was in
+    sys.modules before.
+    """
+
+    active: list[ScriptNamespace] = []
+
+    def __init__(self, scope: str, owner: str) -> None:
+        self.scope = scope
+        self.owner = owner
+        self._files = shipped_script_modules()
+        self._finder = _ScriptFinder(self._files)
+        self._saved: dict[str, ModuleType] = {}
+
+    def activate(self) -> None:
+        for name in self._files:
+            mod = sys.modules.pop(name, None)
+            if mod is not None:
+                self._saved[name] = mod
+        sys.meta_path.insert(0, self._finder)
+        ScriptNamespace.active.append(self)
+
+    def deactivate(self) -> None:
+        if self in ScriptNamespace.active:
+            ScriptNamespace.active.remove(self)
+        if self._finder in sys.meta_path:
+            sys.meta_path.remove(self._finder)
+        for name in self._files:
+            sys.modules.pop(name, None)
+        sys.modules.update(self._saved)
+        self._saved = {}
+
+    def load(self, name: str, *, extra: tuple[str, ...] = ()) -> Any:
+        """Import *name* (and each of *extra*) in this namespace. Returns the
+        module, or a tuple ``(module, *extra_modules)`` when *extra* is given.
+        A module a script imports is the same object the test gets back:
+        ``load("silver_stream_financial", extra=("common",))`` returns the
+        ``common`` that silver_stream_financial uses."""
+        if ScriptNamespace.active[-1:] != [self]:
+            raise RuntimeError(f"the script namespace of {self.owner} is not the active one")
+        for n in (name, *extra):
+            if n not in self._files:
+                raise ValueError(f"{n!r} is not a Spark script module ({SPARK_SCRIPTS_DIR})")
+        mod = importlib.import_module(name)
+        if not extra:
+            return mod
+        return (mod, *(importlib.import_module(n) for n in extra))
+
+
+def _script_namespace(scope: str, request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    owner = request.node.nodeid
+    outer = [ns for ns in ScriptNamespace.active if ns.scope == "module"]
+    if scope == "function" and outer:
+        raise RuntimeError(
+            f"{owner}: load_script and load_script_module in one test module; use one "
+            f"(the module namespace of {outer[-1].owner} is active)"
+        )
+    ns = ScriptNamespace(scope, owner)
+    ns.activate()
+    try:
+        yield ns.load
+    finally:
+        ns.deactivate()
+
+
+def exec_repo_script(path: Path, name: str) -> ModuleType:
+    """Exec a repository tool script (``scripts/*.py``) as module *name*.
+    Some of these put ``src`` or the Spark scripts directory on sys.path at
+    import, for their command-line use; the path is restored afterwards so
+    the scripts directory does not stay importable for later tests."""
+    saved = list(sys.path)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved
+    return mod
+
+
+def _script_leaks() -> list[str]:
+    """Script state left behind: the scripts directory on sys.path (never
+    needed, the finder resolves the names), or a script module in
+    sys.modules while no namespace is active."""
+    found = []
+    scripts = str(SPARK_SCRIPTS_DIR)
+    on_path = [p for p in sys.path if p and os.path.realpath(p) == os.path.realpath(scripts)]
+    if on_path:
+        found.append(f"{scripts} is on sys.path")
+    if not ScriptNamespace.active:
+        found += [f"{n!r} is in sys.modules" for n in shipped_script_modules() if n in sys.modules]
+    return found
+
+
+def _clear_script_leaks() -> None:
+    scripts = os.path.realpath(str(SPARK_SCRIPTS_DIR))
+    sys.path[:] = [p for p in sys.path if not p or os.path.realpath(p) != scripts]
+    if not ScriptNamespace.active:
+        for n in shipped_script_modules():
+            sys.modules.pop(n, None)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> Any:
+    """Fail a test that leaves the Spark scripts importable for later tests:
+    the scripts directory on sys.path, or a script module in sys.modules
+    outside a load_script namespace. It runs after the fixtures this test's
+    teardown finalizes (its function fixtures with monkeypatch undo, and on
+    the last test of a module or session the wider-scoped ones too), so a
+    leak made by the test is reported as that test's teardown error and not
+    the next test's. A leak made in a module or session fixture's own
+    teardown lands on the last test of that scope. If a fixture teardown
+    raises, the leak is cleared but only that error is reported. The state
+    is cleared either way, so the next test starts without it."""
+    try:
+        result = yield
+    except BaseException:
+        _clear_script_leaks()
+        raise
+    leaks = _script_leaks()
+    if leaks:
+        _clear_script_leaks()
+        pytest.fail(
+            "Spark script state leaked (use load_script): " + "; ".join(leaks), pytrace=False
+        )
+    return result
+
+
+@pytest.fixture
+def load_script(request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    """Load a Spark script with a private ``common`` for this test:
+    ``mod = load_script("silver_build_financial")``. While the test runs, a
+    plain ``import common`` (or of any other script), in the test or inside a
+    script, resolves to the same private copy."""
+    yield from _script_namespace("function", request)
+
+
+@pytest.fixture(scope="module")
+def load_script_module(request: pytest.FixtureRequest) -> Iterator[Callable[..., Any]]:
+    """``load_script`` with one private namespace for the whole test module,
+    for modules whose tests share a loaded script or a Spark session that
+    uses one."""
+    yield from _script_namespace("module", request)
+
+
+@pytest.fixture(autouse=True)
+def _offline_deps_set(request, monkeypatch):
+    """Spark job manifests need the deployment's verified dependency set,
+    which `run`, `continuous` and `financial` load from the cluster before
+    any submit (deps.runtime.load_handle). A unit test that builds a manifest
+    gets the offline placeholder set instead. A test marked ``real_deps``
+    keeps the production default (no set) and proves the guard; the static
+    and CLI tests in test_job_deps.py prove every production path loads one.
+    """
+    if request.node.get_closest_marker("real_deps"):
+        return
+    from lakebench.deps import runtime
+    from lakebench.deps.manifest import placeholder_handle
+    from lakebench.modules.pipeline_engines.spark import job
+
+    # The CLI's run-start check reads the cluster; CLI tests run offline.
+    monkeypatch.setattr(runtime, "load_handle", lambda cfg, k8s, **kw: placeholder_handle(cfg))
+    monkeypatch.setattr(
+        runtime, "check_pods", lambda cfg, handle, since: {"pods_checked": 0, "pod_mismatches": []}
+    )
+    monkeypatch.setattr(runtime, "attach_refusal", lambda cfg, run: None)
+
+    real = job.SparkJobManager.__init__
+
+    def init(self, *a, **k):
+        real(self, *a, **k)
+        if self.deps is None:
+            try:
+                self.deps = placeholder_handle(self.config)
+            except Exception:  # noqa: BLE001 -- a config the request cannot serve
+                pass
+
+    monkeypatch.setattr(job.SparkJobManager, "__init__", init)
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +333,113 @@ def _journal_in_tmp(tmp_path, monkeypatch):
     from lakebench.journal import Journal
 
     monkeypatch.setattr(helpers, "_journal", Journal(tmp_path / "lakebench-journal"))
+
+
+@pytest.fixture(autouse=True)
+def _signal_handlers_do_not_leak(request):
+    """Each test starts with the SIGINT and SIGTERM handlers the process had
+    before any test, and gets them back after. A run that installs its
+    interrupt handler and skips restore() (on purpose in some tests) would
+    otherwise hand it to whatever test runs next in the same process; under
+    xdist that order changes, and a later test saw a SIGTERM caught that it
+    expected to reach its own handler (CI run 37014056878, worker gw3)."""
+    import signal
+    import threading
+
+    # The Spark tier keeps pyspark's own SIGINT handler (it cancels the JVM
+    # jobs), which its module-scoped session installs.
+    in_spark_tier = "spark" in Path(str(request.node.path)).parent.parts[-1:]
+    if in_spark_tier or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def reset() -> None:
+        for s, base in _BASE_SIGNAL_HANDLERS.items():
+            signal.signal(s, base if base is not None else signal.SIG_DFL)
+
+    reset()
+    yield
+    reset()
+
+
+def _base_signal_handlers() -> dict:
+    import signal
+
+    return {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+
+#: The handlers at conftest import, before any test ran.
+_BASE_SIGNAL_HANDLERS = _base_signal_handlers()
+
+
+@pytest.fixture(autouse=True)
+def _reset_cluster_target():
+    """A process pins one cluster context (SAF-7, ``k8s/target.py``); the
+    suite is one process, so each test starts with no active target. The
+    hermetic kubeconfig above stays the default; tests that need other
+    contexts write one with ``write_kubeconfig``."""
+    from kubernetes import client as kclient
+
+    from lakebench.k8s import target
+
+    saved = kclient.Configuration._default
+    target._reset_for_tests()
+    yield
+    target._reset_for_tests()
+    kclient.Configuration._default = saved
+
+
+@pytest.fixture(autouse=True)
+def _no_implicit_tool_pin(request, monkeypatch):
+    """``cli_args()`` pins the kubeconfig's current context on a tool call
+    made before any API client (SAF-7). Here that would be the hermetic
+    ``test`` context, which CI may or may not see depending on import order,
+    so tests that build a tool argv with no configured context get the
+    no-kubeconfig answer (no flag). Tests of the pin itself are marked
+    ``tool_pin`` and see the real behaviour."""
+    if request.node.get_closest_marker("tool_pin"):
+        return
+    from lakebench.k8s import target
+
+    monkeypatch.setattr(target, "_pin_on_first_tool_call", lambda: None)
+
+
+def point_kubeconfig_at(monkeypatch, path) -> None:
+    """Make the kubernetes client's default kubeconfig location ``path``.
+
+    The library binds the location twice (``kubernetes.config`` re-exports
+    the ``kube_config`` module constant), and ``deploy/ownership.py`` reads
+    the package binding, so both are patched.
+    """
+    import kubernetes.config as kconfig
+    import kubernetes.config.kube_config as kube_config_mod
+
+    monkeypatch.setattr(kube_config_mod, "KUBE_CONFIG_DEFAULT_LOCATION", str(path))
+    monkeypatch.setattr(kconfig, "KUBE_CONFIG_DEFAULT_LOCATION", str(path))
+
+
+def write_kubeconfig(path, servers: dict[str, str], current: str) -> None:
+    """Write a token-auth kubeconfig with one context per ``servers`` entry.
+
+    ``servers`` maps a context name to its API server URL; each context gets
+    its own cluster and user entry.
+    """
+    import yaml
+
+    doc = {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": current,
+        "clusters": [
+            {"name": f"cl-{n}", "cluster": {"server": url, "insecure-skip-tls-verify": True}}
+            for n, url in servers.items()
+        ],
+        "users": [{"name": f"u-{n}", "user": {"token": f"tok-{n}"}} for n in servers],
+        "contexts": [
+            {"name": n, "context": {"cluster": f"cl-{n}", "user": f"u-{n}"}} for n in servers
+        ],
+    }
+    path.write_text(yaml.safe_dump(doc))
 
 
 @pytest.fixture(autouse=True)
@@ -99,11 +467,9 @@ def make_config(**overrides) -> LakebenchConfig:
     hand-building dicts so that new required fields are handled in one place.
 
     LB-090: when the resulting config selects Polaris and no explicit
-    ``client_secret`` was supplied, fill in a test-only value so the
-    deploy-time ``require_polaris_client_secret`` gate does not fire
-    inside unrelated tests. Real production configs must set the secret
-    themselves; the loader's ${VAR} substitution is the recommended
-    channel.
+    ``client_secret`` was supplied, fill in a test-only value, so unrelated
+    tests that build Spark job manifests never look for the Secret that
+    deploy stores (SAF-8) on a cluster they do not have.
     """
     from lakebench.config.schema import CatalogType
 
@@ -183,7 +549,7 @@ def stub_experiment(
     names in *failed*, as the runner records a failed query). Keyword
     overrides replace identity fields (seed=..., scale=...)."""
     from lakebench.benchmark.fingerprint import fingerprint_rows
-    from lakebench.metrics.experiment import EXPERIMENT_SCHEMA
+    from lakebench.metrics.experiment import EXPERIMENT_SCHEMA_V1
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
     results: dict = {
@@ -196,7 +562,7 @@ def stub_experiment(
     # A continuous run carries the fingerprints of its end-of-run result
     # check (metrics/experiment.py _continuous_results), like a batch run.
     return {
-        "schema": EXPERIMENT_SCHEMA,
+        "schema": EXPERIMENT_SCHEMA_V1,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},
         "corpus": {
             "id": "corpus",
@@ -213,6 +579,39 @@ def stub_experiment(
         },
         "results": results,
     }
+
+
+@pytest.fixture(autouse=True)
+def _continuous_namespace_reads_answered(monkeypatch):
+    """The continuous runner reads its namespace through the real
+    kubernetes client (cli/_sustained.NamespaceWatch). Tests that drive
+    _run_sustained with no CoreV1Api fake would reach for a real API server
+    and, after three failed reads, stop as "namespace unreadable"; answer
+    them with a healthy namespace. A test that fakes CoreV1Api (the QA-9
+    harness, tests/test_run_namespace_gone.py) gets its fake."""
+    try:
+        import kubernetes.client
+        from kubernetes.client.api.core_v1_api import CoreV1Api as real_core_v1
+
+        from lakebench.cli import _sustained
+    except Exception:  # noqa: BLE001
+        return
+    from types import SimpleNamespace
+
+    watch = getattr(_sustained, "NamespaceWatch", None)
+    if watch is None:  # a tree from before the watch (a fix-reverted run)
+        return
+    real_read = watch._read
+
+    def read(self):
+        if kubernetes.client.CoreV1Api is real_core_v1:
+            return SimpleNamespace(
+                metadata=SimpleNamespace(uid="test-ns-uid", deletion_timestamp=None),
+                status=SimpleNamespace(phase="Active"),
+            )
+        return real_read(self)
+
+    monkeypatch.setattr(watch, "_read", read)
 
 
 @pytest.fixture(autouse=True)

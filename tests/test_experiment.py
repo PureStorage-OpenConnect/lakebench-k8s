@@ -46,6 +46,15 @@ def _fp(value: int = 1) -> dict:
     return fingerprint_rows([(value, "x")], engine="trino", adapted_sql="SELECT 1")
 
 
+def _cfg_spark41():
+    """The default C360 batch config on the Spark 4.1 image, the release
+    matrix's version for hive-iceberg-spark-trino."""
+    return make_config(
+        images={"spark": "apache/spark:4.1.1-python3"},
+        architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+    )
+
+
 def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
     run = MetricsCollector().start_run(
         "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
@@ -69,8 +78,13 @@ def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
     # end_run(success=True) call would compute a FAILED verdict and be
     # refused by compare. These tests build a synthetic completed run to
     # exercise the comparability ladder itself, not to test a failed run;
-    # mark it complete so the verdict computes PASSED.
+    # mark it complete so the verdict computes PASSED. Every layer has rows,
+    # so the verdict's layer_rows gate (EVD-1) passes too.
     run.success = True
+    run.jobs = [
+        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
+        for s in ("bronze-verify", "silver-build", "gold-finalize")
+    ]
     return run
 
 
@@ -81,7 +95,12 @@ class TestStamping:
         cfg = _cfg(schema, mode)
         d = _metrics(cfg).to_dict()
         e = d["experiment"]
-        assert e["schema"] == ex.EXPERIMENT_SCHEMA
+        # No corpus observation and no system identity in this synthetic
+        # run: identity v1, naming what v2 lacked (ER-10a stamping rule).
+        assert e["schema"] == ex.EXPERIMENT_SCHEMA_V1
+        assert e["v2_unavailable"] == ["corpus id v2", "system identity"]
+        assert e["corpus"]["id_v2"] is None and e["corpus"]["id_v2_unavailable"]
+        assert e["architecture"]["access_paths"] == {"pipeline": "catalog", "query": "catalog"}
         assert e["workload"]["name"] == schema
         assert e["workload"]["version"] == ex.WORKLOAD_VERSIONS[schema]
         assert e["corpus"]["seed"] is not None
@@ -187,28 +206,29 @@ class TestStamping:
         rec.write_text(
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
-            "     tree: abc1234, runs: [run-1]}\n"
+            "     spark: '4.1', table_format_version: 1.11.0,\n"
+            f"     tree: {'abc1234' + '0' * 33}, runs: [run-1]}}\n"
         )
         with (
             mock.patch.object(support, "VALIDATION_RECORD", rec),
             mock.patch.object(provenance, "run_provenance", lambda: clean),
         ):
-            run = _metrics(_cfg())
+            run = _metrics(_cfg_spark41())
             s = run.to_dict()["experiment"]["support"]
             assert s["state"] == "supported"
             assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
             # A modified tree is not the validated code.
             dirty = dict(clean, git_dirty=True)
             with mock.patch.object(provenance, "run_provenance", lambda: dirty):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified" and "modified tree" in s["basis"]
             unknown = dict(clean, git_dirty=None)
             with mock.patch.object(provenance, "run_provenance", lambda: unknown):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified"
             wheel = dict(clean, git_sha=None, git_dirty=None)
             with mock.patch.object(provenance, "run_provenance", lambda: wheel):
-                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+                s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "supported"
         # Frozen at run start: re-rendering after the record changes keeps it.
         assert run.to_dict()["experiment"]["support"]["state"] == "supported"
@@ -218,12 +238,12 @@ class TestStamping:
             mock.patch.object(support, "VALIDATION_RECORD", rec),
             mock.patch.object(provenance, "run_provenance", lambda: clean),
         ):
-            s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+            s = _metrics(_cfg_spark41()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified"
             # A record from before the state was frozen is never re-stamped
             # supported, whatever the installed record now says.
             rec.write_text(rec.read_text().replace("mode: continuous", "mode: batch"))
-            old = _metrics(_cfg())
+            old = _metrics(_cfg_spark41())
             old.config_snapshot["experiment_inputs"].pop("support")
             s = old.to_dict()["experiment"]["support"]
             assert s["state"] == "unverified" and "not recorded at run start" in s["basis"]
@@ -261,7 +281,11 @@ class TestStamping:
         from lakebench.reports.generator import ReportGenerator
 
         html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-        assert "Experiment" in html and "c360-1" in html and "Result fingerprints" in html
+        assert (
+            "Experiment" in html
+            and ex.WORKLOAD_VERSIONS["customer360"] in html
+            and "Result fingerprints" in html
+        )
         for label in (
             "Query access path",
             "Support state",
@@ -339,15 +363,16 @@ class TestRefusals:
 
     def test_trino_vs_duckdb_is_comparable_but_not_like_for_like(self):
         """DESIGN 6.5: matching results make the pair comparable; the
-        different effective maintenance and access path make it not
-        like-for-like. Neither is a refusal."""
+        different effective maintenance makes it not like-for-like. The
+        access path is part of the architecture (OD-2), not a condition.
+        Neither is a refusal."""
         a = _metrics(_cfg(engine="trino")).to_dict()
         b = _metrics(_cfg(engine="duckdb")).to_dict()
         prov, results, _ = ex.refusals(a, b)
         assert prov == [] and results == []
         conditions = ex.like_for_like(a, b)
         assert any(c.startswith("effective maintenance") for c in conditions), conditions
-        assert any(c.startswith("query access path") for c in conditions), conditions
+        assert not any(c.startswith("query access path") for c in conditions), conditions
 
     def test_stored_references_refuse_on_conditions(self):
         """The perf gate and reproduce need the same experiment under the same
@@ -474,112 +499,105 @@ class TestEffectiveMaintenance:
 
 
 class TestCompareCommand:
-    def _comparison(self, a, b):
-        from lakebench.cli._compare import _build_comparison
+    """compare over stored records built by the collector (the stored-pair
+    goldens are tests/test_compare_stored.py)."""
 
-        for m in (a, b):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"composite_qph": 100.0}
-        return _build_comparison("A", a, "B", b)
+    @staticmethod
+    def _pair(a, b, *, qph=(100.0, 100.0)):
+        a = dict(a)
+        b = dict(b)
+        b["run_id"] = "20260926-120000-bbbbbb"
+        for m, q in ((a, qph[0]), (b, qph[1])):
+            # scale_ratio: a batch pipeline benchmark always records it, and
+            # the verdict fails a ratio of 0 (EVD-1).
+            m.setdefault("pipeline_benchmark", {})["scores"] = {
+                "composite_qph": q,
+                "scale_ratio": 1.0,
+            }
+        return a, b
+
+    def _comparison(self, a, b, **kw):
+        from lakebench.metrics.compare import compare_records
+
+        a, b = self._pair(a, b, **kw)
+        return compare_records([a], [b])
 
     def test_comparable_pair(self):
         c = self._comparison(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
-        assert c["comparable"] is True and c["like_for_like"] is True
-        assert not any(r.get("not_comparable") for r in c["metrics"])
-        assert c["support"] == {"config_a": "unverified", "config_b": "unverified"}
+        assert c["verdict"] == "LIKE-FOR-LIKE" and c["exit_code"] == 0
+        assert c["attribution"] in ("repeat", "system not established")
+        assert all(r["winner"] is None for r in c["metrics"])
+        assert c["sides"]["a"]["support"] == "unverified"
+        assert c["sides"]["b"]["support"] == "unverified"
 
-    def test_matching_results_under_other_conditions_are_labelled(self, capsys):
-        from lakebench.cli import _compare
-
+    def test_other_query_engine_is_an_architecture_differential(self):
         a = _metrics(_cfg(engine="trino")).to_dict()
         b = _metrics(_cfg(engine="duckdb")).to_dict()
         c = self._comparison(a, b)
-        assert c["comparable"] is True and c["like_for_like"] is False
-        assert c["condition_differences"]
-        import io
-
-        from rich.console import Console
-
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(c)
-        text = buf.getvalue()
-        assert "NOT LIKE-FOR-LIKE" in text and "NOT COMPARABLE" not in text
-        assert "unverified" in text
-
-    def test_a_failed_run_is_not_comparable(self):
-        c = self._comparison(_metrics(_cfg()).to_dict(), {"error": "Run failed with exit code 1"})
-        assert c["comparable"] is False
-        assert "did not complete" in c["refusals"]["provenance"][0]
+        assert c["verdict"] != "NOT COMPARABLE"
+        assert "architecture" in c["groups"]
 
     def test_legacy_records_are_not_comparable_and_do_not_crash(self):
         a = _metrics(_cfg()).to_dict()
         b = dict(a)
         b.pop("experiment")
         c = self._comparison(a, b)
-        assert c["comparable"] is False
-        assert ex.NO_PROVENANCE in c["refusals"]["provenance"][0]
+        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "1"
+        assert "predates the experiment block" in c["missing"]["hint"]
 
-    def test_non_comparable_pair_keeps_the_numbers_labelled(self):
+    def test_non_comparable_pair_keeps_the_numbers_and_withholds_them(self):
         a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
         b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        c = self._comparison(a, b)
-        assert c["comparable"] is False
-        assert c["refusals"]["results"]
-        assert c["metrics"] and all(r["not_comparable"] for r in c["metrics"])
+        c = self._comparison(a, b, qph=(100.0, 200.0))
+        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
+        assert "invariant 2" in c["missing"]["condition"]
+        assert [r["metric"] for r in c["metrics"]] == ["composite_qph", "scale_ratio"]
+        (row,) = [r for r in c["metrics"] if r["metric"] == "composite_qph"]
+        assert row["a"]["median"] == 100.0 and row["b"]["median"] == 200.0
+        assert row["assessment"] == "withheld" and row["delta_pct"] is None
 
-    def test_table_withholds_deltas(self, capsys):
-        from lakebench.cli import _compare
+    def test_table_withholds_deltas(self, tmp_path):
+        a, b = self._pair(
+            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(),
+            _metrics(_cfg(), {"Q1": _fp(2)}).to_dict(),
+            qph=(100.0, 200.0),
+        )
+        result = self._invoke(tmp_path, a, b)
+        assert result.exit_code == 10, result.output
+        assert "NOT COMPARABLE" in result.output and "withheld" in result.output
+        assert "+100.00%" not in result.output
 
-        a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
-        b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        a["pipeline_benchmark"] = {"scores": {"composite_qph": 100.0}}
-        b["pipeline_benchmark"] = {"scores": {"composite_qph": 200.0}}
-        import io
-
-        from rich.console import Console
-
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(_compare._build_comparison("A", a, "B", b))
-        text = buf.getvalue()
-        assert "NOT COMPARABLE" in text and "Q1" in text
-        assert "not comparable" in text
-        assert "+100.0%" not in text
-
-    def _invoke(self, tmp_path, metrics_a, metrics_b, cfg_b=None):
+    @staticmethod
+    def _invoke(tmp_path, a, b):
         from lakebench.cli import app
 
-        cfg_a = _cfg()
-        cfg_b = cfg_b or _cfg()
-        for p in ("a.yaml", "b.yaml"):
-            (tmp_path / p).write_text("name: x\n")
-        with (
-            mock.patch("lakebench.cli._compare.load_config", side_effect=[cfg_a, cfg_b]),
-            mock.patch("lakebench.cli._compare._run_single", side_effect=[metrics_a, metrics_b]),
-            mock.patch("lakebench.cli._compare.DEFAULT_OUTPUT_DIR", str(tmp_path / "out")),
-        ):
-            return CliRunner().invoke(
-                app, ["compare", str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml"), "--yes"]
-            )
+        runs = tmp_path / "runs"
+        for m in (a, b):
+            d = runs / f"run-{m['run_id']}"
+            d.mkdir(parents=True)
+            (d / "metrics.json").write_text(json.dumps(m))
+        return CliRunner().invoke(
+            app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)]
+        )
 
-    def test_exit_code_is_non_zero_when_not_comparable(self, tmp_path):
-        a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
-        b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
+    def test_exit_code_is_10_when_not_comparable(self, tmp_path):
+        a, b = self._pair(
+            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(), _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
+        )
         result = self._invoke(tmp_path, a, b)
-        assert result.exit_code == 1, result.output
-        saved = next((tmp_path / "out" / "comparisons").glob("*/comparison.json"))
-        assert json.loads(saved.read_text())["comparable"] is False
+        assert result.exit_code == 10, result.output
+        assert not (tmp_path / "lakebench-output").exists()
 
-    def test_exit_code_is_zero_when_comparable(self, tmp_path):
-        a, b = _metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict()
+    def test_exit_code_is_zero_when_like_for_like(self, tmp_path):
+        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
         result = self._invoke(tmp_path, a, b)
         assert result.exit_code == 0, result.output
 
-    def test_different_configs_are_flagged_before_running(self, tmp_path):
-        a, b = _metrics(_cfg()).to_dict(), _metrics(_cfg(seed=7)).to_dict()
-        result = self._invoke(tmp_path, a, b, cfg_b=_cfg(seed=7))
+    def test_different_seeds_are_not_comparable(self, tmp_path):
+        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg(seed=7)).to_dict())
+        result = self._invoke(tmp_path, a, b)
         assert "NOT COMPARABLE" in result.output
-        assert result.exit_code == 1
+        assert result.exit_code == 10
 
 
 class TestBenchmarkGateEmptyResults:

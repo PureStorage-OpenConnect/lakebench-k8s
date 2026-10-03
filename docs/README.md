@@ -5,6 +5,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 ## Getting Started
 
 - [Getting Started](getting-started.md) -- Prerequisites, installation, and first deployment
+- [Prerequisites](prerequisites.md) -- What the cluster needs, generated from the checks `plan` runs
 - [Recipes](recipes.md) -- All 11 recipes (plus the `default` alias) with decision guidance
 - [Polaris Quickstart](quickstart-polaris.md) -- Switch from Hive Metastore to Apache Polaris
 
@@ -24,6 +25,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 
 - [Scoring and Benchmarking](benchmarking.md) -- pipeline scorecard, query engine benchmark, QpH scoring
 - [Query Reference](query-reference.md) -- Per-query reference with categories and expected output
+- [Customer 360 benchmark specification](benchmarks/C360.md) -- Data model, pipeline, correctness checks, queries, metrics and comparability rules
 
 ## Component Reference
 
@@ -50,12 +52,15 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 
 - [Architecture](architecture.md) -- Component topology, medallion layers, catalog pluggability
 - [CLI Reference](cli-reference.md) -- All commands and flags
-- [Troubleshooting](troubleshooting.md) -- Common errors and fixes
+- [Exit Codes](exit-codes.md) -- What each `lakebench` exit code means and which paths produce it
+- [Operations](operations.md) -- Running on a shared cluster: setup, ownership, parallel deployments, cleanup
+- [Troubleshooting](troubleshooting.md) -- Common errors and fixes, by symptom
+- [Internals](internals.md) -- Why the sizing, versions and catalog handling are built the way they are
 
 ## Development
 
-- [Development Guide](development.md) -- Dev setup, running tests, project structure
-- [Contributing](contributing.md) -- PR process, code standards, test requirements
+- [Development Guide](development.md) -- architecture map, test and CI wiring, adding a recipe or a workload, the frozen AML scope
+- [Contributing](../CONTRIBUTING.md) -- setup, test tiers, pull requests, review and style
 
 ## Internal Reference
 

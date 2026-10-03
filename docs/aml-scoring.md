@@ -132,7 +132,10 @@ W9-W16 are workload ids the spec reserves (writeback, reproduce, ingest, the
 ML workloads), which is why the layering-chain rule is W17. W3 and W17 skip
 with "not run" (`path-cap`) when their path search would not fit the job's
 scratch; the budget is read from `LB_PATH_SEARCH_MAX_ROWS` or derived from
-the executor count and scratch size.
+the executor count and scratch size. A `path-cap` skip, like W1's
+`vertex-cap`, is a Lakebench cap: the run can still pass, and the skip is
+labelled in `limits.bound` and in the verdict's `rule_caps` qualifier (see
+"What a PASSED verdict asserts" in [benchmarking.md](benchmarking.md)).
 
 Every planted typology that no shipped rule targets is documented in
 `UNMAPPED_TYPOLOGIES` in `aml_queries.py` with a one-line reason. That
@@ -306,7 +309,9 @@ nuisance-only model and a nuisance ablation against the pre-registered
 leakage caps. It writes `aml_gate_report.json` (the full report) and
 `reference_metrics.parquet` (one aggregate row and one row per typology)
 under the output prefix. scikit-learn is not on the Spark image; the job
-installs it per run.
+installs it per run, at the versions pinned in `REFERENCE_PY_DEPS`. To run
+the detector or the local gate yourself, install
+`pip install "lakebench-k8s[aml]"`, which pins the same versions.
 
 The older `train_reference_gbt` in `src/lakebench/aml/reference_score.py`
 (a `GradientBoostingClassifier` on five amount and hour features) is no
@@ -327,9 +332,16 @@ The report verdicts:
 v1.6 publishes no Level-2 result: the calibration corpora, Level-2 scoring
 and the registered held-out looks are deferred to v1.7. When a Level-2
 result is published, it will be measured on held-out corpora that are never
-used during development. The seeds, the pre-registered gate constants and the
-rules for when the one-shot evaluation and robustness runs may be taken are
-fixed in `src/lakebench/spark/data/aml/aml_preregistration.json`. Maintainers:
+used during development. The pre-registered gate constants and the rules for
+when the one-shot evaluation and robustness runs may be taken are fixed in
+`src/lakebench/spark/data/aml/aml_preregistration.json`; the evaluation and
+robustness seeds are recorded only as salted hashes in
+`src/lakebench/spark/data/aml/heldout_hashes.json`. A registered look's
+seed is given to its config as `workload.datagen.seed` with the matching
+`corpus_role`; on the cluster it travels only through a Secret in the
+deployment's namespace (it is in no Job argument or Spark spec), and
+`scripts/aml_gate.py` reads it from `--seed-file`. Registered looks need the
+datagen image built for v1.7; an older image refuses a registered corpus. Maintainers:
 the full protocol is `docs/internal/aml-protocol.md` in the source repository.
 
 **Seed 43 is the calibration corpus.** If you leave
@@ -339,11 +351,103 @@ rule thresholds and the reference features were tuned against. Recall
 and precision numbers from a seed-43 run are in-sample: they say what
 the pipeline does on the corpus it was developed on, not what it does
 on a corpus it has never seen. The held-out evaluation and robustness
-seeds are pre-registered in `aml_preregistration.json` and are refused
-at config load unless `workload.datagen.corpus_role` declares the
-matching role, so accidentally scoring against them is not possible.
+seeds are registered as salted hashes in `heldout_hashes.json`, next to
+`aml_preregistration.json`, and are refused at config load unless
+`workload.datagen.corpus_role` declares the matching role, so
+accidentally scoring against them is not possible. The reference job
+also recovers the corpus seed from every manifest row's instance seed
+and refuses a corpus whose manifest comes, wholly or partly, from a spent
+or held-out seed it was not declared for, whatever seed the deployment
+claims. The check reads the manifest only: it does not tie the
+transactions under the bronze prefix to it, so transaction files from
+another generator run left in the same prefix are not detected. Generate
+each corpus into its own prefix.
+
+The salt in `heldout_hashes.json` is public, so a hash hides a seed only
+when the seed is drawn uniformly from 63 bits. The current 8-digit seeds
+are recovered from their hashes in seconds (they are already public, so
+the hash records their role rather than hiding them). A held-out seed
+added later must be a uniform 63-bit draw for its hash to hide it.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
+
+## Reason codes
+
+Every alert in `gold.alerts` carries `reason_codes` (the last column): its
+rule's base code first, then each code below whose condition holds on the
+alert. A code never changes which alerts a rule raises. The conditional codes
+reuse cut points the rules already have (the HIGH priority threshold, the
+screen's exact/fuzzy split, the rescreen pass, the corridor list's risk
+tier); none is a threshold of its own.
+
+| Rule | Base code | Conditional codes |
+|---|---|---|
+| W1_connected_components | `W1_COMPONENT` | `W1_LARGE_COMPONENT` (component of 8 or more entities, HIGH priority) |
+| W2_structuring | `W2_SUB_THRESHOLD_BURST` | `W2_BENEFICIARY_FAN_IN` (beneficiary kind), `W2_HIGH_COUNT` (6 or more in-band payments, HIGH) |
+| W3_round_tripping | `W3_CYCLE` | `W3_LONG_CYCLE` (4 or more hops, HIGH) |
+| W4_risk_propagation | `W4_FAST_PASS_THROUGH` | `W4_MULTI_CHAIN` (3 or more chains, HIGH) |
+| W5_sanctions_match | `W5_SANCTIONS_HIT` | `W5_EXACT`, `W5_FUZZY` (name match), `W5_RESCREEN` (raised by a list version) |
+| W6_pep_counterparty | `W6_PEP_HIT` | `W6_EXACT`, `W6_FUZZY` |
+| W7_cross_border_high_risk | `W7_HIGH_RISK_CORRIDOR` | `W7_FATF_BLACK`, `W7_FATF_GREY`, `W7_SYNTHETIC_CORRIDOR` |
+| W8_dormant_reactivation | `W8_DORMANCY_GAP` | none |
+| W17_layering_chain | `W17_CHAIN` | `W17_LONG_CHAIN` (5 or more hops, HIGH) |
+
+The generator's home countries include none of the FATF-listed
+jurisdictions, so on generated corpora W7 alerts carry
+`W7_SYNTHETIC_CORRIDOR` and the two FATF codes are listed with no alerts.
+
+Batch scoring splits each designated rule's recall and false-positive rate by
+code (`financial_scoring.recall_by_code`, `fp_by_code`, `alerts_by_code`,
+each `{rule: {code: value}}`): a code's recall is the share of the rule's
+target typology's instances (counted as typology recall counts them) with a
+planted payment in an alert of that rule carrying the code, 0.0 when no alert
+carries it (`alerts_by_code` then reads 0), and its false-positive rate is 1
+minus the share of the rule's alerts carrying the code that touch a payment
+of that typology, over the alerts with a related payment as the rule's
+false-positive rate counts them (an alert counts once per code it carries;
+null when no such alert carries the code). When the target typology has no
+instances in the corpus, every code's recall is null, as the typology's is.
+Because every alert carries its base code, the base code's figures are the
+rule's own. Only rules that ran are split. When an alert carries no code, or
+the alerts predate the column, the blocks are empty and
+`financial_scoring.by_code_status` says why. `reason_code_vocabulary` is a
+digest of the code list the run used. A rule's evidence-cap label (below)
+applies to each of its codes. Continuous runs are not split by code in v1.7.
+
+Two diagnostic counts sit beside the scores and are not results:
+`financial_scoring.nonplanted_alerts_by_rule` (per rule with a target
+typology, the alerts that touch none of its planted payments, counted on
+`gold.alerts` before the TM layer, so no Lakebench cap truncates the count;
+an evidence cap can still make an alert whose planted payments were cut read
+non-planted, which `evidence_capped_alerts_by_rule` shows) and
+`financial_scoring.customer_count` (customers in `silver.entities`). They
+feed the published limitation on how W5 and W6 non-planted alerts per
+customer grow with scale.
+
+## Per-alert evidence caps
+
+Some rules cut an alert's related-transaction list so one alert row cannot
+grow with the corpus. These are Lakebench-imposed caps, set by Lakebench and
+not tuned to any result:
+
+| Rule | List | Cap | Kept |
+|---|---|---|---|
+| W1_connected_components | `related_txn_ids` | 250,000 | earliest by time |
+| W2_structuring, beneficiary kind | `related_txn_ids`, `related_entity_ids` | 1,000 each | first by uetr, first by entity id |
+| W4_risk_propagation | `related_txn_ids`, `related_entity_ids` | 1,000 | first in sorted order |
+| W5_sanctions_match, rescreen | `related_txn_ids` | 200 | first by payment time |
+
+The W2 originator kind and the other rules are not cut. Each capped alert's
+`evidence` map carries the full count (`txn_total`, and `entity_total` for
+W4) and whether the cap cut the list (`txns_truncated`, and
+`entities_truncated` for W4). W2's sender list has no such flag, and its
+narrative's sender count is the capped count. Scoring matches planted payments against
+`related_txn_ids`, so a cut alert can miss planted payments past the cut.
+When any alert of a rule was cut, the scoring summary counts them in
+`evidence_capped_alerts_by_rule`, lists the typologies the rule detects in
+`recall_bounded_by_evidence_cap`, and each such typology's entry in
+`typologies` names the rule in `bounded_by_evidence_cap`: that recall is
+bounded by a Lakebench-imposed cap, not a property of the detector alone.
 
 ## Metric-trust caveats
 
@@ -367,12 +471,17 @@ the shipped AML example is batch mode.
   arrived; it is not the share of the corpus taken, which is
   `corpus_ingest_ratio` (bronze rows over datagen rows produced) and
   sits below 1 on a default run, whose trickle is sized to outlast the
-  window. The trickle rate is a Lakebench-imposed cap, so a run whose
-  `intake_limit` is `trickle_rate` measured the configured offered load,
-  not the pipeline's capacity.
+  window. The trickle rate is a Lakebench-imposed cap, so a run the trickle
+  held (`experiment.limits.trickle_bound`, see
+  [Scoring and Benchmarking](benchmarking.md#continuous-mode)) measured the
+  configured offered load, not the pipeline's capacity, whatever its
+  `intake_limit` reads.
 - **`qph_degradation_pct`** (continuous mode only) wants at least four
   rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
+  With the TM operations layer the early rounds run 8 queries and the later
+  ones 12, so the halves time different work: the figure is withheld and
+  `scores.qph_degradation_withheld` says why.
 - **`pattern_span_s`** (per rule, was labelled "time-to-detect") is NOT
   detection latency. It is the span from a planted typology's injection
   start to the event time of the last transaction a rule cites for it,
@@ -428,7 +537,7 @@ datagen and the pipeline scripts, not the catalog choice.
 
 ```bash
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
-lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench generate examples/polaris-iceberg-spark-financial.yaml
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
 
 # Optional re-score (the manifest path assumes the default path template)
@@ -474,6 +583,77 @@ to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-p
 Lakebench-imposed cap). The pipeline has been run end to end only up to
 scale 100, on the pre-freeze generator.
 
+### Where gold-finalize spends its time
+
+The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
+`gold-finalize`) records, besides `alerts_by_rule`:
+
+- `rule_elapsed_s`: wall seconds per detection rule, for every rule that
+  started (ran, failed or skipped for a structural reason such as W1's
+  vertex cap), from the rule's start to its alerts' commit.
+- `stage_profile`: per rule, its three heaviest Spark stages by summed
+  executor run time (`exec_s`), with the stage's status, task count, wall
+  time, longest task (`max_task_s`), shuffle read in MB and the number of
+  stages the rule ran. Each rule runs in its own Spark job group,
+  `lb-rule-<rule>-<id>`, which is how its stages are told apart; the
+  stages are read from the driver's status store after the rule's commit,
+  outside `rule_elapsed_s`. Three flags say how far the numbers can be
+  trusted: `complete: false` when the driver's status listener had not
+  caught up within 5 seconds, `truncated: true` when the store had already
+  dropped some of the rule's jobs or stages (for AML gold-finalize it keeps
+  the last 1,000 of each, enough for a whole rule; 100 for every other
+  job), and `lossy: true` when the listener dropped events during the
+  rule, so task totals are low. When the starting point could not be read,
+  `truncated` and `lossy` are both true. The 5 second wait covers every
+  listener queue, so with Spark's event log turned on `complete` can read
+  false while the status store had caught up. An empty list means the rule
+  ran no stage.
+  When there is no usable list (the store could not be read, or it held no
+  stage of the rule while a flag is set), the rule is listed in
+  `stage_profile_unavailable` with the reason instead. Detection is never
+  affected. The wait for the listener adds at most 5 seconds per rule to
+  the gold-finalize job, and nothing when the listener keeps up;
+  `stage_profile_cost_s` records the seconds each rule's read took, which
+  is Lakebench overhead inside the job's time and never part of
+  `rule_elapsed_s`. The continuous gold tick does not profile, so its
+  timings are unchanged.
+- `tm_ops.phases`: wall seconds per stage of the TM operations pass, in
+  pass order `pin`, `reconcile`, `prior_state`, `plan` (building the
+  alert-input, replay and disposition plans), `write_ledger`, `inputs`
+  (the alert-input build), `simulate` (the per-customer replay),
+  `write_dispositions`, `write_cases`, `coverage`, `read_back`,
+  `recon_write`, `invariants`; together they make up
+  `tm_ops.elapsed_seconds`. The JSON keys are sorted, not in pass order.
+  Spark evaluates lazily, so a phase holds the work its own reads and
+  writes trigger; the alert inputs and the replay are materialised in
+  their own phases, after the cycle is recorded as started, so a failure
+  there fails the pass as before.
+
+The run's record derives two diagnostic blocks from the fields above (neither
+enters identity, a verdict or a comparison):
+
+- `experiment.attribution` (AML batch): the gold-finalize job's slowest
+  rule (`dominant_rule`, its `rule_elapsed_s` and `share_of_job`, the rule's
+  time over the job's), that rule's heaviest stage (`dominant_stage`: stage
+  id, name, tasks, executor seconds, wall seconds, longest task, its share
+  of the executor time of the rule's logged stages (the three heaviest),
+  and the profile's flags), and the TM pass's
+  time and share (`tm_elapsed_s`, `tm_share`). `profile` is `read`, or says
+  why the stage is missing (`unavailable: <reason>`, `no_stage`,
+  `missing`). When the status store could not be read, the same profile can
+  be built from a Spark event log of a rerun of gold-finalize with
+  `scripts/aml_stage_attribution.py EVENTLOG --record metrics.json`, which
+  marks the block `profile_source: eventlog`.
+- `limits.headroom_pct` (batch): per stage, `100 x (1 - elapsed / per-job
+  timeout)` against the per-job timeout the run gave every stage (recorded
+  as `job_timeout_seconds`); a stage that ran more than once reports its
+  slowest run, and a failed stage reads null. The benchmark phase has no
+  per-job timeout: its queries are bounded one by one, so
+  `benchmark_query` is `100 x (1 - slowest timed query sample / per-query timeout)`
+  (recorded as `benchmark_query_timeout_seconds`, 900 s for AML), null
+  when a query failed or the benchmark was replaced afterwards by
+  `lakebench benchmark`. 25 or more means at most 75% of the budget used.
+
 ## Known limitations in v1.6
 
 - **No counter-leakage hard negatives yet.** The generator does not yet
@@ -485,7 +665,9 @@ scale 100, on the pre-freeze generator.
 - **AML continuous per-rule recall is not scored.** Stopping the
   streams can interrupt a gold-refresh tick and leave rule statuses
   `pending`; post-run scoring refuses them, and the report says "Recall is
-  not scored in continuous mode". Batch recall is unaffected. Target v1.7.
+  not scored in continuous mode". Batch recall is unaffected. From v1.7 a
+  continuous run drains the last tick and records `recall_covered`
+  instead; see [Continuous recall over covered instances](#continuous-recall-over-covered-instances).
 - **Stream restarts longer than 1 h are not safe.** Continuous
   Iceberg snapshot expiry is floored at 1 h while streams are live. A
   bronze-ingest driver down for longer can replay a batch and append
@@ -509,6 +691,68 @@ scale 100, on the pre-freeze generator.
 - **Recall is uncalibrated.** v1.6 publishes no held-out Level-2 result;
   recall and precision are in-sample on the calibration corpus. The
   registered held-out looks are deferred to v1.7.
+
+## Continuous recall over covered instances
+
+A continuous run ends its window by draining gold-refresh instead of
+deleting it mid-tick. The CLI writes a marker object,
+`<checkpoint_base>/gold-refresh/_lb_stop` in the gold bucket, whose body is
+the run id. The driver finishes the tick it is in, logs
+`Drain complete: last completed cycle N`, frees its executors and waits
+until the streams are stopped. The CLI waits up to 1800 s for that line.
+The run fails when the drain times out (`gold drain timed out; last tick
+interrupted`), when gold-refresh is deleted before it drains, or when the
+driver had restarted and found the marker before its first tick, because in
+each case `gold.alerts` may be half rewritten. A marker that cannot be
+written does not fail the run; its recall reads `not_scored`.
+`lakebench stop` drains the same way, with a 300 s budget, and stops the
+jobs whether or not the drain is confirmed, Ctrl-C included.
+
+Every tick logs the snapshots it read and wrote: `silver.transactions`,
+`silver.entities`, `silver.accounts` and `silver_batch_versions` when it
+pinned silver, and `gold.alerts` and `gold.detection_status` once
+detection committed. Detection filters the pinned transactions through the
+versions table at the logged snapshot, so the scorer can see exactly the
+sealed batches detection saw. The record keeps them as
+`continuous.ticks[]`, with `continuous.drain` and
+`continuous.ticks_unpinned` (ticks whose transactions or versions snapshot
+was not pinned, which detection then read through the current versions
+table). They come from the current gold-refresh driver pod's log, so a
+driver that restarted leaves its earlier pod's ticks out
+(`continuous.drain.ticks_scope`), and
+`continuous.drain.log_from_driver_start` is false when log rotation trimmed
+the log's first ticks.
+
+After the streams stop and every gate has decided, the score job reads
+those six snapshots of the drained tick and scores **`recall_covered`** per
+typology: the designated
+rule hit rate over the instances the tick could have detected. An instance
+is covered when every one of its participant transactions is in the sealed
+transactions at the tick's snapshot and every participant maps, through
+`silver.accounts` at that snapshot, to an entity in `silver.entities` at
+that snapshot. Each typology also reports `covered_instances`,
+`corpus_instances`, `coverage` and `no_participant_txns`; a typology whose
+designated rules are all excluded from continuous mode is listed under
+`excluded_typologies`. False positives and transaction precision count the
+whole manifest, so an alert on a planted payment the tick had not yet
+covered is not a false positive. The per-rule chance floor uses the covered
+random-control instances, as recall does.
+
+`recall_covered` is not the batch `recall` and is never written under that
+name: it lands in `financial_scoring.covered` with `mode: "covered"`.
+The run is `not_scored`, with the reason, when the drain did not complete,
+the run failed a gate, the last tick's record is missing or names a
+snapshot as `unknown` or `none`, a recorded snapshot was expired before
+scoring, or the run was interrupted before scoring finished. An earlier
+tick is never scored instead, and the current tables are never read in
+place of a recorded snapshot. The scored tick can begin after the window
+closed (the drain waits for the tick in progress, and the window's bucket
+listing runs first); `financial_scoring.tick.pinned_after_window_end_s`
+says by how much. The same job fingerprints `gold.alerts` at the scored
+tick's commit (`experiment.results.alert_set_continuous`), which is
+diagnostic only: continuous alerts depend on when ticks ran. The scorecard
+says whether recall was scored and why not, but does not render
+`recall_covered` yet.
 
 ## The transaction-monitoring operations layer
 
@@ -645,8 +889,13 @@ two-hop view, and open cases older than 60 days. They read only this run's
 rows, and are left out unless this run's TM verdict is pass or fail (the
 standalone `benchmark` command includes them only when the deployment's
 newest run had a pass or fail verdict, since each run overwrites the tables) (so a
-disabled or not-run layer never times empty or stale tables), and from the
-in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
+disabled or not-run layer never times empty or stale tables). A continuous
+run's in-window rounds include them once the run has a case: each round first
+probes `gold.cases` for the run's `base_run_id` (untimed) and runs the 12-query
+set when a row comes back, or the 8-query set before the first TM pass, labelled
+`investigator_queries: absent_no_cases` (`probe_failed` when the probe errors).
+Such a run's rounds usually span both sets, so its in-stream composite QpH reads
+`blended`, with the median per set in `scores.composite_qph_by_set`. QpH is recorded with its query-set id; `compare` and
 `reproduce` refuse to compare QpH across different query sets, so an 8-query
 AML run is never set against a 12-query one. A run recorded before the id
 existed gets a pinned historical id when its query names are the c360 set or

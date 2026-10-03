@@ -24,11 +24,12 @@ these because it drops the ``d^2 * n_a * n_b / n`` cross-term.
 from __future__ import annotations
 
 import random
-import sys
 from pathlib import Path
 
+import pytest
+
 _SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
-sys.path.insert(0, str(_SCRIPTS))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def _reference_M2(xs: list[float]) -> tuple[int, float, float]:

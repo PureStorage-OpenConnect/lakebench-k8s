@@ -7,7 +7,7 @@ config load. Any other catalog, table format, pipeline engine and query engine
 combination is refused at load with the reason.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -27,12 +27,24 @@ combination is refused at load with the reason.
 
 ## Support States
 
-Support is judged per workload x recipe x mode, not per recipe:
+Support is judged per workload x recipe x mode and per component version,
+not per recipe:
 
 - **supported**: the release validation record
   (`src/lakebench/config/validated_combinations.yaml`) lists run ids that
   completed this workload x recipe x mode end to end on the release tree with
-  the correctness contract passing.
+  the correctness contract passing, at this Spark minor and table format
+  version. The record is keyed by workload, recipe, mode, Spark minor (from
+  the Spark image tag) and table format version (the resolved Iceberg or
+  Delta version), so an entry validated on Spark 4.1 does not make a Spark
+  4.0 run of the same recipe supported. A supported cell in the table below
+  names the version pairs its runs used. The Spark minor is read only from
+  an `apache/spark` image (under any registry prefix) with a release tag
+  such as `4.1.1-python3`; a run on any other Spark image is never stamped
+  supported. The record is generated from the release-matrix run records
+  and never edited by hand (see [Releasing](../RELEASING.md)); lakebench
+  refuses to load an entry that is not a release-matrix row at the matrix's
+  versions, and the record is empty until the release runs fill it.
 - **unverified**: valid for the workload and mode, but no release validation
   run is listed. It runs, and its evidence and `compare` output carry the
   state; an unverified run is not proof that the combination is supported.
@@ -60,24 +72,27 @@ local runs are at most unverified. `lakebench config show`,
 `lakebench config recipes`, the HTML report and `lakebench compare` show it. The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|
-| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
-| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
-| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
-| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `hive-delta-spark-none` | unverified [1] | unverified [1] | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified [2] | unverified [1] | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified [2] | unverified [2] | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-none` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-trino` | unverified [2] | unverified [2] | unverified [2] | unverified [2] |
+| `polaris-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | unverified [2] |
 
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- [1] unverified: not in this release's validation matrix.
+- [2] unverified: in this release's validation matrix; no validation run is listed yet.
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
 - AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
 
 <!-- END GENERATED: support-states -->
@@ -117,8 +132,8 @@ with an explicit version -- incompatible combinations are rejected at config loa
 | Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
 |-------|-------------|-------------|----------------|----------------|----------------|
 | 3.5.x | -- | -- | **Default** (java17 image) | OK (fallback default on a Java 11 image) | -- |
-| 4.0.x (default) | **Default** | -- | **Default** | OK | OK |
-| 4.1.x | -- | **Default** | **Default** | OK | OK |
+| 4.0.x (Polaris recipes, hive-delta-spark-thrift) | **Default** | -- | **Default** | OK | OK |
+| 4.1.x (Hive recipes) | -- | **Default** | **Default** | OK | OK |
 
 **Default** = auto-selected when no version specified. **OK** = accepted if user overrides. **--** = rejected.
 
@@ -166,12 +181,14 @@ the artifact depends on both versions:
 | 4.1.x | `4.0_2.13` (borrowed) | `4.1_2.13` (native) |
 
 Spark 4.1 borrows the 4.0 runtime on Iceberg 1.10.x because no 4.1 artifact
-exists there. 1.11.0 publishes one, so 4.1 uses it directly.
+exists there. 1.11.0 publishes one, so 4.1 uses it directly. The Spark jobs
+and the Spark Thrift server choose the runtime the same way, so both load one
+runtime jar.
 
 Example:
 ```yaml
 images:
-  spark: apache/spark:4.1.1-python3    # Opt into Spark 4.1
+  spark: apache/spark:4.1.1-python3    # the Hive recipes' default
 architecture:
   table_format:
     type: delta

@@ -6,8 +6,8 @@ lose its tests while unrelated code gains some. This reads a coverage JSON
 report (``pytest --cov-report=json:<path>``) and fails if any listed file is
 below its floor.
 
-Floors are the measured values rounded down (GOALS P8.3): raise them when
-coverage improves, never lower them. Each suite has its own floors because
+Floors are the measured values rounded down: raise them when coverage
+improves, never lower them; a change that lowers a number adds tests. Each suite has its own floors because
 the files are exercised by different jobs: detection_rules.py needs PySpark
 and runs only under tests/spark; the rest run in the plain unit suite.
 
@@ -23,6 +23,30 @@ floored a point lower because CI skips the Iceberg-jar Spark tests):
     unit   reports/scorecard.py     93.68%
     spark  spark/scripts/detection_rules.py  91.33%
 
+Measured 2026-10-01 on CI run 36901023453 (Python 3.13, coverage 7.13.2,
+the coverage-unit artifact; src/ identical to the v1.7 kickoff commit
+46cc3f4). Existing floors re-read and raised where higher; five new ones:
+    unit   aml/reference_score.py        96.50%  (138/143)
+    unit   metrics/collector.py          94.41%  (1132/1199)  raised to 94
+    unit   reports/scorecard.py          96.43%  (216/224)    raised to 96
+    unit   deploy/destroy.py             79.94%  (1004/1256)  new
+    unit   deploy/ownership.py           85.53%  (337/394)    new
+    unit   s3/client.py                  69.86%  (204/292)    new
+    unit   metrics/experiment.py         93.89%  (430/458)    new
+    unit   metrics/c360_correctness.py   62.46%  (213/341)    new
+Measured 2026-10-02 on the 4.0 Spark leg's command (pyspark 4.0.1,
+LB_REQUIRE_JARS=1, `pytest tests/spark --cov=src/lakebench/spark/scripts`)
+at the commit where the Spark tier first runs fully green on both lines
+(stale and skipped tests fixed, jars pinned); Spark children are not
+measured, only the pytest process:
+    spark  spark/scripts/detection_rules.py        91.74%  (589/642)  raised to 91
+    spark  spark/scripts/silver_stream_financial.py 71.88%  (230/320)  new
+    spark  spark/scripts/common.py                 56.34%  (542/962)  new
+    spark  spark/scripts/silver_stream_delta.py    48.00%  (60/125)   new
+The tests marked slow (the AML statistics job) import none of these modules,
+directly or through what they import, so deselecting them from the unit legs
+cannot lower any of these numbers and no separate slow-suite floors exist.
+
 Usage:
     python scripts/check_coverage.py --suite unit coverage-unit.json
 """
@@ -37,11 +61,19 @@ from pathlib import Path
 FLOORS: dict[str, dict[str, float]] = {
     "unit": {
         "lakebench/aml/reference_score.py": 96.0,
-        "lakebench/metrics/collector.py": 93.0,
-        "lakebench/reports/scorecard.py": 93.0,
+        "lakebench/deploy/destroy.py": 79.0,
+        "lakebench/deploy/ownership.py": 85.0,
+        "lakebench/metrics/c360_correctness.py": 62.0,
+        "lakebench/metrics/collector.py": 94.0,
+        "lakebench/metrics/experiment.py": 93.0,
+        "lakebench/reports/scorecard.py": 96.0,
+        "lakebench/s3/client.py": 69.0,
     },
     "spark": {
-        "lakebench/spark/scripts/detection_rules.py": 90.0,
+        "lakebench/spark/scripts/common.py": 56.0,
+        "lakebench/spark/scripts/detection_rules.py": 91.0,
+        "lakebench/spark/scripts/silver_stream_delta.py": 48.0,
+        "lakebench/spark/scripts/silver_stream_financial.py": 71.0,
     },
 }
 

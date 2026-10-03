@@ -4,11 +4,13 @@
 #![allow(clippy::needless_range_loop)]
 pub mod amounts;
 pub mod arena;
+pub mod corpus;
 pub mod customer360;
 pub mod customer360_realism;
 pub mod cycle;
 pub mod emit;
 pub mod hash;
+pub mod heldout;
 pub mod ids;
 pub mod kyc;
 pub mod metrics;

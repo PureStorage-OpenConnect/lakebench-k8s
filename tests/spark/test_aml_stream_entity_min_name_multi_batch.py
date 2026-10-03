@@ -10,50 +10,28 @@ same bronze produced different silver.entities depending on which
 mode ran. The E1 MERGE replicates batch's LEAST() and re-derives
 entity_type from the merged name via the shared regex helper.
 
-Runs in a child process so the JVM launches with the Iceberg runtime
-jar on its classpath and the Iceberg SQL extensions enabled -- MERGE
-INTO on Iceberg is a SQL-extension surface, not a base Spark surface.
+Runs in a Spark child (``spark_subprocess``) so the JVM launches with the
+Iceberg runtime jar from ``LB_SPARK_TEST_JARS`` on its classpath and the
+Iceberg SQL extensions enabled -- MERGE INTO on Iceberg is a SQL-extension
+surface, not a base Spark surface.
 """
 
 from __future__ import annotations
 
-import glob
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_min_name_across_batches_in_a_fresh_jvm():
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_min_name_across_batches_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     # Only the final JSON blob is asserted; the driver logs precede it.
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     # One row per entity, one entity across all four batches (same LEI).
@@ -82,7 +60,8 @@ def test_min_name_across_batches_in_a_fresh_jvm():
 
 
 # ---------------------------------------------------------------------------
-# Subprocess payload: runs when this file is invoked directly with a jar arg.
+# Subprocess payload: runs when this file is invoked directly with the jar
+# classpath (comma-separated) as its argument.
 # ---------------------------------------------------------------------------
 
 _PACS_SCHEMA = (
@@ -141,14 +120,14 @@ def _bronze_row(spark, txn_id, ts, dbtr_name, cdtr_name):
     return spark.createDataFrame([row], _PACS_SCHEMA)
 
 
-def _run(jar):
+def _run(jars):
     from pyspark.sql import SparkSession
 
     with tempfile.TemporaryDirectory() as work:
         spark = (
             SparkSession.builder.master("local[1]")
             .config("spark.ui.enabled", "false")
-            .config("spark.jars", jar)
+            .config("spark.jars", jars)
             .config("spark.sql.shuffle.partitions", "2")
             .config(
                 "spark.sql.extensions",
@@ -239,6 +218,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(SCRIPTS)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
+    # is the comma-separated jar classpath.
     _run(sys.argv[1])

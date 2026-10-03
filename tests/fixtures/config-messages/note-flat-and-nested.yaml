@@ -1,0 +1,5 @@
+name: t
+scale: 5
+workload:
+  datagen:
+    scale: 7

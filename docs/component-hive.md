@@ -21,41 +21,31 @@ leave it unset) to use it.
 The Stackable Hive Operator (plus commons, listener, and secret operators)
 must be present on the cluster before deploying a Hive catalog.
 
-Lakebench can auto-install the operators, or skip installation if they are
-already present on the cluster:
+A cluster admin installs all four once, under the cluster lease, with:
+
+```bash
+lakebench admin install --component stackable lakebench.yaml
+```
+
+It installs at `version` in `namespace`:
 
 ```yaml
 architecture:
   catalog:
     hive:
       operator:
-        install: false              # Set true to auto-install (requires cluster-admin)
         namespace: "stackable"      # Where the operators run
-        version: "25.7.0"           # Stackable chart version
+        version: "25.7.0"           # SDP chart version a fresh install uses
 ```
 
-When `install: true`, `lakebench deploy` installs all four Stackable operators
-via Helm before deploying the HiveCluster. If the operators are already
-installed, the step is skipped.
-
-To install manually instead:
-
-```bash
-helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
-  --version 25.7.0 --namespace stackable --create-namespace
-helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator \
-  --version 25.7.0 --namespace stackable
-helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator \
-  --version 25.7.0 --namespace stackable
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 --namespace stackable
-```
-
-Lakebench checks for the `hiveclusters.hive.stackable.tech` and
-`secretclasses.secrets.stackable.tech` CRDs, and that their operators are
-running, at deploy time. If either is missing and `install` is false,
-deployment fails with an actionable error message that lists the Helm
-install commands.
+An SDP that is already installed (in any namespace) is left as it is; a
+partial install from an interrupted run is completed at the installed
+version. `lakebench deploy` never installs the operators. It checks for the
+`hiveclusters.hive.stackable.tech` and `secretclasses.secrets.stackable.tech`
+CRDs, and that their operators are running; if either is missing, the Hive
+step fails with the `admin install` command. The v1.6 key
+`operator.install: true` is refused by the commands that change data
+(`destroy`, `status` and `admin` still load it, as false).
 
 ### Managed Resources
 
@@ -86,22 +76,20 @@ thrift://lakebench-hive-metastore.<namespace>.svc.cluster.local:9083
 
 ## YAML Configuration
 
-All Hive settings live under `architecture.catalog` and `images.hive`. Below
-are the configurable fields with their defaults.
+All Hive settings live under `architecture.catalog`. Below are the
+configurable fields with their defaults.
 
-### Image Override
+### Hive Version
 
-```yaml
-images:
-  hive: "apache/hive:3.1.3"        # Hive version (Stackable productVersion)
-```
-
-This is not a container image reference. The metastore runs Stackable's own
-Hive image (`oci.stackable.tech/sdp/hive:3.1.3-stackable<sdp-version>`), and
-the HiveCluster template renders `productVersion: "3.1.3"`. Hive 3.1.3 is
+The metastore runs Stackable's own Hive image
+(`oci.stackable.tech/sdp/hive:3.1.3-stackable<sdp-version>`), and the
+HiveCluster template renders `productVersion: "3.1.3"`. Hive 3.1.3 is
 deliberate: Stackable recommends it because Hive 4 breaks Iceberg
-(`get_table` TApplicationException) and Trino ANALYZE. The tag of
-`images.hive` is what lakebench records as the Hive version in run output.
+(`get_table` TApplicationException) and Trino ANALYZE. Run output records
+3.1.3, the version the template renders. There is no config key for it:
+v1.7 removed `images.hive`, which never selected it. A config that still
+names 3.1.3 there loads with a note; one that names another version is
+refused by the commands that change data.
 
 ### Catalog Selection and Tuning
 
@@ -110,21 +98,19 @@ architecture:
   catalog:
     type: hive                       # hive | polaris | unity | none
     hive:
-      thrift:
-        min_threads: 10              # Min thrift server threads (hive.metastore.server.min.threads)
-        max_threads: 50              # Max thrift server threads (hive.metastore.server.max.threads)
-        client_timeout: "300s"       # Client socket timeout (hive.metastore.client.socket.timeout)
       resources:
         cpu_min: "500m"              # CPU request
         cpu_max: "2"                 # CPU limit
         memory: "4Gi"               # Memory request and limit
 ```
 
-The `resources` fields are applied to the HiveCluster. The `thrift` fields
-are defined in the configuration schema, but the current HiveCluster template
-hardcodes `min.threads=10`, `max.threads=50` and `socket.timeout=300s`, so
-changing them has no effect yet. The thrift thread pool defaults are tuned
-for moderate concurrency (up to 50 simultaneous catalog operations).
+The `resources` fields are applied to the HiveCluster. The HiveCluster
+template sets `hive.metastore.server.min.threads=10`, `max.threads=50` and
+`hive.metastore.client.socket.timeout=300s`, tuned for moderate concurrency
+(up to 50 simultaneous catalog operations). v1.7 removed the `hive.thrift`
+block, which never changed them: a config that carries it at those values
+loads with a note, and any other value is refused by the commands that
+change data.
 
 ### Operator-Injected Configuration
 

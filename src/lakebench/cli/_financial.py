@@ -26,6 +26,9 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from lakebench.cli._helpers import esc, print_error
+from lakebench.exit_codes import ExitCode, LakebenchError
+
 logger = logging.getLogger(__name__)
 
 financial_app = typer.Typer(
@@ -49,9 +52,14 @@ def _assert_financial_schema(cfg) -> None:
 
 
 def _load_config(config_path: Path):
-    from lakebench.config import load_config
+    from lakebench.config import ConfigError, LoadPurpose, load_config
 
-    cfg = load_config(str(config_path))
+    try:
+        cfg = load_config(str(config_path), purpose=LoadPurpose.MUTATE)
+    except ConfigError as e:
+        # One line, not a traceback.
+        print_error(str(e))  # one ERROR line on stderr, like every load error
+        raise typer.Exit(ExitCode.USAGE) from None  # config.validation, config.name_required
     _assert_financial_schema(cfg)
     return cfg
 
@@ -68,10 +76,32 @@ def _get_job_manager(cfg):
         context=cfg.platform.kubernetes.context,
         namespace=cfg.get_namespace(),
     )
+    from lakebench.cli._helpers import load_deps_handle
+    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
+
+    # Before the scripts or any job: the deployment's verified set.
+    deps_handle = load_deps_handle(cfg)
     job_manager = get_engine(cfg, k8s)
-    if not job_manager.deploy_scripts_configmap():
-        raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
+    job_manager.deps = deps_handle  # type: ignore[attr-defined]
+    try:
+        scripts_ok = job_manager.deploy_scripts_configmap()
+    except ScriptsMapError as e:
+        console.print(f"Spark scripts not deployed: {esc(e)}", style="red")
+        raise typer.Exit(ExitCode.FAILED) from None
+    if not scripts_ok:
+        raise LakebenchError("Failed to deploy Spark scripts ConfigMap")
     return job_manager
+
+
+def _require_submitted(status) -> None:
+    """Exit 1 when the job was not submitted. Waiting on it would find
+    nothing (a 30-minute 404 poll) or, if a previous application of the same
+    name survived, report that one's result as this run's."""
+    from lakebench.modules.pipeline_engines.spark.job import JobState
+
+    if status.state is JobState.FAILED:
+        console.print(f"Not submitted: {esc(status.message)}", style="red")
+        raise typer.Exit(ExitCode.FAILED)
 
 
 def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
@@ -157,12 +187,13 @@ def replay(
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(JobType.REPLAY_FINANCIAL, arguments=args)
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-replay-financial")
         console.print(f"[bold]replay result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reproduce")
@@ -182,12 +213,13 @@ def reproduce(
         arguments=["--alert-id", alert_id],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
         console.print(f"[bold]reproduce result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("score")
@@ -208,12 +240,13 @@ def score(
         arguments=["--manifest", manifest, "--output", output],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
         console.print(f"[bold]score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)
 
 
 @financial_app.command("reference-score")
@@ -240,14 +273,24 @@ def reference_score(
     whose precision/recall diverges sharply from the reference is scoring
     against label knowledge it should not have. The job installs scikit-learn
     and its pinned dependencies for the GBT half in an init container on each
-    run; if that is unavailable the leakage gate still runs and the model
-    verdict is reported as no_sklearn.
+    run, from the deployment's dependency set (each wheel hash-checked); if
+    that install fails after its retries, the driver does not start and the
+    job fails. The dependency set's pinset is printed with the submission.
     """
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
     console.print("[bold]lakebench financial reference-score[/bold]")
     job_manager = _get_job_manager(cfg)
+    deps = job_manager.deps
+    console.print(
+        f"  dependency set {esc(deps.pinset_sha256)} (request {esc(deps.request_sha256)}); "
+        "reference wheels: "
+        + ", ".join(
+            f"{esc(e['file'])}@{esc(e['sha256'][:12])}"
+            for e in deps.manifest["groups"].get("py-reference", [])
+        )
+    )
     status = job_manager.submit_job(
         JobType.SCORE_FINANCIAL_REFERENCE,
         arguments=[
@@ -260,9 +303,10 @@ def reference_score(
         ],
     )
     console.print(f"  submitted: {status.message}")
+    _require_submitted(status)
 
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")
         console.print(f"[bold]reference-score result:[/bold] {result}")
         if result != "COMPLETED":
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.FAILED)

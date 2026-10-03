@@ -88,7 +88,29 @@ empties and deletes) or `lakebench.deployment/adopted-empty-buckets`
 (pre-existing buckets that were empty when deploy adopted them, which destroy
 empties but never deletes). A bucket that matches the name but is in neither
 record, such as one that already held data when deploy adopted it, is left
-in place and reported; `--force-legacy` empties it and never deletes it. The
+in place and reported; `--force-legacy` empties it and never deletes it.
+
+From 1.7, deploy adopts a pre-existing, empty FlashBlade bucket (recording it
+in `adopted-empty-buckets`) only when you pass `--force-legacy`, and the same
+holds for pre-provisioned buckets with `create_buckets: false`. Nothing visible
+from one cluster tells an empty bucket apart from another cluster's bucket
+that has not been written yet, and 1.6 adopted such a bucket, which let the
+second cluster's destroy empty the first one's data later. Without the flag
+the bucket is used for reads and writes but destroy, `clean` and the
+continuous reset leave its data alone. Buckets deploy creates are unaffected.
+
+A FlashBlade bucket 1.6 recorded as adopted while empty is no longer emptied
+by destroy, `clean` or `--regenerate` on that record alone: 1.6 wrote the same
+record when the bucket was another cluster's. Claim it once with
+`lakebench admin reclaim-bucket` (owner), which writes its owner marker.
+
+Lakebench also writes a small owner marker, `.lakebench/owner.json`, into
+each FlashBlade bucket it owns. It names the deployment and the cluster, so a
+deployment of the same name on another cluster that shares the FlashBlade
+refuses the bucket instead of adopting it. The `.lakebench/` keys are not
+counted as data anywhere, `clean` keeps them, and destroy removes them only with
+the bucket. The marker is written with a conditional PUT when the backend
+enforces `IfNoneMatch`, and with a read-back check otherwise. The
 example configs and `lakebench init` follow the naming convention, so a user
 who lets deploy create the buckets gets destroy safety on FlashBlade close to
 a tagged backend. A user who names buckets outside the convention on

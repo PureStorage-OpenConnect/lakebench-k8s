@@ -27,25 +27,32 @@ executes at scale-100 without a shuffle spill.
 from __future__ import annotations
 
 import argparse
+import os
 
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    avg,
     broadcast,
     coalesce,
     col,
+    countDistinct,
     explode,
     explode_outer,
     lit,
     when,
 )
+from pyspark.sql.functions import count as scount
 from pyspark.sql.functions import max as smax
+from pyspark.sql.functions import sum as ssum
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 _BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 _BRONZE_ROOT = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/").rstrip("/")
 ACCOUNT_PATH = env(
@@ -150,20 +157,26 @@ def subject_customer_check(spark, manifest, entities, id_map, scoped_typologies)
     }
 
 
-def _run_subject_check(spark, manifest, status_rows) -> dict:
-    """subject_customer_check against the lakehouse silver tables; any read
-    failure is reported as ``unchecked`` with the reason, never as ok."""
+def _iban_to_key(accounts):
+    """silver.accounts as the (iban, key) frame ``_account_id_map`` takes."""
+    return accounts.select(col("iban"), col("holder_entity_id").alias("key")).filter(
+        col("iban").isNotNull()
+    )
+
+
+def _run_subject_check(spark, manifest, status_rows, entities=None, accounts=None) -> dict:
+    """subject_customer_check against the lakehouse silver tables (or the
+    given pinned frames); any read failure is reported as ``unchecked`` with
+    the reason, never as ok."""
     try:
         from aml_features import _account_id_map
         from detection_rules import CUSTOMER_SCOPED_RULES, RULE_TARGET_TYPOLOGY
 
-        entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
-        iban_to_key = (
-            spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
-            .select(col("iban"), col("holder_entity_id").alias("key"))
-            .filter(col("iban").isNotNull())
-        )
-        id_map = _account_id_map(spark.read.parquet(ACCOUNT_PATH), iban_to_key)
+        if entities is None:
+            entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
+        if accounts is None:
+            accounts = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+        id_map = _account_id_map(spark.read.parquet(ACCOUNT_PATH), _iban_to_key(accounts))
         # Only rules that ran this run: a mode-excluded rule (W7/W8 in
         # continuous) drops nothing.
         ran = {r["rule_id"] for r in status_rows if r.get("status") == "ran"}
@@ -171,6 +184,139 @@ def _run_subject_check(spark, manifest, status_rows) -> dict:
         return subject_customer_check(spark, manifest, entities, id_map, scoped)
     except Exception as e:  # noqa: BLE001 -- reported, not raised
         return {"status": "unchecked", "reason": f"{type(e).__name__}: {e}"[:300]}
+
+
+def check_status_run(status_run_id: str, own_run_id: str) -> None:
+    """Refuse to score a detection status another run wrote.
+
+    ``own_run_id`` is this job's LB_RUN_ID. Batch gold jobs run per cycle as
+    ``<run>-c<n>``, so that form of this run counts as this run. Without a run
+    id (``lakebench financial score`` outside a run) the status decides.
+    """
+    if not own_run_id:
+        return
+    if status_run_id == own_run_id or status_run_id.startswith(own_run_id + "-c"):
+        return
+    raise SystemExit(
+        f"{CATALOG}.{GOLD_STATUS} names run {status_run_id}, not this run ({own_run_id}): "
+        "gold still holds another run's alerts, so recall would be that run's. Wait for "
+        "this run's gold-finalize or gold-refresh, or reset the deployment's gold."
+    )
+
+
+def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
+    """Per-reason-code recall and false positives (SPEC section 8, K30): as
+    per-rule recall and FP, split by code; an alert counts once per code it
+    carries.
+
+    For a designated rule R that ran, with target typology T, and each code c
+    R can write (aml_reason_codes.REASON_CODES, plus any other code seen):
+
+    - ``recall_by_code[R][c]``: the share of T's instances (all of them, as
+      typology recall counts them) with a participant payment in an alert of
+      R carrying c; 0.0 when no alert carries c (``alerts_by_code`` says so);
+    - ``fp_by_code[R][c]``: 1 minus the share of R's alerts carrying c that
+      touch a payment of T, over the alerts with a related payment, as
+      ``fp_rate_by_rule`` counts them (null when no such alert carries c);
+    - ``alerts_by_code[R][c]``: how many of R's alerts carry c.
+
+    Every alert carries its rule's base code, so the base code's figures are
+    R's own and R's per-code hit sets union to R's. That needs every alert to
+    carry a code: an alert with none would drop out of every per-code
+    figure, so then (or when the alerts have no reason_codes column) every
+    per-code block is empty and ``by_code_status`` says why. A few grouped
+    Spark jobs for all rules together."""
+    from aml_reason_codes import REASON_CODES, vocabulary_digest
+    from detection_rules import HIGH_PRIORITY_CUTOFFS
+    from pyspark.sql.functions import size
+
+    out: dict = {
+        "recall_by_code": {},
+        "fp_by_code": {},
+        "alerts_by_code": {},
+        "reason_code_vocabulary": vocabulary_digest(HIGH_PRIORITY_CUTOFFS),
+    }
+    if "reason_codes" not in alerts.columns:
+        out["by_code_status"] = "not_recorded: the alerts have no reason_codes column"
+        return out
+    uncoded = alerts.where(coalesce(size(col("reason_codes")), lit(-1)) <= 0).count()
+    if uncoded:
+        out["by_code_status"] = f"not_scored: {uncoded} alerts carry no reason code"
+        return out
+    rules = sorted(r for r in ran if r in target_of)
+    if not rules:
+        out["by_code_status"] = "not_scored: no designated rule ran"
+        return out
+    targets = spark.createDataFrame(
+        [(r, target_of[r]) for r in rules], "rule_id STRING, typology_type STRING"
+    )
+    codes = (
+        alerts.select("alert_id", "rule_id", explode(col("reason_codes")).alias("code"))
+        .join(broadcast(targets.select("rule_id")), "rule_id")
+        .distinct()
+        .cache()
+    )
+    n_by = {
+        (r["rule_id"], r["code"]): int(r["count"])
+        for r in codes.groupBy("rule_id", "code").count().collect()
+    }
+    # Alerts with at least one related payment, per code (fp_rate_by_rule's base).
+    code_uetrs = codes.join(alert_uetrs, ["alert_id", "rule_id"]).cache()
+    n_with_txn = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in code_uetrs.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    n_inst = {
+        r["typology_type"]: int(r["n"])
+        for r in manifest_uetrs.groupBy("typology_type")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    on_target = (
+        code_uetrs.join(broadcast(targets), "rule_id")
+        .join(
+            manifest_uetrs.where(col("uetr").isNotNull()).select(
+                "uetr", "typology_type", "typology_id"
+            ),
+            ["uetr", "typology_type"],
+        )
+        .cache()
+    )
+    hit_inst = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    hit_alerts = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    for frame in (on_target, code_uetrs, codes):
+        frame.unpersist()
+    recall: dict = {}
+    fp: dict = {}
+    counts: dict = {}
+    for rule in rules:
+        seen = {c for (r, c) in n_by if r == rule and c is not None}
+        vocab = list(REASON_CODES.get(rule, ())) + sorted(seen - set(REASON_CODES.get(rule, ())))
+        total = n_inst.get(target_of[rule], 0)
+        recall[rule] = {c: (hit_inst.get((rule, c), 0) / total if total else None) for c in vocab}
+        fp[rule] = {
+            c: (
+                1.0 - hit_alerts.get((rule, c), 0) / n_with_txn[(rule, c)]
+                if n_with_txn.get((rule, c))
+                else None
+            )
+            for c in vocab
+        }
+        counts[rule] = {c: n_by.get((rule, c), 0) for c in vocab}
+    out.update(recall_by_code=recall, fp_by_code=fp, alerts_by_code=counts, by_code_status="scored")
+    return out
 
 
 def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
@@ -291,6 +437,12 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # rule: alerts of a rule touching no txn of that rule's target typology.
     total_alerts = alerts.count()
     fp_by_rule: dict[str, float | None] = {}
+    # Alerts of a rule that touch no payment of its target typology, per
+    # rule with a target (a diagnostic count for the screening limitation:
+    # W5/W6 non-planted alerts grow with scale). Counted before TM, so no
+    # Lakebench cap truncates the count; an evidence cap can still make a
+    # planted alert read non-planted (see evidence_capped_alerts_by_rule).
+    nonplanted_by_rule: dict[str, int] = {}
     txn_precision_by_rule: dict[str, float] = {}
     chance_by_rule: dict[str, float] = {}
     if total_alerts > 0:
@@ -299,6 +451,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         fp_alerts = total_alerts - tp_global
         fp_rate: float | None = fp_alerts / total_alerts
         targeted = {rid: typ for typ, rids in designated.items() for rid in rids}
+        nonplanted_by_rule.update(dict.fromkeys(targeted, 0))
         target_df = spark.createDataFrame(
             list(targeted.items()) or [("", "")], "rule_id STRING, target STRING"
         )
@@ -322,8 +475,16 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         # that are planted target txns, so one giant alert over the whole
         # corpus cannot score itself perfect.
         per_alert = refs.groupBy("alert_id", "rule_id").agg(smax("on_target").alias("hit"))
-        for row in per_alert.groupBy("rule_id").agg({"hit": "avg"}).collect():
-            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(hit)"])
+        for row in (
+            per_alert.groupBy("rule_id")
+            .agg(
+                avg(col("hit")).alias("hit_avg"),
+                ssum(when(col("hit") == lit(0), lit(1)).otherwise(lit(0))).alias("off"),
+            )
+            .collect()
+        ):
+            fp_by_rule[row["rule_id"]] = 1.0 - float(row["hit_avg"])
+            nonplanted_by_rule[row["rule_id"]] = int(row["off"])
         for row in refs.groupBy("rule_id").agg({"on_target": "avg"}).collect():
             txn_precision_by_rule[row["rule_id"]] = float(row["avg(on_target)"])
         # Per-rule chance: the share of random-control instances a rule's
@@ -371,13 +532,47 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         }
         for r in sorted(status_rows, key=lambda x: x["rule_id"])
     ]
+    # Alerts whose related_txn_ids a per-alert evidence cap cut (W1, the W2
+    # beneficiary kind, W4 and the W5 rescreen write txns_truncated into
+    # their evidence). Scoring matches planted
+    # payments against related_txn_ids, so a cut alert can miss planted
+    # payments past the cut: recall for a typology such a rule detects is
+    # bounded by a Lakebench-imposed cap, and says so (invariant 6).
+    by_code = _scores_by_code(
+        spark,
+        alerts,
+        manifest_uetrs,
+        alert_uetrs,
+        {rid: typ for typ, rids in designated.items() for rid in rids},
+        {rid for _, rid in pairs},
+    )
+    capped_by_rule: dict[str, int] = {}
+    if "evidence" in alerts.columns:
+        for row in (
+            alerts.where(col("evidence").getItem("txns_truncated") == lit("true"))
+            .groupBy("rule_id")
+            .count()
+            .collect()
+        ):
+            capped_by_rule[row["rule_id"]] = int(row["count"])
+    capped_typologies = {
+        typ: sorted(r for r in rids if capped_by_rule.get(r))
+        for typ, rids in sorted(designated.items())
+        if any(capped_by_rule.get(r) for r in rids)
+    }
     summary = {
+        **by_code,
+        "evidence_capped_alerts_by_rule": dict(sorted(capped_by_rule.items())),
+        # typology -> its designated rules with a cut alert: that typology's
+        # recall is bounded by an evidence cap.
+        "recall_bounded_by_evidence_cap": capped_typologies,
         "typology_counts": counts,
         "rules": rules,
         "total_alerts": int(total_alerts),
         "fp_alerts": int(fp_alerts),
         "fp_rate": fp_rate,
         "fp_rate_by_rule": fp_by_rule,
+        "nonplanted_alerts_by_rule": dict(sorted(nonplanted_by_rule.items())),
         "txn_precision_by_rule": txn_precision_by_rule,
         "chance_by_rule": chance_by_rule,
         "random_control_floor": (float(random_row[0]["incidental_recall"]) if random_row else None),
@@ -385,10 +580,390 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     return per_typology, summary
 
 
+# --- covered mode: recall over what the last completed tick saw ---------------
+
+#: The tick-record snapshots covered mode reads, by option suffix, and the
+#: table each names. All six come from the last completed tick of a drained
+#: continuous run (gold_refresh_financial.py tick record).
+COVERED_SNAPSHOTS = (
+    ("txns", SILVER_TXNS),
+    ("entities", SILVER_ENTITIES),
+    ("accounts", SILVER_ACCOUNTS),
+    ("versions", SILVER_BATCH_VERSIONS),
+    ("alerts", GOLD_ALERTS),
+    ("status", GOLD_STATUS),
+)
+
+#: Columns of the alert-set fingerprint (the batch alert set's identity of an alert: the
+#: alert id is a uuid and the run id differs between runs).
+ALERT_SET_COLUMNS = ["rule_id", "entity_id", "alert_ts"]
+
+
+class NotScored(Exception):
+    """Covered mode cannot score this run; the message is the reason."""
+
+
+def covered_snapshot_ids(args) -> dict | None:
+    """{name: int snapshot id} from the --covered-* options; None when none is
+    given (normal mode). Raises NotScored when only some are given or one is
+    not an integer: a covered score never runs on a guessed snapshot."""
+    given = {name: getattr(args, f"covered_{name}_snapshot") for name, _ in COVERED_SNAPSHOTS}
+    if all(v is None for v in given.values()):
+        return None
+    missing = sorted(n for n, v in given.items() if v is None)
+    if missing:
+        raise NotScored(f"covered mode needs every tick snapshot; missing {', '.join(missing)}")
+    ids = {}
+    for name, table in COVERED_SNAPSHOTS:
+        try:
+            ids[name] = int(str(given[name]).strip())
+        except ValueError:
+            raise NotScored(f"{table} snapshot unknown at the last completed tick") from None
+    return ids
+
+
+def _check_snapshots_exist(spark, ids: dict) -> None:
+    """NotScored when a recorded snapshot is gone (expired) or unreadable.
+    Never falls back to the table's current state."""
+    for name, table in COVERED_SNAPSHOTS:
+        fq = f"{CATALOG}.{table}"
+        try:
+            n = spark.sql(
+                f"SELECT count(*) AS n FROM {fq}.snapshots WHERE snapshot_id = {ids[name]}"
+            ).collect()[0]["n"]
+        except Exception as e:  # noqa: BLE001 -- reported as the reason
+            raise NotScored(f"snapshots of {table} not readable: {one_line_text(e)}") from e
+        if not n:
+            raise NotScored(f"snapshot {table} expired before scoring")
+
+
+def one_line_text(e) -> str:
+    return " ".join(str(e).split())[:300]
+
+
+def _at(spark, table: str, snapshot_id: int):
+    return spark.sql(f"SELECT * FROM {CATALOG}.{table} VERSION AS OF {int(snapshot_id)}")
+
+
+def covered_instances(manifest, sealed_uetrs, id_map, entity_keys):
+    """One row per manifest instance: typology_id, typology_type, covered,
+    no_participant_txns.
+
+    Covered: the instance names at least one participant uetr, every one of
+    them is in ``sealed_uetrs`` (silver.transactions at the tick's snapshot,
+    through the tick's sealed filter), and every participant entity maps
+    through ``id_map`` (datagen id -> silver key, through silver.accounts at
+    the tick's snapshot) to a key in ``entity_keys`` (silver.entities at the
+    tick's snapshot). An unmapped participant is not covered. An instance
+    with no participant uetr is never covered and is counted in
+    ``no_participant_txns``.
+    """
+    inst = manifest.select(
+        "typology_id", "typology_type", "participant_uetrs", "participant_entity_ids"
+    )
+    present = sealed_uetrs.select("uetr").distinct().withColumn("_present", lit(1))
+    by_uetr = (
+        inst.select("typology_id", explode_outer(col("participant_uetrs")).alias("uetr"))
+        .join(present, "uetr", "left")
+        .groupBy("typology_id")
+        .agg(
+            scount(col("uetr")).alias("_n_uetr"),
+            ssum(
+                when(col("uetr").isNotNull() & col("_present").isNull(), lit(1)).otherwise(lit(0))
+            ).alias("_missing_uetr"),
+        )
+    )
+    keys = entity_keys.select("key").distinct().withColumn("_entity", lit(1))
+    # explode_outer: an instance that names no entity is not covered (its
+    # entities cannot be checked), so its null id counts as missing.
+    by_entity = (
+        inst.select("typology_id", explode_outer(col("participant_entity_ids")).alias("_pid"))
+        .select("typology_id", col("_pid").cast("long").alias("dg_id"))
+        .join(id_map, "dg_id", "left")
+        .join(keys, "key", "left")
+        .groupBy("typology_id")
+        .agg(ssum(when(col("_entity").isNull(), lit(1)).otherwise(lit(0))).alias("_missing_entity"))
+    )
+    return (
+        inst.select("typology_id", "typology_type")
+        .distinct()
+        .join(by_uetr, "typology_id", "left")
+        .join(by_entity, "typology_id", "left")
+        .select(
+            "typology_id",
+            "typology_type",
+            (
+                (coalesce(col("_n_uetr"), lit(0)) > 0)
+                & (coalesce(col("_missing_uetr"), lit(0)) == 0)
+                & (coalesce(col("_missing_entity"), lit(0)) == 0)
+            ).alias("covered"),
+            (coalesce(col("_n_uetr"), lit(0)) == 0).alias("no_participant_txns"),
+        )
+    )
+
+
+def _excluded_typologies(status_rows: list[dict]) -> dict[str, str]:
+    """typology -> reason, for a typology whose designated rules were all
+    skipped as excluded from this mode (W1 and W5 to W8 in continuous)."""
+    by_typ: dict[str, list[dict]] = {}
+    for r in status_rows:
+        if r.get("target_typology"):
+            by_typ.setdefault(r["target_typology"], []).append(r)
+    return {
+        typ: "mode-excluded"
+        for typ, rows in by_typ.items()
+        if all(r.get("status") == "skipped" and r.get("reason") == "mode-excluded" for r in rows)
+    }
+
+
+def score_covered(spark, manifest, ids: dict, own_run_id: str):
+    """Covered-mode scores for a drained continuous run.
+
+    Returns ``(rows, summary)``: one row per manifest typology for
+    recall.parquet, and the recall.json body. Raises NotScored with the
+    reason when the run cannot be scored. Recall is the designated-hit rate
+    over covered instances only (``recall_covered``); false positives and
+    precision count every planted transaction of the full manifest, so an
+    alert on a planted transaction the tick had not yet covered is not a
+    false positive. The chance floor uses covered random instances, as recall
+    does. No key named ``recall`` is written, so nothing can render this as
+    the batch recall.
+    """
+    from aml_features import _account_id_map, check_manifest
+    from common import SealedFilterError, frame_fingerprint, sealed_txns_filter_at
+
+    need = {"typology_id", "typology_type", "participant_uetrs", "participant_entity_ids"}
+    missing = sorted(need - set(manifest.columns))
+    if missing:
+        raise NotScored(f"manifest has no {', '.join(missing)}")
+    try:
+        # Instances are keyed by typology_id; a repeated one would merge two.
+        check_manifest(manifest)
+    except ValueError as e:
+        raise NotScored(str(e)) from None
+    _check_snapshots_exist(spark, ids)
+
+    status_rows = [r.asDict() for r in _at(spark, GOLD_STATUS, ids["status"]).collect()]
+    run_ids = sorted({r["run_id"] for r in status_rows})
+    if len(run_ids) != 1:
+        raise NotScored(
+            f"{GOLD_STATUS} at snapshot {ids['status']} holds {len(run_ids)} run ids, not one"
+        )
+    run_id = run_ids[0]
+    try:
+        check_status_run(run_id, own_run_id)
+    except SystemExit as e:
+        raise NotScored(str(e)) from None
+    pending = sorted(r["rule_id"] for r in status_rows if r.get("status") == "pending")
+    if pending:
+        raise NotScored(f"rules {pending} still pending at the last completed tick")
+    alerts = _at(spark, GOLD_ALERTS, ids["alerts"]).filter(col("run_id") == lit(run_id))
+
+    try:
+        sealed = sealed_txns_filter_at(
+            spark,
+            _at(spark, SILVER_TXNS, ids["txns"]),
+            CATALOG,
+            SILVER_BATCH_VERSIONS,
+            ids["versions"],
+        )
+    except (TypeError, SealedFilterError) as e:
+        raise NotScored(one_line_text(e)) from e
+    entities = _at(spark, SILVER_ENTITIES, ids["entities"])
+    accounts = _at(spark, SILVER_ACCOUNTS, ids["accounts"])
+    id_map = _account_id_map(spark.read.parquet(ACCOUNT_PATH), _iban_to_key(accounts))
+    per_inst = covered_instances(
+        manifest, sealed.select("uetr"), id_map, entities.select(col("entity_id").alias("key"))
+    ).cache()
+    counts = {
+        r["typology_type"]: r
+        for r in per_inst.groupBy("typology_type")
+        .agg(
+            scount(lit(1)).alias("corpus"),
+            ssum(col("covered").cast("int")).alias("covered"),
+            ssum(col("no_participant_txns").cast("int")).alias("no_participant"),
+        )
+        .collect()
+    }
+    covered_manifest = manifest.join(
+        per_inst.where(col("covered")).select("typology_id").distinct(), "typology_id", "left_semi"
+    )
+
+    # Recall and the chance floor over covered instances; FP and precision
+    # over the full manifest.
+    cov_typ, cov_summary = compute_scores(spark, covered_manifest, alerts, status_rows)
+    full_typ, full_summary = compute_scores(spark, manifest, alerts, status_rows)
+    cov_rows = {r["typology_type"]: r.asDict() for r in cov_typ.collect()}
+    full_rows = {r["typology_type"]: r.asDict() for r in full_typ.collect()}
+    excluded = _excluded_typologies(status_rows)
+
+    typologies = []
+    for typ in sorted(counts):
+        c = counts[typ]
+        corpus_n = int(c["corpus"])
+        covered_n = int(c["covered"] or 0)
+        cov = cov_rows.get(typ) or {}
+        full = full_rows.get(typ) or {}
+        # compute_scores leaves recall null unless the typology's rules ran
+        # (scored or partial); zero covered instances is null too.
+        recall_covered = cov.get("recall") if covered_n else None
+        typologies.append(
+            {
+                "typology_type": typ,
+                "recall_covered": recall_covered,
+                "incidental_recall_covered": cov.get("incidental_recall") if covered_n else None,
+                "covered_instances": covered_n,
+                "corpus_instances": corpus_n,
+                "coverage": (covered_n / corpus_n) if corpus_n else None,
+                "no_participant_txns": int(c["no_participant"] or 0),
+                "detection_status": full.get("detection_status"),
+                "designated_rules": full.get("designated_rules"),
+                "workload_category": full.get("workload_category"),
+            }
+        )
+
+    rows_all, fp_all, cols_sha = frame_fingerprint(alerts, ALERT_SET_COLUMNS)
+    by_rule = {}
+    for rid in sorted({r["rule_id"] for r in alerts.select("rule_id").distinct().collect()}):
+        n, h, _ = frame_fingerprint(alerts.where(col("rule_id") == lit(rid)), ALERT_SET_COLUMNS)
+        by_rule[rid] = {"rows": int(n), "h": str(h)}
+    alert_set = {
+        "spec": "as1",
+        "columns": list(ALERT_SET_COLUMNS),
+        "cols_sha": cols_sha,
+        "rows": int(rows_all),
+        "h": str(fp_all),
+        "by_rule": by_rule,
+    }
+
+    # Subjects of covered instances only: an uncovered instance's subject is
+    # usually not in silver yet, which would hide a real is_customer miss.
+    check = _run_subject_check(
+        spark, covered_manifest, status_rows, entities=entities, accounts=accounts
+    )
+    covered_block = {
+        **{f"{name}_snapshot": ids[name] for name, _ in COVERED_SNAPSHOTS},
+        "typologies": typologies,
+        "excluded_typologies": [
+            {"typology_type": t, "reason": why} for t, why in sorted(excluded.items())
+        ],
+        "covered_instances": sum(t["covered_instances"] for t in typologies),
+        "corpus_instances": sum(t["corpus_instances"] for t in typologies),
+        # Full manifest: an alert on a planted txn not yet covered is no FP.
+        "total_alerts": full_summary["total_alerts"],
+        "fp_alerts": full_summary["fp_alerts"],
+        "fp_rate": full_summary["fp_rate"],
+        "fp_rate_by_rule": full_summary["fp_rate_by_rule"],
+        "txn_precision_by_rule": full_summary["txn_precision_by_rule"],
+        # Covered random instances, as recall_covered.
+        "chance_by_rule": cov_summary["chance_by_rule"],
+        "random_control_floor": cov_summary["random_control_floor"],
+        "typology_counts": full_summary["typology_counts"],
+        "rules": full_summary["rules"],
+        "evidence_capped_alerts_by_rule": full_summary["evidence_capped_alerts_by_rule"],
+        "recall_bounded_by_evidence_cap": full_summary["recall_bounded_by_evidence_cap"],
+        "subject_customer_check": check,
+    }
+    summary = {
+        "mode": "covered",
+        "status": "scored",
+        "run_id": run_id,
+        "covered": covered_block,
+        "alert_set": alert_set,
+    }
+    per_inst.unpersist()
+    return typologies, summary
+
+
+def _write_text(spark, uri: str, text: str) -> None:
+    """One object through the already-configured S3A FileSystem."""
+    jvm = spark.sparkContext._jvm
+    hconf = spark.sparkContext._jsc.hadoopConfiguration()
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
+    stream = fs.create(jvm.org.apache.hadoop.fs.Path(uri), True)
+    try:
+        stream.write(bytearray(text, "utf-8"))
+    finally:
+        stream.close()
+
+
+def _json_uri(output: str) -> str:
+    """recall.json beside recall.parquet."""
+    out = output.rstrip("/")
+    return (out.rsplit("/", 1)[0] + "/recall.json") if "/" in out else "recall.json"
+
+
+def run_covered(spark, args, manifest, ids: dict) -> None:
+    """Covered mode: write recall.parquet (no ``recall`` column) and
+    recall.json; a run that cannot be scored writes only recall.json with
+    ``status: not_scored`` and its reason, and exits 0."""
+    import json as _json
+
+    try:
+        typologies, summary = score_covered(
+            spark, manifest, ids, os.environ.get("LB_RUN_ID", "").strip()
+        )
+    except NotScored as e:
+        _write_not_scored(spark, args.output, str(e), ids)
+        return
+    summary["computed_by"] = "lb-score-financial"
+    cols = (
+        "typology_type STRING, recall_covered DOUBLE, covered_instances BIGINT, "
+        "corpus_instances BIGINT, coverage DOUBLE, no_participant_txns BIGINT, "
+        "detection_status STRING, designated_rules STRING"
+    )
+    spark.createDataFrame(
+        [
+            (
+                t["typology_type"],
+                t["recall_covered"],
+                t["covered_instances"],
+                t["corpus_instances"],
+                t["coverage"],
+                t["no_participant_txns"],
+                t["detection_status"],
+                t["designated_rules"],
+            )
+            for t in typologies
+        ],
+        cols,
+    ).write.mode("overwrite").parquet(args.output)
+    cov = summary["covered"]
+    log(
+        f"[score] covered mode: {cov['covered_instances']:,} of {cov['corpus_instances']:,} "
+        f"instances covered at txns snapshot {cov['txns_snapshot']}; "
+        f"alerts={cov['total_alerts']:,} alert_set rows={summary['alert_set']['rows']:,}"
+    )
+    _write_text(spark, _json_uri(args.output), _json.dumps(summary))
+    log(f"Wrote recall.json sidecar: {_json_uri(args.output)}")
+
+
+def _write_not_scored(spark, output: str, reason: str, ids: dict | None) -> None:
+    import json as _json
+
+    log(f"[score] covered mode not scored: {reason}")
+    body = {
+        "mode": "covered",
+        "status": "not_scored",
+        "reason": reason,
+        "computed_by": "lb-score-financial",
+    }
+    if ids:
+        body["covered"] = {f"{name}_snapshot": ids.get(name) for name, _ in COVERED_SNAPSHOTS}
+    _write_text(spark, _json_uri(output), _json.dumps(body))
+    log(f"Wrote recall.json sidecar: {_json_uri(output)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute recall + FP rate from manifest + alerts")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
     parser.add_argument("--output", required=True, help="S3 URI for recall.parquet")
+    for name, table in COVERED_SNAPSHOTS:
+        parser.add_argument(
+            f"--covered-{name}-snapshot",
+            default=None,
+            help=f"Covered mode: {table} snapshot of the last completed tick",
+        )
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial").getOrCreate()
@@ -420,6 +995,17 @@ def main() -> None:
     log(f"Manifest typology instances: {manifest_count:,}")
 
     try:
+        ids = covered_snapshot_ids(args)
+    except NotScored as e:
+        _write_not_scored(spark, args.output, str(e), None)
+        spark.stop()
+        return
+    if ids is not None:
+        run_covered(spark, args, manifest, ids)
+        spark.stop()
+        return
+
+    try:
         alerts_all = spark.table(f"{CATALOG}.{GOLD_ALERTS}")
     except Exception as e:  # noqa: BLE001
         raise SystemExit(
@@ -447,6 +1033,7 @@ def main() -> None:
             "expected exactly one. Re-run gold-finalize."
         )
     current_run_id = run_ids[0]
+    check_status_run(current_run_id, os.environ.get("LB_RUN_ID", "").strip())
     pending = sorted(r["rule_id"] for r in status_rows if r.get("status") == "pending")
     if pending:
         raise SystemExit(
@@ -462,6 +1049,15 @@ def main() -> None:
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)
     summary["subject_customer_check"] = check
+    # Customers in silver.entities (is_customer): the denominator of the
+    # per-customer non-planted alert rate (diagnostic). None when unreadable.
+    try:
+        summary["customer_count"] = int(
+            spark.table(f"{CATALOG}.{SILVER_ENTITIES}").where(col("is_customer")).count()
+        )
+    except Exception as e:  # noqa: BLE001 -- diagnostic only
+        log(f"[score] customer count unavailable: {type(e).__name__}: {e}"[:300])
+        summary["customer_count"] = None
     log(
         f"[score] subject-customer-check status={check['status']} "
         f"subjects={check.get('subjects')} unmapped={check.get('unmapped')} "
@@ -515,6 +1111,11 @@ def main() -> None:
             "subjects_not_customer": (
                 (check.get("by_typology") or {}).get(r.get("typology_type"), {})
             ).get("not_customer"),
+            # Designated rules with an alert cut by an evidence cap: this
+            # recall is bounded by that Lakebench-imposed cap.
+            "bounded_by_evidence_cap": summary["recall_bounded_by_evidence_cap"].get(
+                r.get("typology_type"), []
+            ),
         }
         for r in rows
     ]

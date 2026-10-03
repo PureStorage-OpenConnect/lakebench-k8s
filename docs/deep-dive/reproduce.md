@@ -67,6 +67,10 @@ reproduction_metadata:
   datagen_fleet_summary: {}       # pods_reported, data_quality
 ```
 
+The package also records the source corpus role (`corpus_role`), and
+leaves out the values that follow the config rather than measure the
+run (a continuous stream stage's seconds are the window length).
+
 Recording refuses a source run with no numbers, one measured under a
 maintenance policy other than the current one, one without an
 experiment block, one whose benchmark results are not established or
@@ -76,9 +80,20 @@ or `ingest_ratio` (continuous).
 `lakebench reproduce <package.yaml>` then:
 
 1. Loads and validates the package (schema version 1, finite numbers,
-   a correctness tolerance of exactly 0).
+   a correctness tolerance of exactly 0). A package from a registered
+   evaluation or robustness look (its role, or for a package without a
+   role a financial seed with a recorded look) is never rerun: with
+   `--report PATH` it compares the report's sha256 with the look record's
+   `report_sha256` and exits 0 on a match, 14 on a mismatch or when the
+   record holds no report sha256, and 2 without `--report`. A held-out
+   package whose seed is not spent is refused (exit 3), and so is any
+   financial package while the look record cannot be read. The role
+   is held out when any of the package, its experiment identity or its
+   run-start inputs says so, and a financial package whose seed is spent
+   or held out is treated as a look whatever role it states. The seed is
+   never printed.
 2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
-   `commit_sha`. On a mismatch it exits 2 unless
+   `commit_sha`. On a mismatch it exits 14 (requirement unmet) unless
    `--allow-commit-drift` is passed, which turns it into a warning.
 3. Resolves the config: `--config PATH` if given, otherwise
    `config_reference` resolved relative to the package file's
@@ -87,22 +102,45 @@ or `ingest_ratio` (continuous).
    `architecture.benchmark.iterations` differs from
    `benchmark_samples_per_query` (batch packages with QpH), if the
    package's maintenance policy differs from the running version's,
-   or if the package has no `experiment_identity`. `--dry-run` stops
-   here.
-5. Destroys any existing deployment, then deploys, generates and runs
-   the pipeline, and destroys again unless `--keep` is set.
-6. Exits 2 if the run took a different number of samples per query,
+   or if the package has no `experiment_identity`, and refuses (exit 3)
+   a config that would generate a held-out corpus (an evaluation or
+   robustness role, or a held-out or spent financial seed), whatever the
+   package says. `--dry-run` stops here.
+5. Refuses (exit 3) when the config's namespace or any of its three
+   buckets already exists, and exits 2 when the config sets
+   `create_namespace: false` or `create_buckets: false`: reproduce
+   measures against empty buckets it creates, and never destroys or
+   adopts what it did not create. A namespace or bucket it cannot read
+   stops it (exit 4). It then deploys with a nonce of its own; a
+   namespace or bucket that appears in the meantime is refused, not
+   adopted. It confirms the namespace carries that nonce (exit 3 if
+   another deploy replaced it, before generating or running anything),
+   generates and runs the pipeline, and checks the nonce again after the
+   run, with or without `--keep` (exit 3, nothing destroyed, no verdict:
+   the measurement may not be its own). The run it compares is the first
+   one on this deployment started after the run step began. Unless
+   `--keep` is set it then destroys only that namespace incarnation
+   (`uid#nonce`); if a redeploy landed between that check and the
+   destroy, the destroy deletes nothing, reproduce prints its verdict and
+   then exits 3.
+6. Exits 14 if the run took a different number of samples per query,
    ran under a different maintenance policy, or is not the package's
    experiment or returned different benchmark results.
-7. Compares actual against expected per metric. Correctness metrics
-   (`scale_ratio`, `ingest_ratio`) have zero tolerance in either
-   direction; performance metrics use the performance band in the
+7. Compares actual against expected per metric. `scale_ratio` has zero
+   tolerance in either direction. `ingest_ratio` is a range guard: the
+   run's value must lie in [0.95, 1.05], and the package's value is only
+   a record (honest continuous reruns of one corpus measured 1.0 to
+   1.034). A value that follows the config, which an older package may
+   still carry (continuous stage seconds), is shown as ignored and not
+   gated. Performance metrics use the performance band in the
    metric's bad direction. QpH across different query sets is
    reported as incomparable and counts as performance drift (a
    package recorded before query-set ids is not compared on QpH).
-8. Exits 0 (pass), 1 (performance drift or a missing performance
-   metric) or 2 (correctness violation, a missing correctness metric,
-   or any refusal above).
+8. Exits 0 (pass) or 14 (performance drift, a missing performance
+   metric, a correctness violation or a missing correctness metric).
+   The refusals in steps 1, 3 and 4 exit 2, and a pipeline that could
+   not run, or whose run cannot be found, exits 1. In 1.6 performance
+   drift exited 1 and correctness drift exited 2.
 
 ## What the tolerance is for
 
@@ -114,9 +152,10 @@ factor-of-two regression fails.
 
 Correctness has no tolerance because there is no legitimate reason
 for the pipeline to process a different share of the data than the
-recorded run (`scale_ratio` in batch; `ingest_ratio`, bronze rows over
-the rows the trickle had released, in continuous). Any correctness
-drift means the pipeline has a bug or the config is different.
+recorded run (`scale_ratio` in batch). Any correctness drift means the
+pipeline has a bug or the config is different. Continuous `ingest_ratio`
+(bronze rows over the rows the trickle had released) moves a few percent
+between honest runs, so it is checked against a fixed range instead.
 
 ## What breaks reproducibility
 
@@ -166,8 +205,8 @@ The reproduce command lives in
 `src/lakebench/cli/_reproduce.py`. It shares the deploy / generate /
 run / destroy plumbing with the main CLI; it does not reimplement
 any of it. The default bands are `DEFAULT_TOLERANCES` in
-`_reproduce.py`, and each metric's band and direction come from
-`_METRIC_TABLE` there, not from the package.
+`_reproduce.py`, and each metric's band and direction come from the
+metric registry (`metrics/metric_registry.py`), not from the package.
 
 ## For contributors
 

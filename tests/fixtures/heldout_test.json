@@ -1,0 +1,19 @@
+{
+  "_doc": "Test fixture for the held-out guard. Its salt and seeds are test-only (tests/fixtures/heldout_test_seeds.py); they are not AML seeds.",
+  "format": 1,
+  "algorithm": "sha256(bytes.fromhex(salt) + b':' + decimal(seed))",
+  "salt": "2e43d60ae509a676bab6f62c11ed1400f394864dbca608e1d4d090fd6492380b",
+  "roles": {
+    "evaluation": [
+      "07bbd64f6a819523c55fb45106b692fecdefd69440e7bdff6d2d8ca2d507fa02"
+    ],
+    "robustness": [
+      "9dea31f3fe2eda75cb3e19b0378f1d150a7f545bba90943ff65758153762cea1"
+    ]
+  },
+  "spent": [
+    42,
+    5783979690583702767
+  ],
+  "absence_check": "report"
+}

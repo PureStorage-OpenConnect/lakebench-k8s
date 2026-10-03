@@ -85,7 +85,7 @@ def test_verify_tag_checks_the_tested_sha_and_version():
 def test_gate_runs_release_only_checks_strictly():
     steps = " ".join(str(s.get("run", "")) for s in _load("release.yml")["jobs"]["gate"]["steps"])
     assert "scripts/release_gate.py" in steps and "--require-all" in steps
-    for check in ("examples", "version", "changelog", "em-dashes", "uat-results"):
+    for check in ("examples", "version", "changelog", "prose", "uat-results"):
         assert check in steps
 
 
@@ -105,3 +105,19 @@ def test_macos_runners_match_the_architecture_they_claim():
     assert "latest" not in entries["macos-amd64"]["runner"]
     steps = " ".join(str(s.get("run", "")) for s in job["steps"])
     assert "lipo -archs" in steps and "WANT_ARCH" in steps
+
+
+def test_release_publishes_sha256sums_for_install_sh():
+    # install.sh refuses a binary that SHA256SUMS of the same release does not vouch for.
+    jobs = _load("release.yml")["jobs"]
+    release_steps = jobs["github-release"]["steps"]
+    runs = " ".join(str(s.get("run", "")) for s in release_steps)
+    assert "sha256sum lakebench-* > SHA256SUMS" in runs
+    (upload,) = [s for s in release_steps if "action-gh-release" in str(s.get("uses", ""))]
+    assert "SHA256SUMS" in upload["with"]["files"].split()
+    assert 'test "$(wc -l < SHA256SUMS)" -eq 3' in runs
+    # The fork dry run writes the same file and runs install.sh against it.
+    dry = " ".join(str(s.get("run", "")) for s in jobs["release-dry-run"]["steps"])
+    assert "sha256sum lakebench-* > SHA256SUMS" in dry
+    assert "LB_INSTALL_BASE_URL=" in dry and "bash repo/install.sh" in dry
+    assert "cmp " in dry

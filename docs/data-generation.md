@@ -52,7 +52,6 @@ workload:
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -83,9 +82,15 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    total data to generate.
 2. Generates synthetic Parquet files using the configured workload schema
    (Customer360 by default).
-3. Writes files directly to S3 at the path
-   `s3://<bronze-bucket>/<path_template>/` (default path template:
-   `customer/interactions`; the financial schema writes under `pacs008`).
+3. Writes files directly to S3 under a fixed prefix the Spark stages read:
+   `s3://<bronze-bucket>/customer/interactions/` for Customer 360 and
+   `s3://<bronze-bucket>/pacs008/` for the financial schema. v1.7 removed
+   the `medallion.bronze.path_template` key: the Customer 360 Spark stages
+   always read `customer/interactions/` whatever it said, so a custom bronze
+   layout is not supported. (The financial stages did read it, through
+   `LB_FINANCIAL_BRONZE_PREFIX`.) A config that still names the fixed layout
+   loads with a note; another layout is refused by the commands that change
+   data.
 4. Reports completion status back to Kubernetes.
 
 The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery
@@ -212,25 +217,64 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 
 ## Re-running Data Generation
 
-`lakebench generate` (and `run --generate`) refuses to write into a bronze
-prefix that already holds data: it exits 2 and names the prefix, so an
-existing corpus is never overwritten by accident. To regenerate, pass
-`--regenerate`, which empties the whole bronze bucket (and aborts dangling
-multipart uploads) before datagen starts:
+`lakebench generate` (and `run --generate`, and a multi-cycle run before
+its first cycle) refuses to write into a bronze datagen prefix that already
+holds data: it exits 3 (refused) and names the prefix, so an existing corpus is never
+overwritten by accident. What it does next depends on whether this
+deployment owns the bronze bucket: it carries this deployment's and this
+cluster's stamp (a tag, or on FlashBlade the `.lakebench/owner.json` marker),
+or this namespace's created-buckets record lists it (a bucket 1.6 created,
+stamped on the next deploy). A multi-cycle run clears an owned prefix before
+cycle 0 without `--regenerate`, as 1.6 did; the continuous run refuses any
+bucket it does not own before it starts (exit 3, or 4 when ownership cannot
+be checked).
+
+| Bucket | Prefix | Flag | Result |
+|---|---|---|---|
+| owned | empty | any | generate |
+| owned | holds data | none | exit 3 |
+| owned | holds data | `--regenerate` | clear the datagen prefix (and abort its incomplete multipart uploads), then generate |
+| not owned | empty | any | generate |
+| not owned | holds data | none | exit 3: pass `--allow-stale-bronze`, or clear the prefix yourself |
+| not owned | holds data | `--regenerate` | exit 3: Lakebench never empties a bucket this deployment did not create |
+| not owned | holds data | `--allow-stale-bronze` | generate over it; `metrics.json` records `datagen.stale_bronze` and the report says "bronze held N objects before generate; rows may be over-counted" |
 
 ```bash
-lakebench generate my-config.yaml --wait --regenerate
+lakebench generate my-config.yaml --regenerate
 ```
 
-To keep the existing corpus instead, run the pipeline with `run
---skip-generate`, or without `--generate`.
+`--regenerate` clears only the datagen prefix; other data in the bucket
+(stream checkpoints, another workload's prefix) stays. To keep the existing
+corpus instead, run the pipeline with `run --skip-generate`, or without
+`--generate`.
 
-The deployer also clears the datagen prefix before the first cycle when
-this deployment created the bronze bucket (LB-185), so a smaller generate
-never inherits a larger earlier generate's `part-*` files. It does not
-touch a bucket it did not create or one with `create_buckets: false`; for
-those, empty the bronze data yourself (`lakebench clean bronze
-my-config.yaml`) or use `--regenerate`.
+The deployer applies the same rule before the first cycle: it
+clears the datagen prefix of an owned bucket, so a smaller generate never
+inherits a larger earlier generate's `part-*` files, and refuses a non-empty
+prefix in any other bucket unless the gate allowed it (`--allow-stale-bronze`
+on a prefix that already held objects). Before
+1.7 it skipped such a bucket silently and silver over-counted the stale
+files. Before the gate lists or clears the prefix, `generate`, `run
+--generate` and a multi-cycle run delete an earlier `lakebench-datagen` Job
+and wait until none of its pods (label `app=lakebench-datagen`) is still
+running, since a pod in its grace period could otherwise land a file in the
+cleared prefix that silver would count as this run's. The wait is bounded
+at five minutes; a pod still running then refuses with exit 3
+(`datagen.pods_live`), and pods that cannot be listed exit 4. A
+continuous run does the same before its reset clears the raw prefix. The
+deployer then follows the gate's decision, not the `--allow-stale-bronze`
+flag: objects that appear after the gate found the prefix empty are
+refused.
+
+A continuous run's own datagen never takes `--allow-stale-bronze`
+(`run --continuous --generate-only` does): its reset has already cleared
+the datagen prefix, so objects found there were put there since by another
+writer, and the refusal (exit 3) says to re-run once nothing writes there.
+A `run` without datagen after a `generate --allow-stale-bronze`
+records the same `datagen.stale_bronze` (the generate leaves the note under
+`lakebench-output/datagen/`). Every generate that proceeds clears the
+silver-state `bronze_data_clock`, since bronze is being replaced; the next
+bronze-verify writes it again.
 
 ## Configuration Options
 
@@ -282,7 +326,7 @@ image:
 
 ```bash
 cd datagen_rs/
-podman build -t my-registry/my-datagen:latest .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t my-registry/my-datagen:latest .
 podman push my-registry/my-datagen:latest
 ```
 

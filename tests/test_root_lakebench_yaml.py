@@ -17,7 +17,7 @@ from pathlib import Path
 import yaml
 
 from lakebench.config import load_config
-from lakebench.config.schema import ImagesConfig, PolarisConfig
+from lakebench.config.schema import ImagesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 ROOT_YAML = ROOT / "lakebench.yaml"
@@ -54,49 +54,57 @@ def test_datagen_image_matches_schema_default() -> None:
     )
 
 
-def test_polaris_version_matches_schema_default() -> None:
-    """The Polaris version in the yaml must match PolarisConfig.version."""
-    default = PolarisConfig().version
+def test_polaris_image_matches_schema_default() -> None:
+    """The commented images.polaris tag must match ImagesConfig.polaris.
+
+    The Polaris that runs is that tag; v1.7 removed the unread
+    catalog.polaris.version, so the file must not carry it either.
+    """
+    default = ImagesConfig().polaris
     text = _yaml_text()
-    # Match `version:` under the polaris block (commented or not).
+    found = False
     for line in text.splitlines():
         stripped = line.lstrip("# ").strip()
         if stripped.startswith("polaris: apache/polaris:"):
-            # images.polaris line: check the tag matches too. Drop any
-            # trailing inline comment before comparing.
-            after = stripped.split(":", 2)[2]
-            tag = after.split("#", 1)[0].strip()
-            assert tag == default, (
-                f"images.polaris tag {tag!r} does not match "
-                f"PolarisConfig.version default {default!r}"
-            )
-    # `version: 1.6.0` under architecture.catalog.polaris
-    assert re.search(rf"^\s*#?\s*version:\s*{re.escape(default)}\b", text, re.MULTILINE), (
-        f"root lakebench.yaml does not mention polaris.version={default!r} "
-        f"(schema default). A 1.3.0-incubating pin is stale."
-    )
+            image = stripped.split(":", 1)[1].split("#", 1)[0].strip()
+            assert image == default, f"images.polaris {image!r}, schema default {default!r}"
+            found = True
+    assert found, "no images.polaris line in root lakebench.yaml"
+
+    # Indentation is counted after the comment marker, so a commented line
+    # keeps its nesting.
+    def body(line: str) -> str:
+        return line[1:] if line.startswith("#") else line
+
+    polaris_indent = None
+    for line in text.splitlines():
+        b = body(line).rstrip()
+        if not b.strip():
+            continue
+        indent = len(b) - len(b.lstrip())
+        key = b.strip().lstrip("#").strip()
+        if key == "polaris:":
+            polaris_indent = indent
+        elif polaris_indent is not None:
+            if indent <= polaris_indent:
+                polaris_indent = None
+            elif key.startswith("version:"):
+                raise AssertionError("root lakebench.yaml still sets catalog.polaris.version")
     assert "1.3.0-incubating" not in text, (
         "root lakebench.yaml still references the deprecated 1.3.0-incubating Polaris tag"
     )
 
 
-def test_polaris_client_secret_uses_env_var() -> None:
-    """The Polaris client_secret must use ${...} env-var substitution.
-
-    A literal placeholder (``client_secret: your-secret``) trains users to
-    commit real secrets into the file.
-    """
+def test_polaris_client_secret_not_literal() -> None:
+    """SAF-8: the root yaml sets no Polaris client_secret (deploy generates
+    one per deployment). If a line ever sets one, it must be an env var: a
+    literal trains users to commit real secrets into the file."""
     text = _yaml_text()
-    match = re.search(r"^\s*client_secret:\s*(\S.*)$", text, re.MULTILINE)
-    assert match is not None, "no `client_secret:` line found in root lakebench.yaml"
-    value = match.group(1).strip()
-    assert value.startswith("${") and value.endswith("}"), (
-        f"client_secret is {value!r}; must use ${{VAR}} env-var substitution"
-    )
-    assert "LAKEBENCH_POLARIS_CLIENT_SECRET" in value, (
-        f"client_secret {value!r} should reference LAKEBENCH_POLARIS_CLIENT_SECRET "
-        "to match the other polaris-*.yaml examples"
-    )
+    for m in re.finditer(r"^\s*client_secret:\s*(\S.*)$", text, re.MULTILINE):
+        value = m.group(1).strip()
+        assert value.startswith("${") and value.endswith("}"), (
+            f"client_secret is {value!r}; must use ${{VAR}} env-var substitution"
+        )
 
 
 def test_no_dead_recipe_names() -> None:
@@ -130,7 +138,8 @@ def test_root_yaml_loads_cleanly(monkeypatch, tmp_path) -> None:
         cfg = load_config(ROOT_YAML)
     assert cfg.name
     assert cfg.architecture.catalog.type.value == "polaris"
-    assert cfg.architecture.catalog.polaris.client_secret == "placeholder-secret"
+    # SAF-8: no client_secret in the file; deploy generates one per deployment.
+    assert cfg.architecture.catalog.polaris.client_secret == ""
     assert cfg.architecture.table_format.type.value == "iceberg"
     assert cfg.architecture.query_engine.type.value == "trino"
     assert cfg.architecture.pipeline_engine.value == "spark"

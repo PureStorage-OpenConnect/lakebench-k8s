@@ -504,11 +504,15 @@ class TestBucketOwnershipTag:
         s3.put_bucket_tagging.assert_not_called()
 
     def test_verify_match(self):
+        """SAF-10 row 1: our name and this cluster's stamp."""
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.return_value = {
-            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "mine"}]
+            "TagSet": [
+                {"Key": TAG_DEPLOYMENT_NAME, "Value": "mine"},
+                {"Key": "lakebench.cluster", "Value": "fp1"},
+            ]
         }
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster="fp1", created_record=())
         assert r.verdict is IdentityVerdict.MATCH
 
     def test_verify_mismatch_refuses(self):
@@ -518,21 +522,21 @@ class TestBucketOwnershipTag:
         s3.get_bucket_tagging.return_value = {
             "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "someone-else"}]
         }
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.MISMATCH
         assert "someone-else" in (r.hint or "")
 
     def test_verify_legacy_untagged_bucket_absent(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.ABSENT
         assert "force-legacy" in (r.hint or "")
 
     def test_verify_missing_bucket(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchBucket")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.NOT_FOUND
 
 
@@ -575,7 +579,8 @@ class TestBucketTaggingUnsupported:
     def test_verify_returns_unsupported_verdict(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NotImplemented")
-        r = verify_bucket_ownership(s3, "b1", "mine")
+        s3.get_object.side_effect = _client_error("NoSuchKey")  # no owner marker
+        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
         assert r.verdict is IdentityVerdict.UNSUPPORTED
         assert "NotImplemented" in (r.hint or "")
 
@@ -584,13 +589,21 @@ class TestBucketTaggingUnsupported:
         prefix instead of the --force-legacy migration path."""
         s3_unsupported = mock.MagicMock()
         s3_unsupported.get_bucket_tagging.side_effect = _client_error("NotImplemented")
+        s3_unsupported.get_object.side_effect = _client_error("NoSuchKey")
         s3_absent = mock.MagicMock()
         s3_absent.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
         assert (
-            verify_bucket_ownership(s3_unsupported, "b1", "mine").verdict
+            verify_bucket_ownership(
+                s3_unsupported, "b1", "mine", expected_cluster=None, created_record=()
+            ).verdict
             is IdentityVerdict.UNSUPPORTED
         )
-        assert verify_bucket_ownership(s3_absent, "b1", "mine").verdict is IdentityVerdict.ABSENT
+        assert (
+            verify_bucket_ownership(
+                s3_absent, "b1", "mine", expected_cluster=None, created_record=()
+            ).verdict
+            is IdentityVerdict.ABSENT
+        )
 
 
 class TestBucketNamePrefixFallback:
@@ -874,3 +887,181 @@ class TestCreatedBucketsRecord:
         write_bucket_ownership_tag(s3, "b1", "my-config")
         keys = [t["Key"] for t in s3.put_bucket_tagging.call_args.kwargs["Tagging"]["TagSet"]]
         assert TAG_CREATED_BY_LAKEBENCH not in keys
+
+
+# -- CLI-1: a check that could not run is not a refusal --------------------
+
+
+def test_unlistable_namespaces_without_a_namespace_is_unverifiable():
+    from lakebench.deploy.ownership import check_data_ownership
+
+    d = check_data_ownership(
+        None,
+        namespace="a",
+        deployment_name="a",
+        namespace_present=False,
+        namespace_verified=False,
+        force_legacy=False,
+    )
+    assert not d.allowed and d.unverifiable
+
+
+def test_same_name_live_deployment_is_a_refusal_not_unverifiable():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME, check_data_ownership
+
+    other = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name="b",
+            deletion_timestamp=None,
+            annotations={ANNOTATION_DEPLOYMENT_NAME: "a"},
+            labels={},
+        )
+    )
+    core = MagicMock()
+    core.list_namespace.return_value = SimpleNamespace(items=[other])
+    d = check_data_ownership(
+        core,
+        namespace="a",
+        deployment_name="a",
+        namespace_present=True,
+        namespace_verified=True,
+        force_legacy=False,
+    )
+    assert not d.allowed and not d.unverifiable
+
+
+# ---------------------------------------------------------------------------
+# A redeploy refreshes the committed-sha stamp; identity checks unchanged
+# ---------------------------------------------------------------------------
+
+
+class TestStampNamespaceRefreshesCommittedSha:
+    _OURS = {ANNOTATION_DEPLOYMENT_NAME: "my-config", ANNOTATION_API_SERVER: "deadbeef1234"}
+
+    def _stamp(self, core, sha, **kw):
+        return stamp_namespace(
+            core, "ns", "my-config", api_server="deadbeef1234", committed_sha=sha, **kw
+        )
+
+    def test_redeploy_from_other_code_refreshes_the_sha(self):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA, ANNOTATION_STAMPED_AT
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={
+                **self._OURS,
+                ANNOTATION_COMMITTED_SHA: "90a8478",
+                ANNOTATION_STAMPED_AT: "2026-10-01T00:00:00Z",
+            },
+            resource_version="7",
+        )
+        r = self._stamp(core, "69ee2fc")
+        assert r.verdict is IdentityVerdict.MATCH
+        core.patch_namespace.assert_called_once()
+        body = core.patch_namespace.call_args[0][1]
+        anns = body["metadata"]["annotations"]
+        # Only the sha is sent: identity and the first claim's time stay as
+        # stored, and the write is OCC on the read's resourceVersion.
+        assert anns == {ANNOTATION_COMMITTED_SHA: "69ee2fc"}
+        assert ANNOTATION_STAMPED_AT not in anns
+        assert body["metadata"]["resourceVersion"] == "7"
+
+    def test_redeploy_that_cannot_name_its_commit_drops_the_stale_sha(self):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={**self._OURS, ANNOTATION_COMMITTED_SHA: "90a8478"}
+        )
+        r = self._stamp(core, None)
+        assert r.verdict is IdentityVerdict.MATCH
+        anns = core.patch_namespace.call_args[0][1]["metadata"]["annotations"]
+        assert anns[ANNOTATION_COMMITTED_SHA] is None  # merge patch: delete
+
+    def test_same_sha_is_still_a_no_op(self):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={**self._OURS, ANNOTATION_COMMITTED_SHA: "69ee2fc"}
+        )
+        assert self._stamp(core, "69ee2fc").verdict is IdentityVerdict.MATCH
+        core.patch_namespace.assert_not_called()
+
+    def test_foreign_identity_is_never_refreshed(self):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={
+                ANNOTATION_DEPLOYMENT_NAME: "someone-else",
+                ANNOTATION_API_SERVER: "deadbeef1234",
+                ANNOTATION_COMMITTED_SHA: "90a8478",
+            }
+        )
+        assert self._stamp(core, "69ee2fc").verdict is IdentityVerdict.MISMATCH
+        core.patch_namespace.assert_not_called()
+
+    def test_other_cluster_same_name_is_not_a_refresh(self):
+        """Name matches but the api-server stamp differs: not this identity,
+        so no sha refresh (the existing restamp path decides, unchanged)."""
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={
+                ANNOTATION_DEPLOYMENT_NAME: "my-config",
+                ANNOTATION_API_SERVER: "otherclusterfp",
+                ANNOTATION_COMMITTED_SHA: "90a8478",
+            },
+            resource_version="3",
+        )
+        self._stamp(core, "69ee2fc")
+        core.patch_namespace.assert_called_once()
+        anns = core.patch_namespace.call_args[0][1]["metadata"]["annotations"]
+        assert anns[ANNOTATION_API_SERVER] == "deadbeef1234"  # full restamp, not a refresh
+        assert anns[ANNOTATION_DEPLOYMENT_NAME] == "my-config"
+
+    def test_refresh_conflict_rereads_and_rechecks_identity(self):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.side_effect = [
+            _ns_response(annotations={**self._OURS, ANNOTATION_COMMITTED_SHA: "90a8478"}),
+            _ns_response(
+                annotations={
+                    ANNOTATION_DEPLOYMENT_NAME: "someone-else",
+                    ANNOTATION_API_SERVER: "deadbeef1234",
+                }
+            ),
+        ]
+        core.patch_namespace.side_effect = [_api_exception(409)]
+        assert self._stamp(core, "69ee2fc").verdict is IdentityVerdict.MISMATCH
+        assert core.patch_namespace.call_count == 1
+
+    @pytest.mark.parametrize("error", [409, 500, "timeout"])
+    def test_a_failed_refresh_never_refuses_the_deploy(self, error):
+        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = _ns_response(
+            annotations={**self._OURS, ANNOTATION_COMMITTED_SHA: "90a8478"}
+        )
+        core.patch_namespace.side_effect = (
+            TimeoutError("read timed out") if error == "timeout" else _api_exception(error)
+        )
+        assert self._stamp(core, "69ee2fc", max_retries=2).verdict is IdentityVerdict.MATCH
+
+
+def test_owner_marker_records_the_lakebench_version():
+    """The distribution is lakebench-k8s, so version("lakebench") raised and
+    every marker said "unknown"; the marker carries the package version."""
+    import lakebench
+    from lakebench.deploy.ownership import owner_marker_identity
+
+    body = owner_marker_identity("my-config", "deadbeef1234", "ns")
+    assert body["lakebench_version"] == lakebench.__version__
+    assert body["lakebench_version"] != "unknown"

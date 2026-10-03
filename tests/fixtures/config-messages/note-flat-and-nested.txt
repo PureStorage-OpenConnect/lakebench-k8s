@@ -1,0 +1,1 @@
+both flat 'scale' and nested 'workload.datagen.scale' are set; the flat value is used

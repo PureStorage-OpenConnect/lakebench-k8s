@@ -89,7 +89,9 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 When `pipeline.cycles` is set to 2 or more, the batch pipeline runs N
 iterations. Each cycle generates new data for its portion of the timestamp
 range, then runs the full bronze-verify -> silver-build -> gold-finalize
-sequence.
+sequence. The run generates without `--generate`, which a multi-cycle run
+refuses (exit 2): a whole corpus generated first would be read again by
+cycle 0.
 
 ```yaml
 architecture:
@@ -112,6 +114,18 @@ Metrics include a `cycles[]` array with per-cycle datagen timing, job
 metrics, and table health (data file counts and snapshot counts from
 Iceberg system tables). The `cycle_progression` score shows how elapsed
 time and table state evolve across cycles.
+
+## Repeated Batch Runs
+
+`lakebench run --repeat 3` runs the batch pipeline three times as one
+series over one corpus: repetition 1 may generate, repetitions 2 and 3
+rebuild silver and gold from the same bronze. Bronze is checked between
+repetitions and the series stops (exit 3) if it changed. Records carry
+`series {id, index, size}`; the series manifest is
+`lakebench-output/series/<id>.json`. `--repeat` is refused with a
+continuous run, with `cycles` above 1, and with `--stage`, `--local`,
+`--deploy-only` or `--generate-only`. See
+[CLI Reference](cli-reference.md#run) for the rules.
 
 ## Command Flags
 
@@ -201,10 +215,11 @@ derived per run so the corpus keeps arriving for about 1.2 x the window
 files, about 2,190 s), capped at 50 files per 30 s (about 107 MB/s; a Lakebench-imposed cap, so
 an auto-capped rate measures the cap, not the infrastructure). At the
 cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
-corpus is not a failure:
-the scorecard reports `intake_limit: trickle_rate` and
-`pipeline_saturated: false` when the pipeline kept pace with the trickle, and
-`corpus_drain_seconds` for the window that would drain the corpus. See
+corpus is not a failure: a run the trickle held is recorded in
+`experiment.limits.trickle_bound`, its throughput is labelled the offered
+load, and the scorecard reads `intake_limit: none` (bronze kept up with what
+was released). `intake_limit: trickle_rate` and `corpus_drain_seconds` appear
+when the released rows are unknown or bronze took under 0.95 of them. See
 [Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
 The measurement window opens when all three streams are running and lasts
@@ -379,7 +394,7 @@ Continuous mode produces a different set of scores than batch:
 | **data_freshness_seconds** | Worst-case gold table staleness from the stream job logs. |
 | **query_time_event_age_seconds** | Diagnostic, not freshness: median age of gold's newest event date at query time (when in-stream rounds ran). Written as `query_time_freshness_seconds` before v1.6. |
 | **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
-| **composite_qph** | In-stream median QpH. |
+| **composite_qph** | In-stream median QpH. When the rounds executed different query sets (a round with a failed query), `composite_qph_basis.blended` is true, the median is over different queries and is not compared, and `composite_qph_by_set` holds the median per set. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
 | **composite_qph_rounds** | In-stream rounds behind the composite_qph median (0 when it is the post-stream benchmark). Benchmark iterations are an execution condition, so two runs with different counts are comparable but not like-for-like, and `lakebench compare` says so. |
 | **stage_latency_profile** | Average micro-batch processing time per stage (`bronze_ms`, `silver_ms`, `gold_ms`). |
@@ -449,8 +464,9 @@ that, capped at the profile's maximum. The formula is
 
 At scale 100 that gives bronze-verify 7 (c360) or 11 (financial),
 silver-build 18 and gold-finalize 11. The 28 maximum is a Lakebench-imposed
-ceiling (K8s API polling, below), not a cluster limit. The auto-sizer and the
-global `platform.compute.spark.executor` block do not change these counts;
+ceiling (K8s API polling, below), not a cluster limit. The auto-sizer does not
+change these counts (v1.7 removed the `platform.compute.spark.executor`
+block, which never did);
 `lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) shows the resolved per-job values. In continuous
 mode the streaming jobs have their own profiles and are capped to a
 concurrent CPU budget when the cluster is smaller than the profiles need.

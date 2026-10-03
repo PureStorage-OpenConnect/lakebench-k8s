@@ -10,7 +10,6 @@ write.distribution-mode=hash. These tests pin the Delta equivalent.
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -20,12 +19,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
 
 
 @pytest.fixture()
-def common(monkeypatch):
-    monkeypatch.syspath_prepend(str(SCRIPTS))
-    sys.modules.pop("common", None)
-    import common as mod
-
-    return mod
+def common(load_script):
+    return load_script("common")
 
 
 class TestClusterByPartition:

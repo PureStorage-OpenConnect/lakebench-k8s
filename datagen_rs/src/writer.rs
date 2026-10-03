@@ -122,27 +122,86 @@ pub fn customer360_bytes_per_row_default() -> f64 {
 /// mid-file and exercises the streaming semantics. Production sizing
 /// tuning belongs in a follow-up sprint with live-scale measurement.
 pub fn writer_properties() -> WriterProperties {
-    let stats = match std::env::var("DG_STATS").as_deref() {
-        Ok("page") => EnabledStatistics::Page,
-        Ok("chunk") => EnabledStatistics::Chunk,
-        _ => EnabledStatistics::None,
-    };
-    let dict = std::env::var("DG_DICT").map(|v| v != "0").unwrap_or(true);
-    let mut b = WriterProperties::builder()
-        .set_compression(compression_from_env())
-        .set_statistics_enabled(stats)
-        .set_dictionary_enabled(dict);
-    if let Ok(ps) = std::env::var("DG_PAGESZ") {
-        if let Ok(n) = ps.parse::<usize>() {
+    WriterSettings::from_env().properties()
+}
+
+/// The parquet writer settings as resolved from the environment
+/// (`DG_COMPRESSION`, `DG_STATS`, `DG_DICT`, `DG_PAGESZ`, `DG_ROW_GROUP`):
+/// what the builder receives, so an ignored value (an unparseable page size,
+/// a zero row-group cap) reads as the default. They change every object's
+/// bytes, so the per-node marker's `corpus_args` records them (`to_json`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WriterSettings {
+    pub compression: Compression,
+    pub statistics: EnabledStatistics,
+    pub dictionary: bool,
+    pub data_page_size_limit: Option<usize>,
+    pub max_row_group_size: Option<usize>,
+}
+
+impl WriterSettings {
+    pub fn from_env() -> WriterSettings {
+        let statistics = match std::env::var("DG_STATS").as_deref() {
+            Ok("page") => EnabledStatistics::Page,
+            Ok("chunk") => EnabledStatistics::Chunk,
+            _ => EnabledStatistics::None,
+        };
+        let dictionary = std::env::var("DG_DICT").map(|v| v != "0").unwrap_or(true);
+        let data_page_size_limit = std::env::var("DG_PAGESZ")
+            .ok()
+            .and_then(|ps| ps.parse::<usize>().ok());
+        let max_row_group_size = std::env::var("DG_ROW_GROUP")
+            .ok()
+            .and_then(|rg| rg.parse::<usize>().ok())
+            .filter(|n| *n > 0);
+        WriterSettings {
+            compression: compression_from_env(),
+            statistics,
+            dictionary,
+            data_page_size_limit,
+            max_row_group_size,
+        }
+    }
+
+    pub fn properties(&self) -> WriterProperties {
+        let mut b = WriterProperties::builder()
+            .set_compression(self.compression)
+            .set_statistics_enabled(self.statistics)
+            .set_dictionary_enabled(self.dictionary);
+        if let Some(n) = self.data_page_size_limit {
             b = b.set_data_page_size_limit(n);
         }
-    }
-    if let Ok(rg) = std::env::var("DG_ROW_GROUP") {
-        if let Ok(n) = rg.parse::<usize>() {
-            if n > 0 {
-                b = b.set_max_row_group_size(n);
-            }
+        if let Some(n) = self.max_row_group_size {
+            b = b.set_max_row_group_size(n);
         }
+        b.build()
     }
-    b.build()
+
+    /// `{"compression", "statistics", "dictionary", "data_page_size_limit",
+    /// "max_row_group_size"}` with `"default"` for an unset size.
+    pub fn to_json(&self) -> serde_json::Value {
+        let compression = match self.compression {
+            Compression::SNAPPY => "snappy".to_string(),
+            Compression::ZSTD(l) => format!("zstd({})", l.compression_level()),
+            Compression::LZ4_RAW => "lz4_raw".to_string(),
+            Compression::UNCOMPRESSED => "uncompressed".to_string(),
+            other => format!("{other:?}").to_ascii_lowercase(),
+        };
+        let statistics = match self.statistics {
+            EnabledStatistics::None => "none",
+            EnabledStatistics::Chunk => "chunk",
+            EnabledStatistics::Page => "page",
+        };
+        let size = |v: Option<usize>| match v {
+            Some(n) => serde_json::Value::from(n),
+            None => serde_json::Value::from("default"),
+        };
+        serde_json::json!({
+            "compression": compression,
+            "statistics": statistics,
+            "dictionary": self.dictionary,
+            "data_page_size_limit": size(self.data_page_size_limit),
+            "max_row_group_size": size(self.max_row_group_size),
+        })
+    }
 }

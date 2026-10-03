@@ -1,0 +1,1 @@
+  - platform.compute.spark.silver_executor: unknown key; did you mean `silver_executors`?
