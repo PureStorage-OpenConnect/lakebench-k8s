@@ -428,6 +428,6 @@ Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_s
 
 ### Multi-cycle runs and reused corpora check a corpus series marker
 
-A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and `generate` or `run --generate-only` on a multi-cycle config exits 2.
+A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
 
-**What to do:** Generate a multi-cycle corpus with `lakebench run` (add `--regenerate` over an old corpus); regenerate a single-cycle corpus the marker refuses with `run --generate --regenerate`.
+**What to do:** Keep a finished multi-cycle corpus with `run --skip-generate`; otherwise let `run` generate it, with `--regenerate` (single-cycle: `--generate --regenerate`) on a bucket this deployment created, after `lakebench admin reclaim-bucket` on any other. An AML multi-cycle run generates every cycle.
