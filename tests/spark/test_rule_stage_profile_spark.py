@@ -20,6 +20,9 @@ pytestmark = pytest.mark.spark_static_conf(
 
 def _profile(spark, common, group, work):
     sc = spark.sparkContext
+    # A job that completes before the mark: the store then shows nothing of
+    # the group can have been evicted yet.
+    spark.range(1).collect()
     sc.setJobGroup(group, "test", interruptOnCancel=False)
     try:
         mark = common.rule_profile_mark(spark)
@@ -55,3 +58,16 @@ def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, cap
     assert rows, rows
     out = capsys.readouterr().out
     assert "truncated=true" in out and "truncated=false" not in out, out
+
+
+def test_store_jobs_order(spark_session, load_script):
+    """_store_jobs reads oldest first by default and newest first on request
+    (the early stops in rule_stage_profile rely on it)."""
+    common = load_script("common")
+    for _ in range(2):
+        spark_session.range(3).collect()
+    store = spark_session.sparkContext._jsc.sc().statusStore()
+    spark_session.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(5000)
+    oldest = [j[0] for j in common._store_jobs(store)]
+    newest = [j[0] for j in common._store_jobs(store, newest_first=True)]
+    assert oldest == sorted(oldest) and newest == sorted(newest, reverse=True)

@@ -99,6 +99,7 @@ from bronze_verify_financial import MANIFEST_TABLE, register_manifest
 from common import (
     TTD_SNAPSHOT_UNKNOWN,
     TtdBaseline,
+    ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -238,13 +239,12 @@ def _bootstrap_gold_tables(spark) -> None:
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
-    try:
-        cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
-        if "detected_ts" not in cols:
-            spark.sql(f"ALTER TABLE {CATALOG}.{GOLD_ALERTS} ADD COLUMNS (detected_ts TIMESTAMP)")
-            log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
-    except Exception as e:  # noqa: BLE001
-        log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+    # Reused-catalog upgrade, as gold_finalize_financial does: missing
+    # trailing ALERT_COLUMNS are appended; a table whose columns differ in
+    # any other way fails bootstrap, before the first tick writes positionally.
+    from detection_rules import ALERT_COLUMNS
+
+    ensure_alert_columns(spark, f"{CATALOG}.{GOLD_ALERTS}", ALERT_COLUMNS)
 
 
 def _newest_ingest_epoch_s(spark, fq_table):

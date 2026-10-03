@@ -493,6 +493,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   nameless-config refusals already pointed here. `scripts/upgrading.py`
   also requires a breaking-changes entry for each config value 1.7 refuses
   that 1.6 accepted (`config/refused_keys.py`).
+- **Every AML alert carries reason codes.** `gold.alerts` gains a last
+  column, `reason_codes`: the rule's base code, then the conditions that
+  held (for example `W2_BENEFICIARY_FAN_IN`, `W5_RESCREEN`,
+  `W7_SYNTHETIC_CORRIDOR`). Batch scoring adds per-code recall, false
+  positives and alert counts (`financial_scoring.recall_by_code`,
+  `fp_by_code`, `alerts_by_code`). A gold.alerts table from an earlier
+  release gains the missing trailing columns at the next run; a table whose
+  columns are in another order now stops the gold job instead of taking
+  alerts positionally into the wrong columns. No alert, existing column or
+  score changes. See [aml-scoring.md](docs/aml-scoring.md#reason-codes).
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's
@@ -739,6 +749,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   The unit tests run the same guard (`tests/test_prose_style.py`). A hit
   that has to stay is listed in `scripts/prose_allowlist.txt` with a
   reason. `--only em-dashes` is now an unknown check; use `--only prose`.
+- **AML gold-finalize keeps 1,000 jobs and 1,000 stages in the Spark
+  driver's status store** (`spark.ui.retainedJobs`, `spark.ui.retainedStages`;
+  100 before, and still 100 for every other job and workload), so the
+  per-rule stage profile holds whole rules; the path-search rules (W3,
+  W17) can run more jobs than the store kept before. These keys are Lakebench's, so they
+  enter the perf-gate fingerprint of AML runs, and AML perf baselines taken
+  before this change do not compare like for like with runs after it.
 - **AML results move to workload version `aml-2`.** W4's
   `related_txn_ids` and `related_entity_ids` are sorted and cut to 1,000
   per alert (an evidence cap, as W2 already had), and the evidence maps of

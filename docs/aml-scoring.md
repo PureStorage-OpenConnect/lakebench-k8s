@@ -350,6 +350,59 @@ matching role, so accidentally scoring against them is not possible.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
+## Reason codes
+
+Every alert in `gold.alerts` carries `reason_codes` (the last column): its
+rule's base code first, then each code below whose condition holds on the
+alert. A code never changes which alerts a rule raises. The conditional codes
+reuse cut points the rules already have (the HIGH priority threshold, the
+screen's exact/fuzzy split, the rescreen pass, the corridor list's risk
+tier); none is a threshold of its own.
+
+| Rule | Base code | Conditional codes |
+|---|---|---|
+| W1_connected_components | `W1_COMPONENT` | `W1_LARGE_COMPONENT` (component of 8 or more entities, HIGH priority) |
+| W2_structuring | `W2_SUB_THRESHOLD_BURST` | `W2_BENEFICIARY_FAN_IN` (beneficiary kind), `W2_HIGH_COUNT` (6 or more in-band payments, HIGH) |
+| W3_round_tripping | `W3_CYCLE` | `W3_LONG_CYCLE` (4 or more hops, HIGH) |
+| W4_risk_propagation | `W4_FAST_PASS_THROUGH` | `W4_MULTI_CHAIN` (3 or more chains, HIGH) |
+| W5_sanctions_match | `W5_SANCTIONS_HIT` | `W5_EXACT`, `W5_FUZZY` (name match), `W5_RESCREEN` (raised by a list version) |
+| W6_pep_counterparty | `W6_PEP_HIT` | `W6_EXACT`, `W6_FUZZY` |
+| W7_cross_border_high_risk | `W7_HIGH_RISK_CORRIDOR` | `W7_FATF_BLACK`, `W7_FATF_GREY`, `W7_SYNTHETIC_CORRIDOR` |
+| W8_dormant_reactivation | `W8_DORMANCY_GAP` | none |
+| W17_layering_chain | `W17_CHAIN` | `W17_LONG_CHAIN` (5 or more hops, HIGH) |
+
+The generator's home countries include none of the FATF-listed
+jurisdictions, so on generated corpora W7 alerts carry
+`W7_SYNTHETIC_CORRIDOR` and the two FATF codes are listed with no alerts.
+
+Batch scoring splits each designated rule's recall and false-positive rate by
+code (`financial_scoring.recall_by_code`, `fp_by_code`, `alerts_by_code`,
+each `{rule: {code: value}}`): a code's recall is the share of the rule's
+target typology's instances (counted as typology recall counts them) with a
+planted payment in an alert of that rule carrying the code, 0.0 when no alert
+carries it (`alerts_by_code` then reads 0), and its false-positive rate is 1
+minus the share of the rule's alerts carrying the code that touch a payment
+of that typology, over the alerts with a related payment as the rule's
+false-positive rate counts them (an alert counts once per code it carries;
+null when no such alert carries the code). When the target typology has no
+instances in the corpus, every code's recall is null, as the typology's is.
+Because every alert carries its base code, the base code's figures are the
+rule's own. Only rules that ran are split. When an alert carries no code, or
+the alerts predate the column, the blocks are empty and
+`financial_scoring.by_code_status` says why. `reason_code_vocabulary` is a
+digest of the code list the run used. A rule's evidence-cap label (below)
+applies to each of its codes. Continuous runs are not split by code in v1.7.
+
+Two diagnostic counts sit beside the scores and are not results:
+`financial_scoring.nonplanted_alerts_by_rule` (per rule with a target
+typology, the alerts that touch none of its planted payments, counted on
+`gold.alerts` before the TM layer, so no Lakebench cap truncates the count;
+an evidence cap can still make an alert whose planted payments were cut read
+non-planted, which `evidence_capped_alerts_by_rule` shows) and
+`financial_scoring.customer_count` (customers in `silver.entities`). They
+feed the published limitation on how W5 and W6 non-planted alerts per
+customer grow with scale.
+
 ## Per-alert evidence caps
 
 Some rules cut an alert's related-transaction list so one alert row cannot
@@ -526,8 +579,9 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   outside `rule_elapsed_s`. Three flags say how far the numbers can be
   trusted: `complete: false` when the driver's status listener had not
   caught up within 5 seconds, `truncated: true` when the store had already
-  dropped some of the rule's jobs or stages (it keeps the last 100 of
-  each), and `lossy: true` when the listener dropped events during the
+  dropped some of the rule's jobs or stages (for AML gold-finalize it keeps
+  the last 1,000 of each, enough for a whole rule; 100 for every other
+  job), and `lossy: true` when the listener dropped events during the
   rule, so task totals are low. When the starting point could not be read,
   `truncated` and `lossy` are both true. The 5 second wait covers every
   listener queue, so with Spark's event log turned on `complete` can read

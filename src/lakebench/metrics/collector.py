@@ -436,7 +436,9 @@ class PipelineMetrics:
     # "fp_rate", "run_id", "computed_by", "evidence_capped_alerts_by_rule"
     # (rule -> alerts an evidence cap cut), "recall_bounded_by_evidence_cap"
     # (typology -> those of its designated rules), and per typology
-    # "bounded_by_evidence_cap"}. The scorecard reads this to render
+    # "bounded_by_evidence_cap", and per reason code "recall_by_code",
+    # "fp_by_code", "alerts_by_code" ({rule: {code: value}}), "by_code_status",
+    # "reason_code_vocabulary"}. The scorecard reads this to render
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 

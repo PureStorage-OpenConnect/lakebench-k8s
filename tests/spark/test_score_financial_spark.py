@@ -324,3 +324,28 @@ def test_recall_of_a_rule_with_a_cut_alert_is_labelled_bounded(spark):
     _, s = compute_scores(spark, _manifest(spark), uncut, status)
     assert s["evidence_capped_alerts_by_rule"] == {}
     assert s["recall_bounded_by_evidence_cap"] == {}
+
+
+def test_nonplanted_alerts_are_counted_per_rule(spark):
+    """AML-4 (diagnostic): per rule with a target, the alerts touching no
+    payment of that typology. One on-target and two off-target W5 alerts."""
+    from score_financial import compute_scores
+
+    status = STATUS + [
+        {"rule_id": "W5_sanctions_match", "status": "ran", "target_typology": "fan_out"}
+    ]
+    alerts = _alerts(
+        spark,
+        [
+            ("s1", "W5_sanctions_match", ["u1"]),
+            ("s2", "W5_sanctions_match", ["b1"]),
+            ("s3", "W5_sanctions_match", ["u4"]),
+            ("a1", "W2_structuring", ["u1"]),
+        ],
+    )
+    _, s = compute_scores(spark, _manifest(spark), alerts, status)
+    assert s["nonplanted_alerts_by_rule"]["W5_sanctions_match"] == 2
+    assert s["nonplanted_alerts_by_rule"]["W2_structuring"] == 0
+    # A targeted rule with no alerts reads 0, not absent.
+    assert s["nonplanted_alerts_by_rule"]["W8_dormant_reactivation"] == 0
+    assert s["fp_rate_by_rule"]["W5_sanctions_match"] == pytest.approx(2 / 3)

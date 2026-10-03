@@ -2781,15 +2781,47 @@ def _status_events_dropped(jsc):
     return int(registry.counter("queue.appStatus.numDroppedEvents").getCount())
 
 
+def _store_jobs(store, newest_first=False):
+    """Yield (job id, status, completion epoch ms or None, job group) of the
+    jobs the status store holds, read one at a time over py4j (so a caller
+    that stops early pays only for what it read). AppStatusStore.jobsList
+    lists them newest job id first (checked on Spark 4.0.1 and 4.1.1);
+    oldest first unless ``newest_first``."""
+    jobs = store.jobsList(None)
+    n = int(jobs.size())
+    for i in range(n) if newest_first else range(n - 1, -1, -1):
+        j = jobs.apply(i)
+        comp = j.completionTime()
+        group = j.jobGroup()
+        yield (
+            int(j.jobId()),
+            j.status().toString(),
+            int(comp.get().getTime()) if comp.isDefined() else None,
+            group.get() if group.isDefined() else None,
+        )
+
+
+def _jobs_evicted_since(jobs, mark_ms):
+    """Whether the status store may have dropped jobs that completed after
+    epoch ms *mark_ms*. It evicts completed jobs oldest completion first, so
+    while it still holds a job that completed before the mark, no job that
+    completed after it is gone. Without such a job, say yes."""
+    return not any(
+        comp is not None and comp < mark_ms and status not in ("RUNNING", "UNKNOWN")
+        for _id, status, comp, _group in jobs
+    )
+
+
 def rule_profile_mark(spark):
     """Where the application stands when a rule's job group is set: jobs
-    submitted so far (DAGScheduler.numTotalJobs) and status events dropped
-    so far. Pass it to ``rule_stage_profile``. None when it cannot be read."""
+    submitted so far (DAGScheduler.numTotalJobs), status events dropped so
+    far and the JVM clock (epoch ms). Pass it to ``rule_stage_profile``. None when it cannot be read."""
     try:
         jsc = spark.sparkContext._jsc.sc()
         return {
             "jobs": int(jsc.dagScheduler().numTotalJobs()),
             "dropped": _status_events_dropped(jsc),
+            "ms": int(spark.sparkContext._jvm.System.currentTimeMillis()),
         }
     except Exception:  # noqa: BLE001 -- diagnostic only
         return None
@@ -2821,7 +2853,11 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     - ``truncated=true``: the store had already dropped some of the
       group's jobs or stages (it keeps ``spark.ui.retainedJobs`` jobs and
       ``spark.ui.retainedStages`` stages). Dropped jobs are not listed under
-      the group at all, so they are found by count against ``mark``;
+      the group at all; they are found against ``mark``: the store drops its
+      completed jobs oldest completion first, so the profile is complete
+      only while the store still holds a job that completed before the
+      rule's mark. Jobs since the mark that ran outside the group are
+      logged as ``[stage-profile-foreign]`` for diagnosis;
     - ``lossy=true``: the listener queue dropped events during the rule
       (against ``mark``), so the stored task totals are low.
 
@@ -2849,7 +2885,22 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         job_ids = list(tracker.getJobIdsForGroup(group))
         truncated = lossy = mark is None
         if mark is not None:
-            truncated = len(job_ids) < int(jsc.dagScheduler().numTotalJobs()) - mark["jobs"]
+            # Stops at the first held job that completed before the mark
+            # (usually among the oldest few).
+            truncated = _jobs_evicted_since(_store_jobs(store), mark["ms"])
+            # Diagnostic: jobs since the mark that ran outside the rule's
+            # group, read from the newest back to the mark.
+            foreign = []
+            for i, _s, _c, g in _store_jobs(store, newest_first=True):
+                if i < mark["jobs"]:
+                    break
+                if g != group:
+                    foreign.append((i, g))
+            if foreign:
+                log(
+                    f"[stage-profile-foreign] rule={rule_id} group={group} jobs={len(foreign)} "
+                    f"groups={sorted({str(g) for _, g in foreign})[:5]}"
+                )
             lossy = _status_events_dropped(jsc) > mark["dropped"]
         stage_ids = set()
         for job_id in job_ids:
@@ -2922,3 +2973,48 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
             f"stages={len(stages)} {flags} name={r['name']}"
         )
     return rows
+
+
+class AlertColumnsError(RuntimeError):
+    """An alerts table whose columns are not the expected ones in order."""
+
+
+def ensure_alert_columns(spark, fq_table, columns):
+    """Bring alerts table *fq_table* up to *columns* ((name, type, ...) in
+    table order, detection_rules.ALERT_COLUMNS): when the table's columns
+    are a leading part of *columns*, append the missing trailing ones in
+    order through ensure_column_with_retry. Then the table must hold exactly
+    those (name, type) pairs in that order.
+
+    A reused catalog's table from an older release lacks only trailing
+    columns (detected_ts, reason_codes), which ALTER ... ADD COLUMNS appends
+    in place. Any other difference raises AlertColumnsError before anything
+    is altered: the detection loop writes alerts with a positional
+    INSERT ... SELECT *, so a reordered or retyped table would take columns
+    into each other's slots. Returns the names added.
+    """
+    from pyspark.sql.types import _parse_datatype_string
+
+    want = [(name, _parse_datatype_string(sql_type)) for name, sql_type, *_ in columns]
+
+    def _got():
+        return [(f.name, f.dataType) for f in spark.table(fq_table).schema.fields]
+
+    def _refuse(got):
+        return AlertColumnsError(
+            f"{fq_table} columns {[(n, t.simpleString()) for n, t in got]} are not "
+            f"{[(n, t.simpleString()) for n, t in want]} in order; alerts are written "
+            "positionally, so this table cannot take them (drop or rebuild it)"
+        )
+
+    got = _got()
+    if got != want[: len(got)]:
+        raise _refuse(got)
+    added = []
+    for name, sql_type, *_ in columns[len(got) :]:
+        if ensure_column_with_retry(spark, fq_table, name, sql_type):
+            added.append(name)
+    got = _got()
+    if got != want:
+        raise _refuse(got)
+    return added

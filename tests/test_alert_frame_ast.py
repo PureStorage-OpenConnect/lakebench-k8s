@@ -327,23 +327,34 @@ def _ddl_column_names(text: str) -> list[str]:
     return cols
 
 
-def test_other_alert_ddl_copies_match_alert_columns():
-    """Two gold.alerts column lists are not built from ALERT_COLUMNS yet
-    (replay's target table and empty schema, deploy's DDL). A column
-    appended to ALERT_COLUMNS, or a type changed, without them fails here.
-    (A reused replay target table still needs its own upgrade for a new
-    column; replay adds only detected_ts today.)"""
-    cols = [(n, t) for n, t, _ in _alert_columns()]
-    names = [n for n, _ in cols]
-    rp = (SCRIPTS / "replay_financial.py").read_text()
-    replay_ddl = rp[rp.index("CREATE TABLE IF NOT EXISTS {args.output_alerts}") :]
-    assert _ddl_column_names(replay_ddl) == cols
-    empty = rp[rp.index("def _empty_alerts_df") :]
-    empty = empty[: empty.index("return spark.createDataFrame")]
-    import re
-
-    assert re.findall(r'"(\w+) [A-Z]', empty) == names
+def test_deploy_alert_ddl_matches_alert_columns():
+    """Replay's target table and empty schema are built from ALERT_COLUMNS;
+    deploy's gold.alerts DDL is a written copy. A column appended to
+    ALERT_COLUMNS without it fails here."""
+    names = [c[0] for c in _alert_columns()]
+    rp = ast.parse((SCRIPTS / "replay_financial.py").read_text())
+    for fn_name in ("_empty_alerts_df", "_target_ddl"):
+        fn = next(n for n in rp.body if isinstance(n, ast.FunctionDef) and n.name == fn_name)
+        loops = [n for n in ast.walk(fn) if isinstance(n, ast.comprehension)]
+        assert any(getattr(c.iter, "id", None) == "ALERT_COLUMNS" for c in loops), fn_name
     fd = (SCRIPTS.parent.parent / "deploy" / "financial_ddl.py").read_text()
     i = fd.index("related_txn_ids    ARRAY<STRING>")
     start = fd.rindex("CREATE TABLE", 0, i)
     assert [n for n, _ in _ddl_column_names(fd[start:])] == names
+
+
+def test_no_benchmark_query_reads_gold_alerts_by_position():
+    """The 19th column (reason_codes) cannot move a query's result: no
+    benchmark query selects * from gold.alerts (FQ5, FQ8 and the AML SQL
+    files name their columns)."""
+    import re
+
+    root = SCRIPTS.parent.parent
+    texts = {"benchmark/queries.py": (root / "benchmark" / "queries.py").read_text()}
+    for f in (root / "benchmark" / "queries").rglob("*.sql"):
+        texts[str(f.relative_to(root))] = f.read_text()
+    for name, text in texts.items():
+        for m in re.finditer(r"SELECT\s+(\w+\.)?\*", text, re.IGNORECASE):
+            window = text[m.start() : m.start() + 400]
+            source = window.upper().partition("FROM")[2].split("\n", 1)[0]
+            assert "ALERTS" not in source, (name, window)

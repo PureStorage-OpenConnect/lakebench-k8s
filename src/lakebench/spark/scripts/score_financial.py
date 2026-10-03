@@ -32,15 +32,18 @@ import os
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    avg,
     broadcast,
     coalesce,
     col,
+    countDistinct,
     explode,
     explode_outer,
     lit,
     when,
 )
 from pyspark.sql.functions import max as smax
+from pyspark.sql.functions import sum as ssum
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
@@ -192,6 +195,121 @@ def check_status_run(status_run_id: str, own_run_id: str) -> None:
     )
 
 
+def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
+    """Per-reason-code recall and false positives (SPEC section 8, K30): as
+    per-rule recall and FP, split by code; an alert counts once per code it
+    carries.
+
+    For a designated rule R that ran, with target typology T, and each code c
+    R can write (aml_reason_codes.REASON_CODES, plus any other code seen):
+
+    - ``recall_by_code[R][c]``: the share of T's instances (all of them, as
+      typology recall counts them) with a participant payment in an alert of
+      R carrying c; 0.0 when no alert carries c (``alerts_by_code`` says so);
+    - ``fp_by_code[R][c]``: 1 minus the share of R's alerts carrying c that
+      touch a payment of T, over the alerts with a related payment, as
+      ``fp_rate_by_rule`` counts them (null when no such alert carries c);
+    - ``alerts_by_code[R][c]``: how many of R's alerts carry c.
+
+    Every alert carries its rule's base code, so the base code's figures are
+    R's own and R's per-code hit sets union to R's. That needs every alert to
+    carry a code: an alert with none would drop out of every per-code
+    figure, so then (or when the alerts have no reason_codes column) every
+    per-code block is empty and ``by_code_status`` says why. A few grouped
+    Spark jobs for all rules together."""
+    from aml_reason_codes import REASON_CODES, vocabulary_digest
+    from detection_rules import HIGH_PRIORITY_CUTOFFS
+    from pyspark.sql.functions import size
+
+    out: dict = {
+        "recall_by_code": {},
+        "fp_by_code": {},
+        "alerts_by_code": {},
+        "reason_code_vocabulary": vocabulary_digest(HIGH_PRIORITY_CUTOFFS),
+    }
+    if "reason_codes" not in alerts.columns:
+        out["by_code_status"] = "not_recorded: the alerts have no reason_codes column"
+        return out
+    uncoded = alerts.where(coalesce(size(col("reason_codes")), lit(-1)) <= 0).count()
+    if uncoded:
+        out["by_code_status"] = f"not_scored: {uncoded} alerts carry no reason code"
+        return out
+    rules = sorted(r for r in ran if r in target_of)
+    if not rules:
+        out["by_code_status"] = "not_scored: no designated rule ran"
+        return out
+    targets = spark.createDataFrame(
+        [(r, target_of[r]) for r in rules], "rule_id STRING, typology_type STRING"
+    )
+    codes = (
+        alerts.select("alert_id", "rule_id", explode(col("reason_codes")).alias("code"))
+        .join(broadcast(targets.select("rule_id")), "rule_id")
+        .distinct()
+        .cache()
+    )
+    n_by = {
+        (r["rule_id"], r["code"]): int(r["count"])
+        for r in codes.groupBy("rule_id", "code").count().collect()
+    }
+    # Alerts with at least one related payment, per code (fp_rate_by_rule's base).
+    code_uetrs = codes.join(alert_uetrs, ["alert_id", "rule_id"]).cache()
+    n_with_txn = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in code_uetrs.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    n_inst = {
+        r["typology_type"]: int(r["n"])
+        for r in manifest_uetrs.groupBy("typology_type")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    on_target = (
+        code_uetrs.join(broadcast(targets), "rule_id")
+        .join(
+            manifest_uetrs.where(col("uetr").isNotNull()).select(
+                "uetr", "typology_type", "typology_id"
+            ),
+            ["uetr", "typology_type"],
+        )
+        .cache()
+    )
+    hit_inst = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("typology_id").alias("n"))
+        .collect()
+    }
+    hit_alerts = {
+        (r["rule_id"], r["code"]): int(r["n"])
+        for r in on_target.groupBy("rule_id", "code")
+        .agg(countDistinct("alert_id").alias("n"))
+        .collect()
+    }
+    for frame in (on_target, code_uetrs, codes):
+        frame.unpersist()
+    recall: dict = {}
+    fp: dict = {}
+    counts: dict = {}
+    for rule in rules:
+        seen = {c for (r, c) in n_by if r == rule and c is not None}
+        vocab = list(REASON_CODES.get(rule, ())) + sorted(seen - set(REASON_CODES.get(rule, ())))
+        total = n_inst.get(target_of[rule], 0)
+        recall[rule] = {c: (hit_inst.get((rule, c), 0) / total if total else None) for c in vocab}
+        fp[rule] = {
+            c: (
+                1.0 - hit_alerts.get((rule, c), 0) / n_with_txn[(rule, c)]
+                if n_with_txn.get((rule, c))
+                else None
+            )
+            for c in vocab
+        }
+        counts[rule] = {c: n_by.get((rule, c), 0) for c in vocab}
+    out.update(recall_by_code=recall, fp_by_code=fp, alerts_by_code=counts, by_code_status="scored")
+    return out
+
+
 def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     """Per-typology recall and per-rule false positives for one run.
 
@@ -310,6 +428,12 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # rule: alerts of a rule touching no txn of that rule's target typology.
     total_alerts = alerts.count()
     fp_by_rule: dict[str, float | None] = {}
+    # Alerts of a rule that touch no payment of its target typology, per
+    # rule with a target (a diagnostic count for the screening limitation:
+    # W5/W6 non-planted alerts grow with scale). Counted before TM, so no
+    # Lakebench cap truncates the count; an evidence cap can still make a
+    # planted alert read non-planted (see evidence_capped_alerts_by_rule).
+    nonplanted_by_rule: dict[str, int] = {}
     txn_precision_by_rule: dict[str, float] = {}
     chance_by_rule: dict[str, float] = {}
     if total_alerts > 0:
@@ -318,6 +442,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         fp_alerts = total_alerts - tp_global
         fp_rate: float | None = fp_alerts / total_alerts
         targeted = {rid: typ for typ, rids in designated.items() for rid in rids}
+        nonplanted_by_rule.update(dict.fromkeys(targeted, 0))
         target_df = spark.createDataFrame(
             list(targeted.items()) or [("", "")], "rule_id STRING, target STRING"
         )
@@ -341,8 +466,16 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         # that are planted target txns, so one giant alert over the whole
         # corpus cannot score itself perfect.
         per_alert = refs.groupBy("alert_id", "rule_id").agg(smax("on_target").alias("hit"))
-        for row in per_alert.groupBy("rule_id").agg({"hit": "avg"}).collect():
-            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(hit)"])
+        for row in (
+            per_alert.groupBy("rule_id")
+            .agg(
+                avg(col("hit")).alias("hit_avg"),
+                ssum(when(col("hit") == lit(0), lit(1)).otherwise(lit(0))).alias("off"),
+            )
+            .collect()
+        ):
+            fp_by_rule[row["rule_id"]] = 1.0 - float(row["hit_avg"])
+            nonplanted_by_rule[row["rule_id"]] = int(row["off"])
         for row in refs.groupBy("rule_id").agg({"on_target": "avg"}).collect():
             txn_precision_by_rule[row["rule_id"]] = float(row["avg(on_target)"])
         # Per-rule chance: the share of random-control instances a rule's
@@ -396,6 +529,14 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # payments against related_txn_ids, so a cut alert can miss planted
     # payments past the cut: recall for a typology such a rule detects is
     # bounded by a Lakebench-imposed cap, and says so (invariant 6).
+    by_code = _scores_by_code(
+        spark,
+        alerts,
+        manifest_uetrs,
+        alert_uetrs,
+        {rid: typ for typ, rids in designated.items() for rid in rids},
+        {rid for _, rid in pairs},
+    )
     capped_by_rule: dict[str, int] = {}
     if "evidence" in alerts.columns:
         for row in (
@@ -411,6 +552,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         if any(capped_by_rule.get(r) for r in rids)
     }
     summary = {
+        **by_code,
         "evidence_capped_alerts_by_rule": dict(sorted(capped_by_rule.items())),
         # typology -> its designated rules with a cut alert: that typology's
         # recall is bounded by an evidence cap.
@@ -421,6 +563,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         "fp_alerts": int(fp_alerts),
         "fp_rate": fp_rate,
         "fp_rate_by_rule": fp_by_rule,
+        "nonplanted_alerts_by_rule": dict(sorted(nonplanted_by_rule.items())),
         "txn_precision_by_rule": txn_precision_by_rule,
         "chance_by_rule": chance_by_rule,
         "random_control_floor": (float(random_row[0]["incidental_recall"]) if random_row else None),
@@ -506,6 +649,15 @@ def main() -> None:
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)
     summary["subject_customer_check"] = check
+    # Customers in silver.entities (is_customer): the denominator of the
+    # per-customer non-planted alert rate (diagnostic). None when unreadable.
+    try:
+        summary["customer_count"] = int(
+            spark.table(f"{CATALOG}.{SILVER_ENTITIES}").where(col("is_customer")).count()
+        )
+    except Exception as e:  # noqa: BLE001 -- diagnostic only
+        log(f"[score] customer count unavailable: {type(e).__name__}: {e}"[:300])
+        summary["customer_count"] = None
     log(
         f"[score] subject-customer-check status={check['status']} "
         f"subjects={check.get('subjects')} unmapped={check.get('unmapped')} "

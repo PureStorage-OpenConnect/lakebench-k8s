@@ -114,7 +114,7 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
     ),
     # Library modules the AML jobs import: detection rules (replay, gold) and
     # the P10 operations layer (gold, and the executors' workflow replay).
-    "aml-rules": _scripts("detection_rules.py", "tm_operations.py"),
+    "aml-rules": _scripts("detection_rules.py", "tm_operations.py", "aml_reason_codes.py"),
     "aml-jobs": _scripts(
         "bronze_verify_financial.py",
         "silver_build_financial.py",
