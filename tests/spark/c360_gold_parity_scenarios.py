@@ -105,7 +105,6 @@ def _env(work: str, fmt: str, gold_table: str) -> None:
 def batch_gold(spark, work: str, fmt: str, gold_table: str) -> dict:
     _env(work, fmt, gold_table)
     name = "gold_finalize" if fmt == "iceberg" else "gold_finalize_delta"
-    sys.modules.pop(name, None)
     importlib.import_module(name).main()
     return table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
 
@@ -119,7 +118,6 @@ def stream_ticks(spark, work: str, fmt: str, parts: list, gold_table: str) -> li
     SparkSession.readStream = property(lambda self: _RateStream())  # type: ignore[assignment]
     _RateStream.handler = None
     _env(work, fmt, gold_table)
-    sys.modules.pop(name, None)
     module = importlib.import_module(name)
     tick = _RateStream.handler
     if tick is None or getattr(tick, "__module__", None) != module.__name__:
