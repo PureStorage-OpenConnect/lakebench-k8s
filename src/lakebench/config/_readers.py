@@ -321,6 +321,7 @@ READERS: dict[str, str] = {
     "architecture.benchmark.streams": "lakebench.cli._query:benchmark",
     "architecture.benchmark.cache": "lakebench.cli._query:benchmark",
     "architecture.benchmark.iterations": "lakebench.cli._query:benchmark",
+    "architecture.benchmark.investigator_sessions": "lakebench.cli._sustained:_run_sustained",
     "architecture.benchmark.maintenance_settle.enabled": (
         "lakebench.cli._run:_settle_after_maintenance"
     ),
