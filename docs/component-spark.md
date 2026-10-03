@@ -78,9 +78,19 @@ with its default value.
 
 ```yaml
 images:
-  spark: "apache/spark:4.0.2-python3"   # Spark 4.0.x (default)
+  spark: "apache/spark:4.1.1-python3"   # Spark 4.1.x (default for the Hive recipes)
+  # spark: "apache/spark:4.0.2-python3" # Spark 4.0.x (default for Polaris, hive-delta-spark-thrift)
   # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
 ```
+
+The default image follows each recipe's release-matrix row: the Hive recipes
+(`hive-iceberg-*`, `hive-delta-spark-trino`) default to Spark 4.1.1; the
+Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`
+default to 4.0.2. A config with no recipe takes the image of the recipe its
+components name, so a recipe-less Polaris config also runs 4.0.2. The table
+format version follows the Spark minor when left at `auto`: Delta 4.1.0 on
+4.1 and 4.0.0 on 4.0; Iceberg 1.11.0 on both, with its native 4.1 runtime on
+Spark 4.1.
 
 **Supported versions:** Spark 3.5.x, 4.0.x, and 4.1.x. Spark 4.2 is not
 supported: no Iceberg release ships a runtime that works with it. The image

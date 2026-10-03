@@ -132,8 +132,8 @@ with an explicit version -- incompatible combinations are rejected at config loa
 | Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
 |-------|-------------|-------------|----------------|----------------|----------------|
 | 3.5.x | -- | -- | **Default** (java17 image) | OK (fallback default on a Java 11 image) | -- |
-| 4.0.x (default) | **Default** | -- | **Default** | OK | OK |
-| 4.1.x | -- | **Default** | **Default** | OK | OK |
+| 4.0.x (Polaris recipes, hive-delta-spark-thrift) | **Default** | -- | **Default** | OK | OK |
+| 4.1.x (Hive recipes) | -- | **Default** | **Default** | OK | OK |
 
 **Default** = auto-selected when no version specified. **OK** = accepted if user overrides. **--** = rejected.
 
@@ -188,7 +188,7 @@ runtime jar.
 Example:
 ```yaml
 images:
-  spark: apache/spark:4.1.1-python3    # Opt into Spark 4.1
+  spark: apache/spark:4.1.1-python3    # the Hive recipes' default
 architecture:
   table_format:
     type: delta

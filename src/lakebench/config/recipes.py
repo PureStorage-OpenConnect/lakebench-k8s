@@ -24,7 +24,7 @@ from typing import Any
 
 RECIPES: dict[str, dict[str, Any]] = {
     "hive-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg"},
@@ -32,7 +32,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg"},
@@ -40,7 +40,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg"},
@@ -72,7 +72,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg"},
@@ -90,7 +90,7 @@ RECIPES: dict[str, dict[str, Any]] = {
     # -- Hive + Delta Lake (v1.2) --
     # delta.version omitted so DeltaConfig.version="auto" resolves per Spark image.
     "hive-delta-spark-trino": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "delta"},

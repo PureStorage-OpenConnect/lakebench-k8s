@@ -61,7 +61,7 @@ config file. The image is shared with Spark pipeline jobs under `images.spark`.
 
 ```yaml
 images:
-  spark: "apache/spark:4.0.2-python3"    # Shared with pipeline Spark jobs
+  spark: "apache/spark:4.1.1-python3"    # Shared with pipeline Spark jobs
 
 architecture:
   query_engine:

@@ -313,7 +313,7 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.x, 4.0.x (default 4.0.2), 4.1.x (4.2 not supported) |
+| Apache Spark | 3.5.x, 4.0.x (default on the Polaris recipes and hive-delta-spark-thrift: 4.0.2), 4.1.x (default on the Hive recipes: 4.1.1; 4.2 not supported) |
 | Spark Operator | 2.5.1 (Kubeflow) |
 | Apache Iceberg | 1.11.0 (1.10.1 with Spark 3.5.4 on its Java 11 image, and in local mode) |
 | Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |

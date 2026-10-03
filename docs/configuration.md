@@ -312,7 +312,7 @@ name: my-lakehouse
 # registries or custom builds.
 images:
   datagen: docker.io/sillidata/lb-datagen:1.6.0
-  spark: apache/spark:4.0.2-python3
+  spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
@@ -574,7 +574,7 @@ Container images for every deployed component. Override for air-gapped registrie
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:1.6.0` | advanced | Data generator image. Pinned by digest `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for provenance. Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`); this build cuts datagen pod memory. |
-| `images.spark` | string | `apache/spark:4.0.2-python3` | advanced | Spark runtime image. Spark 4.x images are auto-detected. |
+| `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
 | `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.6.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
@@ -1213,7 +1213,7 @@ useful for air-gapped environments or when running custom builds:
 ```yaml
 images:
   datagen: my-registry.internal/lakebench/datagen:v2
-  spark: my-registry.internal/apache/spark:4.0.2-python3
+  spark: my-registry.internal/apache/spark:4.1.1-python3
   trino: my-registry.internal/trinodb/trino:483
   pull_policy: Always
 ```

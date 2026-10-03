@@ -232,6 +232,13 @@ def experiment_inputs(
     dg = workload.datagen
     schema = workload.schema_type.value
     images = cfg.images
+    # A --local run submits to its own Spark image, not images.spark.
+    if system == "local":
+        from lakebench.modules.pipeline_engines.spark.local_job import DEFAULT_SPARK_IMAGE
+
+        spark_image = DEFAULT_SPARK_IMAGE
+    else:
+        spark_image = images.spark
 
     seed: int | None
     seed_error = None
@@ -388,7 +395,7 @@ def experiment_inputs(
             ),
             "catalog": {"type": catalog, "version": catalog_version},
             "table_format": {"type": table_format, "version": format_version},
-            "pipeline_engine": {"type": arch.pipeline_engine.value, "image": images.spark},
+            "pipeline_engine": {"type": arch.pipeline_engine.value, "image": spark_image},
             "query_engine": {"type": query_engine, "version": engine_version},
             # How the query engine reaches the tables: through the catalog
             # (Trino, Spark Thrift) or straight from object storage (DuckDB

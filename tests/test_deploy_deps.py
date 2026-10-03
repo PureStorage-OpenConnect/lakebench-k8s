@@ -261,7 +261,7 @@ def test_same_config_redeploy_renders_an_identical_deployment(recording_k8s, mon
 
 def test_a_changed_image_renders_a_new_pod_template():
     a = _cfg()
-    b = _cfg(images={"spark": "apache/spark:4.1.1-python3"})
+    b = _cfg(images={"spark": "apache/spark:4.0.2-python3"})
     eng = MagicMock(renderer=TemplateRenderer(), dry_run=False)
 
     def template(cfg):
@@ -299,7 +299,7 @@ def test_a_changed_request_replaces_the_tools_map_and_warns_about_active_jobs(
         {"metadata": {"name": "lb-old"}, "status": {"applicationState": {"state": "COMPLETED"}}},
         namespace=NS,
     )
-    engine.config = _cfg(images={"spark": "apache/spark:4.1.1-python3"})
+    engine.config = _cfg(images={"spark": "apache/spark:4.0.2-python3"})
     new = req.select_request(engine.config).request_sha256
 
     result = DependencyServerDeployer(engine).deploy()
