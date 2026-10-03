@@ -21,9 +21,11 @@ Lifecycle, all on the CLI host:
    finished one. A failed write fails the generate.
 2. ``record_cycle``: after each cycle's datagen Job succeeded, a
    read-modify-write that adds the cycle. It builds only on a marker this run
-   wrote for the same generation with every earlier cycle complete;
-   otherwise it records this cycle alone (an incomplete series). Never
-   raises: a failed write leaves the marker incomplete, the safe side.
+   wrote for the same generation with every earlier cycle complete. Behind
+   its own marker it writes nothing (the marker stays incomplete); over
+   another run's marker it writes nothing and says so (``conflict``); with
+   no marker at all it records the cycle alone. Never raises: a failed read
+   or write leaves the marker as it was, the safe side.
 3. ``series_problem``: before a run that reuses the corpus (``--skip-generate``,
    or a single-cycle run without ``--generate``), the marker must be
    complete for the config's cycle count and windows, and its generation
@@ -259,6 +261,11 @@ def series_problem(cfg: Any, read: SeriesRead) -> str | None:
             f"no series marker at {read.where}: a multi-cycle run reuses only a corpus a "
             "multi-cycle run generated and finished"
         )
+    if series.get("clearing") is True:
+        return (
+            "a clear of the datagen prefix stopped part way (the series marker says a "
+            "clear is under way)"
+        )
     if series.get("format") != SERIES_FORMAT:
         return f"the series marker has format {series.get('format')!r}, not {SERIES_FORMAT}"
     schema = cfg.architecture.workload.schema_type.value
@@ -441,13 +448,28 @@ def mark_clearing(cfg: Any, s3: Any, run_id: str) -> str:
     return series_key(datagen_scope(prefix))
 
 
+class _ReadFailed(Exception):
+    """The marker could be there but could not be read."""
+
+
 def _get(cfg: Any, s3: Any) -> dict[str, Any] | None:
+    """The marker as stored; None when there is none (or it is not JSON).
+    Raises ``_ReadFailed`` when S3 could not answer (a transient error is
+    never taken for "no marker", which would let a cycle be recorded over
+    another run's marker)."""
     bucket, prefix = _where(cfg)
     client = s3.raw_client
     try:
         raw = client.get_object(Bucket=bucket, Key=series_key(datagen_scope(prefix)))["Body"]
-        data = json.loads(raw.read())
-    except Exception:  # noqa: BLE001 -- no usable prior marker
+        body = raw.read()
+    except Exception as e:  # noqa: BLE001 -- classified below
+        code = str(getattr(e, "response", {}).get("Error", {}).get("Code", ""))
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        raise _ReadFailed(f"{type(e).__name__}: {str(e)[:200]}") from e
+    try:
+        data = json.loads(body)
+    except ValueError:
         return None
     return data if isinstance(data, dict) else None
 

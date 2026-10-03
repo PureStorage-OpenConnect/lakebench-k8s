@@ -291,6 +291,24 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool 
     return _rule(cfg, bucket, s3, strict=strict)
 
 
+def _holds_corpus(cfg: Any, s3: Any, bucket: str, prefix: str) -> bool:
+    """Whether the datagen prefix holds anything but Lakebench's own: an
+    object other than the bucket owner marker and the corpus series marker
+    (a prefix holding only the marker of a clear or a generate that stopped
+    is empty). Raises when the prefix cannot be listed; when the marker
+    check itself cannot list, the prefix counts as non-empty."""
+    if not s3.has_user_objects(bucket, prefix + "/"):
+        return False
+    try:
+        from lakebench.corpus_digest import datagen_scope, series_key
+        from lakebench.s3.client import list_user_keys
+
+        keys = list_user_keys(s3.raw_client, bucket, prefix + "/", limit=2)
+        return keys != [series_key(datagen_scope(prefix))]
+    except Exception:  # noqa: BLE001 -- the safe side: a corpus may be there
+        return True
+
+
 def _reuse_hint(cfg: Any) -> str:
     """How to keep the corpus instead of regenerating it, for *cfg*."""
     from lakebench.config.c360_run import run_cycles
@@ -396,7 +414,9 @@ def bronze_prefix_gate(
         if not s3.bucket_exists(bucket):
             _clear_clock_best_effort(cfg)
             return BronzeGateResult(True, bucket, prefix, owned=False)
-        nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
+        nonempty = (
+            _holds_corpus(cfg, s3, bucket, prefix) if prefix else s3.has_user_objects(bucket, "")
+        )
     except Exception as e:  # noqa: BLE001
         return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
     if not nonempty:
@@ -751,7 +771,7 @@ class DatagenDeployer:
                     prefix,
                 )
             return
-        if not s3.has_user_objects(bucket, prefix + "/"):
+        if not _holds_corpus(self.config, s3, bucket, prefix):
             return
         if self.allow_stale_bronze:
             logger.warning(

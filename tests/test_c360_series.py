@@ -433,3 +433,77 @@ def test_generate_begins_and_finishes_its_series(tmp_path, monkeypatch):
     body = json.loads(t._FakeS3.store[key])
     assert body["cycles_complete"] == [0] and body["generation"]["image_digest"] == D1
     assert "clearing" not in body
+
+
+def test_continuous_reset_keeps_the_clearing_marker(monkeypatch):
+    """The continuous reset clears the datagen prefix too: the marker that
+    says a clear is under way is written first and kept by the clear."""
+    from unittest.mock import MagicMock
+
+    from lakebench.cli import _sustained
+    from tests.test_c360_continuous_reset import _c360_cfg
+
+    cfg = _c360_cfg()
+    monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
+    client = MagicMock()
+    client.delete_prefix.return_value = 0
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
+    _sustained._reset_continuous_state(cfg, clear_raw=True)
+    put = client.raw_client.put_object.call_args.kwargs
+    assert put["Key"] == SERIES and json.loads(put["Body"])["clearing"] is True
+    last = client.delete_prefix.call_args_list[-1]
+    assert last.args[1] == "customer/interactions"
+    assert last.kwargs["keep_keys"] == frozenset({SERIES})
+    assert all(
+        c.kwargs["keep_keys"] == frozenset() for c in client.delete_prefix.call_args_list[:-1]
+    )
+
+
+def test_clearing_marker_refuses_reuse():
+    cfg = _cfg(1)
+    s3 = S3()
+    corpus.mark_clearing(cfg, s3, "r")
+    why = corpus.series_problem(cfg, corpus.read_series(cfg, s3))
+    assert why is not None and "clear of the datagen prefix stopped part way" in why
+
+
+def test_a_transient_read_is_not_taken_for_no_marker():
+    """A GET that fails for another reason than a missing key leaves the
+    marker alone: recording the cycle alone could claim another run's corpus."""
+    from botocore.exceptions import ClientError
+
+    class Flaky(S3):
+        @property
+        def raw_client(self):
+            boto = MemoryBoto(self.store)
+
+            def boom(**kw):
+                raise ClientError({"Error": {"Code": "SlowDown", "Message": "x"}}, "GetObject")
+
+            boto.get_object = boom  # type: ignore[method-assign]
+            return boto
+
+    s3 = Flaky()
+    assert corpus.record_cycle(_cfg(1), s3, 0, 1, "r", D1, None) == "unwritten"
+    assert s3.store == {}
+
+
+def test_clean_bronze_keeps_the_marker_until_the_bucket_is_empty():
+    from lakebench.cli._clean import _empty_layer
+
+    calls: list = []
+
+    class Bucket(S3):
+        def empty_bucket(self, bucket, progress_callback=None, keep_prefixes=()):
+            calls.append(("empty", tuple(keep_prefixes), dict(self.store)))
+            return 7
+
+    s3 = Bucket()
+    boto = MemoryBoto(s3.store)
+    boto.delete_object = lambda **kw: calls.append(("delete", kw["Key"]))  # type: ignore[attr-defined]
+    type(s3).raw_client = property(lambda self: boto)  # type: ignore[assignment]
+    assert _empty_layer(_cfg(1), s3, "bronze", BUCKET, None) == 7
+    (_, keep, before), last = calls
+    assert keep == (".lakebench/", SERIES)
+    assert json.loads(before[(BUCKET, SERIES)])["clearing"] is True
+    assert last == ("delete", SERIES)

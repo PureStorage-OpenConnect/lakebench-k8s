@@ -365,9 +365,19 @@ class TestMultiCycleGate:
                 [OWNER_MARKER_KEY, f"{PREFIX}/part-0"]
             )
 
-    def test_leftover_series_marker_alone_is_a_corpus(self):
+    def test_a_prefix_holding_only_the_series_marker_is_empty(self):
+        """A marker with no part file beside it (a clear or a generate that
+        stopped before writing data) is no corpus: the gate proceeds, on an
+        owned or unowned bucket, and records nothing stale."""
+        for owned in (True, False):
+            with recording() as rec:
+                cfg = _seed(rec, owned=owned, objects=[SERIES_KEY])
+                got = _gate(cfg)
+                assert got.proceed and not got.stale_allowed, owned
+
+    def test_series_marker_beside_part_files_is_a_corpus(self):
         with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/_corpus/series.json"])
+            cfg = _seed(rec, owned=True, objects=[SERIES_KEY, f"{PREFIX}/part-0"])
             assert not _gate(cfg).proceed
 
     def test_regenerate_keeps_ownership_marker(self):

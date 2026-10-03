@@ -39,6 +39,16 @@ class MemoryBoto:
 
         return _Paginator()
 
+    def list_objects_v2(
+        self,
+        Bucket: str,  # noqa: N803
+        Prefix: str = "",  # noqa: N803
+        MaxKeys: int = 1000,  # noqa: N803
+        **_kw: Any,
+    ) -> dict[str, Any]:
+        keys = sorted(k for b, k in self.store if b == Bucket and k.startswith(Prefix))[:MaxKeys]
+        return {"KeyCount": len(keys), "Contents": [{"Key": k} for k in keys]}
+
     def get_object(self, Bucket: str, Key: str, **_kw: Any) -> dict[str, Any]:  # noqa: N803
         try:
             body = self.store[(Bucket, Key)]
