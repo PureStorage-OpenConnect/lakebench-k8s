@@ -2781,24 +2781,24 @@ def _status_events_dropped(jsc):
     return int(registry.counter("queue.appStatus.numDroppedEvents").getCount())
 
 
-def _store_jobs(store):
-    """(job id, status, completion epoch ms or None, job group) of every job
-    the status store holds."""
+def _store_jobs(store, newest_first=False):
+    """Yield (job id, status, completion epoch ms or None, job group) of the
+    jobs the status store holds, read one at a time over py4j (so a caller
+    that stops early pays only for what it read). AppStatusStore.jobsList
+    lists them newest job id first (checked on Spark 4.0.1 and 4.1.1);
+    oldest first unless ``newest_first``."""
     jobs = store.jobsList(None)
-    out = []
-    for i in range(int(jobs.size())):
+    n = int(jobs.size())
+    for i in range(n) if newest_first else range(n - 1, -1, -1):
         j = jobs.apply(i)
         comp = j.completionTime()
         group = j.jobGroup()
-        out.append(
-            (
-                int(j.jobId()),
-                j.status().toString(),
-                int(comp.get().getTime()) if comp.isDefined() else None,
-                group.get() if group.isDefined() else None,
-            )
+        yield (
+            int(j.jobId()),
+            j.status().toString(),
+            int(comp.get().getTime()) if comp.isDefined() else None,
+            group.get() if group.isDefined() else None,
         )
-    return out
 
 
 def _jobs_evicted_since(jobs, mark_ms):
@@ -2885,10 +2885,17 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         job_ids = list(tracker.getJobIdsForGroup(group))
         truncated = lossy = mark is None
         if mark is not None:
-            jobs = _store_jobs(store)
-            truncated = _jobs_evicted_since(jobs, mark["ms"])
-            # Diagnostic: jobs since the mark that ran outside the rule's group.
-            foreign = [(i, g) for i, _s, _c, g in jobs if i >= mark["jobs"] and g != group]
+            # Stops at the first held job that completed before the mark
+            # (usually among the oldest few).
+            truncated = _jobs_evicted_since(_store_jobs(store), mark["ms"])
+            # Diagnostic: jobs since the mark that ran outside the rule's
+            # group, read from the newest back to the mark.
+            foreign = []
+            for i, _s, _c, g in _store_jobs(store, newest_first=True):
+                if i < mark["jobs"]:
+                    break
+                if g != group:
+                    foreign.append((i, g))
             if foreign:
                 log(
                     f"[stage-profile-foreign] rule={rule_id} group={group} jobs={len(foreign)} "
