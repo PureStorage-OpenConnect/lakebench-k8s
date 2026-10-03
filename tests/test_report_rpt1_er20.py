@@ -353,3 +353,32 @@ def test_r6_interrupted_run_keeps_its_verdict_word(monkeypatch):
     assert f"Run INTERRUPTED: {reason}" in text
     assert "Verdict: INTERRUPTED" in text
     assert "headline figures not shown: the run is INTERRUPTED" in text
+
+
+def test_r10_subject_check_failure_lists_typologies_and_reason():
+    from lakebench.reports.scorecard import _subject_check_html
+
+    html = _subject_check_html(
+        {
+            "subject_customer_check": {
+                "status": "fail",
+                "subjects": 10,
+                "unmapped": 1,
+                "not_customer": 2,
+                "failing_typologies": ["cycle"],
+                "unresolved_typologies": ["stack"],
+                "reason": "join miss",
+            }
+        }
+    )
+    assert "var(--danger)" in html
+    assert "failing: cycle" in html and "unresolved: stack" in html and "reason: join miss" in html
+    assert _subject_check_html({}) == "" and _subject_check_html(None) == ""
+
+
+def test_tm_percent_without_a_record_path_is_plain():
+    from lakebench.reports.scorecard import _fmt_pct, _p
+
+    assert _p(None, "x") is None
+    assert _fmt_pct(0.25) == "25.0%"
+    assert _fmt_pct(None) == "n/a"

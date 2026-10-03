@@ -48,13 +48,188 @@ class ScorecardBlock(Protocol):
 
 
 class Customer360ScorecardBlock:
-    """Scorecard block for the Customer 360 medallion pipeline."""
+    """Scorecard block for the Customer 360 medallion pipeline: the
+    expected-results checks (``record.c360_correctness``), failures first."""
 
     schema_name = "customer360"
     domain_label = "Customer360"
 
+    # metrics/c360_correctness.py check kinds, grouped as the report shows them.
+    FAMILIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("pipeline", ("invariant", "reconcile")),
+        ("benchmark shapes", ("shape",)),
+        ("statistical", ("statistical",)),
+    )
+
     def render_detail_html(self, metrics: PipelineMetrics) -> str:
-        return ""
+        from collections.abc import Mapping
+
+        record = getattr(metrics, "c360_correctness", None) if metrics is not None else None
+        if not isinstance(record, Mapping):
+            return ""
+        record = dict(record)
+        try:
+            return self._render(record)
+        except Exception as exc:  # noqa: BLE001 -- render must never crash the report
+            from html import escape
+
+            logger.exception("C360 results could not be rendered")
+            first = (str(exc).splitlines() or [""])[0][:200]
+            return (
+                '<section class="c360-render-error" style="border-left: 3px solid var(--danger);">'
+                "<h3>Expected results (Customer 360)</h3>"
+                '<p style="color: var(--danger);">C360 results could not be rendered: '
+                f"{escape(type(exc).__name__)}: {escape(first)}</p></section>"
+            )
+
+    @staticmethod
+    def judged_gating_ids(record: dict) -> set[str]:
+        """The GATING_CHECKS ids the verdict's c360 gate judges on *record*:
+        the rule of ``c360_correctness.gating_outcome`` (continuous
+        reporting-only records judge none; benchmark shapes are judged only
+        when the record holds shape checks). A test drops each id from every
+        stored record and asserts gating_outcome fails exactly for these, so
+        a change to that rule fails here rather than drifting."""
+        from lakebench.metrics import c360_correctness as cc
+
+        if not cc.GATING_CHECKS or (
+            record.get("reporting_only") is True and record.get("mode") == "continuous"
+        ):
+            return set()
+        gated = cc._gated_ids(None)
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+        if any(str(c.get("id", "")).startswith("benchmark_rows_") for c in checks):
+            gated |= cc._gated_ids(("benchmark_rows_",))
+        return gated
+
+    @classmethod
+    def _family(cls, kind: str) -> str:
+        for name, kinds in cls.FAMILIES:
+            if kind in kinds:
+                return name
+        return "other"
+
+    def _render(self, record: dict) -> str:
+        import json
+        from html import escape
+
+        from lakebench.metrics import c360_correctness as cc
+        from lakebench.reports import derived as dv
+
+        checks = [c for c in record.get("checks") or [] if isinstance(c, dict)]
+
+        # The gate exactly as the verdict's c360 gate applies it today
+        # (c360_correctness.gating_outcome over GATING_CHECKS), never the
+        # record's stored gating flag, which predates the owner's approval
+        # on older records.
+        outcome, why = cc.gating_outcome(record)
+        gated = self.judged_gating_ids(record)
+        present = {str(c.get("id")) for c in checks}
+        absent = sorted(g for g in gated if g not in present)
+
+        if not cc.GATING_CHECKS:
+            gate_text, colour = "reporting only", "warning"
+        elif outcome == "FAIL":
+            gate_text, colour = f"fails the run: {why}", "danger"
+        else:
+            n_gated = len(gated)  # GATING_CHECKS, not a record count
+            gate_text = f"{n_gated} gating checks passed" if gated else "reporting only"
+            colour = "success"
+        n_passed = len([c for c in checks if c.get("status") == "pass"])
+        raw = record.get("checks") or []
+        # The span counts the record's list; a list holding non-check
+        # entries is shown plain, since the block counts checks only.
+        if checks and len(raw) == len(checks):
+            total_html = dv.count(len(checks), path="c360_correctness.checks")
+        else:
+            total_html = str(len(checks))
+        chip = (
+            f'<span class="c360-chip" style="color: var(--{colour}); font-weight: 600;">'
+            f"{n_passed}/{total_html} checks passed; gate: {escape(gate_text)}</span>"
+        )
+        notes = []
+        if record.get("reason"):
+            notes.append(str(record["reason"]))
+        if record.get("note"):
+            notes.append(f"Recorded with the run: {record['note']}")
+        reason_html = "".join(
+            f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{escape(n)}</p>'
+            for n in notes
+        )
+        parts = ["<section><h3>Expected results (Customer 360)</h3>", f"<p>{chip}</p>", reason_html]
+        if not checks:
+            parts.append("<p>No check ran.</p></section>")
+            return "\n".join(p for p in parts if p)
+
+        def _v(v) -> str:
+            if isinstance(v, (dict, list)):
+                return escape(json.dumps(v, sort_keys=True, default=str))
+            return escape(str(v))
+
+        def _row(c: dict, *, with_status: bool) -> str:
+            cid = str(c.get("id"))
+            tag = " <small>(gating)</small>" if cid in gated else ""
+            state = f"<td>{escape(str(c.get('status')))}</td>" if with_status else ""
+            detail = f"<br><small>{escape(str(c['detail']))}</small>" if c.get("detail") else ""
+            return (
+                f"<tr><td><code class='mono'>{escape(cid)}</code>{tag}{detail}</td>"
+                f"<td>{escape(str(c.get('kind')))}</td>{state}"
+                f"<td>{_v(c.get('observed'))}</td><td>{_v(c.get('expected'))}</td>"
+                f"<td>{_v(c.get('tolerance'))}</td></tr>"
+            )
+
+        # Gated checks absent from the record fail the run ("not evaluated").
+        not_passed = [c for c in checks if c.get("status") != "pass"] + [
+            {
+                "id": gid,
+                "kind": "-",
+                "status": "not evaluated",
+                "observed": "-",
+                "expected": "-",
+                "tolerance": "-",
+                "detail": "a gating check absent from the record",
+            }
+            for gid in absent
+        ]
+        order = {name: i for i, (name, _k) in enumerate(self.FAMILIES)}
+        # Checks that fail the run first, then other failures, then the rest.
+        not_passed.sort(
+            key=lambda c: (
+                0 if str(c.get("id")) in gated else 1,
+                0 if c.get("status") == "fail" else 1,
+                order.get(self._family(str(c.get("kind"))), 99),
+            )
+        )
+        head = "<th>Check</th><th>Kind</th>{status}<th>Observed</th><th>Expected</th><th>Tolerance</th>"
+        if not_passed:
+            parts.append(
+                "<h4>Not passed</h4><table><thead><tr>"
+                + head.format(status="<th>Status</th>")
+                + "</tr></thead><tbody>"
+                + "".join(_row(c, with_status=True) for c in not_passed)
+                + "</tbody></table>"
+            )
+        known = {k for _n, kinds in self.FAMILIES for k in kinds}
+        groups = [(name, kinds) for name, kinds in self.FAMILIES]
+        for name, kinds in groups + [("other", ())]:
+            group = [
+                c
+                for c in checks
+                if c.get("status") == "pass"
+                and (c.get("kind") in kinds if kinds else c.get("kind") not in known)
+            ]
+            if not group:
+                continue
+            parts.append(
+                f"<details><summary>{escape(name)} checks that passed</summary>"
+                "<table><thead><tr>"
+                + head.format(status="")
+                + "</tr></thead><tbody>"
+                + "".join(_row(c, with_status=False) for c in group)
+                + "</tbody></table></details>"
+            )
+        parts.append("</section>")
+        return "\n".join(p for p in parts if p)
 
 
 class FinancialScorecardBlock:
