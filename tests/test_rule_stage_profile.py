@@ -38,9 +38,10 @@ def _fake_spark(*, wait=None, last_stage=None, jobs_now=1, dropped=0):
         waitUntilEmpty=wait or (lambda ms: None),
         metrics=lambda: _Obj(metricRegistry=lambda: registry),
     )
+    retained = _Obj(size=lambda: 1, apply=lambda i: _Obj(jobId=lambda: 0))
     jsc = _Obj(
         listenerBus=lambda: bus,
-        statusStore=lambda: _Obj(lastStageAttempt=last_stage),
+        statusStore=lambda: _Obj(lastStageAttempt=last_stage, jobsList=lambda statuses: retained),
         dagScheduler=lambda: _Obj(numTotalJobs=lambda: jobs_now),
     )
     tracker = _Obj(
@@ -104,3 +105,19 @@ def test_without_a_mark_the_flags_are_not_claimed_clean(load_script, capsys):
     common.rule_stage_profile(_fake_spark(last_stage=_evicted), "g", "W2", mark=None)
     out = capsys.readouterr().out
     assert "truncated=true complete=true lossy=true" in out
+
+
+def test_jobs_outside_the_store_do_not_mark_truncation(load_script):
+    """Truncation means the store dropped the rule's jobs (its oldest
+    retained job is newer than the rule's first), not that job ids were
+    taken by jobs the store never saw."""
+    common = load_script("common")
+
+    def store(ids):
+        seq = _Obj(size=lambda: len(ids), apply=lambda i: _Obj(jobId=lambda: ids[i]))
+        return _Obj(jobsList=lambda statuses: seq)
+
+    assert common._jobs_evicted_since(store([5, 6, 7]), 5) is False
+    assert common._jobs_evicted_since(store([3, 9]), 5) is False
+    assert common._jobs_evicted_since(store([8, 9]), 5) is True
+    assert common._jobs_evicted_since(store([]), 5) is True

@@ -2781,6 +2781,18 @@ def _status_events_dropped(jsc):
     return int(registry.counter("queue.appStatus.numDroppedEvents").getCount())
 
 
+def _jobs_evicted_since(store, first_job):
+    """Whether the status store may have dropped jobs with id >= first_job:
+    its oldest retained job id is above first_job. An empty store says
+    nothing was retained, so yes."""
+    jobs = store.jobsList(None)
+    n = int(jobs.size())
+    if n == 0:
+        return True
+    oldest = min(int(jobs.apply(i).jobId()) for i in range(n))
+    return oldest > int(first_job)
+
+
 def rule_profile_mark(spark):
     """Where the application stands when a rule's job group is set: jobs
     submitted so far (DAGScheduler.numTotalJobs) and status events dropped
@@ -2821,7 +2833,12 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     - ``truncated=true``: the store had already dropped some of the
       group's jobs or stages (it keeps ``spark.ui.retainedJobs`` jobs and
       ``spark.ui.retainedStages`` stages). Dropped jobs are not listed under
-      the group at all, so they are found by count against ``mark``;
+      the group at all; they are found against ``mark``: the store drops its
+      oldest jobs first, so when its oldest retained job id is above the
+      job count at ``mark``, jobs of the rule may be gone. (A count of
+      jobs submitted since ``mark`` against those listed under the group
+      flagged rules that lost nothing: job ids are also taken by jobs that
+      never reach the store.);
     - ``lossy=true``: the listener queue dropped events during the rule
       (against ``mark``), so the stored task totals are low.
 
@@ -2849,7 +2866,7 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
         job_ids = list(tracker.getJobIdsForGroup(group))
         truncated = lossy = mark is None
         if mark is not None:
-            truncated = len(job_ids) < int(jsc.dagScheduler().numTotalJobs()) - mark["jobs"]
+            truncated = _jobs_evicted_since(store, mark["jobs"])
             lossy = _status_events_dropped(jsc) > mark["dropped"]
         stage_ids = set()
         for job_id in job_ids:
