@@ -860,6 +860,17 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         description="False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does",
     ),
     MetricMeta(
+        "storage_multiple_total",
+        "ratio",
+        "lower",
+        "diagnostic",
+        _BOTH,
+        _ALL_WL,
+        (),
+        source="derived",
+        description="Physical over logical table bytes at run end (storage_multiple.total.multiple): a condition of the maintenance policy, not a system score",
+    ),
+    MetricMeta(
         "datagen_cpu_hr_per_tb",
         "cpu-h/TB",
         "lower",

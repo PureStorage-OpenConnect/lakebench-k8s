@@ -1580,7 +1580,8 @@ class ReportGenerator:
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
         summary_html = self._generate_summary(metrics)
         config_html = (
-            self._generate_resources_section(metrics)
+            self._generate_storage_multiple_section(metrics)
+            + self._generate_resources_section(metrics)
             + self._generate_config_section(metrics)
             + self._generate_experiment_section(metrics)
         )
@@ -3090,6 +3091,140 @@ class ReportGenerator:
             </table>
             {detail_cards}
             {domain_detail}
+        </section>
+        """
+
+    def _generate_storage_multiple_section(self, metrics: PipelineMetrics) -> str:
+        """Storage multiple (metrics/storage_multiple.py): physical over
+        logical bytes per table, layer and in total, with the policy that
+        produced it and what was excluded."""
+        from lakebench.reports import derived as dv
+
+        sm = getattr(metrics, "storage_multiple", None)
+        if not isinstance(sm, dict):
+            return ""
+        e = _html_escape
+
+        def gib(value, path: str) -> str:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return "-"
+            return dv.total(
+                value / (1024**3), paths=dv.product(path, "/1073741824"), fmt=".2f", suffix=" GiB"
+            )
+
+        def mult(row: dict, base: str) -> str:
+            return dv.ratio(
+                row.get("physical_bytes") or 0,
+                row.get("current_bytes"),
+                a_path=f"{base}.physical_bytes",
+                b_path=f"{base}.current_bytes",
+                fmt=".2f",
+                suffix="x",
+                missing="-",
+            )
+
+        rows = []
+        for i, t in enumerate(sm.get("tables") or []):
+            if not isinstance(t, dict):
+                continue
+            base = dv.path("storage_multiple", "tables", i)
+            if t.get("not_measured"):
+                rows.append(
+                    f"<tr><td><code class='mono'>{e(str(t.get('table')))}</code></td>"
+                    f"<td>{e(str(t.get('layer')))}</td>"
+                    f"<td colspan='6'>not measured: {e(str(t['not_measured']))}</td></tr>"
+                )
+                continue
+            other = gib(t.get("other_bytes"), f"{base}.other_bytes")
+            if t.get("other_label"):
+                other += f" <small>({e(str(t['other_label']))})</small>"
+            rows.append(
+                f"<tr><td><code class='mono'>{e(str(t.get('table')))}</code></td>"
+                f"<td>{e(str(t.get('layer')))}</td>"
+                f"<td>{gib(t.get('physical_bytes'), f'{base}.physical_bytes')}</td>"
+                f"<td>{gib(t.get('current_bytes'), f'{base}.current_bytes')}</td>"
+                f"<td>{gib(t.get('retained_bytes'), f'{base}.retained_bytes')}</td>"
+                f"<td>{gib(t.get('metadata_bytes'), f'{base}.metadata_bytes')}</td>"
+                f"<td>{other}</td><td>{mult(t, base)}</td></tr>"
+            )
+        for layer, acc in sorted((sm.get("layers") or {}).items()):
+            base = dv.path("storage_multiple", "layers", layer)
+            rows.append(
+                f"<tr><td><strong>{e(layer)} layer</strong></td><td></td>"
+                f"<td>{gib(acc.get('physical_bytes'), f'{base}.physical_bytes')}</td>"
+                f"<td>{gib(acc.get('current_bytes'), f'{base}.current_bytes')}</td>"
+                f"<td colspan='3'></td><td>{mult(acc, base)}</td></tr>"
+            )
+        total = sm.get("total") or {}
+        if total:
+            coverage = (
+                f" ({total['tables_measured']} of {total['tables']} tables)"
+                if isinstance(total.get("tables"), int)
+                and total.get("tables_measured") != total.get("tables")
+                else ""
+            )
+            rows.append(
+                f"<tr><td><strong>Total{e(coverage)}</strong></td><td></td>"
+                f"<td>{gib(total.get('physical_bytes'), 'storage_multiple.total.physical_bytes')}</td>"
+                f"<td>{gib(total.get('current_bytes'), 'storage_multiple.total.current_bytes')}</td>"
+                f"<td colspan='3'></td><td>{mult(total, 'storage_multiple.total')}</td></tr>"
+            )
+        notes = []
+        if sm.get("not_measured"):
+            notes.append(f"Not measured: {sm['not_measured']}.")
+        excluded = sm.get("excluded") or {}
+        if excluded:
+            parts = []
+            for label, value in sorted(excluded.items()):
+                parts.append(
+                    f"{label} (not in object storage)"
+                    if value is None
+                    else f"{label} {value / (1024**3):.2f} GiB"
+                )
+            notes.append("Excluded: " + "; ".join(parts) + ".")
+        for layer, value in sorted((sm.get("raw_files") or {}).items()):
+            notes.append(
+                f"Raw datagen files in {layer}: {value / (1024**3):.2f} GiB, physical only, "
+                "outside the total."
+            )
+        for bucket, value in sorted((sm.get("unattributed") or {}).items()):
+            if value is None:
+                notes.append(f"Bucket {bucket} could not be listed.")
+            elif value:
+                notes.append(f"Unattributed in {bucket}: {value / (1024**3):.2f} GiB.")
+        if sm.get("budget_spent"):
+            notes.append(f"Time budget: {sm['budget_spent']}.")
+        for bucket, err in sorted((sm.get("listing_errors") or {}).items()):
+            notes.append(f"Listing of {bucket} failed ({err}); its tables are not measured.")
+        for t in sm.get("tables") or []:
+            if isinstance(t, dict) and t.get("retained_error"):
+                notes.append(
+                    f"{t.get('table')}: retained-snapshot bytes not read ({t['retained_error']})."
+                )
+        if sm.get("note"):
+            notes.append(f"Counts {sm['note']}.")
+        note_html = "".join(
+            f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{e(n)}</p>' for n in notes
+        )
+        table = (
+            "<table><thead><tr><th>Table</th><th>Layer</th><th>Physical</th>"
+            '<th title="Data files of the current snapshot">Current (logical)</th>'
+            '<th title="Data files only retained snapshots reference">Retained</th>'
+            "<th>Metadata</th><th>Other</th><th>Multiple</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            if rows
+            else ""
+        )
+        return f"""
+        <section>
+            <h2>Storage multiple</h2>
+            <p style="font-size: 0.875rem;">Physical bytes over the current snapshot's data
+            files, at run end under maintenance policy
+            <code class="mono">{e(str(sm.get("policy") or "not recorded"))}</code>
+            (engine {e(str(sm.get("engine") or "none"))}). A condition of the policy, not a
+            system score.</p>
+            {table}
+            {note_html}
         </section>
         """
 

@@ -709,6 +709,7 @@ class MetricsStorage:
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
             stored_verdict=data.get("verdict") if isinstance(data.get("verdict"), dict) else None,
+            storage_multiple=data.get("storage_multiple"),
         )
 
         if data.get("end_time"):

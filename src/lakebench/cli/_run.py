@@ -3465,6 +3465,20 @@ def _run_once(
                 )
             except Exception as e:
                 console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
+            # Physical over logical bytes at run end, after the maintenance the
+            # policy ran (metrics/storage_multiple.py). Never raises; skipped
+            # when the run stopped before it had a cluster client.
+            _sm_k8s = locals().get("k8s")
+            if collector.current_run is not None and not pipeline_success:
+                # A failed run's tables are not this run's result.
+                collector.current_run.storage_multiple = {"not_measured": "the run did not pass"}
+            elif collector.current_run is not None and _sm_k8s is not None:
+                from lakebench.metrics.storage_multiple import measure_run
+
+                print_info("Measuring the storage multiple...")
+                collector.current_run.storage_multiple = measure_run(
+                    cfg, _sm_k8s, None, collector.current_run
+                )
         if _interrupted is None and _interrupt.late_signal():
             # Interrupted while the results were gathered: sealed the same way.
             # A run that had already failed keeps its own exit code.

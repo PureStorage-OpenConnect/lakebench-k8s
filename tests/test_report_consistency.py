@@ -669,3 +669,11 @@ def test_variant_derived_numbers_agree(name):
     assert marker in html
     assert derived_spans(html)
     assert mismatches(record, html) == []
+
+
+def _plain_text(html: str) -> str:
+    """Visible page text, tags removed and whitespace collapsed."""
+    from html import unescape
+
+    html = re.sub(r"<style>.*?</style>", " ", page_text(html), flags=re.S)
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", html)))
