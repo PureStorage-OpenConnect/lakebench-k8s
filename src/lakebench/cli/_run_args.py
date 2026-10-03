@@ -74,6 +74,9 @@ class RunContext:
 
     mode: str  # "batch" or "continuous"
     cycles: int = 1
+    #: Why ``benchmark.investigator_sessions`` cannot run in this mode, or None
+    #: (``config.schema.investigator_sessions_problem``, the load check's rule).
+    investigators: str | None = None
 
 
 @dataclass(frozen=True)
@@ -259,6 +262,14 @@ RUN_RULES: tuple[RunRule, ...] = (
         "drop them with --repeat",
         "`--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`",
     ),
+    RunRule(
+        lambda a, c: c.investigators is not None,
+        "architecture.benchmark.investigator_sessions runs only on an AML continuous run with "
+        "TM operations on a trino or spark-thrift query engine",
+        "run it continuous on a financial config with tm_operations enabled, or delete the key",
+        "`benchmark.investigator_sessions` outside an AML continuous run with TM operations on "
+        "trino or spark-thrift",
+    ),
 )
 
 
@@ -288,8 +299,21 @@ def _generates_bronze(a: RunArgs, c: RunContext) -> bool:
 
 def run_args_problems(args: RunArgs, cfg: Any) -> list[RunRule]:
     """Every rule *args* break (empty when the run may start)."""
-    ctx = RunContext(mode=run_mode(args, cfg), cycles=_cycles(cfg))
+    mode = run_mode(args, cfg)
+    ctx = RunContext(mode=mode, cycles=_cycles(cfg), investigators=_investigators(cfg, mode))
     return [rule for rule in RUN_RULES if rule.broken(args, ctx)]
+
+
+def _investigators(cfg: Any, mode: str) -> str | None:
+    """``investigator_sessions_problem`` for the mode this run resolved
+    (``run --continuous`` on a batch config included); None when the config
+    sets no sessions."""
+    from lakebench.config.schema import investigator_sessions_problem
+
+    bench = getattr(cfg.architecture, "benchmark", None)
+    if getattr(bench, "investigator_sessions", None) is None:
+        return None
+    return investigator_sessions_problem(cfg.architecture, mode)
 
 
 def _cycles(cfg: Any) -> int:
