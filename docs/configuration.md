@@ -1240,6 +1240,62 @@ two credentials as `${LAKEBENCH_S3_ACCESS_KEY}` and
 Every other key keeps its default and is described on this page. See
 [cli-reference.md](cli-reference.md#init) for the flags.
 
+### Converting an older config
+
+`lakebench init --from OLD.yaml -o NEW.yaml` rewrites a 1.6 config in the
+current format. It reads OLD as text, so a `${VAR}` reference is copied as
+written (quoted or not) and never expanded, and it never writes over OLD
+(`-o` naming OLD, or a link to it, exits 2). It:
+
+- keeps the deployment's name: OLD's `name:`, or for a nameless config the
+  name 1.6 recorded in `.lakebench/state.json` beside it (beside the path
+  given and, for a link, beside the file it points to; two different names
+  exit 3). When other nameless configs share that directory, 1.6 gave all
+  of them that name, so it exits 3 until `--name` says which deployment
+  this file made. A `--name` that differs from the recorded name is
+  printed with it. With neither, the new file gets a new name, and the
+  output says to convert again with `--name` if the config deployed
+  something;
+- writes out the bucket names 1.6 and 1.7 derive from the name
+  (`<name>-bronze` and so on), so a later rename cannot move them. A config
+  last deployed by 1.5 or earlier, with no buckets set, used
+  `lakebench-bronze`, `-silver` and `-gold`: set those in NEW to keep them;
+- moves the old spellings to the current keys: flat top-level keys
+  (`endpoint:`, `scale:` and the rest), `architecture.workload` to
+  `workload`, `architecture.processing` to `architecture.pipeline`,
+  `pipeline.sustained` to `pipeline.continuous` and `mode: sustained` to
+  `continuous`. A recipe that contradicts the components written becomes
+  the recipe of those components, which is what 1.6 deployed, and a config
+  with no recipe gets the one it resolves to, unless that recipe's
+  defaults would change a setting;
+- drops every removed key, both `operator.install` keys and the
+  `spark.conf` keys at the 1.6 defaults Lakebench overwrote anyway, each
+  with what to do instead, and drops `benchmark.streams` when it holds the
+  default 4 (1.6 saved configs wrote it, and `run` refuses it written out).
+  A `medallion` block that moved the bronze layout is kept: 1.6 read it,
+  1.7 cannot, and `deploy` and `run` refuse it;
+- replaces a plaintext credential (`access_key`, `secret_key`,
+  `client_secret`, or a `spark.conf` password, token or key) with a
+  `${VAR}` reference: `${LAKEBENCH_S3_ACCESS_KEY}` and
+  `${LAKEBENCH_S3_SECRET_KEY}` for the S3 keys (`--credentials-env`
+  renames them) and `${LAKEBENCH_POLARIS_CLIENT_SECRET}` for Polaris. The
+  value is never printed, and NEW is no more readable than OLD. When one
+  of those variables is already set in the shell, the output says so.
+
+Before writing, it loads OLD (under the name above) and the new file the
+way `status` would, every referenced variable set to its own placeholder
+(or, when that cannot load, to its value in this shell), and writes nothing
+(exit 3) unless the two give the same settings and the same planned
+experiment, apart from the moved secrets. This checks the rewrite, not the
+name it chose. It prints every moved, dropped or derived key, and then
+anything `run` still refuses in the new file (an executor override above
+28, `benchmark.mode: throughput`; `deploy` refuses all but the benchmark
+settings), which it leaves for you to change. `--overwrite` replaces an
+existing NEW, and refuses (exit 3) when that file resolves to the same
+deployment in another namespace, bucket, endpoint or recipe, or is a
+nameless config in a directory 1.6 recorded a name for. Comments in OLD
+are not carried over.
+
 ### Recipes and components
 
 A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,

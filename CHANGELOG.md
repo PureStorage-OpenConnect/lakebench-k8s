@@ -76,6 +76,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A zero, negative or out-of-range count (Trino workers, generators, ports, cores), which 1.6 accepted, is refused.
 - `spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst` and `spark.kubernetes.*`) are refused.
 - `run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams` above 1.
+- A `driver_memory` Spark cannot read (`16Gi`, `1.5g`) and a `spark.lb.gold.strategy` other than `auto`, `simple_agg` or `two_phase_agg` are refused by the commands that change data.
 - Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied or deleted by `destroy`.
 - `run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes or pods cannot be read.
 - A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
@@ -148,6 +149,19 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `seal_update=True`.
 
 ### Added
+- **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
+  deployment's name (OLD's, or the one 1.6 recorded in
+  `.lakebench/state.json` for a nameless config) and writes the bucket names
+  out; moves flat keys, `architecture.workload`, `processing` and
+  `sustained` to the current keys; writes the recipe the config resolves to;
+  drops removed keys and the `operator.install` keys with their fix text;
+  replaces plaintext credentials with `${VAR}` references without printing
+  them; and lists every change and what `run` still refuses. It never
+  expands a `${VAR}`, never writes over OLD, and writes nothing unless the
+  new file loads to the same settings as OLD. `config upgrade` and the
+  nameless-config refusals already pointed here. `scripts/upgrading.py`
+  also requires a breaking-changes entry for each config value 1.7 refuses
+  that 1.6 accepted (`config/refused_keys.py`).
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's

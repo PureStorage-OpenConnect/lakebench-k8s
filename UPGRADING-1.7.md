@@ -9,7 +9,13 @@ renamed and refused commands are listed in
 
 Before anything else: redeploy each deployment once with `lakebench deploy
 CONFIG` (see [run needs a 1.7 deploy](#run-needs-a-17-deploy)), and give
-every config a `name:` and a `recipe:`.
+every config a `name:` and a `recipe:`. `lakebench init --from OLD.yaml -o
+NEW.yaml` does both for a 1.6 config: it keeps the deployment's name (from
+the config, or the one 1.6 recorded in `.lakebench/state.json`) and its
+bucket names, writes the recipe the config resolves to, drops the removed
+keys with their fix text, moves plaintext secrets to `${VAR}` references,
+and writes nothing unless the new file loads to the same settings as the
+old one (docs/configuration.md, "Converting an older config").
 
 ## Removed config keys
 
@@ -60,7 +66,7 @@ The keys:
 
 `lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote secrets in plaintext.
 
-**What to do:** Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml` once that flag ships, or edit it by hand.
+**What to do:** Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml`, which keeps its name and buckets and lists every key it moves or drops, or edit it by hand.
 
 ### clean bronze and clean data are refused
 
@@ -339,6 +345,12 @@ A zero, negative or out-of-range count (Trino workers, generators, ports, cores)
 `run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams` above 1.
 
 **What to do:** Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+
+### driver_memory and the gold strategy are checked at load
+
+A `driver_memory` Spark cannot read (`16Gi`, `1.5g`) and a `spark.lb.gold.strategy` other than `auto`, `simple_agg` or `two_phase_agg` are refused by the commands that change data.
+
+**What to do:** Write `driver_memory` as a whole number with k, m, g or t (`16g`); delete the gold strategy or set one of the three.
 
 ### Buckets are stamped with their cluster
 

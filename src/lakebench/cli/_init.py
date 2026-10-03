@@ -339,6 +339,18 @@ def init(
         bool,
         typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
+    from_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--from",
+            metavar="OLD",
+            help=(
+                "Rewrite an older config in the current format: keeps its name and buckets, moves "
+                "plaintext secrets to ${VAR} references and lists every moved or dropped key. "
+                "Never writes over OLD."
+            ),
+        ),
+    ] = None,
     local: Annotated[
         bool,
         typer.Option(
@@ -401,6 +413,26 @@ def init(
         warn_deprecated_short_f("--overwrite")
         force = True
     overwrite = overwrite or force
+    if from_config is not None:
+        conflicting = [
+            flag
+            for flag, given in (
+                ("--recipe", bool(recipe)),
+                ("--workload", bool(workload)),
+                ("--scale", scale is not None),
+                ("--endpoint", bool(endpoint)),
+                ("--namespace", bool(namespace)),
+                ("--local", local),
+            )
+            if given
+        ]
+        if conflicting:
+            _refuse(
+                f"--from converts the old config as it is; {', '.join(conflicting)} cannot "
+                "be combined with it (edit the new file afterwards)"
+            )
+        _init_from(from_config, output, name, overwrite, credentials_env)
+        return
     if output.exists() and not overwrite:
         print_error(f"File already exists: {output}")
         print_info("Use --overwrite to replace it")
@@ -441,7 +473,9 @@ def init(
         if problem:
             _refuse(f"nothing written: this config would not load: {problem}")
         if old_name and old_name == (name or kept_name or "local-lakehouse"):
-            _refuse_if_target_moves(output, old_cfg, old_problem, local_text, credentials_env)
+            _refuse_if_target_moves(
+                output, old_cfg, old_problem, _validate_text(local_text, credentials_env)[0]
+            )
         _write_local_config(output, local_text, 0.1 if scale is None else scale)
         return
 
@@ -476,7 +510,9 @@ def init(
     if problem:
         _refuse(f"nothing written: this config would not load: {problem}")
     if old_name and old_name == name:
-        _refuse_if_target_moves(output, old_cfg, old_problem, text, credentials_env)
+        _refuse_if_target_moves(
+            output, old_cfg, old_problem, _validate_text(text, credentials_env)[0]
+        )
     output.write_text(text)
 
     _say(f"wrote {output}")
@@ -488,6 +524,165 @@ def init(
     if not endpoint:
         _say("  set platform.storage.s3.endpoint")
     _say(f"next: export {access_var} and {secret_var}, then lakebench validate {output}")
+
+
+# ---------------------------------------------------------------------------
+# --from
+# ---------------------------------------------------------------------------
+
+
+def _write_atomically(output: Path, text: str, like: Path) -> Path:
+    """Write *text* to a temporary file beside *output*; the caller renames it.
+
+    The file is no more readable than *like* (OLD), nor than *output* when
+    it replaces one: a config kept private stays private, whatever the
+    umask allows.
+    """
+    import os
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(dir=output.parent, prefix=f".{output.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        mask = os.umask(0)
+        os.umask(mask)
+        mode = 0o666 & ~mask & (like.stat().st_mode | 0o600)
+        if output.is_file():
+            mode &= output.stat().st_mode | 0o600
+        os.chmod(tmp, mode)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return Path(tmp)
+
+
+def _init_from(
+    old: Path, output: Path, name: str | None, overwrite: bool, credentials_env: str
+) -> None:
+    """``init --from OLD -o NEW``: write OLD in the current config format.
+
+    Nothing is written unless the new file loads, for a read-only command,
+    to the same model and planned experiment as OLD (apart from the secrets
+    it moved to references). OLD is never written.
+    """
+    import os
+
+    from lakebench.config.init_from import (
+        InitFromError,
+        convert,
+        dump,
+        remaining_refusals,
+        secret_vars,
+        undo_derived_recipe,
+        verify,
+    )
+
+    if not old.is_file():
+        _refuse(f"--from {old}: no such file")
+    if old.resolve() == output.resolve() or (output.exists() and os.path.samefile(old, output)):
+        _refuse(f"--from {old} and -o {output} are the same file; init never writes over OLD")
+    if output.is_dir():
+        _refuse(f"-o {output} is a directory; name the new config file")
+    if output.exists() and not overwrite:
+        _refuse(f"{output} already exists; pass --overwrite to replace it")
+    if not output.parent.is_dir():
+        _refuse(f"{output.parent} is not a directory")
+
+    header = (
+        f"# Written by `lakebench init --from {old.name}`. Comments in the old file are\n"
+        "# not carried over; every key is in docs/configuration.md.\n"
+    )
+    try:
+        conv, old_text = convert(
+            old,
+            s3_vars=credential_vars(credentials_env),
+            name_override=name,
+            fresh_name=default_name(),
+        )
+        text = header + dump(conv.data)
+        differ = verify(old_text, text, conv)
+        if differ and conv.derived_recipe:
+            # The recipe's defaults moved something: keep the file recipe-less.
+            undo_derived_recipe(conv, differ)
+            text = header + dump(conv.data)
+            differ = verify(old_text, text, conv)
+    except InitFromError as e:
+        _refuse(f"nothing written: {e}", ExitCode.REFUSED if e.refused else ExitCode.USAGE)
+    if differ:
+        _refuse(
+            "nothing written: the converted config would load differently from "
+            f"{old.name} at " + ", ".join(differ) + " (a Lakebench bug; please report it)",
+            ExitCode.REFUSED,
+        )
+    still_refused = remaining_refusals(text)
+
+    tmp = _write_atomically(output, text, old)
+    try:
+        if output.is_file():
+            _refuse_if_overwrite_moves(output, tmp)
+        os.replace(tmp, output)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    _say(f"wrote {output} from {old}")
+    for change in conv.changes:
+        # "scale -> workload.datagen.scale"; otherwise "path: what happened".
+        joint = " " if change.text.startswith("->") else ": "
+        where = f"{change.path}{joint}" if change.path else ""
+        _say(f"  {change.kind + ':':<9}{where}{change.text}")
+    if not conv.changes:
+        _say("  nothing to move, drop or derive")
+    for problem in still_refused:
+        _say(f"  run still refuses it: {problem}")
+    # A reference with a default needs nothing exported.
+    refs = sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", text)))
+    moved = set(secret_vars(conv))
+    for var in sorted(moved & set(os.environ)):
+        _say(f"  note: {var} is already set in this shell; check it holds this config's secret")
+    step = f"export {', '.join(refs)}, then " if refs else ""
+    _say(f"next: {step}lakebench validate {output}")
+
+
+def _refuse_if_overwrite_moves(output: Path, new_file: Path) -> None:
+    """Refuse replacing a config that names a deployment the new file does
+    not keep: a nameless file in a directory 1.6 recorded a name for (it may
+    be that deployment's only config), or a file that resolves, with this
+    shell's variables, to the new file's name in another place."""
+    replaced_cfg, replaced_problem = _load_replaced(output)
+    replaced_name = (
+        replaced_cfg.name if replaced_cfg is not None else _name_of(_replaced_config(output))
+    )
+    if not replaced_name:
+        from lakebench.config.deploy_state import legacy_names
+
+        recorded = sorted(set(legacy_names(output).values()))
+        if recorded:
+            _refuse(
+                f"{output} has no name, and 1.6 recorded '{recorded[0]}' for nameless "
+                f"configs here, so it may be the config of deployment '{recorded[0]}': "
+                "write the new file elsewhere",
+                ExitCode.REFUSED,
+            )
+        return
+    new_cfg, new_problem = _load_replaced(new_file)
+    if new_cfg is None:
+        _refuse(
+            f"the new file cannot be read with this shell's variables ({new_problem}), so "
+            f"whether it keeps the deployment {output} names cannot be checked: set them and "
+            "re-run, or write the new file elsewhere",
+            ExitCode.REFUSED,
+        )
+    if any("${" in n or _UNSET in n for n in (replaced_name, new_cfg.name)):
+        # Unset, the name says nothing; set, it may be the same deployment.
+        _refuse(
+            f"{output} or the new file names its deployment through a variable this shell "
+            "has not set, so whether the new file keeps that deployment cannot be checked: "
+            "set it and re-run, or write the new file elsewhere",
+            ExitCode.REFUSED,
+        )
+    if replaced_name == new_cfg.name:
+        _refuse_if_target_moves(output, replaced_cfg, replaced_problem, new_cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +822,7 @@ def _deployment_target(cfg: Any) -> dict[str, str]:
 
 
 def _refuse_if_target_moves(
-    output: Path, old_cfg: Any, old_problem: str | None, text: str, credentials_env: str
+    output: Path, old_cfg: Any, old_problem: str | None, new_cfg: Any
 ) -> None:
     """Refuse an overwrite that keeps the name but moves what it deploys.
 
@@ -644,9 +839,8 @@ def _refuse_if_target_moves(
             f"{output} names this deployment, but where it deploys cannot be read ({why}): {fix}",
             ExitCode.REFUSED,
         )
-    new_cfg, _ = _validate_text(text, credentials_env)
     if new_cfg is None:
-        return  # config_problem refuses it
+        return  # init refuses a config that does not load; --from checks first
     after = _deployment_target(new_cfg)
     if not before["endpoint"]:
         after["endpoint"] = ""

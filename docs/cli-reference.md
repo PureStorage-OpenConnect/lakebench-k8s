@@ -78,6 +78,7 @@ lakebench init [OPTIONS]
 | `--workload` | `-w` | text |  | Workload schema (customer360 \| financial). Default is customer360. |
 | `--overwrite` |  | flag |  | Overwrite an existing file |
 | `--force` |  | flag |  | Old spelling of --overwrite |
+| `--from` |  | path |  | Rewrite an older config in the current format: keeps its name and buckets, moves plaintext secrets to ${VAR} references and lists every moved or dropped key. Never writes over OLD. |
 | `--local` |  | flag |  | Generate a config for local mode (podman/docker, no Kubernetes) |
 <!-- END GENERATED: cli init -->
 

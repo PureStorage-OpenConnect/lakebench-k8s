@@ -106,8 +106,8 @@
   source: src/lakebench/cli/_aliases.py:REFUSED
   text: '`lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote
     secrets in plaintext.'
-  fix: Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml` once that flag ships, or edit
-    it by hand.
+  fix: Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml`, which keeps its name and
+    buckets and lists every key it moves or drops, or edit it by hand.
 - id: clean-bronze-and-clean-data-are-refused
   title: clean bronze and clean data are refused
   kind: refused-command
@@ -334,7 +334,15 @@
 - id: executor-overrides-are-bounded-and-counted
   title: Executor overrides are bounded and counted
   kind: default-change
-  subject: executor overrides
+  subject:
+  - executor overrides
+  - platform.compute.spark.bronze_executors above 28
+  - platform.compute.spark.silver_executors above 28
+  - platform.compute.spark.gold_executors above 28
+  - platform.compute.spark.bronze_ingest_executors above 28
+  - platform.compute.spark.silver_stream_executors above 28
+  - platform.compute.spark.gold_refresh_executors above 28
+  - platform.compute.spark.driver_cores above 16
   source: src/lakebench/modules/pipeline_engines/spark/job.py:executor_override
   text: Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep
     a run out of release evidence.
@@ -404,7 +412,10 @@
 - id: deploy-never-installs-a-shared-component
   title: Deploy never installs a shared component
   kind: default-change
-  subject: shared components
+  subject:
+  - shared components
+  - platform.compute.spark.operator.install true
+  - architecture.catalog.hive.operator.install true
   source: src/lakebench/cli/_admin.py:install
   text: '`deploy` only checks the scratch StorageClass, Spark Operator, Stackable and observability stack;
     `operator.install: true` is refused.'
@@ -451,7 +462,9 @@
 - id: sparkconf-merges-over-the-job-defaults
   title: spark.conf merges over the job defaults
   kind: default-change
-  subject: spark.conf
+  subject:
+  - spark.conf
+  - spark.conf a key Lakebench owns
   source: src/lakebench/modules/pipeline_engines/spark/conf_keys.py:LAKEBENCH_OWNED_SPARK_KEYS
   text: '`spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst`
     and `spark.kubernetes.*`) are refused.'
@@ -459,11 +472,25 @@
 - id: run-refuses-benchmark-settings-it-does-not-run
   title: run refuses benchmark settings it does not run
   kind: default-change
-  subject: run benchmark settings
+  subject:
+  - run benchmark settings
+  - architecture.benchmark.mode throughput or composite
+  - architecture.benchmark.cache cold
+  - architecture.benchmark.streams above 1
   source: src/lakebench/config/schema.py:BenchmarkConfig
   text: '`run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams`
     above 1.'
   fix: Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+- id: driver_memory-and-the-gold-strategy-are-checked-at-load
+  title: driver_memory and the gold strategy are checked at load
+  kind: default-change
+  subject:
+  - driver memory and gold strategy
+  - platform.compute.spark.driver_memory not a Spark size
+  - spark.conf spark.lb.gold.strategy other than auto, simple_agg or two_phase_agg
+  source: src/lakebench/config/refused_keys.py:REFUSED_KEYS
+  text: 'A `driver_memory` Spark cannot read (`16Gi`, `1.5g`) and a `spark.lb.gold.strategy` other than `auto`, `simple_agg` or `two_phase_agg` are refused by the commands that change data.'
+  fix: 'Write `driver_memory` as a whole number with k, m, g or t (`16g`); delete the gold strategy or set one of the three.'
 - id: buckets-are-stamped-with-their-cluster
   title: Buckets are stamped with their cluster
   kind: default-change
