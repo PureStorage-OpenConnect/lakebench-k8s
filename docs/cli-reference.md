@@ -627,7 +627,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--generate` |  | flag |  | Run datagen before pipeline stages (single-cycle batch only: a multi-cycle run generates in its cycles and refuses it; continuous always runs datagen) |
 | `--skip-preflight` |  | flag |  | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says capacity not checked |
 | `--skip-deploy` |  | flag |  | Skip the deploy and the infrastructure readiness check; the read-only prerequisite checks, cluster capacity included, still run |
-| `--skip-generate` |  | flag |  | Reuse the corpus already in bronze. Refused when its series marker says the generate did not finish or was made for another cycle count, window or generation than the config's (exit 2) |
+| `--skip-generate` |  | flag |  | Batch: reuse the corpus already in bronze. Refused (exit 3) when its series marker says the generate did not finish or was made for another cycle count, window or generation than the config's; a multi-cycle run needs a marker |
 | `--regenerate` |  | flag |  | Clears the datagen prefix in a bronze bucket this deployment created, before generating (before cycle 0 of a multi-cycle run); refused on any other bucket. Without it, a non-empty datagen prefix is refused (exit 3), so existing datagen output is never overwritten silently. Takes --generate on a single-cycle run, nothing more on a multi-cycle run, and is refused when the run does not generate. |
 | `--allow-stale-bronze` |  | flag |  | On a batch run with --generate or more than one cycle, or with --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
 | `--skip-maintenance` |  | flag |  | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
@@ -648,7 +648,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `run.namespace_gone`: the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
-- `2` `run.series_mismatch`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's
+- `3` `run.series_mismatch`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
@@ -692,7 +692,13 @@ cluster call, and exits 2 (usage) naming the first refused one:
   the AML workload adds 900 s and never goes below its bronze-verify budget.
 - `--skip-deploy` still runs the read-only prerequisite checks, cluster
   capacity included, and a failed one fails the run with exit 4.
-- `--skip-generate` is refused with `--generate`.
+- `--skip-generate` is refused with `--generate`. The corpus series marker
+  must describe a finished generate of this config: see "Reusing a corpus"
+  below.
+- `--generate-only` takes a single-cycle config only; a multi-cycle run
+  generates each cycle before its stages.
+- `--allow-stale-bronze`: every later run that reuses that corpus records
+  the note too (`datagen.stale_bronze`).
 - `--force-rebuild`: on Delta the silver table's own log has the last word;
   the rebuild writes under an epoch above every one the table has used, even
   if the counter reads lower.
