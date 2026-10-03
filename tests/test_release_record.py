@@ -435,6 +435,98 @@ def test_c360_continuous_failed_result_queries_refused(ready):
     _fails(rec, f"continuous result check queries failed: {q}")
 
 
+Q9 = "Q9_executive_dashboard"
+
+
+def _round_failing(rnd: dict, *failed: str, listed: list[str] | None = None) -> None:
+    """Edit *rnd* as record_round writes a round in which *failed* failed:
+    success false, and the executed queries and their set id are the rest.
+    *listed* replaces the round's query list (and its listed set id)."""
+    from lakebench.benchmark.queries import query_set_id
+
+    if listed is not None:
+        rnd["queries"] = [q for q in rnd["queries"] if q["name"] in listed]
+        rnd["query_set_id"] = query_set_id(listed)
+    for q in rnd["queries"]:
+        q["success"] = q["name"] not in failed
+    rnd["executed_queries"] = [q["name"] for q in rnd["queries"] if q["success"]]
+    rnd["executed_query_set_id"] = query_set_id(rnd["executed_queries"])
+
+
+def _c360_cont_with(*failed: str, rounds: tuple[int, ...] = (1,), **kw) -> dict:
+    rec = _release("c360_cont")
+    for holder in (rec["pipeline_benchmark"]["benchmark_rounds"], rec["benchmark_rounds"]):
+        for i in rounds:
+            _round_failing(holder[i], *failed, **kw)
+    return rec
+
+
+def test_c360_continuous_tolerated_q9_round_passes(ready):
+    """LB-266: a round whose Q9 failed after its retries executed a 7-query
+    set; the verdict tolerates that in any round, so the release record
+    counts the round for the 8-query set it listed and the run is evidence."""
+    rec = _c360_cont_with(Q9)
+    assert rec["pipeline_benchmark"]["benchmark_rounds"][1]["executed_query_set_id"].startswith(
+        "qs7-"
+    )
+    assert _problems(rec, _expected(_release("c360_cont"))) == []
+    # Every round, the last included: the verdict tolerates that too.
+    rec = _c360_cont_with(Q9, rounds=(0, 1, 2, 3))
+    assert _problems(rec, _expected(_release("c360_cont"))) == []
+
+
+def test_c360_continuous_unexpected_round_set_fails(ready):
+    """A round that executed any other subset stays at the set it executed
+    and is refused: another query failed, Q9 failed with another query, or
+    Q9 was never listed (silently skipped)."""
+    expected = _expected(_release("c360_cont"))
+    rec = _c360_cont_with("Q3_customer_segmentation")
+    _fails(rec, "rounds ran unexpected query set(s) qs7-", expected)
+    rec = _c360_cont_with(Q9, "Q3_customer_segmentation")
+    _fails(rec, "rounds ran unexpected query set(s) qs6-", expected)
+    names = [q["name"] for q in _release("c360_cont")["benchmark_rounds"][1]["queries"]]
+    rec = _c360_cont_with(listed=[n for n in names if n != Q9])
+    _fails(rec, "rounds ran unexpected query set(s) qs7-", expected)
+    # Every round without Q9 listed: the expected set never ran.
+    rec = _c360_cont_with(listed=[n for n in names if n != Q9], rounds=(0, 1, 2, 3))
+    _fails(rec, "rounds never ran query set(s) qs8-", expected)
+
+
+def _drop_first_query(rnd: dict) -> None:
+    """Leave the first query out of the round entirely, executed id kept
+    true to the executed names, listed id still the full set's."""
+    from lakebench.benchmark.queries import query_set_id
+
+    name = rnd["queries"].pop(0)["name"]
+    rnd["executed_queries"].remove(name)
+    rnd["executed_query_set_id"] = query_set_id(rnd["executed_queries"])
+
+
+def test_round_query_set_needs_the_record_to_show_the_tolerated_failure():
+    """The listed set stands only when the record shows only Q9 failed and
+    the executed queries are the listed ones less Q9."""
+    rec = _c360_cont_with(Q9)
+    rnd = rec["pipeline_benchmark"]["benchmark_rounds"][1]
+    listed = rnd["query_set_id"]
+    assert rr.round_query_set(rnd) == listed
+    for edit in (
+        lambda r: r.pop("executed_queries"),
+        lambda r: r["executed_queries"].pop(0),
+        lambda r: r.pop("query_set_id"),
+        lambda r: r["queries"].append("Q9_not_an_object"),
+        lambda r: [q.update(success=True) for q in r["queries"]],
+        # Forged ids: a query dropped from the listed names under the full
+        # set's id, or an executed id that is not its names'.
+        _drop_first_query,
+        lambda r: r.update(executed_query_set_id="qs7-000000000000"),
+    ):
+        r = copy.deepcopy(rnd)
+        edit(r)
+        assert rr.round_query_set(r) == r.get("executed_query_set_id")
+        assert rr.round_query_set(r) != listed
+    assert rr.round_query_set({"executed_query_set_id": None, "query_set_id": listed}) is None
+
+
 def test_mixed_datagen_images_refused(ready):
     """Pods on two images: the fleet names no single digest, and the series
     marker of the release image does not vouch for them."""
