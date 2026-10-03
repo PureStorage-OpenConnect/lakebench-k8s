@@ -72,6 +72,7 @@ class KeyS3:
 
     def __init__(self, keys: set[str]):
         self.keys = keys
+        self.markers: dict = {}
 
     def bucket_exists(self, bucket):
         return True
@@ -83,7 +84,14 @@ class KeyS3:
         n = sum(1 for k in self.keys if k.startswith(prefix))
         return SimpleNamespace(object_count=n, size_bytes=n * 1000)
 
-    def delete_prefix(self, bucket, prefix, abort_multipart=False):
+    @property
+    def raw_client(self):
+        """The corpus series marker, kept apart from the part-file keys."""
+        from tests.fixtures.memory_s3 import MemoryBoto
+
+        return MemoryBoto(self.markers)
+
+    def delete_prefix(self, bucket, prefix, abort_multipart=False, keep_keys=frozenset()):
         gone = {k for k in self.keys if k.startswith(prefix.rstrip("/") + "/")}
         self.keys -= gone
         return len(gone)
@@ -205,11 +213,22 @@ def test_foreign_empty_bucket_without_the_flag_generates(tmp_path, monkeypatch):
     assert len(keys) == FILES
 
 
-def test_owned_corpus_is_replaced_by_the_cycle_slices(tmp_path, monkeypatch):
-    """An owned bronze holding a corpus is cleared before cycle 0, as 1.6
-    did, and ends up holding the cycle slices only."""
+def test_owned_corpus_is_refused_without_regenerate(tmp_path, monkeypatch):
+    """An owned bronze holding a corpus is not cleared by a plain multi-cycle
+    run (1.6 cleared it silently): the run is refused (exit 3) and the corpus
+    stays (DESIGN ch05 7.1 rule 3)."""
     _seed(monkeypatch, FILES)
     result, keys, calls = _run(tmp_path, monkeypatch, owned=True, argv=["--yes"])
+    assert result.exit_code == 3, result.output
+    assert "--regenerate" in result.output
+    assert calls == [] and len(keys) == FILES
+
+
+def test_owned_corpus_is_replaced_by_the_cycle_slices_with_regenerate(tmp_path, monkeypatch):
+    """With --regenerate, an owned bronze holding a corpus is cleared before
+    cycle 0 and ends up holding the cycle slices only."""
+    _seed(monkeypatch, FILES)
+    result, keys, calls = _run(tmp_path, monkeypatch, owned=True, argv=["--regenerate", "--yes"])
     assert result.exit_code == 0, result.output
     assert (_cycle0_silver_reads(keys, monkeypatch), len(keys)) == (FILES // CYCLES, FILES)
     assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]

@@ -318,6 +318,9 @@ def _deserialize_cycles(
                 timestamp_end=c.get("timestamp_end", ""),
                 datagen_elapsed_seconds=c.get("datagen_elapsed_seconds", 0.0),
                 datagen_output_gb=c.get("datagen_output_gb", 0.0),
+                datagen_skipped=bool(c.get("datagen_skipped", False)),
+                datagen_start=c.get("datagen_start", "") or "",
+                datagen_end=c.get("datagen_end", "") or "",
                 jobs=jobs,
                 benchmark=bench,
                 table_health=c.get("table_health", {}),
@@ -705,6 +708,7 @@ class MetricsStorage:
             record_kind=str(data.get("record_kind") or "run"),
             parent_run_id=data.get("parent_run_id"),
             stage_only=data.get("stage_only"),
+            cycle_series=data.get("cycle_series"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
@@ -824,6 +828,9 @@ class MetricsStorage:
                     "pipeline_throughput_gb_per_second", 0.0
                 ),
                 time_to_value_seconds=scores.get("time_to_value_seconds", 0.0),
+                time_to_value_datagen_excluded_seconds=scores.get(
+                    "time_to_value_datagen_excluded_seconds"
+                ),
                 # Both modes
                 total_core_hours=scores.get("total_core_hours", 0.0),
                 compute_efficiency_gb_per_core_hour=scores.get(

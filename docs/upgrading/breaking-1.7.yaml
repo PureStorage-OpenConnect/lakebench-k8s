@@ -272,13 +272,13 @@
     and 13 confounded (all were 0).'
   fix: Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the
     `cmp2` document.
-- id: customer-360-records-are-workload-version-c360-2
-  title: Customer 360 records are workload version c360-2
+- id: customer-360-records-carry-a-new-workload-version
+  title: Customer 360 records carry a new workload version
   kind: identity
-  subject: workload customer360 c360-2
+  subject: workload customer360 c360-2.dev1
   source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
-  text: Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do
-    not compare with `c360-1`.
+  text: Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock;
+    records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
   fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
     is refused.
 - id: aml-records-are-workload-version-aml-2
@@ -597,3 +597,19 @@
   source: datagen_rs/src/s3sink.rs:S3_PATH_STYLE
   text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
   fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.'
+- id: multi-cycle-runs-and-reused-corpora-check-a-corpus-series-marker
+  title: Multi-cycle runs and reused corpora check a corpus series marker
+  kind: default-change
+  subject:
+  - corpus series marker
+  - run.series_mismatch
+  - generate.multi_cycle
+  source: src/lakebench/deploy/corpus.py:read_series
+  text: A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another
+    cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files
+    (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without
+    `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate`
+    on a multi-cycle AML config exit 2.
+  fix: 'Keep a finished multi-cycle corpus with `run --skip-generate`; otherwise let `run` generate it,
+    with `--regenerate` (single-cycle: `--generate --regenerate`) on a bucket this deployment created,
+    after `lakebench admin reclaim-bucket` on any other. An AML multi-cycle run generates every cycle.'

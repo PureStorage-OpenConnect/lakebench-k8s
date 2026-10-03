@@ -274,6 +274,14 @@ class CycleMetrics:
     jobs: list[JobMetrics] = field(default_factory=list)
     benchmark: BenchmarkMetrics | None = None
     table_health: dict[str, int] = field(default_factory=dict)
+    # The cycle reused a finished corpus (``run --skip-generate``): no
+    # datagen Job ran for it.
+    datagen_skipped: bool = False
+    # When this cycle's datagen began (its Job submitted) and ended (the Job
+    # succeeded), ISO UTC; "" when it did not run. Time to value leaves this
+    # interval out (``PipelineBenchmark._compute_batch_scores``).
+    datagen_start: str = ""
+    datagen_end: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -283,6 +291,9 @@ class CycleMetrics:
             "timestamp_end": self.timestamp_end,
             "datagen_elapsed_seconds": round(self.datagen_elapsed_seconds, 2),
             "datagen_output_gb": round(self.datagen_output_gb, 3),
+            "datagen_skipped": self.datagen_skipped,
+            "datagen_start": self.datagen_start,
+            "datagen_end": self.datagen_end,
             "jobs": [j.to_dict() for j in self.jobs],
             "benchmark": self.benchmark.to_dict() if self.benchmark else None,
             "table_health": self.table_health,
@@ -513,6 +524,11 @@ class PipelineMetrics:
     # gold-finalize). The verdict's record gates then judge that stage's
     # layer only. None for a whole pipeline.
     stage_only: str | None = None
+    # The corpus series marker (deploy/corpus.py) as a batch run left or
+    # found it: {marker: written | unwritten | read | absent, reused,
+    # cycles_total, windows}. None for a run that neither generated nor
+    # checked a corpus (continuous, --local, a stage that stopped first).
+    cycle_series: dict[str, Any] | None = None
 
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # None on a fresh run until it is saved; experiment_block() builds it then.
@@ -600,6 +616,8 @@ class PipelineMetrics:
             d["stage_only"] = self.stage_only
         if self.storage_multiple is not None:
             d["storage_multiple"] = self.storage_multiple
+        if self.cycle_series is not None:
+            d["cycle_series"] = self.cycle_series
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment
@@ -945,6 +963,11 @@ class PipelineBenchmark:
     total_data_processed_gb: float = 0.0
     pipeline_throughput_gb_per_second: float = 0.0
     time_to_value_seconds: float = 0.0
+    # Multi-cycle Customer 360 batch: seconds of the cycles' datagen inside
+    # the time-to-value span, which time_to_value_seconds leaves out. None
+    # for a run with no cycles, another workload, or cycle datagen times
+    # that cannot be read.
+    time_to_value_datagen_excluded_seconds: float | None = None
 
     # Pipeline-level scores (both modes)
     compute_efficiency_gb_per_core_hour: float = 0.0
@@ -1132,6 +1155,20 @@ class PipelineBenchmark:
                 latest_end = candidate
         if starts and latest_end:
             self.time_to_value_seconds = (latest_end - min(starts)).total_seconds()
+            # A multi-cycle run generates cycles 2+ between one cycle's gold
+            # and the next bronze, inside that span: datagen is not pipeline
+            # time, so each cycle's datagen interval is left out.
+            # Customer 360 only: its workload version moved with this
+            # (c360-2.dev1); an AML record's time to value keeps its meaning
+            # under aml-1.
+            excluded = (
+                _cycle_datagen_overlap(self.cycles, min(starts), latest_end)
+                if self.config_snapshot.get("workload_schema") == "customer360"
+                else None
+            )
+            if excluded is not None:
+                self.time_to_value_datagen_excluded_seconds = excluded
+                self.time_to_value_seconds = max(0.0, self.time_to_value_seconds - excluded)
         elif self.total_elapsed_seconds > 0:
             self.time_to_value_seconds = self.total_elapsed_seconds
 
@@ -1703,6 +1740,10 @@ class PipelineBenchmark:
                     "high": _spread["qph_high"],
                     "relative_range": _spread["relative_range"],
                 }
+        if self.time_to_value_datagen_excluded_seconds is not None:
+            batch_scores["time_to_value_datagen_excluded_seconds"] = round(
+                self.time_to_value_datagen_excluded_seconds, 2
+            )
         if self.cycles:
             batch_scores["cycle_progression"] = [
                 {
@@ -1847,6 +1888,34 @@ class PipelineBenchmark:
         if sizes["gold_gb"] == 0.0:
             sizes["gold_gb"] = round(self.config_snapshot.get("gold_size_gb", 0.0), 3)
         return sizes
+
+
+def _cycle_datagen_overlap(
+    cycles: list[CycleMetrics], start: datetime, end: datetime
+) -> float | None:
+    """Seconds of the cycles' datagen intervals inside ``[start, end]``.
+
+    None when there are no cycles, or when a cycle that ran datagen has no
+    readable interval (or one that cannot be compared with the stage
+    times): time to value is then the plain span, and the record says the
+    exclusion was not made. A cycle that reused its corpus
+    (``datagen_skipped``) has no interval and adds nothing.
+    """
+    if not cycles:
+        return None
+    total = 0.0
+    for c in cycles:
+        if c.datagen_skipped:
+            continue
+        try:
+            lo = datetime.fromisoformat(c.datagen_start)
+            hi = datetime.fromisoformat(c.datagen_end)
+            a, b = max(lo, start), min(hi, end)
+        except (TypeError, ValueError):
+            return None
+        if b > a:
+            total += (b - a).total_seconds()
+    return total
 
 
 def build_pipeline_benchmark(

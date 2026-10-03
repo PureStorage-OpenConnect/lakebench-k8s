@@ -90,9 +90,18 @@ def _install(monkeypatch, world: _World, *, owned: bool = True):
 
     class _S3:
         _init_error = None
+        #: The corpus series marker the deployer writes after its clear
+        #: (kept apart from the part files in ``world.keys``).
+        markers: dict = {}
 
         def __init__(self, **kw):
             pass
+
+        @property
+        def raw_client(self):
+            from tests.fixtures.memory_s3 import MemoryBoto
+
+            return MemoryBoto(_S3.markers)
 
         def bucket_exists(self, bucket):
             return True
@@ -100,7 +109,7 @@ def _install(monkeypatch, world: _World, *, owned: bool = True):
         def has_user_objects(self, bucket, prefix=""):
             return any(k.startswith(prefix) for k in world.keys)
 
-        def delete_prefix(self, bucket, prefix, *, abort_multipart=False):
+        def delete_prefix(self, bucket, prefix, *, abort_multipart=False, keep_keys=frozenset()):
             gone = {k for k in world.keys if k.startswith(prefix.rstrip("/") + "/")}
             world.keys -= gone
             return len(gone)

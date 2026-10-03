@@ -41,6 +41,10 @@ MARKER_NAME = re.compile(r"^c(\d{3})-node-(\d{4})\.json$")
 
 SERIES_NAME = "series.json"
 
+#: The name of a part file of cycle 1 or later (``datagen_rs`` ``cycle.rs``
+#: ``c360_key`` and ``pacs_key``).
+LATER_CYCLE_PART = re.compile(r"^part-c\d{3}-")
+
 #: Marker file format this reader understands (ch05 section 3.1).
 MARKER_FORMAT = 1
 
@@ -209,6 +213,14 @@ class MarkerSet:
     scope: str = ""
     markers: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     series: dict[str, Any] | None = None
+    #: A ``series.json`` object is listed in the scope, whether or not it
+    #: parsed: ``series`` None with this True is an unreadable marker, never
+    #: an absent one. Not persisted (``problems`` says why it is None).
+    series_present: bool = False
+    #: Part files of a cycle after the first (``part-c{cycle:03}-*``,
+    #: ``datagen_rs`` ``cycle.rs``): a corpus a multi-cycle run made. Not
+    #: persisted.
+    later_cycle_files: int = 0
     bronze_listing_sha256: str | None = None
     objects: int = 0
     problems: list[str] = field(default_factory=list)
@@ -302,10 +314,13 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
     for obj in objects:
         key = str(obj["Key"])
         if not key.startswith(marker_dir):
+            if LATER_CYCLE_PART.match(key.rsplit("/", 1)[-1]):
+                out.later_cycle_files += 1
             continue
         name = key[len(marker_dir) :]
         if name == SERIES_NAME:
             series_at = key
+            out.series_present = True
             continue
         m = MARKER_NAME.match(name)
         if m:

@@ -116,6 +116,7 @@ def test_map_failure_submits_no_job(monkeypatch, failure):
     d = dg.DatagenDeployer(engine)
     d.stop_previous_job = lambda: None
     d._clear_bronze_prefix_if_fresh = lambda *a, **k: None
+    d._begin_series = lambda *a, **k: None  # the series marker (CD-18): no S3 here
     r = d.deploy()
     assert r.status.value == "failed" and "Job" not in applied, r.message
     assert "heldout" in r.message.lower() or "held-out" in r.message.lower(), r.message
@@ -133,6 +134,7 @@ def test_customer360_generate_applies_no_map():
     d = dg.DatagenDeployer(engine)
     d.stop_previous_job = lambda: None
     d._clear_bronze_prefix_if_fresh = lambda *a, **k: None
+    d._begin_series = lambda *a, **k: None  # the series marker (CD-18): no S3 here
     assert d.deploy().status.value == "success"
     kinds = [c.args[0]["kind"] for c in engine.k8s.apply_manifest.call_args_list]
     assert kinds == ["Job"]

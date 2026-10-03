@@ -51,12 +51,20 @@ class _FakeS3:
     def bucket_exists(self, bucket):
         return True
 
+    @property
+    def raw_client(self):
+        """The corpus series marker the clear writes first (kept by it)."""
+        from tests.fixtures.memory_s3 import MemoryBoto
+
+        return MemoryBoto({})
+
     def has_user_objects(self, bucket, prefix=""):
         return _FakeS3.holds
 
-    def delete_prefix(self, bucket, prefix, *, abort_multipart=False):
+    def delete_prefix(self, bucket, prefix, *, abort_multipart=False, keep_keys=frozenset()):
         self.deleted.append((bucket, prefix))
         self.aborts.append(abort_multipart)
+        self.kept = keep_keys
         return 3
 
 

@@ -774,7 +774,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `workload.datagen.memory` | string | auto (by workload, scale and cpu) | advanced | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
 | `workload.datagen.generators` | integer | `0` | advanced | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
 | `workload.datagen.timestamp_start` | string or null | `null` | advanced | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
-| `workload.datagen.timestamp_end` | string or null | `null` | advanced | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
+| `workload.datagen.timestamp_end` | string or null | `null` | advanced | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`config/c360_run.py` `cycle_windows`, which the datagen deployer and `metrics/c360_correctness.py` both read). See [Timestamp Range Impact](#timestamp-range-impact). |
 
 ### Workload -- Customer 360 and AML
 
@@ -973,8 +973,11 @@ does not change with scale.
 
 `architecture.pipeline.cycles` (1 to 50) runs a batch run as N cycles, each
 over its own slice of the event window, to model a table that receives daily
-loads. It is refused with continuous mode, and `run --generate` is refused
-with it (except with `--local`), because each cycle generates its own slice. Cycle 1 creates silver
+loads. It is refused with continuous mode, and `run --generate` (except with
+`--local`), `run --generate-only` and `lakebench generate` are refused with
+it, because each cycle generates its own slice; `run --skip-generate` reuses a finished
+multi-cycle corpus of the same config (checked against its corpus series
+marker), except for AML. Cycle 1 creates silver
 and gold; cycles 2 and later append to silver and run gold-finalize
 incrementally (`LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL`), the only
 case in which gold-finalize runs incrementally. Table health is probed after

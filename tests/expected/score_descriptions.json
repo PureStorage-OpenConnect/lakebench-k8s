@@ -40,6 +40,7 @@
   "qph_degradation_withheld": "Continuous. Why qph_degradation_pct is not recorded though the run has four or more rounds: the rounds ran different query sets, so the two halves time different work",
   "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
   "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+  "time_to_value_datagen_excluded_seconds": "Multi-cycle Customer 360 batch: seconds of the cycles' datagen inside the time-to-value span, left out of time_to_value_seconds",
   "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",
   "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
   "maintenance_stopped": "True when pre-benchmark maintenance stopped early (a statement timed out or the 30 min cap hit); a statement may still have been running, so post_compaction_qph is not a clean measurement and maintenance_value_pct is null",

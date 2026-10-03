@@ -194,9 +194,9 @@ A `run` whose datagen did not finish in time exits 1 (was 5); the record says "d
 
 ## Comparability and identity
 
-### Customer 360 records are workload version c360-2
+### Customer 360 records carry a new workload version
 
-Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do not compare with `c360-1`.
+Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 
 **What to do:** Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental` is refused.
 
@@ -425,3 +425,9 @@ Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain
 Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
 
 **What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.
+
+### Multi-cycle runs and reused corpora check a corpus series marker
+
+A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
+
+**What to do:** Keep a finished multi-cycle corpus with `run --skip-generate`; otherwise let `run` generate it, with `--regenerate` (single-cycle: `--generate --regenerate`) on a bucket this deployment created, after `lakebench admin reclaim-bucket` on any other. An AML multi-cycle run generates every cycle.

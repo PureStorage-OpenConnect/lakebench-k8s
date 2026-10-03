@@ -178,8 +178,9 @@ A run is refused, never compared, when:
   poll-timed; re-record it (`scripts/perf_gate.py record --replace`) from a
   v1.6 run;
 - it is a multi-cycle batch run (`cycles` above 1). Cycles 2 onwards generate
-  data between gold and the next bronze, inside the time-to-value span, and
-  `cycles` is not in the snapshot for the fingerprint to catch;
+  data between gold and the next bronze (unless the run reused its corpus
+  with `--skip-generate`); from 1.7 time to value leaves that datagen out,
+  but `cycles` is not in the snapshot for the fingerprint to catch;
 - its batch stage timestamps span less time than the stages' own seconds add
   up to. Runs recorded before v1.6 carry naive local timestamps, so this is a
   clock change (a DST fall-back) during the run; a spring-forward lengthens the

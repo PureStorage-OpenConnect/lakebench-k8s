@@ -1796,8 +1796,9 @@ class DatagenConfig(ConfigModel):
         description=(
             "End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for "
             "single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a "
-            "wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` "
-            "fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range "
+            "wider `2024-01-01` to `2025-12-31` default window across cycles "
+            "(`config/c360_run.py` `cycle_windows`, which the datagen deployer and "
+            "`metrics/c360_correctness.py` both read). See [Timestamp Range "
             "Impact](#timestamp-range-impact)."
         ),
     )

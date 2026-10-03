@@ -139,4 +139,5 @@ def test_c360_workload_version_is_c360_2():
     c360-2 (K17)."""
     from lakebench.metrics.experiment import WORKLOAD_VERSIONS
 
-    assert WORKLOAD_VERSIONS["customer360"] == "c360-2"
+    # c360-2.dev1 (CD-19, one multi-cycle data clock) builds on c360-2.
+    assert WORKLOAD_VERSIONS["customer360"].startswith("c360-2")

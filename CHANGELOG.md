@@ -33,7 +33,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.
 - A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
 - `compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like and 13 confounded (all were 0).
-- Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do not compare with `c360-1`.
+- Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 - AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
 - Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
 - A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
@@ -70,6 +70,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+- A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -117,6 +118,38 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   0.95 is rounded down, never up to 0.95. `compare` refuses a `lakebench
   benchmark` record even when it is named by id, and such a record's
   `success` follows its verdict (the command's exit code does not change).
+- **Multi-cycle runs and reused corpora check a corpus series marker.**
+  Every generate (`generate`, `run --generate`, each cycle of a multi-cycle
+  run, and a continuous run's datagen) now writes
+  `<datagen prefix>/_corpus/series.json` in the bronze bucket: the cycle
+  count, the cycles whose datagen Job finished, each cycle's event-time
+  window, the generation parameters and the image digest the datagen pods
+  ran. A batch run that reuses bronze (`--skip-generate`, or a single-cycle
+  run without `--generate`) reads it before anything is deployed or
+  submitted and exits 3 (new path `run.series_mismatch`) when the generate
+  did not finish (an interrupted generate or clear, or a continuous run's
+  corpus) or the marker names another cycle count, window or generation
+  (seed, scale, customer id space, file size, target size per cycle, dirty
+  ratio, image, window bounds, AML robustness perturbation) than the
+  config's; it exits 4 (`s3.unreachable`) when bronze cannot be read. A
+  single-cycle run over a corpus with no marker (1.6, or an older
+  `generate`) proceeds as before and records `cycle_series.marker:
+  "absent"`, unless the corpus holds files of later cycles. The clears of
+  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset)
+  first write a marker that says a clear is under way and
+  keep it until the clear is done; a generate whose marker another run
+  replaced exits 3. A multi-cycle `--skip-generate` now reuses a finished
+  multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
+  it said. An AML multi-cycle `--skip-generate` is refused (exit
+  2): its stages read the whole bronze prefix every cycle. A multi-cycle run
+  that generates no longer clears an owned non-empty datagen prefix before
+  cycle 0: it exits 3 unless `--regenerate`, which a multi-cycle run now
+  takes without `--generate`. `lakebench generate` (new path
+  `generate.multi_cycle`) and `run --generate-only` refuse a multi-cycle
+  config (exit 2): a corpus generated in one go would be read as cycle 0;
+  `reproduce` of a multi-cycle config lets its run generate each cycle.
+  `metrics.json` gains `cycle_series {marker, reused, cycles_total,
+  windows}` and `cycles[].datagen_skipped`.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -220,10 +253,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
   `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
   `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
-  `--regenerate` without `--generate` or `--generate-only`, or with
+  `--regenerate` on a run that does not generate, or with
   `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
-  `--generate` on a multi-cycle batch run (it generated the corpus twice; the run
-  generates each cycle without it);
+  `--generate` or `--generate-only` on a multi-cycle batch run (it generated the corpus twice; the run
+  generates each cycle without it); `--skip-generate` on a multi-cycle AML run;
   `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
   `--duration` on a batch run or below 60; `--timeout` below 1. The full
   list is under `run` in docs/cli-reference.md. `reproduce` refuses a
@@ -1048,6 +1081,24 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   gold-finalize job records `gold_strategy` and `gold_strategy_source` in
   `jobs[].extra_metrics`. Customer 360 records now carry workload version
   `c360-2`, so they do not compare with `c360-1` records.
+- **Multi-cycle time to value leaves the cycles' datagen out.** A
+  multi-cycle run generates cycles 2 and later between one cycle's gold and
+  the next bronze, inside the span `time_to_value_seconds` measures, so the
+  score counted datagen as pipeline time. Each cycle now records
+  `datagen_start` and `datagen_end`, and the overlap of those intervals with
+  the span is subtracted and reported as
+  `pipeline_benchmark.scores.time_to_value_datagen_excluded_seconds`.
+  Customer 360 only (an AML multi-cycle time to value is unchanged);
+  single-cycle time to value is unchanged; a multi-cycle record from before
+  this does not compare with one after it (workload version `c360-2.dev1`).
+- **A multi-cycle Customer 360 run takes one data clock (workload version
+  `c360-2.dev1`).** Each cycle's silver job anchored `customer_recency_score`
+  to that cycle's bronze-verify clock, so one run's rows were scored against
+  different days. Every cycle now takes the exclusive end of the event-time
+  range the run's cycles cover (`data_clock_source` `cycle_series_end` in the
+  silver driver log). Single-cycle Customer 360 and AML at any cycle count
+  are unchanged. Customer 360 records carry `c360-2.dev1`, which does not
+  compare with `c360-2` records; `compare` names the older side.
 - **`admin repair-operator` reads and repairs under the lease.** It now
   takes the cluster lease first (waiting up to 37.5 min, three watch-list
   holds) and reads the release state, the Helm values, the `--namespaces`
@@ -1478,12 +1529,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   bucket silently before cycle 0. A user with a pre-provisioned bronze
   bucket who relied on `--regenerate` clears the prefix, or claims the bucket
   once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
-  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
-  an owned prefix before cycle 0, and a `run` after `generate
-  --allow-stale-bronze` still records the note. `run` refuses
+  (`--allow-stale-bronze` would over-count). A multi-cycle run takes the
+  same gate before cycle 0, and a `run` that reuses a corpus generated with
+  `--allow-stale-bronze` still records the note (from the corpus series
+  marker, or the note `generate` left on the host). `run` refuses
   `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
   reads it: without `--generate`, `--generate-only` or a multi-cycle batch
-  run, and with `--local`, `--deploy-only` or a continuous run other than
+  run that generates, and with `--local`, `--deploy-only` or a continuous run other than
   `--generate-only`. A `run --repeat` series passes it to repetition 1
   only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
 - **`destroy` clears the kept silver-state's data clock when it empties
@@ -1893,6 +1945,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **A multi-cycle `run` no longer fails at cycle 1.** Its datagen wait used
   a name only the single-shot generate defined, so every multi-cycle run
   without `--generate` stopped with "cannot access local variable" (exit 1).
+- **`run --generate` no longer runs its stages over a datagen Job that
+  failed.** Its progress poll stopped when no datagen pod was active, which
+  a Job whose pods failed after their retries also is, printed "Datagen
+  completed" and ran the pipeline over a partial corpus. It now exits 1
+  ("Datagen did not complete: N/M pods succeeded").
 - `run --continuous --skip-generate` no longer journals a "Datagen started"
   event for a datagen it did not start.
 - Trino compaction of the Customer 360 silver table no longer fails with

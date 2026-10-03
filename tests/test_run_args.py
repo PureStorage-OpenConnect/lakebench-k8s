@@ -53,11 +53,16 @@ CASES = [
     (["--skip-deploy", "--deploy-only"], "--skip-deploy skips the deploy"),
     (["--generate-only", "--skip-generate"], "--generate-only and --skip-generate cannot be"),
     (["--local", "--force-rebuild"], "--local does not deploy, generate on its own, rebuild"),
-    (["--regenerate"], "--regenerate only applies with --generate or --generate-only"),
+    (["--regenerate"], "--regenerate only applies when the run generates"),
     (["--continuous", "--generate", "--regenerate"], "--regenerate does not apply to a local"),
     (["--allow-stale-bronze"], "--allow-stale-bronze only applies when the run generates"),
     (["--generate", "--skip-generate"], "--skip-generate and --generate cannot be combined"),
     (["--generate", "--cycles"], "--generate does not apply to a multi-cycle run"),
+    (["--generate-only", "--cycles"], "--generate-only does not apply to a multi-cycle run"),
+    (
+        ["--skip-generate", "--cycles", "--financial"],
+        "--skip-generate does not apply to a multi-cycle financial (AML) run",
+    ),
     (["--force-reset"], "--force-reset only applies to a continuous run"),
     (["--continuous", "--force-rebuild"], "--force-rebuild only applies to a batch run"),
     (["--duration", "600"], "--duration only applies to a continuous run"),
@@ -82,6 +87,7 @@ def test_every_rule_has_a_case():
         ctx = RunContext(
             mode="continuous" if args.continuous else "batch",
             cycles=2 if "--cycles" in argv else 1,
+            schema="financial" if "--financial" in argv else "customer360",
         )
         assert rule.broken(args, ctx), argv
         assert message in rule.text(args), (argv, rule.next)
@@ -164,6 +170,9 @@ def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, ar
     if "--cycles" in argv:  # not a flag: the config's cycle count
         argv = [a for a in argv if a != "--cycles"]
         text = text.replace("    mode: batch\n", "    mode: batch\n    cycles: 2\n")
+    if "--financial" in argv:  # not a flag: the config's schema
+        argv = [a for a in argv if a != "--financial"]
+        text = text.replace("  schema: customer360\n", "  schema: financial\n")
     cfg.write_text(text)
     result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
     assert result.exit_code == ExitCode.USAGE, result.output
@@ -230,7 +239,7 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
         ({"generate_only": True}, "batch", 1, False),
         ({"generate_only": True}, "continuous", 1, False),
         ({}, "batch", 2, False),
-        ({"skip_generate": True}, "batch", 2, False),
+        ({"skip_generate": True}, "batch", 2, True),
         ({}, "batch", 1, True),
         ({"include_datagen": True, "skip_generate": True}, "batch", 1, True),
         ({"include_datagen": True}, "continuous", 1, True),
@@ -240,9 +249,43 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
 )
 def test_allow_stale_bronze_only_where_a_generate_reads_it(kw, mode, cycles, refused):
     """The flag is read only by the bronze gate before a run's own datagen:
-    --generate-only, a batch --generate, or a multi-cycle batch run (whose
-    cycle 0 runs the gate even under --skip-generate)."""
+    --generate-only, a batch --generate, or a multi-cycle batch run that
+    generates (a multi-cycle --skip-generate reuses its corpus, no gate)."""
     rule = next(r for r in RUN_RULES if "--allow-stale-bronze" in str(r.message))
     ctx = RunContext(mode=mode, cycles=cycles)
     assert rule.broken(RunArgs(allow_stale_bronze=True, **kw), ctx) is refused
     assert not rule.broken(RunArgs(**kw), ctx)
+
+
+@pytest.mark.parametrize(
+    ("kw", "cycles", "refused"),
+    [
+        ({}, 2, False),  # a multi-cycle run takes --regenerate alone
+        ({"skip_generate": True}, 2, True),  # reuses the corpus: nothing to clear
+        ({"deploy_only": True}, 2, True),
+        ({"local": True}, 2, True),
+        ({}, 1, True),  # a single-cycle run generates only with --generate
+        ({"include_datagen": True}, 1, False),
+    ],
+)
+def test_regenerate_on_a_multi_cycle_run(kw, cycles, refused):
+    problems = run_args_problems(RunArgs(regenerate=True, **kw), _cycles_cfg(cycles))
+    assert bool(problems) is refused, [p.doc for p in problems]
+
+
+def _cycles_cfg(cycles: int, schema: str = "customer360"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        architecture=SimpleNamespace(
+            pipeline=SimpleNamespace(mode="batch", cycles=cycles),
+            workload=SimpleNamespace(schema_type=SimpleNamespace(value=schema)),
+        )
+    )
+
+
+def test_multi_cycle_skip_generate_is_refused_only_for_financial():
+    args = RunArgs(skip_generate=True)
+    assert run_args_problems(args, _cycles_cfg(3)) == []
+    assert run_args_problems(args, _cycles_cfg(1, "financial")) == []
+    assert run_args_problems(args, _cycles_cfg(3, "financial"))

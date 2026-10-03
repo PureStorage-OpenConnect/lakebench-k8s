@@ -270,6 +270,18 @@ PATHS: tuple[ExitPath, ...] = (
         "`config upgrade` is removed; the message names `init --from`",
     ),
     ExitPath(
+        "generate.multi_cycle",
+        _C.USAGE,
+        "`generate` with a multi-cycle config (`cycles` above 1): `run` generates each cycle",
+    ),
+    ExitPath(
+        "run.series_mismatch",
+        _C.REFUSED,
+        "a `run` that reuses the corpus (`--skip-generate`, or one cycle without "
+        "`--generate`) finds its series marker unfinished, unreadable, or written for "
+        "another cycle count, window or generation than the config's",
+    ),
+    ExitPath(
         "run.protected_corpus",
         _C.USAGE,
         "the config names a protected AML corpus role or seed",
@@ -485,7 +497,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "s3.unreachable",
         _C.PREREQUISITE,
-        "`generate` or `run --generate` cannot read the bronze bucket to check it is empty",
+        "`generate` or `run --generate` cannot read the bronze bucket to check it is empty, "
+        "or a `run` that reuses bronze cannot read its corpus series marker",
         v16_code=2,
     ),
     ExitPath(

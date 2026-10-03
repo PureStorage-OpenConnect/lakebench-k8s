@@ -47,6 +47,15 @@ nothing measured under this one):
   queries (IQ1 to IQ4) once the run has a case, so the continuous query set
   changes from 8 queries to 12; a round before the first TM pass runs the 8
   and is labelled (2026-10-02).
+- ``c360-2.dev1``: a multi-cycle run's silver jobs take one data clock, the
+  exclusive end of the range its cycles cover (``data_clock_source``
+  ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
+  ``customer_recency_score`` is anchored to one day across cycles.
+  Single-cycle results do not change. With it, multi-cycle time to value
+  leaves the cycles' datagen out. A ``.devN`` version orders after its
+  ``-N`` (``metrics.compare``); the release takes ``c360-3``, never ``c360-2``
+  again, so no release record shares an identity with a pre-``dev1`` one
+  (2026-10-03).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -82,7 +91,7 @@ IDENTITY_VERSION = 2
 V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
-    "customer360": "c360-2",
+    "customer360": "c360-2.dev1",
     "financial": "aml-2",
     "custom": "custom-1",
 }

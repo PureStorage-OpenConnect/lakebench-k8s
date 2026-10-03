@@ -6,7 +6,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -94,6 +93,26 @@ def _clear_clock_best_effort(cfg: Any) -> None:
     except Exception as e:  # noqa: BLE001
         if getattr(e, "status", None) != 404:
             logger.warning("could not clear the bronze data clock: %s", e)
+
+
+def parse_size_to_bytes(size_str: str) -> int:
+    """Bytes in a size string such as "64MB" or "1TB" (bytes without a suffix)."""
+    size_str = size_str.strip().upper()
+    multipliers = {
+        "B": 1,
+        "KB": 1024,
+        "MB": 1024**2,
+        "GB": 1024**3,
+        "TB": 1024**4,
+    }
+
+    for suffix, multiplier in sorted(multipliers.items(), key=lambda x: -len(x[0])):
+        if size_str.endswith(suffix):
+            value = float(size_str[: -len(suffix)])
+            return int(value * multiplier)
+
+    # Assume bytes if no suffix
+    return int(size_str)
 
 
 class DatagenRefused(RuntimeError):
@@ -470,6 +489,43 @@ def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool 
     return _rule(cfg, bucket, s3, strict=strict)
 
 
+def _holds_corpus(cfg: Any, s3: Any, bucket: str, prefix: str) -> bool:
+    """Whether the datagen prefix holds anything but Lakebench's own: an
+    object other than the bucket owner marker and the corpus series marker
+    (a prefix holding only the marker of a clear or a generate that stopped
+    is empty). Raises when the prefix cannot be listed; when the marker
+    check itself cannot list, the prefix counts as non-empty."""
+    if not s3.has_user_objects(bucket, prefix + "/"):
+        return False
+    try:
+        from lakebench.corpus_digest import datagen_scope, series_key
+        from lakebench.s3.client import list_user_keys
+
+        keys = list_user_keys(s3.raw_client, bucket, prefix + "/", limit=2)
+        return keys != [series_key(datagen_scope(prefix))]
+    except Exception:  # noqa: BLE001 -- the safe side: a corpus may be there
+        return True
+
+
+def _reuse_hint(cfg: Any) -> str:
+    """How to keep the corpus instead of regenerating it, for *cfg*."""
+    from lakebench.config.c360_run import run_cycles
+
+    if run_cycles(cfg) == 1:
+        return "or --skip-generate to reuse the existing data"
+    if cfg.architecture.workload.schema_type.value == "financial":
+        return "or clear it yourself (a multi-cycle AML run cannot reuse its corpus)"
+    return "or --skip-generate to reuse a finished multi-cycle corpus of this config"
+
+
+def _mark_clearing(cfg: Any, s3: Any) -> frozenset[str]:
+    """``deploy.corpus.mark_clearing`` before a clear of the datagen prefix:
+    the key the clear must keep. Raises when it cannot be written."""
+    from lakebench.deploy.corpus import mark_clearing
+
+    return frozenset({mark_clearing(cfg, s3, os.environ.get("LB_RUN_ID", ""))})
+
+
 @dataclass
 class BronzeGateResult:
     """What ``bronze_prefix_gate`` decided before datagen."""
@@ -504,7 +560,6 @@ def bronze_prefix_gate(
     regenerate: bool,
     allow_stale_bronze: bool,
     s3: Any = None,
-    clear_owned: bool = False,
 ) -> BronzeGateResult:
     """The one bronze safety gate, on the CLI host before any datagen Job.
 
@@ -531,10 +586,10 @@ def bronze_prefix_gate(
     result's ``exit_code``. Every "proceed" means bronze is about to be
     replaced, so the silver-state data clock is cleared.
 
-    ``clear_owned`` (the multi-cycle loop before cycle 0, which clears an
-    owned prefix as 1.6 did): an owned non-empty prefix is cleared as with
-    ``--regenerate``, and an unowned one takes the ordinary rows, so
-    ``--allow-stale-bronze`` still applies.
+    Every generate takes it before its first datagen Job: ``generate``,
+    ``run --generate`` and a multi-cycle run before cycle 0. A prefix holding
+    only the corpus series marker (``_corpus/series.json``, left by a clear
+    or a generate that stopped) counts as empty (``_holds_corpus``).
     """
     bucket = cfg.platform.storage.s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/")
@@ -557,7 +612,9 @@ def bronze_prefix_gate(
         if not s3.bucket_exists(bucket):
             _clear_clock_best_effort(cfg)
             return BronzeGateResult(True, bucket, prefix, owned=False)
-        nonempty = s3.has_user_objects(bucket, prefix + "/" if prefix else "")
+        nonempty = (
+            _holds_corpus(cfg, s3, bucket, prefix) if prefix else s3.has_user_objects(bucket, "")
+        )
     except Exception as e:  # noqa: BLE001
         return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
     if not nonempty:
@@ -587,16 +644,24 @@ def bronze_prefix_gate(
             n,
         )
     if owned:
-        if not (regenerate or clear_owned):
+        if not regenerate:
             return refuse(
                 f"Bronze prefix {held}. Refusing to generate over it: pass --regenerate "
-                "to clear the datagen prefix first, or --skip-generate to reuse the "
-                "existing data.",
+                f"to clear the datagen prefix first, {_reuse_hint(cfg)}.",
                 owned,
                 n,
             )
         try:
-            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            keep = _mark_clearing(cfg, s3)
+        except Exception as e:  # noqa: BLE001 -- nothing was deleted
+            return refuse(
+                f"--regenerate: {e}; nothing under {shown} was deleted",
+                owned,
+                n,
+                code=ExitCode.FAILED,
+            )
+        try:
+            cleared = s3.delete_prefix(bucket, prefix, abort_multipart=True, keep_keys=keep)
         except Exception as e:  # noqa: BLE001
             return refuse(
                 f"--regenerate: could not clear {shown}: {e}", owned, n, code=ExitCode.FAILED
@@ -637,8 +702,14 @@ class DatagenDeployer:
         allow_stale_bronze: bool = False,
         *,
         continuous: bool = False,
+        stale_record: dict[str, Any] | None = None,
     ):
         self.allow_stale_bronze = allow_stale_bronze
+        # The bronze gate's ``datagen.stale_bronze`` record when it allowed
+        # generating over existing objects; the series marker carries it so a
+        # run that reuses the corpus keeps the label.
+        self.stale_record = stale_record
+        self._wrote_over_stale = False
         # A continuous run's datagen: it never takes --allow-stale-bronze,
         # and its reset has already cleared the datagen prefix, so a refusal
         # names that path's remedy instead of the flag.
@@ -744,30 +815,8 @@ class DatagenDeployer:
         return context
 
     def _parse_size_to_bytes(self, size_str: str) -> int:
-        """Parse size string to bytes.
-
-        Args:
-            size_str: Size string (e.g., "100GB", "1TB")
-
-        Returns:
-            Size in bytes
-        """
-        size_str = size_str.strip().upper()
-        multipliers = {
-            "B": 1,
-            "KB": 1024,
-            "MB": 1024**2,
-            "GB": 1024**3,
-            "TB": 1024**4,
-        }
-
-        for suffix, multiplier in sorted(multipliers.items(), key=lambda x: -len(x[0])):
-            if size_str.endswith(suffix):
-                value = float(size_str[: -len(suffix)])
-                return int(value * multiplier)
-
-        # Assume bytes if no suffix
-        return int(size_str)
+        """``parse_size_to_bytes``."""
+        return parse_size_to_bytes(size_str)
 
     @staticmethod
     def _cycle_timestamp_range(
@@ -776,32 +825,12 @@ class DatagenDeployer:
         timestamp_start: str | None = None,
         timestamp_end: str | None = None,
     ) -> tuple[str, str]:
-        """Compute the timestamp window for a given cycle.
+        """The event-time window of one cycle: ``config.c360_run.cycle_windows``,
+        the one copy of the window rule (non-overlapping, chronological, the
+        last cycle takes the remainder)."""
+        from lakebench.config.c360_run import cycle_windows
 
-        Divides the configured date range evenly across cycles.
-        Non-overlapping, chronologically ordered.  Last cycle gets remainder.
-
-        The chronological, non-overlapping property is load-bearing for the c360
-        gold non-degeneracy gate (gold_finalize*.py gold_date_coverage_problem):
-        the INCREMENTAL strategy recomputes silver dates >= the gold watermark
-        and keeps older gold rows, so it covers every date only while each
-        cycle's dates are >= the prior cycle's. If this window ever admits
-        overlapping, backfilled or late-arriving dates, the gate would turn a
-        legitimate pre-watermark gap into a hard run failure -- update the gate
-        (recompute the affected dates) alongside any such change here.
-        """
-        start = datetime.strptime(timestamp_start or "2024-01-01", "%Y-%m-%d")
-        end = datetime.strptime(timestamp_end or "2025-12-31", "%Y-%m-%d")
-        total_days = (end - start).days
-        days_per_cycle = total_days // total_cycles
-
-        cycle_start = start + timedelta(days=days_per_cycle * cycle_index)
-        if cycle_index == total_cycles - 1:
-            cycle_end = end
-        else:
-            cycle_end = start + timedelta(days=days_per_cycle * (cycle_index + 1))
-
-        return cycle_start.strftime("%Y-%m-%d"), cycle_end.strftime("%Y-%m-%d")
+        return cycle_windows(total_cycles, timestamp_start, timestamp_end)[cycle_index]
 
     def deploy_cycle(
         self,
@@ -857,6 +886,8 @@ class DatagenDeployer:
             # after the previous job's pods have stopped so nothing writes
             # mid-clear. Append cycles (n > 0) keep the earlier cycles' files.
             self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
+            if cycle_index == 0:
+                self._begin_series(total_cycles)
 
             for template_name in self.TEMPLATES:
                 yaml_content = self.renderer.render(template_name, context)
@@ -934,7 +965,9 @@ class DatagenDeployer:
                 )
             return
         if deployment_may_empty(self.config, bucket, s3):
-            n = s3.delete_prefix(bucket, prefix, abort_multipart=True)
+            n = s3.delete_prefix(
+                bucket, prefix, abort_multipart=True, keep_keys=_mark_clearing(self.config, s3)
+            )
             if n:
                 logger.info(
                     "cleared %d stale object(s) under s3://%s/%s before a fresh generate",
@@ -943,7 +976,7 @@ class DatagenDeployer:
                     prefix,
                 )
             return
-        if not s3.has_user_objects(bucket, prefix + "/"):
+        if not _holds_corpus(self.config, s3, bucket, prefix):
             return
         if self.allow_stale_bronze:
             logger.warning(
@@ -953,6 +986,7 @@ class DatagenDeployer:
                 prefix,
                 bucket,
             )
+            self._wrote_over_stale = True
             return
         if self.continuous:
             raise StaleBronzeRefused(
@@ -969,6 +1003,22 @@ class DatagenDeployer:
             f"{bucket}. Pass --allow-stale-bronze to generate over them, or clear the "
             "prefix yourself."
         )
+
+    def _begin_series(self, total_cycles: int) -> None:
+        """Write the corpus series marker of a generate that is starting
+        (``deploy.corpus.begin_series``), after the fresh clear and before
+        the Job, so a generate that stops part way leaves a marker that says
+        so. Raises when it cannot be written; skipped when the bronze bucket
+        does not exist yet."""
+        from lakebench.deploy.corpus import begin_series
+
+        s3 = _s3_client_for(self.config)
+        if s3._init_error:
+            raise RuntimeError(f"cannot write the series marker: {s3._init_error}")
+        if not s3.bucket_exists(self.config.platform.storage.s3.buckets.bronze):
+            return
+        stale = self.stale_record or ({"allowed": True} if self._wrote_over_stale else None)
+        begin_series(self.config, s3, total_cycles, os.environ.get("LB_RUN_ID", ""), stale=stale)
 
     def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.
@@ -997,6 +1047,7 @@ class DatagenDeployer:
             # the previous job's pods have stopped, so nothing writes into the
             # prefix mid-clear.
             self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
+            self._begin_series(1)
 
             # Render and apply job template
             for template_name in self.TEMPLATES:

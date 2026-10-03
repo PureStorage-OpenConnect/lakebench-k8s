@@ -569,6 +569,10 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | flag |  | Skip confirmation prompt |
 | `--regenerate` |  | flag |  | Clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment cannot prove it owns. |
 | `--allow-stale-bronze` |  | flag |  | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; the run records it. |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `2` `generate.multi_cycle`: `generate` with a multi-cycle config (`cycles` above 1): `run` generates each cycle
 <!-- END GENERATED: cli generate -->
 
 - `--regenerate` clears the datagen prefix, not the whole bucket, and only
@@ -580,7 +584,10 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
   before generate".
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
-generates approximately 1 TB of data. Use `--timeout` for large scales that
+generates approximately 1 TB of data. A multi-cycle config (`cycles` above 1)
+is refused (exit 2) before any cluster call: `lakebench run` generates each
+cycle before its stages. A finished generate records the corpus series
+marker (see "Reusing a corpus" under `run`). Use `--timeout` for large scales that
 may take hours. Without `--yes`, the command prompts for confirmation before
 submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
 run is re-run from the start.
@@ -620,9 +627,9 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--generate` |  | flag |  | Run datagen before pipeline stages (single-cycle batch only: a multi-cycle run generates in its cycles and refuses it; continuous always runs datagen) |
 | `--skip-preflight` |  | flag |  | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says capacity not checked |
 | `--skip-deploy` |  | flag |  | Skip the deploy and the infrastructure readiness check; the read-only prerequisite checks, cluster capacity included, still run |
-| `--skip-generate` |  | flag |  | Assume data already exists in bronze bucket |
-| `--regenerate` |  | flag |  | With --generate: clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without --generate or --generate-only. |
-| `--allow-stale-bronze` |  | flag |  | On a batch run with --generate or more than one cycle, or with --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
+| `--skip-generate` |  | flag |  | Batch: reuse the corpus already in bronze. Refused (exit 3) when its series marker says the generate did not finish or was made for another cycle count, window or generation than the config's; a multi-cycle run needs a marker |
+| `--regenerate` |  | flag |  | Clears the datagen prefix in a bronze bucket this deployment created, before generating (before cycle 0 of a multi-cycle run); refused on any other bucket. Without it, a non-empty datagen prefix is refused (exit 3), so existing datagen output is never overwritten silently. Takes --generate on a single-cycle run, nothing more on a multi-cycle run, and is refused when the run does not generate. |
+| `--allow-stale-bronze` |  | flag |  | On a batch run with --generate, a multi-cycle batch run without --skip-generate, or --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
 | `--skip-maintenance` |  | flag |  | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` |  | flag |  | Silver batch only: opt in to a full rebuild that would drop an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. |
 | `--force-reset` |  | flag |  | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data before starting |
@@ -641,6 +648,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `run.namespace_gone`: the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
+- `3` `run.series_mismatch`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
@@ -662,11 +670,13 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--skip-deploy` with `--deploy-only` or `--generate-only`;
 - `--generate-only` with `--skip-generate`;
 - `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
-- `--regenerate` without `--generate` or `--generate-only`;
+- `--regenerate` on a run that does not generate (only `--generate`, `--generate-only` or a multi-cycle batch run without `--skip-generate` take it);
 - `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
-- `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` or a continuous run other than `--generate-only`);
+- `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run without `--skip-generate` take it; not `--local`, `--deploy-only` or a continuous run other than `--generate-only`);
 - `--skip-generate` with `--generate`;
 - `--generate` on a multi-cycle batch run (`cycles` above 1);
+- `--generate-only` on a multi-cycle batch run (`cycles` above 1);
+- `--skip-generate` on a multi-cycle financial (AML) batch run;
 - `--force-reset` on a batch run;
 - `--force-rebuild` on a continuous run;
 - `--duration` on a batch run;
@@ -682,7 +692,13 @@ cluster call, and exits 2 (usage) naming the first refused one:
   the AML workload adds 900 s and never goes below its bronze-verify budget.
 - `--skip-deploy` still runs the read-only prerequisite checks, cluster
   capacity included, and a failed one fails the run with exit 4.
-- `--skip-generate` is refused with `--generate`.
+- `--skip-generate` is refused with `--generate`. The corpus series marker
+  must describe a finished generate of this config: see "Reusing a corpus"
+  below.
+- `--generate-only` takes a single-cycle config only; a multi-cycle run
+  generates each cycle before its stages.
+- `--allow-stale-bronze`: every later run that reuses that corpus records
+  the note too (`datagen.stale_bronze`).
 - `--force-rebuild`: on Delta the silver table's own log has the last word;
   the rebuild writes under an epoch above every one the table has used, even
   if the counter reads lower.
@@ -719,6 +735,40 @@ count. Exit: 0 when every repetition passed, 1 when any did not, 3 when bronze o
 the corpus changed, 130 on an interrupt. A repetition that stops before
 saving a record, and repetition 1 when it exits 2 to 5, stop the series
 with that repetition's own code.
+
+**Reusing a corpus.** Every generate (`generate`, `run --generate`, each
+cycle of a multi-cycle run, and a continuous run's datagen) writes a corpus
+series marker, `<datagen prefix>/_corpus/series.json` in the bronze bucket:
+the cycle count, the cycles whose datagen Job finished, each cycle's
+event-time window, the generation parameters (seed, scale, customer id
+space, file size, dirty ratio, image) and the image digest the datagen pods
+ran. A batch run that reuses the corpus (`--skip-generate`, or a
+single-cycle run without `--generate`) reads it after the prerequisite
+checks and before anything is deployed or submitted, and is refused (exit 3,
+`run.series_mismatch`) when the marker says the generate did not finish (an
+interrupted generate or clear, or a continuous run's corpus), or names
+another cycle count, window or generation than the config's (the seed,
+scale, customer id space, file size, target size per cycle, dirty ratio,
+image, window bounds and, for AML, the robustness perturbation; the image
+digest is not compared), and exits 4 when bronze cannot be read. The clears
+of the datagen prefix (`--regenerate`, the deployer's clear before a fresh
+generate, a continuous run's reset) first write a marker
+that says a clear is under way and keep it until the clear is done, so such
+a clear that stops part way never leaves part of a corpus unmarked (a
+destroy that keeps the bronze bucket and stops while emptying it is not
+covered). A prefix holding only the marker counts as empty. A
+single-cycle run over a corpus with no marker (one from 1.6 or an older
+`generate`) proceeds and records `cycle_series.marker: "absent"`, unless it
+holds files of cycles after the first (`part-cNNN-*`, a multi-cycle corpus);
+a multi-cycle `--skip-generate` needs a marker. A multi-cycle run without
+`--skip-generate` generates every cycle: a non-empty datagen prefix, a
+leftover marker included, is refused (exit 3) unless `--regenerate`. A
+multi-cycle financial (AML) run cannot reuse its corpus: its stages read the
+whole bronze prefix every cycle. The run records `cycle_series {marker,
+reused, cycles_total, windows}` (`marker`: `read` or `absent` for a reuse;
+`begun`, `written`, `unwritten` or `conflict` for a generate), and each cycle
+`datagen_skipped`. A generate whose marker another run has replaced since it
+began stops with exit 3 (two runs in one namespace are not supported).
 
 The refused arguments are listed with the flags above.
 
