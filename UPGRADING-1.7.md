@@ -266,7 +266,7 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 ### financial reproduce reruns the alert's rule on what gold read
 
-`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 every time (it could not reproduce).
+`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
 
 **What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
 

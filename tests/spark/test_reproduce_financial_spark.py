@@ -116,7 +116,11 @@ def case(spark, load_script, monkeypatch):
             f"{names[k]}={current(k)}:0"
             for k in ("SILVER_TXNS", "SILVER_ENTITIES", "SILVER_BATCH_VERSIONS")
         ]
-        return {"run_id": RUN, "read_snapshots": score.read_snapshot_fingerprints(spark, args)}
+        return {
+            "run_id": RUN,
+            "nonce": "n-1",
+            "read_snapshots": score.read_snapshot_fingerprints(spark, args),
+        }
 
     def raise_alert(alert_id, txns_ids):
         spark.createDataFrame(
@@ -147,6 +151,8 @@ def case(spark, load_script, monkeypatch):
 
     return SimpleNamespace(
         gold=gold,
+        rules=rules,
+        rule=rule,
         repro=repro,
         names=names,
         fq=fq,
@@ -169,13 +175,21 @@ def test_reproduced_from_the_recorded_snapshots(spark, case):
     # Later commits gold never read do not change the reproduction.
     case.write_txns([case.txn(9, 7, 1, 2)])
     case.seal([1])
-    out = case.repro.reproduce(spark, "a-1", inputs)
+    cleaned = []
+    real_cleanup = case.rules.cleanup_w1_checkpoints
+    case.rules.cleanup_w1_checkpoints = lambda sp: cleaned.append(1) or real_cleanup(sp)
+    try:
+        out = case.repro.reproduce(spark, "a-1", inputs)
+    finally:
+        case.rules.cleanup_w1_checkpoints = real_cleanup
     assert (out["outcome"], out["basis"], out["matched"], out["diff_size"]) == (
         "reproduced",
         "recorded",
         1,
         0,
     ), out
+    assert out["nonce"] == "n-1" and out["not_pinned"]
+    assert cleaned == [1]  # W1 checkpoints and path spill removed after the rule
 
 
 def test_a_batch_sealed_after_the_recorded_versions_snapshot_stays_hidden(spark, case):
@@ -287,3 +301,57 @@ def test_gold_logs_the_snapshots_it_reads(spark, case, monkeypatch):
         "total_records": 3,
     }
     assert got[1]["total_records"] == 2 and got[2]["total_records"] == 1
+
+
+def test_reproduces_an_alert_gold_wrote(spark, case, monkeypatch):
+    """The alert row comes from gold-finalize's own writer
+    (run_detection_rules: the positional INSERT of ALERT_COLUMNS, a uuid
+    alert_id, the Iceberg timestamp and array round trip), not a hand-made
+    row, and reproduce finds and matches it. A rule version other than the
+    running code's is a mismatch."""
+    from pyspark.sql import functions as F
+
+    gf, rules = case.gold, case.rules
+    for ddl in (gf.DDL_ALERTS, gf.DDL_STATUS):
+        spark.sql(ddl)
+    case.setup()
+    inputs = case.record()
+    template = rules._empty_alerts_df(spark, "x")
+
+    def toy(txns, run_id, silver_entities=None):
+        grouped = case.rule(txns, run_id, silver_entities)
+        cols = {
+            "alert_id": F.expr("uuid()"),
+            "rule_id": F.lit("WX_toy"),
+            "rule_version": F.lit(rules.RULE_VERSION),
+            "model_id": F.lit("m"),
+            "model_version": F.lit("1"),
+            "entity_id": F.col("entity_id"),
+            "related_txn_ids": F.col("related_txn_ids"),
+            "related_entity_ids": F.array(F.col("entity_id")),
+            "alert_ts": F.col("alert_ts"),
+            "alert_score": F.lit(0.5),
+            "priority": F.lit("LOW"),
+            "status": F.lit("OPEN"),
+            "disposition": F.lit(None).cast("string"),
+            "alert_type": F.lit("test"),
+            "run_id": F.lit(run_id),
+            "narrative": F.lit("n"),
+            "evidence": F.lit(None).cast("map<string,string>"),
+            "detected_ts": F.current_timestamp(),
+            "reason_codes": F.array(F.lit("X_CODE")),
+        }
+        return grouped.select(*[cols[f.name].alias(f.name) for f in template.schema.fields])
+
+    monkeypatch.setattr(rules, "get_rule", lambda rid: toy if rid == "WX_toy" else None)
+    txns = gf._sealed_txns(spark, case.names["SILVER_TXNS"])
+    gf.run_detection_rules(spark, txns, RUN, rules=("WX_toy",))
+    written = spark.table("lakehouse.gold.alerts").where("rule_id = 'WX_toy'").collect()
+    assert len(written) == 1, written
+    monkeypatch.setattr(case.repro, "GOLD_ALERTS", "gold.alerts")
+    out = case.repro.reproduce(spark, written[0]["alert_id"], inputs)
+    assert (out["outcome"], out["basis"]) == ("reproduced", "recorded"), out
+
+    monkeypatch.setattr(rules, "RULE_VERSION", "9.9.9")
+    out = case.repro.reproduce(spark, written[0]["alert_id"], inputs)
+    assert out["outcome"] == "mismatch" and "rule version" in out["reason"], out

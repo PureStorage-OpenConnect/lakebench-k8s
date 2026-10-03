@@ -19,6 +19,7 @@ script.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Annotated
@@ -243,26 +244,55 @@ def reproduce_record(cfg, run_id: str | None, metrics_dir: Path) -> tuple[dict |
             return None
         return data if isinstance(data, dict) else None
 
-    if run_id:
-        rec = load(metrics_dir / f"run-{run_id}" / "metrics.json")
-        return rec, str(metrics_dir / f"run-{run_id}" / "metrics.json")
-    best: tuple[str, dict] | None = None
-    for path in sorted(metrics_dir.glob("run-*/metrics.json")):
-        rec = load(path)
+    def aml_batch_run(rec: dict | None) -> bool:
         if rec is None or rec.get("deployment_name") != cfg.name:
-            continue
+            return False
         if (rec.get("record_kind") or "run") != "run":
-            continue
+            return False
         exp = rec.get("experiment") or {}
         workload = (exp.get("workload") or {}).get("name") or (
             rec.get("config_snapshot") or {}
         ).get("schema_type")
-        if workload != "financial" or exp.get("mode", "batch") != "batch":
+        return workload == "financial" and exp.get("mode", "batch") == "batch"
+
+    if run_id:
+        path = metrics_dir / f"run-{run_id}" / "metrics.json"
+        rec = load(path)
+        return (rec if aml_batch_run(rec) else None), str(path)
+    best: tuple[str, dict] | None = None
+    for path in sorted(metrics_dir.glob("run-*/metrics.json")):
+        rec = load(path)
+        if not aml_batch_run(rec):
             continue
+        assert rec is not None
         start = str(rec.get("start_time") or "")
         if best is None or start > best[0]:
             best = (start, rec)
     return (best[1] if best else None), str(metrics_dir)
+
+
+def snapshots_problem(record: dict) -> tuple[str | None, list, str]:
+    """``(problem, read_snapshots, scoring run id)`` of a run record: why it
+    cannot drive a reproduction (None when it can). The scoring run id is the
+    one gold-finalize stamped on its alerts (a cycle's, e.g. ``<run>-c1``)."""
+    from lakebench.metrics.read_snapshots import usable
+
+    run = record.get("run_id")
+    scoring = record.get("financial_scoring")
+    if not isinstance(scoring, dict) or not scoring.get("run_id"):
+        return (
+            f"run {run} was not scored (a `run --stage` subset, or its scoring did not "
+            "complete), so it recorded no read snapshots",
+            [],
+            "",
+        )
+    snaps = scoring.get("read_snapshots")
+    if snaps is None:
+        return f"run {run} recorded no read snapshots (it predates 1.7)", [], ""
+    problem = usable(snaps)
+    if problem:
+        return f"run {run}: {problem}", [], ""
+    return None, snaps, str(scoring["run_id"])
 
 
 @financial_app.command("reproduce")
@@ -288,7 +318,6 @@ def reproduce(
     reproduced; 4 when the snapshots are gone (or the run recorded none).
     """
     from lakebench.exit_codes import UsageError, path_code
-    from lakebench.metrics.read_snapshots import usable
     from lakebench.metrics.storage import MetricsStorage
     from lakebench.modules.pipeline_engines.spark.job import JobType
 
@@ -297,37 +326,47 @@ def reproduce(
             "--alert-id must be 1 to 128 characters of hex digits, dashes and underscores",
             path="click.usage",
         )
+    if run is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run):
+        raise UsageError("--run must be a run id (letters, digits, - and _)", path="click.usage")
     cfg = _load_config(config, "financial reproduce")
     record, where = reproduce_record(cfg, run, MetricsStorage().metrics_dir)
     if record is None:
         raise UsageError(
             f"No AML batch run record of {cfg.name} to reproduce from",
             where=where,
-            next="pass --run RUN_ID with a record on this host",
+            next="pass --run RUN_ID with a record of this deployment on this host",
             path="financial.reproduce.no_record",
         )
-    run_id = str(record.get("run_id") or "")
-    snapshots = (record.get("financial_scoring") or {}).get("read_snapshots")
-    problem = usable(snapshots)
+    # A run on a protected corpus is read only by its registered look.
+    from lakebench.aml.look_guard import refuse_protected_records
+
+    refuse_protected_records(
+        [(str(record.get("run_id")), record)], "financial reproduce", fail_closed=True
+    )
+    problem, snapshots, run_id = snapshots_problem(record)
     if problem:
         raise LakebenchError(
-            f"Run {run_id} cannot be reproduced: {problem}",
-            next="reproduce an alert of a 1.7 AML batch run",
+            f"Cannot reproduce: {problem}",
+            next="reproduce an alert of a scored 1.7 AML batch run (--run RUN_ID)",
             path="financial.reproduce.snapshot_gone",
             code=path_code("financial.reproduce.snapshot_gone"),
         )
 
     gold = cfg.platform.storage.s3.buckets.gold
     prefix = f"scoring/reproduce/{alert_id}"
-    console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id} run={run_id}")
+    console.print(
+        f"[bold]lakebench financial reproduce[/bold] alert_id={esc(alert_id)} run={esc(run_id)}"
+    )
     job_manager = _get_job_manager(cfg)
     import json
+    import uuid
 
     client = _s3(cfg)
+    nonce = uuid.uuid4().hex
     client.raw_client.put_object(
         Bucket=gold,
         Key=f"{prefix}/input.json",
-        Body=json.dumps({"run_id": run_id, "read_snapshots": snapshots}).encode(),
+        Body=json.dumps({"run_id": run_id, "nonce": nonce, "read_snapshots": snapshots}).encode(),
     )
     try:  # a result left by an earlier reproduction of this alert is not this one's
         client.raw_client.delete_object(Bucket=gold, Key=f"{prefix}/result.json")
@@ -358,8 +397,8 @@ def reproduce(
     except Exception as e:  # noqa: BLE001 -- no result: a crash
         print_error(f"reproduce wrote no result ({state}): {e}")
         raise typer.Exit(ExitCode.FAILED) from None
-    if not isinstance(result, dict) or result.get("run_id") != run_id:
-        print_error(f"reproduce result is not this reproduction's ({state})")
+    if not isinstance(result, dict) or result.get("nonce") != nonce:
+        print_error(f"reproduce wrote no result for this reproduction ({state})")
         raise typer.Exit(ExitCode.FAILED)
     outcome = result.get("outcome")
     console.print(
@@ -367,6 +406,11 @@ def reproduce(
         f"basis={esc(result.get('basis'))} matched={esc(result.get('matched'))} "
         f"diff={esc(result.get('diff_size'))}"
         + (f" ({esc(result.get('reason'))})" if result.get("reason") else "")
+        + (
+            f" [not pinned: {esc(', '.join(result['not_pinned']))}]"
+            if outcome == "reproduced" and result.get("not_pinned")
+            else ""
+        )
     )
     if outcome == "reproduced":
         return

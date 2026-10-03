@@ -579,9 +579,11 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   batch scorer, before maintenance, fingerprints every column of each
   (`financial_scoring.read_snapshots` in the run record: table, snapshot,
   `total_records`, `rows`, `fp`, `cols_sha`). The command reads that record
-  (`--run`, or the deployment's latest AML batch run on this host) and
-  refuses before any cluster call when it has none (exit 4: the run
-  predates 1.7). The job reads each table at its recorded snapshot, or, when
+  (`--run`, or the deployment's latest AML batch run on this host; exit 2
+  when there is none here) and refuses before any cluster call when that
+  run is from a protected corpus (exit 2) or recorded no read snapshots
+  (exit 4: it predates 1.7, or it was not scored, like a `run --stage`
+  subset). The job reads each table at its recorded snapshot, or, when
   that expired, the current table if its fingerprint is the same (content
   and batch stamping equal: `basis: equivalent`); filters the transactions
   to the batches the versions table had sealed when gold read it; runs the
@@ -590,9 +592,14 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   `scoring/reproduce/<alert_id>/result.json` and the command exits 0 when
   the alert is reproduced, 1 when it is not (no match, several, a different
   set, or the rule declined to run) or the alert is not in `gold.alerts` for
-  that run, and 4 when a snapshot is gone and the content changed. W3 and
-  W17 path budgets depend on the driver's memory, so reproduce a W2 or W4
-  alert for a clean check.
+  that run (a rule version other than the running code's included), and 4
+  when a snapshot is gone and the content changed. The basis covers the
+  three silver tables: W5 and W6 read the bronze watchlist as it is now and
+  W1 its vertex cap from the current config, which the result lists as
+  `not_pinned`. W3 and W17 path budgets depend on the driver's memory, so
+  reproduce a W2 or W4 alert for a clean check. A reproduction runs the
+  rule over the whole silver snapshot, and the batch scorer's fingerprints
+  read all three tables once per run.
 
 `CONFIG` in both cases is the same YAML you passed to `deploy`. Both
 verbs load it, assert `workload.schema=financial`, and dispatch a

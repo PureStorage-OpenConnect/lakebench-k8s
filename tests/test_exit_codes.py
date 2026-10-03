@@ -585,7 +585,10 @@ def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, o
             "deployment_name": "aml-x",
             "start_time": "2026-10-03T12:00:00+00:00",
             "experiment": {"workload": {"name": "financial"}, "mode": "batch"},
-            "financial_scoring": {"read_snapshots": _READ_SNAPSHOTS if snapshots else []},
+            "financial_scoring": {
+                "run_id": "20261003-120000-aaaaaa-c1",
+                "read_snapshots": _READ_SNAPSHOTS if snapshots else [],
+            },
         }
         (d / "metrics.json").write_text(_json.dumps(rec))
 
@@ -598,17 +601,18 @@ def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, o
             self.raw_client = self
 
         def put_object(self, **k):
-            pass
+            self.nonce = _json.loads(k["Body"])["nonce"]
 
         def delete_object(self, **k):
             pass
 
         def get_object(self, **k):
-            body = _json.dumps({"run_id": "20261003-120000-aaaaaa", "outcome": outcome})
+            body = _json.dumps({"nonce": self.nonce, "outcome": outcome})
             return {"Body": SimpleNamespace(read=lambda: body.encode())}
 
     monkeypatch.setattr(fin, "_get_job_manager", lambda c: _Jobs())
-    monkeypatch.setattr(fin, "_s3", lambda c: _S3())
+    s3 = _S3()
+    monkeypatch.setattr(fin, "_s3", lambda c: s3)
     monkeypatch.setattr(fin, "_wait_for_sparkapp", lambda *a, **k: "COMPLETED")
     (tmp_path / "c.yaml").write_text("name: aml-x\n")
     return _runner().invoke(

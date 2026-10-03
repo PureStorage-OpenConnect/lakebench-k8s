@@ -80,8 +80,10 @@ budget below is what the ENG-2C.4.8 verification asserts against.
 ## Reproduce (W10, `lakebench financial reproduce`)
 
 Reproducing one batch alert from the snapshots its run's gold read (the
-run record's `financial_scoring.read_snapshots`). Small, bounded work; used
-as a supervisory-reproducibility smoke check rather than a scaling metric.
+run record's `financial_scoring.read_snapshots`). It runs the alert's rule
+over the whole silver snapshot (plus a fingerprint of a table whose snapshot
+expired); used as a supervisory-reproducibility smoke check rather than a
+scaling metric.
 
 | Scale | Wall-clock p50 (s) | Reproduction match rate |
 |------:|-------------------:|------------------------:|
