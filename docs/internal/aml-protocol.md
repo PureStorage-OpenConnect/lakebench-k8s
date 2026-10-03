@@ -9,7 +9,10 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
 
 ## Seeds and corpus roles
 
-- Evaluation seed 50000043 and robustness seed 90000042 are generated and
+- The evaluation and robustness seeds are held out. They are recorded only as
+  salted hashes in `src/lakebench/spark/data/aml/heldout_hashes.json`
+  (append-only, with the same hashes compiled into the guards), never in
+  plaintext, and a seed is checked by hashing it. Their corpora are generated and
   scored only as the registered look for their role
   (`scripts/aml_gate.py --registered`, `corpora.registered_looks_open`), once
   each, after the generator freeze.

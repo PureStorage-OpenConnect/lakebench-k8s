@@ -77,10 +77,8 @@
       370370410,
       493827199
     ],
-    "calibration_replicate_seeds_note": "v3.6.0 (AML-GOALS section 9 #45): scale-2 replicates of the calibration corpus for D8 (scale_invariance.s2). Calibration role: tuning use is allowed, and the gate reports them as calibration. Chosen as 43 + k x 123456789 for k = 1..4, the first four of that progression that pass every check in tests/test_aml_d8_seeds.py against each other and against 42, 43, 50000042, 50000043 and 90000042: (1) seed_guard.rule, every pairwise gap more than max_n_inst_scale100 from a multiple of TID_SEED_STRIDE; (2) gaps above 4096, because datagen salts are seed + small offsets (world.rs, kyc.rs: up to 1616) and hash_normal reads salt and salt + 1, which is why 44 and 45 are refused (they reuse seed 43's persona draws); (3) (s1 + a) XOR (s2 + b) >= 2^24 for every offset a, b < 2048, so the realism.rs and world.rs id ^ (seed + offset) hashes cannot alias two corpora within a scale-100 population (11.1M entities); (4) hashed instance seeds (typology.rs, 2e5 instances per tid, tids 0-14) pairwise disjoint (D10); (5) not spent, not the evaluation or robustness seed, accepted by config/datagen_seed.py aml_seed_error. Four, not two: with two replicates (three s2 runs) the corrected rule's s2 SE has 2 degrees of freedom and an invariant generator passes 0.33 to 0.68 of the time (power_sim).",
-    "evaluation_seed": 50000043,
-    "robustness_seed": 90000042,
-    "seed_rule": "v3.5.0: a voided or burned look increments the seed by one. D0 at v3.4.1 looked at calibration seed 42 (now 43); the evaluation seed moves with any change after a gate run (50000042 to 50000043). The robustness corpus was never generated and keeps 90000042. Pairwise gaps checked against seed_guard.",
+    "calibration_replicate_seeds_note": "v3.6.0 (AML-GOALS section 9 #45): scale-2 replicates of the calibration corpus for D8 (scale_invariance.s2). Calibration role: tuning use is allowed, and the gate reports them as calibration. Chosen as 43 + k x 123456789 for k = 1..4, the first four of that progression that pass every check in tests/test_aml_d8_seeds.py against each other and against 42, 43, 50000042, [held-out evaluation seed] and [held-out robustness seed]: (1) seed_guard.rule, every pairwise gap more than max_n_inst_scale100 from a multiple of TID_SEED_STRIDE; (2) gaps above 4096, because datagen salts are seed + small offsets (world.rs, kyc.rs: up to 1616) and hash_normal reads salt and salt + 1, which is why 44 and 45 are refused (they reuse seed 43's persona draws); (3) (s1 + a) XOR (s2 + b) >= 2^24 for every offset a, b < 2048, so the realism.rs and world.rs id ^ (seed + offset) hashes cannot alias two corpora within a scale-100 population (11.1M entities); (4) hashed instance seeds (typology.rs, 2e5 instances per tid, tids 0-14) pairwise disjoint (D10); (5) not spent, not the evaluation or robustness seed, accepted by config/datagen_seed.py aml_seed_error. Four, not two: with two replicates (three s2 runs) the corrected rule's s2 SE has 2 degrees of freedom and an invariant generator passes 0.33 to 0.68 of the time (power_sim).",
+    "seed_rule": "v3.5.0: a voided or burned look increments the seed by one. D0 at v3.4.1 looked at calibration seed 42 (now 43); the evaluation seed moves with any change after a gate run (50000042 to [held-out evaluation seed]). The robustness corpus was never generated and keeps [held-out robustness seed]. Pairwise gaps checked against seed_guard.",
     "gate_scale": 2,
     "entities_per_scale_unit": 111111,
     "gate_scale_note": "AML-GOALS section 9 #36: calibration corpora and D0 run at scale 2 (the local runner refuses another scale unless --diagnostic); D8 still compares scale 10 against the gate scale. entities_per_scale_unit mirrors datagen_rs world.rs (population = round(111111 x scale)) and is how a corpus's scale is read back from its account master.",
@@ -464,7 +462,7 @@
       "version": "3.6.0",
       "date": "2026-09-26",
       "part": "D5",
-      "approved": "AML-GOALS #52 (owner decision 2026-09-27): approved as drafted. Owner waiver: the evaluation seed 50000043 and robustness seed 90000042 stay; the D5 checks were drafted before any 3.6.0 result was read and neither seed has been generated or looked at",
+      "approved": "AML-GOALS #52 (owner decision 2026-09-27): approved as drafted. Owner waiver: the evaluation seed [held-out evaluation seed] and robustness seed [held-out robustness seed] stay; the D5 checks were drafted before any 3.6.0 result was read and neither seed has been generated or looked at",
       "changes": [
         "shortcut_model.also_reference_model: single and pair shortcuts also fit with reference_model; shortcut AP is the larger AP (the gated leakage shortcuts are never looser than 3.5.2)",
         "leakage.shortcut_models: feature_pair_depth2 renamed feature_pair (tree or reference_model), nuisance_only added",
@@ -508,7 +506,7 @@
       "changes": [
         "reference_model: l2_regularization 10 (the v3.4.1 model diverged at monthly prevalence; D0 at v3.4.1 seed 42 void as a harness failure)",
         "leakage.relative_cap_formula: lift_over_prevalence_band_floor",
-        "corpora: calibration_seed 43, evaluation_seed 50000043 (seed_rule)"
+        "corpora: calibration_seed 43, evaluation_seed [held-out evaluation seed] (seed_rule)"
       ],
       "unchanged": "band [0.30, 0.80], K = 4 of 6, monthly (customer, UTC month) unit, subject labels, gate scale 2, six behavioural typologies, features, CV, power, absolute leakage cap"
     },

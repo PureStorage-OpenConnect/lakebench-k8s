@@ -554,22 +554,21 @@ def two_configs():
     ]
 
 
-@pytest.mark.xfail(
-    json.loads(PROD.read_text())["absence_check"] == "report",
-    reason="the pre-registration keeps its plaintext seeds until they are removed",
-    raises=AssertionError,
-    strict=True,
-)
 def test_tip_maps_clean(two_configs):
     for cfg in two_configs:
         problems = ds.absence_problems(_rendered_maps(cfg))
         assert not problems, problems
 
 
-def test_only_the_prereg_holds_a_heldout_value(two_configs):
-    for cfg in two_configs:
-        for p in ds.absence_problems(_rendered_maps(cfg)):
-            assert p.startswith("lakebench-scripts-aml-data/aml_preregistration.json:"), p
+def test_production_file_enforces():
+    # The pre-registration no longer carries the plaintext seeds, so a hit in
+    # a rendered map refuses the deploy rather than logging it.
+    assert ds.load_heldout(PROD).absence_check == "enforce"
+
+
+def test_prereg_has_no_plaintext_seed_keys():
+    corpora = json.loads(PREREG.read_text())["corpora"]
+    assert not {"evaluation_seed", "robustness_seed"} & set(corpora)
 
 
 def _manager(cfg):
