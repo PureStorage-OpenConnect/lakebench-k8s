@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -66,6 +66,17 @@ def has_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> bool:
         return True
     # The backend ignored StartAfter: a full listing decides (never a guess).
     return bool(list_user_keys(boto_client, bucket, prefix, limit=1))
+
+
+def iter_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> Iterator[dict[str, Any]]:
+    """Every ``list_objects_v2`` entry under ``prefix`` except Lakebench's own
+    keys, one page at a time, so a large bucket is never held in memory.
+    Raises on listing errors."""
+    paginator = boto_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            if not is_lakebench_key(str(obj.get("Key", ""))):
+                yield obj
 
 
 def list_user_objects(boto_client: Any, bucket: str, prefix: str) -> list[dict[str, Any]]:

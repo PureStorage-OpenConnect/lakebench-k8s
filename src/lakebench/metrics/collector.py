@@ -521,6 +521,10 @@ class PipelineMetrics:
     # Never written: to_dict computes the verdict it saves. None on a fresh run.
     stored_verdict: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
+    # Physical over logical bytes per table, layer and in total, measured at
+    # run end (metrics/storage_multiple.py). None when not measured.
+    storage_multiple: dict[str, Any] | None = None
+
     def experiment_block(self) -> dict[str, Any] | None:
         """The experiment block: the stored one whenever the record has one,
         whatever its schema, and otherwise built from the snapshot's
@@ -580,6 +584,8 @@ class PipelineMetrics:
             d["series"] = self.series
         if self.stage_only is not None:
             d["stage_only"] = self.stage_only
+        if self.storage_multiple is not None:
+            d["storage_multiple"] = self.storage_multiple
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

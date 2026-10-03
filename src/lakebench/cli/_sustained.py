@@ -4232,6 +4232,23 @@ def _run_sustained(
             _exit_interrupted = pipeline_success
             pipeline_success = False
 
+        if collector.current_run is not None and not pipeline_success:
+            collector.current_run.storage_multiple = {"not_measured": "the run did not pass"}
+        elif (
+            _interrupted is None
+            and _abort is None
+            and k8s is not None
+            and collector.current_run is not None
+        ):
+            # Physical over logical bytes after settle, as the batch run
+            # measures it after maintenance (metrics/storage_multiple.py).
+            # Never raises. Not after an interrupt or a lost namespace.
+            from lakebench.metrics.storage_multiple import measure_run
+
+            print_info("Measuring the storage multiple...")
+            collector.current_run.storage_multiple = measure_run(
+                cfg, k8s, None, collector.current_run
+            )
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             run_metrics.interrupted = _interrupted

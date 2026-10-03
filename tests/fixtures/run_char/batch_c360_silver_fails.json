@@ -429,6 +429,7 @@
    "run_id",
    "silver_size_gb",
    "start_time",
+   "storage_multiple",
    "streaming",
    "success",
    "total_elapsed_seconds",

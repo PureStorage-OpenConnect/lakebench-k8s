@@ -1331,6 +1331,49 @@ Shows per-query times across rounds plus statistical measures (median, min,
 max). Each round header includes its QpH, gold freshness, and contention
 status.
 
+### Storage multiple
+
+Physical bytes over logical bytes, per table, per layer and in total,
+measured once at the end of the run: after maintenance and the post-maintenance
+benchmark round (batch), or after the settle wait (continuous), and stated
+with the maintenance policy that produced it. It is a condition of that
+policy, not a system score (`storage_multiple_total` is diagnostic).
+
+- **Physical** is the object bytes under each table's location, from one
+  listing per bucket. **Logical** (current) is the data files of the table's
+  current snapshot (Iceberg `$files`, Delta `DESCRIBE DETAIL`).
+- Physical is split into current data, retained-snapshot data (files only an
+  older retained snapshot references; Spark Thrift `all_files`, Trino
+  `$all_entries`), metadata (`metadata/` or `_delta_log/`) and other. When the
+  engine cannot separate retained data (Delta, or a Trino without
+  `$all_entries`), "retained and unreferenced" is one figure. When orphan
+  removal ran, the unreferenced share is labelled as bounded by its
+  24 h 10 min floor.
+- Excluded and listed with their bytes: stream checkpoints, the datagen
+  markers (`_corpus/`) and manifest, scoring outputs (`<gold>/scoring/`) and
+  the ML loop's `<gold>/_ml_loop/`. Named without bytes, because they are not
+  in object storage: the executor scratch PVCs and the dependency server's
+  `lb-deps` PVC. The raw datagen files in bronze are reported as physical
+  only, outside the total. Incomplete multipart uploads do not appear in a
+  listing and are not counted.
+- A table is "not measured", with the reason, when the catalog does not
+  know it, when its data files are registered in place outside its
+  location (AML batch bronze, registered with `add_files`), when the engine
+  cannot read its current data size (Delta on Trino), or when physical
+  bytes under its location are below the bytes it references. C360 batch
+  bronze is the raw corpus, not a table. Retained-snapshot bytes are not
+  read on Trino past 500 snapshots (its `$all_entries` read is expensive on
+  the coordinator).
+- A recipe whose query engine cannot read table metadata (DuckDB, `none`)
+  records physical bytes per bucket only, with the reason.
+- The measurement makes its own listing of each bucket (one more pass after
+  the bucket sizes) and has a 10-minute budget covering the listings and
+  the queries; a bucket whose listing fails or runs out of time leaves its
+  tables not measured, and the total says how many tables it covers. A run
+  that did not pass records the measurement as not measured.
+
+The record holds it as `storage_multiple`.
+
 ### Resources as run
 
 Per job, the executors as recorded (batch: every executor the monitor saw,

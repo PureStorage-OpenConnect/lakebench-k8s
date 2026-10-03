@@ -1093,6 +1093,862 @@
    ""
   ],
   [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.default.pacs008_raw"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.bronze.manifest"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.transactions"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.entities"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.accounts"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.account_statements"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.counterparty_edges"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.entity_profiles"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.silver_batch_versions"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.alerts"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.risk_scores"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.entity_clusters"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.daily_dashboards"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.detection_status"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.tm_reconciliation"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.scenario_coverage"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.alert_dispositions"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.cases"
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.default.\"pacs008_raw$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.default.\"pacs008_raw$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/pacs008_raw/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.default.\"pacs008_raw$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.default.\"pacs008_raw$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.default.\"pacs008_raw$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.bronze.\"manifest$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.bronze.\"manifest$files\" WHERE file_path NOT LIKE '%://runchar-bronze/warehouse/manifest/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.bronze.\"manifest$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.bronze.\"manifest$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.bronze.\"manifest$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"transactions$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"transactions$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/transactions/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"transactions$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"transactions$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"transactions$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"entities$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"entities$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/entities/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"entities$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"entities$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"entities$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"accounts$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"accounts$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/accounts/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"accounts$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"accounts$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"accounts$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"account_statements$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"account_statements$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/account_statements/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"account_statements$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"account_statements$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"account_statements$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"counterparty_edges$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"counterparty_edges$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/counterparty_edges/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"counterparty_edges$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"counterparty_edges$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"counterparty_edges$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"entity_profiles$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"entity_profiles$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/entity_profiles/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"entity_profiles$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"entity_profiles$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"entity_profiles$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"silver_batch_versions$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"silver_batch_versions$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/silver_batch_versions/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"silver_batch_versions$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"silver_batch_versions$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"silver_batch_versions$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"alerts$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"alerts$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/alerts/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"alerts$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"alerts$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"alerts$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"risk_scores$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"risk_scores$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/risk_scores/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"risk_scores$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"risk_scores$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"risk_scores$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"entity_clusters$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"entity_clusters$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/entity_clusters/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"entity_clusters$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"entity_clusters$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"entity_clusters$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"daily_dashboards$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"daily_dashboards$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/daily_dashboards/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"daily_dashboards$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"daily_dashboards$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"daily_dashboards$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"detection_status$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"detection_status$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/detection_status/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"detection_status$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"detection_status$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"detection_status$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"tm_reconciliation$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"tm_reconciliation$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/tm_reconciliation/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"tm_reconciliation$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"tm_reconciliation$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"tm_reconciliation$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"scenario_coverage$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"scenario_coverage$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/scenario_coverage/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"scenario_coverage$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"scenario_coverage$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"scenario_coverage$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"alert_dispositions$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"alert_dispositions$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/alert_dispositions/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"alert_dispositions$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"alert_dispositions$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"alert_dispositions$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"cases$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"cases$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/cases/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"cases$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"cases$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"cases$files\")"
+  ],
+  [
    "k8s",
    "get_k8s_client",
    "runchar"
@@ -1273,6 +2129,7 @@
    "run_id",
    "silver_size_gb",
    "start_time",
+   "storage_multiple",
    "streaming",
    "success",
    "tm_operations",

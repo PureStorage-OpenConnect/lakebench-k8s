@@ -648,6 +648,142 @@
    ""
   ],
   [
+   "S3",
+   "init",
+   "http://10.0.1.50:80",
+   "harness-access",
+   "harness-secret",
+   "us-east-1",
+   true,
+   true
+  ],
+  [
+   "CoreV1Api",
+   "list_namespaced_pod",
+   "runchar",
+   "app=lakebench-trino,component=coordinator"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.silver.customer_interactions_enriched"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SHOW CREATE TABLE lakehouse.gold.customer_executive_dashboard"
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-bronze",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-silver",
+   ""
+  ],
+  [
+   "S3",
+   "raw_client"
+  ],
+  [
+   "S3",
+   "paginate list_objects_v2",
+   "runchar-gold",
+   ""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"customer_interactions_enriched$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.silver.\"customer_interactions_enriched$files\" WHERE file_path NOT LIKE '%://runchar-silver/warehouse/customer_interactions_enriched/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.silver.\"customer_interactions_enriched$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.silver.\"customer_interactions_enriched$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.silver.\"customer_interactions_enriched$files\")"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"customer_executive_dashboard$files\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(file_size_in_bytes) FROM lakehouse.gold.\"customer_executive_dashboard$files\" WHERE file_path NOT LIKE '%://runchar-gold/warehouse/customer_executive_dashboard/%'"
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT count(*) FROM lakehouse.gold.\"customer_executive_dashboard$snapshots\""
+  ],
+  [
+   "exec",
+   "lakebench-trino-coordinator-0",
+   "runchar",
+   null,
+   120,
+   "trino --execute",
+   "SELECT sum(a.file_size_in_bytes) FROM (SELECT DISTINCT data_file.file_path AS file_path, data_file.file_size_in_bytes AS file_size_in_bytes FROM lakehouse.gold.\"customer_executive_dashboard$all_entries\" WHERE status <> 2) a WHERE a.file_path NOT IN (SELECT file_path FROM lakehouse.gold.\"customer_executive_dashboard$files\")"
+  ],
+  [
    "k8s",
    "get_k8s_client",
    "runchar"
@@ -815,6 +951,7 @@
    "run_id",
    "silver_size_gb",
    "start_time",
+   "storage_multiple",
    "streaming",
    "success",
    "total_elapsed_seconds",
