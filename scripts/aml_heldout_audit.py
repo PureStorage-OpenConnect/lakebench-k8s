@@ -134,6 +134,7 @@ def audit_records(audit: Audit, runs_dirs: Iterable[Path]) -> None:
                 audit.findings.append(
                     {"record": str(path), "kind": "unreadable", "reason": type(e).__name__}
                 )
+                audit.incomplete = True
                 continue
             reason = look_guard.protected_record_reason(record)
             if reason is None:
@@ -153,25 +154,68 @@ def audit_records(audit: Audit, runs_dirs: Iterable[Path]) -> None:
 # -- 2. journals --------------------------------------------------------------
 
 
-def raw_corpus_fields(path: Path) -> tuple[str | None, Any, Any]:
-    """(schema, seed, corpus_role) of a config file read raw, as the loader
-    places them: ``architecture.workload`` or a top-level ``workload``, and
-    the flat v2 fields. ``${VAR}`` is substituted; nothing is validated."""
-    from lakebench.config.loader import _apply_flat_fields, load_yaml
+def _raw_config(path: Path) -> dict:
+    """A config file read raw: no ``${VAR}`` substitution (the corpus fields
+    never need one, and the audit runs without the deployment's keys), the
+    flat v2 fields placed as the loader places them, nothing validated."""
+    import yaml
 
-    data = _apply_flat_fields(load_yaml(path))
+    from lakebench.config.loader import _apply_flat_fields
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError("the config is not a mapping")
+    return _apply_flat_fields(data)
+
+
+def raw_corpus_candidates(data: dict) -> list[tuple[str | None, Any, Any]]:
+    """Every (schema, seed, corpus_role) the loader could make of ``data``:
+    a top-level ``workload`` and the deprecated ``architecture.workload``
+    are merged both ways round (the loader refuses a conflict, so either
+    order may be the one a run used)."""
+    from lakebench.config.schema import _merge_workload_blocks, _normalise_workload_block
+
     arch = data.get("architecture") if isinstance(data.get("architecture"), dict) else {}
-    workload = arch.get("workload") if isinstance(arch.get("workload"), dict) else None
-    if workload is None:
-        workload = data.get("workload") if isinstance(data.get("workload"), dict) else {}
-    datagen = workload.get("datagen") if isinstance(workload.get("datagen"), dict) else {}
-    schema = workload.get("schema", workload.get("schema_type"))
-    return schema, datagen.get("seed"), datagen.get("corpus_role")
+    top = _normalise_workload_block(data.get("workload"))
+    nested = _normalise_workload_block(arch.get("workload"))
+    blocks = []
+    for a, b in ((top, nested), (nested, top)):
+        merged = _merge_workload_blocks(a, b, "workload", []) if a and b else (a or b)
+        blocks.append(merged if isinstance(merged, dict) else {})
+    out = []
+    for w in blocks:
+        dg = w.get("datagen") if isinstance(w.get("datagen"), dict) else {}
+        fields = (w.get("schema"), dg.get("seed"), dg.get("corpus_role"))
+        if fields not in out:
+            out.append(fields)
+    return out
+
+
+def raw_corpus_fields(path: Path) -> tuple[str | None, Any, Any]:
+    """The first of ``raw_corpus_candidates`` for a config file."""
+    return raw_corpus_candidates(_raw_config(path))[0]
+
+
+def raw_config_reason(data: dict) -> str | None:
+    """``look_guard``'s config rule over a raw config: a protected role or
+    held-out seed in any reading of the workload block, or (financial) a
+    bronze prefix in this host's corpus ledger."""
+    for schema, seed, role in raw_corpus_candidates(data):
+        reason = look_guard.corpus_fields_reason(schema, seed, role)
+        if reason is not None:
+            return reason
+        if schema == "financial":
+            s3 = ((data.get("platform") or {}).get("storage") or {}).get("s3") or {}
+            bronze = (s3.get("buckets") or {}).get("bronze") or f"{data.get('name')}-bronze"
+            reason = look_guard.registered_prefix_reason(bronze, FINANCIAL_PREFIX)
+            if reason is not None:
+                return reason
+    return None
 
 
 def _session_config(path: Path) -> tuple[str | None, str | None]:
     """(session id, config path) from a journal's session.start event."""
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 event = json.loads(line)
@@ -192,7 +236,7 @@ def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
         for path in sorted(d.glob("session-*.jsonl")):
             audit.counts["journals"] += 1
             try:
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8", errors="replace")
                 session, config = _session_config(path)
             except OSError as e:
                 audit.skip(str(path), f"journal unreadable ({type(e).__name__})", incomplete=True)
@@ -210,15 +254,20 @@ def audit_journals(audit: Audit, journal_dirs: Iterable[Path]) -> None:
                 audit.skip(f"session {session}", "the journal names no config")
                 continue
             cfg_path = Path(config)
+            if not cfg_path.is_absolute():
+                # The journal stores the path as typed: relative to the
+                # directory lakebench-output/ sits in.
+                cfg_path = d.parent.parent / cfg_path
             if not cfg_path.is_file():
                 audit.skip(f"session {session}", f"config unavailable ({config})")
                 continue
             try:
-                schema, seed, role = raw_corpus_fields(cfg_path)
+                reason = raw_config_reason(_raw_config(cfg_path))
             except Exception as e:  # noqa: BLE001 -- a config that does not parse
-                audit.skip(f"session {session}", f"config unreadable ({type(e).__name__})")
+                audit.skip(
+                    f"session {session}", f"config unreadable ({type(e).__name__})", incomplete=True
+                )
                 continue
-            reason = look_guard.corpus_fields_reason(schema, seed, role)
             if reason is not None:
                 audit.findings.append(
                     {
@@ -241,8 +290,8 @@ class LedgerRow:
 
 
 _TABLE_ROW = re.compile(r"^\|(.+)\|\s*$")
-_INLINE = re.compile(r"namespace:\s*([^,\s]+)\s*,\s*config:\s*([^,\s]+)", re.IGNORECASE)
-_BULLET = re.compile(r"^\s*-\s*(namespace|config)\s*:\s*(\S+)", re.IGNORECASE)
+_INLINE = re.compile(r"namespace:\s*([^,\s]+)[^,]*,\s*config:\s*([^,\s]+)", re.IGNORECASE)
+_BULLET = re.compile(r"^\s*(?:[-*]\s*)?(namespace|config)\s*:\s*(\S+)", re.IGNORECASE)
 
 
 def parse_ledger(path: Path) -> tuple[list[LedgerRow], list[str]]:
@@ -250,7 +299,9 @@ def parse_ledger(path: Path) -> tuple[list[LedgerRow], list[str]]:
     ledger sections nothing could be parsed from. Three shapes: the table
     with ``Namespace`` and ``Config path`` columns, inline ``namespace: X,
     config: Y`` bullets, and ``- Namespace: X`` / ``- Config: Y`` bullet
-    pairs, each under a heading that mentions the ledger."""
+    pairs (the dash optional), in any section, since ledger rows were also
+    written under other headings. A section whose heading mentions the
+    ledger and yields no row is returned as unparsed."""
     rows: list[LedgerRow] = []
     unparsed: list[str] = []
     heading: str | None = None
@@ -269,8 +320,6 @@ def parse_ledger(path: Path) -> tuple[list[LedgerRow], list[str]]:
             heading = line.lstrip("#").strip()
             in_ledger = "ledger" in heading.lower()
             found_here, cols, pending = 0, None, {}
-            continue
-        if not in_ledger:
             continue
         m = _TABLE_ROW.match(line)
         if m:
@@ -414,7 +463,18 @@ def audit_bucket_row(
     audit.counts["bucket_rows"] += 1
     audit.counts["recall_files"] += len(recalls)
     if not manifests:
-        audit.skip(what, "no bronze manifest")
+        if recalls:
+            # Scoring files outlived the corpus they scored: unchecked.
+            audit.findings.append(
+                {
+                    "bucket_path": f"s3://{gold}/scoring/",
+                    "kind": "unverifiable_scoring",
+                    "reason": f"{len(recalls)} recall.json file(s) and no bronze manifest",
+                }
+            )
+            audit.incomplete = True
+        else:
+            audit.skip(what, "no bronze manifest")
         return
     rows: list[tuple[Any, Any]] = []
     try:
@@ -454,7 +514,9 @@ def audit_ledgers(
             continue
         rows, unparsed = parse_ledger(ledger)
         for heading in unparsed:
-            audit.skip(f"{ledger}: {heading}", "ledger section with no parsable row")
+            audit.skip(
+                f"{ledger}: {heading}", "ledger section with no parsable row", incomplete=True
+            )
         audit.counts["ledger_rows"] += len(rows)
         for row in rows:
             audit_bucket_row(audit, row, ledger, client_factory)

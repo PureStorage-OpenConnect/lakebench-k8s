@@ -114,13 +114,23 @@ def registered_corpus_at(cfg: Any) -> str | None:
     the TM operations would run on it before the scorer's manifest check. A
     ledger that cannot be read refuses (fail closed). The ledger is per host
     (``LB_AML_CORPORA_LEDGER``): the owner takes the looks from one host."""
-    path = ds.corpora_ledger_path()
-    if not path.is_file():
+    if not ds.corpora_ledger_path().is_file():
         return None
     from lakebench.deploy.datagen import bronze_datagen_prefix
 
-    s3 = cfg.platform.storage.s3
-    here = bronze_uri(s3.buckets.bronze, bronze_datagen_prefix(cfg))
+    return registered_prefix_reason(
+        cfg.platform.storage.s3.buckets.bronze, bronze_datagen_prefix(cfg)
+    )
+
+
+def registered_prefix_reason(bucket: str, prefix: str) -> str | None:
+    """Why ``s3://bucket/prefix/`` is a bronze prefix this host generated a
+    registered corpus into (the corpus ledger), or None; an unreadable
+    ledger refuses. ``registered_corpus_at`` and the held-out audit."""
+    path = ds.corpora_ledger_path()
+    if not path.is_file():
+        return None
+    here = bronze_uri(bucket, prefix)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as e:
