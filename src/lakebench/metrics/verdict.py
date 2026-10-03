@@ -507,13 +507,18 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
 #: The rule skips a PASSED run may carry, keyed by (workload, mode): rule ->
 #: the skip reasons allowed. Any other skip, or another reason, fails the
 #: ``aml_rules`` gate. W1's giant-component is on the stored PASSED records
-#: at scale 1 and 10; vertex-cap is W1's scale-100 skip. Continuous
+#: at scale 1 and 10; vertex-cap is W1's scale-100 skip, and path-cap is
+#: W3's and W17's (owner, 10-03). A skip whose reason is a Lakebench cap is
+#: labelled: ``limits.bound`` and ``limits.bound_kinds`` carry it (``rule <id>
+#: cap``), and the verdict lists it in the ``rule_caps`` qualifier. Continuous
 #: allows none: its mode-excluded rules
 #: (``config.support.AML_CONTINUOUS_SKIPPED_RULES``) are never in the skip
 #: list; they are left out of the expected set instead.
 EXPECTED_SKIPS: dict[tuple[str, str], dict[str, frozenset[str]]] = {
     ("financial", "batch"): {
         "W1_connected_components": frozenset({"giant-component", "vertex-cap"}),
+        "W3_round_tripping": frozenset({"path-cap"}),
+        "W17_layering_chain": frozenset({"path-cap"}),
     },
     ("financial", "continuous"): {},
 }
@@ -522,6 +527,11 @@ EXPECTED_SKIPS: dict[tuple[str, str], dict[str, frozenset[str]]] = {
 #: the ``layer_rows`` gate passed on bytes alone. Always set (possibly
 #: empty) when the gate is computed; the release gate reads it.
 LAYER_ROWS_UNMEASURED = "layer_rows_unmeasured"
+
+#: Verdict qualifier naming each AML rule a PASSED run skipped on a
+#: Lakebench cap (rule -> skip reason): the rule set is bounded by Lakebench,
+#: not by the system (invariant 6; ``limits.bound`` carries the same).
+RULE_CAPS = "rule_caps"
 
 #: The batch stage job that measures each layer.
 _BATCH_LAYER_JOBS: tuple[tuple[str, str], ...] = (
@@ -689,6 +699,9 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     for rule, why in sorted(skipped.items()):
         if str(why) not in allowed.get(rule, frozenset()):
             res.reasons.append(f"rule {rule} skipped ({why}), not an allowed skip")
+        elif "cap" in str(why):
+            # An allowed skip on a Lakebench cap: the run passes, labelled.
+            res.qualifiers.setdefault(RULE_CAPS, {})[rule] = str(why)
     outside = sorted(executed - expected)
     if outside:
         res.reasons.append(f"rules outside the expected set ran: {', '.join(outside)}")
