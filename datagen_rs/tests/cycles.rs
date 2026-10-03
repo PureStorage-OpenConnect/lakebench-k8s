@@ -308,6 +308,57 @@ fn financial_seed_is_required_strict_and_never_spent() {
     }
 }
 
+#[test]
+fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
+    // A registered corpus's seed arrives in LB_DATAGEN_SEED (from a Secret)
+    // instead of --seed: the same seed must give the same bytes, the two
+    // together are refused, and a bad value is not printed.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-env");
+    let (a, b) = (base.join("argv"), base.join("env"));
+    for d in [&a, &b] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+    run(&a, &[]);
+    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", &b)
+        .env("LB_DATAGEN_SEED", "7777")
+        .args([
+            "--bucket",
+            "b",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "all",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    assert_eq!(tree_digest(&a), tree_digest(&b));
+    for (env, args) in [
+        ("7777", vec!["--seed", "7777"]),
+        ("77x77913", vec![]),
+        ("", vec![]),
+    ] {
+        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env("DG_LOCAL_DIR", base.join("bad"))
+            .env("LB_DATAGEN_SEED", env)
+            .args(["--bucket", "b", "--scale", SCALE])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(2), "{env:?} {args:?} was accepted");
+        let err = String::from_utf8_lossy(&st.stderr);
+        assert!(err.contains("LB_DATAGEN_SEED"), "{err}");
+        assert!(env.is_empty() || !err.contains(env), "the value was echoed");
+    }
+}
+
 fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .env("DG_LOCAL_DIR", dir)

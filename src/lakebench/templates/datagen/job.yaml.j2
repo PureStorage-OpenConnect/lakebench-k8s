@@ -74,8 +74,12 @@ spec:
             - "{{ bucket_bronze }}"
             - "--prefix"
             - "{{ datagen_path_prefix | default('customer/interactions/') }}"
+            {# A registered (held-out) corpus's seed comes from the Secret
+               through LB_DATAGEN_SEED below, never from the Job's args. #}
+            {% if not (datagen_seed_secret is defined and datagen_seed_secret) %}
             - "--seed"
             - "{{ datagen_seed }}"
+            {% endif %}
             {% if datagen_robustness_perturbation is defined and datagen_robustness_perturbation %}
             - "--robustness-perturbation"
             {% endif %}
@@ -142,6 +146,14 @@ spec:
             # aggregator prefers this over rayon's pool size (which may
             # differ from the pod's request because rayon's default reads
             # `available_parallelism()`, not the cgroup CPU quota).
+            {% if datagen_seed_secret is defined and datagen_seed_secret %}
+            - name: LB_DATAGEN_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ datagen_seed_secret }}
+                  key: {{ datagen_seed_secret_key | default('seed') }}
+                  optional: false
+            {% endif %}
             - name: LB_POD_CPU_REQUEST_MILLI
               valueFrom:
                 resourceFieldRef:

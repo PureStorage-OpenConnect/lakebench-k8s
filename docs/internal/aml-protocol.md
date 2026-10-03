@@ -72,5 +72,16 @@ the seed for its look out of band; the operator sets it as
 `workload.datagen.seed` with the matching `corpus_role`, and every guard
 checks it by hash against `heldout_hashes.json`. A wrong value is refused.
 
+On the cluster that seed is held only in the namespace's Secret
+`lakebench-datagen-seed` (written by `generate`, immutable, annotated with
+its salted hash, removed by `destroy`). The datagen Job and the reference
+scorer read it as `LB_DATAGEN_SEED` from that Secret, so it is in no Job
+argument, pod spec or SparkApplication spec, and no Spark job of that
+deployment gets `LB_SEED`. `scripts/aml_gate.py --registered <role>` reads
+it from `--seed-file PATH` (one integer, `chmod 600`) and refuses `--seed`.
+Anyone who can read the corpus bucket can still recover the seed from the
+manifest's instance seeds, by design; the Secret keeps it out of cluster
+object specs, command lines and logs.
+
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.

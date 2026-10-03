@@ -11,7 +11,15 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.config.datagen_seed import (
+    SEED_REF_ANNOTATION,
+    SEED_SECRET_KEY,
+    SEED_SECRET_NAME,
+    config_perturbation,
+    config_seed,
+    seed_ref,
+    uses_seed_secret,
+)
 from lakebench.exit_codes import REFUSAL_DETAIL, ExitCode
 
 from .engine import DeploymentResult, DeploymentStatus
@@ -117,6 +125,132 @@ class DatagenPodsStillRunning(DatagenRefused):
 
 class DatagenPodsUnknown(DatagenRefused):
     """The datagen pods could not be listed, so a fresh generate cannot start."""
+
+
+class SeedSecretError(DatagenRefused):
+    """The registered-corpus seed Secret could not be written. The message
+    names the Secret and the failure, never the seed."""
+
+
+def _secret_labels(cfg: Any) -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": "lakebench",
+        "app.kubernetes.io/instance": cfg.name,
+        "app.kubernetes.io/component": "datagen-seed",
+        "app.kubernetes.io/managed-by": "lakebench",
+    }
+
+
+def _read_seed_secret(core: Any, namespace: str) -> Any:
+    """The seed Secret, or None when there is none."""
+    from kubernetes.client.rest import ApiException
+
+    try:
+        return core.read_namespaced_secret(SEED_SECRET_NAME, namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return None
+        raise SeedSecretError(
+            f"could not read Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
+        ) from None
+    except Exception as e:  # noqa: BLE001 -- transport errors
+        raise SeedSecretError(
+            f"could not read Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
+        ) from None
+
+
+def ensure_seed_secret(cfg: Any, k8s: Any) -> None:
+    """Write the registered corpus's seed into ``SEED_SECRET_NAME`` (immutable,
+    annotated with its seed_ref), the only place the cluster holds it.
+
+    Call after ``stop_previous_datagen``: no datagen pod is running, so a
+    replaced Secret cannot reach a restarting container of an older Job. The
+    same seed_ref already there is a no-op; another one is deleted and
+    created anew; a Secret another deployment labelled is refused. Raises
+    :class:`SeedSecretError`, whose message never holds the seed."""
+    from kubernetes.client.rest import ApiException
+
+    namespace = cfg.get_namespace()
+    want = seed_ref("financial", config_seed(cfg))
+    core = k8s._core_v1
+    current = _read_seed_secret(core, namespace)
+    if current is not None:
+        meta = current.metadata
+        owner = (meta.labels or {}).get("app.kubernetes.io/instance")
+        if owner != cfg.name:
+            raise SeedSecretError(
+                f"Secret {SEED_SECRET_NAME} in {namespace} belongs to deployment {owner!r}, "
+                f"not {cfg.name!r}; not replacing it"
+            )
+        if (meta.annotations or {}).get(SEED_REF_ANNOTATION) == want:
+            return
+        try:
+            core.delete_namespaced_secret(SEED_SECRET_NAME, namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise SeedSecretError(
+                    f"could not replace Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
+                ) from None
+        except Exception as e:  # noqa: BLE001
+            raise SeedSecretError(
+                f"could not replace Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
+            ) from None
+    body = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": SEED_SECRET_NAME,
+            "namespace": namespace,
+            "labels": _secret_labels(cfg),
+            "annotations": {SEED_REF_ANNOTATION: want},
+        },
+        "type": "Opaque",
+        "immutable": True,
+        "stringData": {SEED_SECRET_KEY: str(config_seed(cfg))},
+    }
+    try:
+        core.create_namespaced_secret(namespace, body)
+    except ApiException as e:
+        raise SeedSecretError(
+            f"could not create Secret {SEED_SECRET_NAME} in {namespace} (HTTP {e.status})"
+        ) from None
+    except Exception as e:  # noqa: BLE001
+        raise SeedSecretError(
+            f"could not create Secret {SEED_SECRET_NAME} in {namespace} ({type(e).__name__})"
+        ) from None
+
+
+def drop_seed_secret(cfg: Any, k8s: Any) -> None:
+    """Delete this deployment's seed Secret before a generate that does not
+    use one, so a registered seed does not stay in the namespace under a
+    development corpus. Best effort: a failure is logged (without the seed)
+    and the generate goes on, since nothing reads the Secret then."""
+    namespace = cfg.get_namespace()
+    core = k8s._core_v1
+    try:
+        current = _read_seed_secret(core, namespace)
+        if current is None:
+            return
+        owner = (current.metadata.labels or {}).get("app.kubernetes.io/instance")
+        if owner != cfg.name:
+            return
+        core.delete_namespaced_secret(SEED_SECRET_NAME, namespace)
+    except Exception as e:  # noqa: BLE001 -- best effort
+        logger.warning(
+            "Could not delete Secret %s in %s (%s); it is removed by destroy",
+            SEED_SECRET_NAME,
+            namespace,
+            type(e).__name__,
+        )
+
+
+def prepare_seed_secret(cfg: Any, k8s: Any) -> None:
+    """``ensure_seed_secret`` for a registered corpus, ``drop_seed_secret``
+    otherwise. Call after the previous datagen Job's pods have stopped."""
+    if uses_seed_secret(cfg):
+        ensure_seed_secret(cfg, k8s)
+    else:
+        drop_seed_secret(cfg, k8s)
 
 
 #: Label every datagen pod carries (templates/datagen/job.yaml.j2).
@@ -503,7 +637,11 @@ class DatagenDeployer:
                 "datagen_schema": schema_value,
                 # From config, or the pre-registration's calibration seed for
                 # financial (config/datagen_seed.py); spent seeds are refused.
-                "datagen_seed": config_seed(cfg),
+                # A registered corpus's seed is in the Secret instead, never
+                # in the Job's arguments (owner, 10-03).
+                "datagen_seed": None if uses_seed_secret(cfg) else config_seed(cfg),
+                "datagen_seed_secret": SEED_SECRET_NAME if uses_seed_secret(cfg) else "",
+                "datagen_seed_secret_key": SEED_SECRET_KEY,
                 # Robustness corpus flag (financial only), checked against
                 # the declared corpus role (config/datagen_seed.py).
                 "datagen_robustness_perturbation": config_perturbation(cfg),
@@ -647,6 +785,7 @@ class DatagenDeployer:
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
             self.stop_previous_job()
+            prepare_seed_secret(self.config, self.k8s)
 
             # Cycle 0 is a fresh write: clear stale files a prior generate left,
             # after the previous job's pods have stopped so nothing writes
@@ -786,6 +925,7 @@ class DatagenDeployer:
             context = self._build_datagen_context()
 
             self.stop_previous_job()
+            prepare_seed_secret(self.config, self.k8s)
 
             # A single-cycle generate is a fresh write: clear stale files after
             # the previous job's pods have stopped, so nothing writes into the
@@ -1013,6 +1153,22 @@ class DatagenDeployer:
                                 crash_details[pod_name] = f"exit {terminated.exit_code}" + (
                                     f" ({terminated.reason})" if terminated.reason else ""
                                 )
+
+                    # A Secret or ConfigMap the container needs is missing
+                    # (the registered seed Secret, the CA secret): the pod
+                    # never starts, so fail now instead of at the timeout.
+                    for cs in pod.status.container_statuses:
+                        waiting = cs.state.waiting if cs.state is not None else None
+                        if (
+                            waiting is not None
+                            and waiting.reason == "CreateContainerConfigError"
+                            and pod_name not in crash_pods
+                        ):
+                            crash_pods.append(pod_name)
+                            crash_details[pod_name] = (
+                                "CreateContainerConfigError (a Secret or ConfigMap the pod "
+                                "needs is missing)"
+                            )
 
                 # Detect pending pods
                 if pod.status.phase == "Pending":
