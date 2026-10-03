@@ -868,6 +868,7 @@ Primary: `time_to_value_seconds`, lower is better.
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
 | `time_to_value_seconds` | s | lower | wall-clock seconds from the start of the first pipeline job (bronze-verify) to the end of the last (gold-finalize); a job that never recorded an end counts at its start. Datagen, maintenance, settle and the benchmark are outside it. Recorded: 874.51 s at scale 1 (`run-20260929-221146-9d5345`) and 5,086.03 s at scale 10 (`run-20260929-214442-825153`), n=1 each |
+| `time_to_value_datagen_excluded_seconds` | s | none | diagnostic, multi-cycle Customer 360 batch only: the cycles' datagen seconds left out of `time_to_value_seconds`. An AML record never carries it (collector.py sets it for customer360 only) |
 | `total_elapsed_seconds` | s | lower | sum of the elapsed seconds of every stage, datagen and the query benchmark included |
 | `total_data_processed_gb` | GB | none | sum of every stage's input GB, including the query benchmark's read of gold |
 | `pipeline_throughput_gb_per_second` | GB/s | higher | `total_data_processed_gb / time_to_value_seconds` |
