@@ -2534,6 +2534,9 @@ def test_rehearsal_writes_a_draft_outside_the_tree(env, monkeypatch):
         return built, []
 
     monkeypatch.setattr(H._expected, "build_expected", build)
+    from lakebench.metrics import verdict
+
+    monkeypatch.setattr(verdict, "passed", lambda record: True)
     env.h.rehearsal = True
     _go(env, _plan(env))
     env.h.finish()
@@ -2545,7 +2548,10 @@ def test_rehearsal_writes_a_draft_outside_the_tree(env, monkeypatch):
     assert any("not reviewed, not evidence" in s for s in env.said)
 
 
-def test_rehearsal_draft_refused_says_why_and_removes_an_old_one(env):
+def test_rehearsal_draft_refused_says_why_and_removes_an_old_one(env, monkeypatch):
+    from lakebench.metrics import verdict
+
+    monkeypatch.setattr(verdict, "passed", lambda record: True)
     env.h.rehearsal = True
     draft = env.out / "expected-results-1.7.0.draft.json"
     _go(env, _plan(env))
@@ -2554,6 +2560,15 @@ def test_rehearsal_draft_refused_says_why_and_removes_an_old_one(env):
     assert not draft.exists()
     assert any("draft expected results not written" in s for s in env.said)
     assert any("no experiment block" in s for s in env.said)
+
+
+def test_rehearsal_draft_leaves_out_a_run_that_did_not_pass(env):
+    env.h.rehearsal = True
+    _go(env, _plan(env))
+    env.h.finish()  # the fake run's record has no verdict: it did not pass
+    assert not (env.out / "expected-results-1.7.0.draft.json").exists()
+    assert any("left out: the run did not pass" in s for s in env.said)
+    assert any("no reference records" in s for s in env.said)
 
 
 def test_a_release_run_writes_no_draft(env, monkeypatch):

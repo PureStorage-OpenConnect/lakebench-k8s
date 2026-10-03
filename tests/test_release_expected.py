@@ -446,3 +446,20 @@ def test_summary_shows_rows_and_alerts_for_the_reviewer(ready, tmp_path):
     lines = X.summary(expected)
     assert any(line.startswith("  rows per query: ") for line in lines)
     assert any("alerts: 3; per rule: R1 1, R2 2" in line for line in lines)
+
+
+def test_references_are_compared_pairwise(ready):
+    """A, A+T and A-T each match A, but the last two differ by 2T: refused
+    whatever the run-id order."""
+    from lakebench.benchmark.fingerprint import approx_tolerance
+
+    a = _ref("c360_batch")
+    fps = a["experiment"]["results"]["fingerprints"]
+    q = next(q for q in sorted(fps) if fps[q].get("approx"))
+    col = sorted(fps[q]["approx"])[0]
+    t = approx_tolerance(float(fps[q]["quanta"][col]), int(fps[q]["rows"]))
+    up, down = _with(a, "hive-iceberg-spark-trino"), _with(a, "hive-delta-spark-trino")
+    up["experiment"]["results"]["fingerprints"][q]["approx"][col] += 0.9 * t
+    down["experiment"]["results"]["fingerprints"][q]["approx"][col] -= 0.9 * t
+    problems = _refusals({"run-1": a, "run-2": up, "run-3": down})
+    assert any(f"query {q} differs between run-3 and run-2" in p for p in problems)

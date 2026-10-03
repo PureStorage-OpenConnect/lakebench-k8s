@@ -2612,9 +2612,11 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
     def write_draft_expected(self) -> Path | None:
         """A rehearsal's draft expected-results file, written from its matrix
         rows' records to ``<out>/expected-results-<version>.draft.json``
-        (never into the tree); not reviewed and never evidence. When the
-        records cannot make one, the reasons are said and any older draft
-        is removed."""
+        (never into the tree); not reviewed and never evidence. A run that
+        did not pass is left out and said. When the other records cannot
+        make one, the reasons are said and any older draft is removed."""
+        from lakebench.metrics.verdict import passed
+
         path = self.out / f"expected-results-{self.version}.draft.json"
         states = self.rowlog.latest()
         records = []
@@ -2625,9 +2627,16 @@ class Harness(ScenarioMixin, UpgradeMixin, ExtraStepsMixin):
             for run_id in s.get("run_ids") or []:
                 src = self.out / "rehearsal" / "runs" / run_id / "metrics.json"
                 try:
-                    records.append((run_id, json.loads(src.read_text())))
+                    record = json.loads(src.read_text())
                 except (OSError, ValueError) as e:
                     problems.append(f"{run_id}: record unreadable: {e}")
+                    continue
+                if not passed(record):
+                    # A draft is not evidence: one failed row leaves its run
+                    # out instead of refusing the draft (`expected` refuses).
+                    self.say(f"draft expected results: {run_id} left out: the run did not pass")
+                    continue
+                records.append((run_id, record))
         try:
             if problems:
                 raise _expected.ExpectedRefused(problems)

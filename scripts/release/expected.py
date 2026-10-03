@@ -32,9 +32,10 @@ empty result, under the registry's full query set id; an AML batch run must
 carry a non-empty alert set. A continuous run's rounds must have executed the
 registry's sets: the full set for Customer 360, the pre-case and the full set
 for AML, at the release matrix's continuous scale (the gate matches
-continuous entries by workload alone). Runs of one entry must share corpus
-id v2 and scale, their fingerprints must match the first run's as the gate
-matches them (``fingerprint.mismatch``) and their alert sets must be equal;
+continuous entries by workload and workload version only). Runs of one entry
+must share corpus id v2 and scale, every pair of them must match as the gate
+matches fingerprints (``fingerprint.mismatch``) and their alert sets must be
+equal; a batch entry needs at least one run with a query engine;
 each approximate column's expected sums are the midpoint of the runs'
 range. Any refusal writes nothing. Before returning, the file is checked
 against every input record through the gate's own reader
@@ -311,9 +312,9 @@ def _merge_fingerprints(
     label: str, members: Sequence[tuple[str, Mapping[str, Any]]]
 ) -> tuple[dict[str, Any], list[str]]:
     """One expected fingerprint per query from *members* (``(run id,
-    fingerprints)``, sorted), provided every run's matches the first run's
-    as the gate matches (``fingerprint.mismatch``) and every run answered
-    the same queries. The value is the first run's, with each approximate
+    fingerprints)``, sorted), provided every pair of runs matches as the
+    gate matches (``fingerprint.mismatch``) and every run answered the same
+    queries. The value is the first run's, with each approximate
     column's sums at the midpoint of the runs' range, so a release run is
     held to the centre of the references rather than to one end."""
     from lakebench.benchmark.fingerprint import mismatch
@@ -327,10 +328,19 @@ def _merge_fingerprints(
                 f"(missing {sorted(set(ref) - set(fps))}, extra {sorted(set(fps) - set(ref))})"
             )
             continue
-        for q in sorted(ref):
-            why = mismatch(fps[q], ref[q])
-            if why:
-                problems.append(f"{label}: query {q} differs between {rid} and {ref_id}: {why}")
+    if problems:
+        return {}, problems
+    # Every pair, not only each run against the first: the gate's rule is
+    # pairwise, and tolerance is not transitive (A, A+T and A-T each match A
+    # but the last two differ by 2T).
+    for i, (rid, fps) in enumerate(members):
+        for other_id, other in members[i + 1 :]:
+            for q in sorted(ref):
+                why = mismatch(other[q], fps[q])
+                if why:
+                    problems.append(
+                        f"{label}: query {q} differs between {other_id} and {rid}: {why}"
+                    )
     merged = {}
     for q in sorted(ref):
         fp = _strip(ref[q])
