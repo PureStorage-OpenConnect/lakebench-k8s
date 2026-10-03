@@ -554,8 +554,10 @@ def _save_benchmark_record(
     from: ``benchmark``, the pipeline benchmark's ``query_benchmark`` and
     query stage (so its scores, ``compare`` and the HTML card show this
     benchmark), and the experiment block's benchmark half. A continuous
-    parent's in-stream rounds are dropped from the copy: they are the run's
-    measurement, and the scores would prefer them. ``provenance.benchmark``
+    parent's in-stream rounds are dropped from the copy, with the aggregates
+    taken from them and the experiment block's round counts: they are the
+    run's measurement, and the scores would prefer them. The parent's
+    post-maintenance QpH is dropped too. ``provenance.benchmark``
     names the code that ran this benchmark and when. The record gets a new
     run id, ``record_kind`` "benchmark" and ``parent_run_id``; its series
     stamp is dropped (a benchmark is not a repetition). The save is a
@@ -604,6 +606,14 @@ def _save_benchmark_record(
                 queries_per_hour=result.qph,
             )
         )
+        # Aggregates of the parent's benchmark that the copy would otherwise
+        # carry next to its own QpH: the in-stream QpH trend and event age,
+        # the post-maintenance QpH, and the stage-time sum that held the
+        # parent's query stage.
+        pb.qph_degradation_pct = None
+        pb.query_time_event_age_seconds = 0.0
+        pb.post_compaction_qph = 0.0
+        pb.total_elapsed_seconds = sum(s.elapsed_seconds for s in pb.stages)
     # The stored experiment block is never rebuilt; bring its benchmark half
     # (results, iterations, mode) in line with the benchmark it now holds.
     refresh_benchmark(record)

@@ -315,10 +315,16 @@ def test_report_list_names_benchmark_records(tmp_path, monkeypatch):
     assert f"is a benchmark record of run {PARENT}" in _stderr(res)
 
 
-def test_benchmark_record_of_a_continuous_run_drops_its_rounds(tmp_path):
+@pytest.mark.parametrize(
+    "cont",
+    # lb16-cont-c360 (no stored round count) and a 1.7 continuous record
+    # whose experiment block stores limits.benchmark_rounds.
+    ["20260926-215221-65567b", "20260929-204941-1d17f4"],
+)
+def test_benchmark_record_of_a_continuous_run_drops_its_rounds(cont, tmp_path):
     from lakebench.cli._query import _save_benchmark_record
+    from lakebench.metrics.compare import compare_records
 
-    cont = "20260926-215221-65567b"  # lb16-cont-c360, continuous, in-stream rounds
     runs = _runs(tmp_path, cont)
     storage = MetricsStorage(runs)
     parent = storage.load_run(cont)
@@ -326,8 +332,48 @@ def test_benchmark_record_of_a_continuous_run_drops_its_rounds(tmp_path):
     path = _save_benchmark_record(storage, parent, _bench_result())
     data = json.loads(path.read_text())
     assert data.get("benchmark_rounds", []) == []
-    assert data["pipeline_benchmark"]["scores"]["composite_qph"] == 2400.0
-    assert "in_stream_composite_qph" not in data["pipeline_benchmark"]["scores"]
+    scores = data["pipeline_benchmark"]["scores"]
+    assert scores["composite_qph"] == 2400.0
+    assert "in_stream_composite_qph" not in scores
+    assert "qph_degradation_pct" not in scores
+    assert "query_time_event_age_seconds" not in scores
+    exp = data.get("experiment") or {}  # a 1.6 record may have no block
+    assert (exp.get("limits") or {}).get("benchmark_rounds") in (None, 0)
+    assert (exp.get("repetitions") or {}).get("benchmark_rounds") in (None, 0)
+    # One post-run benchmark never stands like-for-like against a median of
+    # in-stream rounds.
+    parent_rec = json.loads((runs / f"run-{cont}" / "metrics.json").read_text())
+    assert compare_records([parent_rec], [data])["verdict"] != "LIKE-FOR-LIKE"
+
+
+def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
+    from lakebench.cli._query import _save_benchmark_record
+
+    runs = _runs(tmp_path, PARENT)
+    storage = MetricsStorage(runs)
+    parent = storage.load_run(PARENT)
+    parent.pipeline_benchmark.post_compaction_qph = 999.0
+    data = json.loads(_save_benchmark_record(storage, parent, _bench_result()).read_text())
+    scores = data["pipeline_benchmark"]["scores"]
+    assert not scores.get("post_compaction_qph")
+    stages = data["pipeline_benchmark"]["stages"]
+    assert scores["total_elapsed_seconds"] == round(sum(st["elapsed_seconds"] for st in stages), 2)
+
+
+def test_reproduce_and_release_evidence_refuse_a_benchmark_record(tmp_path, monkeypatch):
+    from lakebench.cli._query import _save_benchmark_record
+    from lakebench.metrics.release_record import record_problems
+
+    runs = _runs(tmp_path, PARENT)
+    storage = MetricsStorage(runs)
+    path = _save_benchmark_record(storage, storage.load_run(PARENT), _bench_result())
+    bench_id = path.parent.name.removeprefix("run-")
+    problems = record_problems(json.loads(path.read_text()), "f" * 40, None)
+    assert any(f"a benchmark record (of run {PARENT}), not a run" in p for p in problems)
+    res = _invoke(tmp_path, monkeypatch, "reproduce", "--record", bench_id, "--write", "pkg.yaml")
+    assert res.exit_code == 2, res.output
+    assert f"lakebench reproduce --record {PARENT} --write pkg.yaml" in _stderr(res)
+    assert not (tmp_path / "pkg.yaml").exists()
 
 
 def test_perf_gate_and_export_skip_benchmark_records(tmp_path):
