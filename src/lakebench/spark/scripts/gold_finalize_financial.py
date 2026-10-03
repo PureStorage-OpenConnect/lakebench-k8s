@@ -91,6 +91,9 @@ except ValueError:
 # not prevent the cheap ones from writing their alerts. W5 and W6 screen
 # payment beneficiaries against the corpus watchlist
 # (bronze/watchlist.parquet); a corpus without one records them as skipped.
+#: Rules that take the shared screening base (detection_rules.screen_base_frame).
+SCREEN_BASE_RULES = ("W5_sanctions_match", "W6_pep_counterparty")
+
 DEFAULT_DETECTION_RULES = (
     "W5_sanctions_match",
     "W6_pep_counterparty",
@@ -487,6 +490,22 @@ def run_detection_rules(
     # after every rule.
     sc = spark.sparkContext
     caller_group = _job_group_props(sc) if profile_stages else None
+    # W5 and W6 screen the same input (silver txns joined to the
+    # beneficiary's country). When both run, it is built once, persisted, and
+    # passed to each as screen_base; results are the same frame either way.
+    screen_rules = [r for r in rules if r in SCREEN_BASE_RULES]
+    screen_base = None
+    if len(screen_rules) > 1 and silver_entities is not None:
+        from detection_rules import screen_base_frame
+
+        try:
+            screen_base = screen_base_frame(txns, silver_entities).persist(
+                StorageLevel.MEMORY_AND_DISK
+            )
+            log(f"[detection] shared screening base for {', '.join(screen_rules)}")
+        except Exception as e:  # noqa: BLE001 -- each rule then builds its own
+            log(f"[detection] shared screening base not built: {one_line(e)}")
+            screen_base = None
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -503,6 +522,7 @@ def run_detection_rules(
             sc.setJobGroup(group, f"{rule_id} run {run_id}", interruptOnCancel=False)
             mark = rule_profile_mark(spark)
         rule_start = time.time()
+        rule_frame = None
         try:
             # Signature-based param filter, NOT ``__code__.co_varnames``
             # -- co_varnames includes every local in the function body,
@@ -522,6 +542,8 @@ def run_detection_rules(
             # silently disable the rule by capping it at zero.
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
+            if "screen_base" in sig.parameters and screen_base is not None:
+                params["screen_base"] = screen_base
             alerts = fn(txns, **params)
             # Persist before counting, so the rule is computed exactly once.
             # The loop used to count the frame and then INSERT from a temp
@@ -531,6 +553,7 @@ def run_detection_rules(
             # below, so gold.alerts never shows alerts for a rule whose
             # status is not 'ran'.
             alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
+            rule_frame = alerts
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
@@ -595,8 +618,17 @@ def run_detection_rules(
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
             # write, and left cached they hold executor memory and scratch
-            # through every later rule.
-            spark.catalog.clearCache()
+            # through every later rule. The one exception is the shared
+            # screening base while a later screening rule still needs it:
+            # then only this rule's alerts frame is dropped (W5 and W6 persist
+            # nothing else).
+            if screen_base is not None and rule_id in screen_rules[:-1]:
+                if rule_frame is not None:
+                    rule_frame.unpersist()
+            else:
+                spark.catalog.clearCache()
+                if rule_id in screen_rules:
+                    screen_base = None
             # W3/W17 write their path levels and results under the gold
             # bucket; the alerts are written (or dropped) by now.
             cleanup_path_search_spill(spark)

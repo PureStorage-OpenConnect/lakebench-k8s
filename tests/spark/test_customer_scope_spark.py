@@ -364,3 +364,36 @@ def test_empty_alerts_frame_has_the_alert_columns(spark):
         (name, _parse_datatype_string(ddl), nullable) for name, ddl, nullable in ALERT_COLUMNS
     ]
     assert df.count() == 0
+
+
+def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
+    """AML-3: W5 and W6 build their screening input once when the driver
+    passes it as screen_base. Their alerts are the same rows either way, and
+    with the base _screen_txns runs once for both instead of once each."""
+    import detection_rules as dr
+    from common import frame_fingerprint
+
+    txns, entities = _silver(spark)
+    calls = []
+    real = dr._screen_txns
+    monkeypatch.setattr(dr, "_screen_txns", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    def fp(df):
+        cols = [c for c in df.columns if c not in ("alert_id", "detected_ts")]
+        return frame_fingerprint(df, cols)
+
+    alone = {
+        r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r"))
+        for r in ("W5_sanctions_match", "W6_pep_counterparty")
+    }
+    assert len(calls) == 2
+    calls.clear()
+    base = dr.screen_base_frame(txns, entities).persist()
+    shared = {
+        r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r", screen_base=base))
+        for r in ("W5_sanctions_match", "W6_pep_counterparty")
+    }
+    base.unpersist()
+    assert len(calls) == 1
+    assert shared == alone
+    assert all(f[0] > 0 for f in alone.values()), alone

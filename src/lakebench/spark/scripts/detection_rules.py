@@ -2333,6 +2333,15 @@ def _screen_txns(silver_txns: DataFrame, silver_entities: DataFrame) -> DataFram
     )
 
 
+def screen_base_frame(silver_txns: DataFrame, silver_entities: DataFrame | None) -> DataFrame:
+    """The screening input W5 and W6 both build (_screen_txns over the
+    resolved silver.entities), for a driver that runs both to build once and
+    pass to each as ``screen_base``. Raises RuleSkipped as the rules would
+    when the entity master is unreadable."""
+    spark = silver_txns.sparkSession
+    return _screen_txns(silver_txns, _entities_frame(spark, silver_entities, "W5/W6"))
+
+
 def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, score, priority):
     """gold.alerts rows for per-transaction screening hits (one alert per
     transaction, on its best-matching entry)."""
@@ -2377,6 +2386,7 @@ def w5_sanctions_match(
     silver_txns: DataFrame,
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
+    screen_base: DataFrame | None = None,
 ) -> DataFrame:
     """Sanctions screen: payments to a party on the corpus sanctions list.
 
@@ -2401,7 +2411,8 @@ def w5_sanctions_match(
     silver_entities = _entities_frame(spark, silver_entities, "W5")
     customers = _customer_ids(spark, silver_entities, "W5")
     wl = _load_watchlist(spark, "sanctions", "W5")
-    txns = _screen_txns(silver_txns, silver_entities)
+    # screen_base: the same frame, built once for W5 and W6 by the driver.
+    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
     matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
@@ -2477,6 +2488,7 @@ def w6_pep_counterparty(
     silver_txns: DataFrame,
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
+    screen_base: DataFrame | None = None,
 ) -> DataFrame:
     """PEP screen: payments to a party on the corpus PEP list, by the same
     fuzzy screen as W5 (transaction screen only).
@@ -2490,7 +2502,8 @@ def w6_pep_counterparty(
     silver_entities = _entities_frame(spark, silver_entities, "W6")
     customers = _customer_ids(spark, silver_entities, "W6")
     wl = _load_watchlist(spark, "pep", "W6")
-    txns = _screen_txns(silver_txns, silver_entities)
+    # screen_base: the same frame, built once for W5 and W6 by the driver.
+    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
     matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
