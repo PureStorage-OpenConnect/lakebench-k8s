@@ -68,8 +68,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
-  `experiment.requested_effective`. A request that was not met, or
-  automatic incremental gold outside a multi-cycle cycle, is listed in
+  `experiment.requested_effective`. A request that was not met (a
+  configured gold strategy the gold job did not run, an executor override
+  that ran with fewer executors, a mode that did not run), or incremental
+  gold chosen automatically outside a multi-cycle cycle, is listed in
   `experiment.requested_effective_mismatches` and labelled in the verdict
   (`qualifiers.requested_effective`) and the report; it never fails the
   run or enters identity. The config snapshot records the requested gold

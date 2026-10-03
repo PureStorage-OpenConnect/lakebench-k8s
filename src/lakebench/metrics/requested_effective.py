@@ -11,31 +11,40 @@ effective, source, stage}`` read from fields the record already carries:
   "auto" when unset), and the strategy and its source each gold-finalize
   job wrote in its JOB METRICS block (``jobs[].extra_metrics.gold_strategy``
   and ``gold_strategy_source``: ``auto``, ``override`` or ``cycle``). One
-  entry per gold job, keyed ``gold_strategy[cycle=N]`` when there are
-  several.
+  entry per gold job, keyed ``gold_strategy[cycle=N]`` (the Nth gold job,
+  one per cycle) when there are several.
 - ``pipeline_mode``: the mode the command asked for
   (``experiment_inputs.run_mode``: the config's, or ``run --continuous``)
-  against the pipeline that ran (``pipeline_benchmark.pipeline_mode``).
-- ``executors[<job type>]``: the override, else the profile's count at this
-  scale under its cap, against the count the job ran with
-  (``experiment.limits.executors``). The executor cap and a concurrent
-  budget show in the entry's source; the limits they impose are labelled by
-  ``limits.bound``.
+  against the pipeline the record shows ran: streams for continuous, batch
+  jobs for batch, "not recorded" when it holds neither (a run that stopped
+  before its first stage).
+- ``executors[<job type>]`` (cluster runs): the override, else the
+  profile's count at this scale under its cap, against
+  ``experiment.limits.executors``' observed count. For a batch job that is
+  the most executor pods the operator listed (a replaced executor counts
+  twice, and a job whose progress was never seen records the count it was
+  asked for); for a stream it is the count submitted. So only an override
+  that ran with fewer executors than it asked for is a mismatch. The
+  executor cap and a concurrent budget show in the entry's source; the
+  limits they impose are labelled by ``limits.bound``.
 - ``trickle`` (continuous): ``max_files_per_trigger`` as configured, or
   "auto", against the value the run resolved (``continuous.trickle``).
 
 The other Lakebench caps (W1 vertices, TM alerts per customer, benchmark
-iterations) are recorded as configured in ``experiment.limits`` and, when
-one bounds the run, in ``limits.bound``; no run resolves them to another
-value, so they have no entry here.
+iterations, the auto-sizing cuts) have no entry here: they are recorded as
+the run used them in ``experiment.limits`` and, when one bounds the run,
+labelled in ``limits.bound``.
 
 A mismatch is an entry whose request was explicit and not met, or an
 "auto" request that resolved to a value labelled even when chosen
 automatically (``LABEL_WHEN_AUTO``: incremental gold, which aggregates part
-of silver). Incremental gold chosen by Lakebench for cycles 2+ of a
-multi-cycle run (source ``cycle``) is by design and not a mismatch. A
-mismatch is a verdict warning and qualifier; it never fails a run and never
-enters identity.
+of silver; the gold scripts no longer choose it automatically, so this
+guards against that returning). Incremental gold chosen by Lakebench for
+cycles 2+ of a multi-cycle run (source ``cycle``) is by design and not a
+mismatch. The entries are stored facts; which of them are mismatches is
+decided when the record is read, so a later rule applies to an older
+record. A mismatch is a verdict warning and qualifier; it never fails a run
+and never enters identity.
 """
 
 from __future__ import annotations
@@ -54,10 +63,11 @@ EXEMPT_SOURCES: dict[str, frozenset[str]] = {"gold_strategy": frozenset({"cycle"
 #: Requests that leave the choice to Lakebench.
 _AUTO = frozenset({None, "auto", "profile"})
 
-#: Every function whose name says it chooses a strategy, trickle, executor
-#: count, cap or mode (``tests/test_requested_effective_sites.py`` walks the
-#: tree for them), and where its decision reaches the record. A new site
-#: must be listed here with its carrier, or the test fails.
+#: Every function named as choosing a strategy, trickle, executor count, cap
+#: or mode (``select_``/``determine_``/``resolve_``/``choose_`` names;
+#: ``tests/test_requested_effective_sites.py`` walks the tree for them), and
+#: where its decision reaches the record. A new site so named must be listed
+#: here with its carrier, or the test fails.
 KNOWN_SITES: dict[tuple[str, str], str] = {
     ("cli/_sustained.py", "resolve_trickle"): "record: continuous.trickle {value, source}",
     ("spark/scripts/gold_finalize.py", "determine_gold_strategy"): (
@@ -73,15 +83,17 @@ KNOWN_SITES: dict[tuple[str, str], str] = {
         "returns into: determine_gold_strategy"
     ),
     ("spark/scripts/silver_build.py", "determine_silver_strategy"): (
-        "exempt: both silver strategies write the same rows; the choice "
-        "changes only how silver is computed and is logged on the Strategy line"
+        "exempt: every silver strategy runs the same transforms over the same "
+        "bronze and differs only in how it writes; the choice is logged on the "
+        "Strategy line"
     ),
     ("spark/scripts/silver_build.py", "select_silver_strategy"): (
         "returns into: determine_silver_strategy"
     ),
     ("spark/scripts/silver_build_delta.py", "determine_silver_strategy"): (
-        "exempt: both silver strategies write the same rows; the choice "
-        "changes only how silver is computed and is logged on the Strategy line"
+        "exempt: every silver strategy runs the same transforms over the same "
+        "bronze and differs only in how it writes; the choice is logged on the "
+        "Strategy line"
     ),
     ("spark/scripts/silver_build_delta.py", "select_silver_strategy"): (
         "returns into: determine_silver_strategy"
@@ -99,7 +111,7 @@ def _norm_mode(mode: Any) -> Any:
 
 def _gold_entries(metrics: Any) -> dict[str, dict[str, Any]]:
     snapshot = getattr(metrics, "config_snapshot", None) or {}
-    if snapshot.get("workload_schema") not in (None, "customer360"):
+    if snapshot.get("workload_schema") != "customer360":
         return {}
     configured = (snapshot.get("requested") or {}).get("gold_strategy")
     gold = [j for j in getattr(metrics, "jobs", None) or [] if j.job_type == "gold-finalize"]
@@ -129,33 +141,40 @@ def _mode_entry(metrics: Any) -> dict[str, dict[str, Any]]:
     requested = _norm_mode(inputs.get("run_mode")) or configured
     if requested is None:
         return {}
-    pb = getattr(metrics, "pipeline_benchmark", None)
-    effective = _norm_mode(getattr(pb, "pipeline_mode", None))
-    if effective is None:
-        if getattr(metrics, "streaming", None):
-            effective = "continuous"
-        elif getattr(metrics, "jobs", None):
-            effective = "batch"
-        else:
-            effective = NOT_RECORDED
+    # What the record shows ran (pipeline_benchmark.pipeline_mode is itself
+    # derived from the streams, and says batch for a run with neither).
+    if getattr(metrics, "streaming", None):
+        effective: Any = "continuous"
+    elif getattr(metrics, "jobs", None):
+        effective = "batch"
+    else:
+        effective = NOT_RECORDED
     source = "config" if requested == configured else "command line"
     return {"pipeline_mode": _entry(requested, effective, source, None)}
 
 
-def _executor_entries(limits: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+def _executor_entries(metrics: Any, limits: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if (getattr(metrics, "config_snapshot", None) or {}).get("local"):
+        return {}  # a --local job runs in one JVM: no executors
     out: dict[str, dict[str, Any]] = {}
     for e in (limits or {}).get("executors") or []:
         if not isinstance(e, Mapping) or not e.get("job_type"):
             continue
         override = e.get("override")
+        requested: Any
         if override is not None:
-            requested: Any = int(override)
+            requested = int(override)
             source = "override"
         else:
-            requested = "profile"
+            derived, cap = e.get("scale_derived"), e.get("cap")
+            requested = (
+                min(int(derived), int(cap))
+                if isinstance(derived, int) and isinstance(cap, int)
+                else NOT_RECORDED
+            )
             source = "profile"
             if e.get("cap_hit"):
-                source = f"profile, capped at {e.get('cap')}"
+                source = f"profile, capped at {cap}"
         if isinstance(e.get("budget_cap"), Mapping):
             source += f", concurrent budget granted {e['budget_cap'].get('granted')}"
         observed = e.get("observed")
@@ -186,7 +205,7 @@ def derive(metrics: Any, limits: Mapping[str, Any] | None = None) -> dict[str, d
     entries: dict[str, dict[str, Any]] = {}
     entries.update(_gold_entries(metrics))
     entries.update(_mode_entry(metrics))
-    entries.update(_executor_entries(limits))
+    entries.update(_executor_entries(metrics, limits))
     entries.update(_trickle_entry(metrics))
     return entries
 
@@ -203,6 +222,16 @@ def is_mismatch(key: str, entry: Mapping[str, Any]) -> bool:
         return False
     if entry.get("source") in EXEMPT_SOURCES.get(base, frozenset()):
         return False
+    if base == "executors":
+        # Only an override that ran with fewer executors than it asked for:
+        # the observed count counts a replaced executor again, and the
+        # profile's count is Lakebench's choice (its cuts are in limits.bound).
+        return (
+            str(entry.get("source", "")).startswith("override")
+            and isinstance(requested, int)
+            and isinstance(effective, int)
+            and effective < requested
+        )
     if requested in _AUTO:
         return effective in LABEL_WHEN_AUTO.get(base, frozenset())
     return str(requested) != str(effective)
@@ -214,18 +243,17 @@ def mismatches(entries: Mapping[str, Mapping[str, Any]]) -> list[str]:
 
 
 def stored_or_derived(metrics: Any) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """The entries and mismatch keys of a record: the stored block's when it
-    carries them (a record written by this version), else derived from the
-    record's fields (a record from before them)."""
+    """The entries of a record and which of them are mismatches: the stored
+    block's entries when it carries them (a record written by this version),
+    else derived from the record's fields (a record from before them). The
+    mismatches are decided now from those entries, never read from the
+    stored list, so a corrected rule applies to every record."""
     exp = getattr(metrics, "experiment", None) or {}
     stored = exp.get("requested_effective")
     if isinstance(stored, Mapping):
-        keys = exp.get("requested_effective_mismatches")
         entries = {str(k): dict(v) for k, v in stored.items() if isinstance(v, Mapping)}
-        if isinstance(keys, list):
-            return entries, [str(k) for k in keys]
-        return entries, mismatches(entries)
-    entries = derive(metrics)
+    else:
+        entries = derive(metrics)
     return entries, mismatches(entries)
 
 
