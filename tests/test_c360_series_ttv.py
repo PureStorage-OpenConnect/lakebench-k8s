@@ -20,7 +20,7 @@ def _at(seconds: float) -> datetime:
     return T0 + timedelta(seconds=seconds)
 
 
-def _bench(cycles: list[CycleMetrics]) -> PipelineBenchmark:
+def _bench(cycles: list[CycleMetrics], schema: str = "customer360") -> PipelineBenchmark:
     """Four cycles of three 100 s stages; datagen before each cycle takes 50 s
     (cycle 0's before the first stage, cycles 1-3 between gold and bronze)."""
     stages = []
@@ -48,6 +48,7 @@ def _bench(cycles: list[CycleMetrics]) -> PipelineBenchmark:
         start_time=T0,
         stages=stages,
         cycles=cycles,
+        config_snapshot={"workload_schema": schema},
     )
     pb.compute_aggregates()
     return pb
@@ -121,3 +122,11 @@ def test_a_generating_multicycle_run_records_each_cycles_datagen(tmp_path, monke
         assert lo <= hi and lo.tzinfo is not None and not c["datagen_skipped"]
     scores = record["pipeline_benchmark"]["scores"]
     assert scores["time_to_value_datagen_excluded_seconds"] >= 0.0
+
+
+def test_aml_time_to_value_keeps_its_meaning():
+    """The exclusion is Customer 360's (its workload version moved with it);
+    an AML record keeps the plain span under aml-1."""
+    pb = _bench([_cycle(i) for i in range(4)], schema="financial")
+    assert pb.time_to_value_datagen_excluded_seconds is None
+    assert pb.time_to_value_seconds == 1350.0
