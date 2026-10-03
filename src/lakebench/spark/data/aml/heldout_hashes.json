@@ -4,9 +4,16 @@
   "algorithm": "sha256(bytes.fromhex(salt) + b':' + decimal(seed))",
   "salt": "267910981b7370a7aaed163588284507373136289bfeec908df42ae15e1d75aa",
   "roles": {
-    "evaluation": [],
-    "robustness": []
+    "evaluation": [
+      "206064919eb86d06940ba8f4a66510605707e6cfe99bb2564f47dc859c2cba06"
+    ],
+    "robustness": [
+      "9d730778dff8ae49bc2eb428a83016de00a9f227e6c0a9c43f84043fe2869562"
+    ]
   },
-  "spent": [],
+  "spent": [
+    42,
+    50000042
+  ],
   "absence_check": "report"
 }
