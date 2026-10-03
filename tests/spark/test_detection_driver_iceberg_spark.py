@@ -96,6 +96,7 @@ def _check(spark):
             "narrative": lit("n"),
             "evidence": lit(None).cast("map<string,string>"),
             "detected_ts": current_timestamp(),
+            "reason_codes": array(lit("X_CODE")),
         }
         return base.select(*[cols[f.name].alias(f.name) for f in template.schema.fields])
 
@@ -135,7 +136,7 @@ def _check(spark):
             "INSERT INTO lakehouse.gold.alerts SELECT alert_id, 'WX_skip', rule_version, "
             "model_id, model_version, entity_id, related_txn_ids, related_entity_ids, "
             "alert_ts, alert_score, priority, status, disposition, alert_type, 'run-2', "
-            "narrative, evidence, detected_ts FROM lakehouse.gold.alerts LIMIT 1"
+            "narrative, evidence, detected_ts, reason_codes FROM lakehouse.gold.alerts LIMIT 1"
         )
         gf.run_detection_rules(spark, txns, "run-2", rules=("WX_skip",))
     finally:

@@ -226,6 +226,7 @@ def _alerts(spark, run_id, specs=None):
             None,
             None,
             datetime(*ts),
+            ["X_CODE"],
         )
         for a, r, e, ts, rel in (specs or _BASE_SPECS)
     ]

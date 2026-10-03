@@ -989,17 +989,17 @@ def test_detected_ts_in_empty_schema_and_all_ddls():
     ddl = (root / "src/lakebench/deploy/financial_ddl.py").read_text()
     assert "detected_ts" in ddl
 
-    # Upgrade guard uses a live-schema check + `ADD COLUMNS (...)`, not the
-    # `ADD COLUMN IF NOT EXISTS` form (invalid for columns in Spark/Iceberg).
-    gf = (root / "src/lakebench/spark/scripts/gold_finalize_financial.py").read_text()
-    assert "for name, ddl_type, nullable in ALERT_COLUMNS" in gf
-    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in gf
-    assert '"detected_ts" not in' in gf  # only ALTER when genuinely missing
-
-    rp = (root / "src/lakebench/spark/scripts/replay_financial.py").read_text()
-    assert "detected_ts" in rp
-    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in rp
-    assert '"detected_ts" not in' in rp
+    # Reused-catalog upgrade: one helper adds missing trailing columns
+    # (through ensure_column_with_retry's live-schema check, not the invalid
+    # `ADD COLUMN IF NOT EXISTS`) and refuses a table out of order.
+    for script in (
+        "gold_finalize_financial.py",
+        "gold_refresh_financial.py",
+        "replay_financial.py",
+    ):
+        text = (root / "src/lakebench/spark/scripts" / script).read_text()
+        assert "ensure_alert_columns(spark," in text, script
+        assert "ALERT_COLUMNS)" in text, script
 
 
 def _alert_columns():

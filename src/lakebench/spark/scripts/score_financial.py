@@ -192,6 +192,88 @@ def check_status_run(status_run_id: str, own_run_id: str) -> None:
     )
 
 
+def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
+    """Per-reason-code recall and false positives (SPEC section 8, K30): as
+    per-rule recall and FP, split by code; an alert counts once per code it
+    carries.
+
+    For a designated rule R that ran, with target typology T, and each code c
+    R can write (aml_reason_codes.REASON_CODES, plus any other code seen):
+
+    - ``recall_by_code[R][c]``: the share of T's instances with a participant
+      payment in an alert of R carrying c;
+    - ``fp_by_code[R][c]``: 1 minus the share of R's alerts carrying c that
+      touch a payment of T (null when no alert carries c);
+    - ``alerts_by_code[R][c]``: how many of R's alerts carry c.
+
+    Every alert carries its rule's base code, so R's per-code hit sets union
+    to R's hit set and the base code's figures are R's. That holds only when
+    every alert carries a code: an alert with none would drop out of every
+    per-code figure, so then (or when the alerts have no reason_codes column)
+    every per-code block is empty and ``by_code_status`` says why. Recall for a rule bounded by an
+    evidence cap is bounded for each of its codes too."""
+    from aml_reason_codes import REASON_CODES, vocabulary_digest
+    from pyspark.sql.functions import size
+
+    out: dict = {
+        "recall_by_code": {},
+        "fp_by_code": {},
+        "alerts_by_code": {},
+        "reason_code_vocabulary": vocabulary_digest(),
+    }
+    if "reason_codes" not in alerts.columns:
+        out["by_code_status"] = "not_recorded: the alerts have no reason_codes column"
+        return out
+    uncoded = alerts.where(coalesce(size(col("reason_codes")), lit(-1)) <= 0).count()
+    if uncoded:
+        out["by_code_status"] = f"not_scored: {uncoded} alerts carry no reason code"
+        return out
+    codes = alerts.select("alert_id", "rule_id", explode(col("reason_codes")).alias("code"))
+    code_uetrs = codes.join(alert_uetrs, ["alert_id", "rule_id"]).cache()
+    instances = manifest_uetrs.where(col("uetr").isNotNull()).select(
+        "typology_id", "typology_type", "uetr"
+    )
+    recall: dict = {}
+    fp: dict = {}
+    counts: dict = {}
+    for rule in sorted(r for r in ran if r in target_of):
+        typ = target_of[rule]
+        inst = instances.where(col("typology_type") == lit(typ))
+        n_inst = inst.select("typology_id").distinct().count()
+        rule_codes = codes.where(col("rule_id") == lit(rule))
+        n_by = {r["code"]: int(r["count"]) for r in rule_codes.groupBy("code").count().collect()}
+        vocab = list(REASON_CODES.get(rule, ())) + sorted(
+            set(n_by) - set(REASON_CODES.get(rule, ()))
+        )
+        hits = (
+            inst.join(code_uetrs.where(col("rule_id") == lit(rule)), "uetr")
+            .select("code", "typology_id")
+            .distinct()
+            .cache()
+        )
+        hit_by = {r["code"]: int(r["count"]) for r in hits.groupBy("code").count().collect()}
+        on_target = (
+            inst.select("uetr")
+            .distinct()
+            .join(code_uetrs.where(col("rule_id") == lit(rule)), "uetr")
+            .select("alert_id", "code")
+            .distinct()
+            .groupBy("code")
+            .count()
+            .collect()
+        )
+        hit_alerts = {r["code"]: int(r["count"]) for r in on_target}
+        recall[rule] = {c: (hit_by.get(c, 0) / n_inst if n_inst else None) for c in vocab}
+        fp[rule] = {
+            c: (1.0 - hit_alerts.get(c, 0) / n_by[c] if n_by.get(c) else None) for c in vocab
+        }
+        counts[rule] = {c: n_by.get(c, 0) for c in vocab}
+        hits.unpersist()
+    code_uetrs.unpersist()
+    out.update(recall_by_code=recall, fp_by_code=fp, alerts_by_code=counts, by_code_status="scored")
+    return out
+
+
 def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     """Per-typology recall and per-rule false positives for one run.
 
@@ -396,6 +478,14 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # payments against related_txn_ids, so a cut alert can miss planted
     # payments past the cut: recall for a typology such a rule detects is
     # bounded by a Lakebench-imposed cap, and says so (invariant 6).
+    by_code = _scores_by_code(
+        spark,
+        alerts,
+        manifest_uetrs,
+        alert_uetrs,
+        {rid: typ for typ, rids in designated.items() for rid in rids},
+        {rid for _, rid in pairs},
+    )
     capped_by_rule: dict[str, int] = {}
     if "evidence" in alerts.columns:
         for row in (
@@ -411,6 +501,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         if any(capped_by_rule.get(r) for r in rids)
     }
     summary = {
+        **by_code,
         "evidence_capped_alerts_by_rule": dict(sorted(capped_by_rule.items())),
         # typology -> its designated rules with a cut alert: that typology's
         # recall is bounded by an evidence cap.

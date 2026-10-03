@@ -121,7 +121,19 @@ ALERT_COLUMNS = (
     ("narrative", "STRING", True),
     ("evidence", "MAP<STRING, STRING>", True),
     ("detected_ts", "TIMESTAMP", True),
+    ("reason_codes", "ARRAY<STRING>", True),
 )
+
+#: The count or size at which a rule's alert is HIGH priority. The priority
+#: expressions and the matching reason codes (aml_reason_codes) both read it,
+#: so a code always means "a HIGH-priority alert of that kind".
+HIGH_PRIORITY_CUTOFFS = {
+    "W1_connected_components": 8,
+    "W2_structuring": 6,
+    "W3_round_tripping": 4,
+    "W4_risk_propagation": 3,
+    "W17_layering_chain": 5,
+}
 
 # Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
 # with RULE_TARGETS in src/lakebench/benchmark/aml_queries.py (the
@@ -273,7 +285,7 @@ def _suspicious_amount_expr():
 def _alert_frame(
     df: DataFrame,
     *,
-    rule_id,
+    rule_id: str,
     entity_id,
     related_txn_ids,
     related_entity_ids,
@@ -284,11 +296,17 @@ def _alert_frame(
     run_id,
     narrative,
     evidence,
+    reason_codes=None,
+    reason_key: str | None = None,
 ) -> DataFrame:
     """``df`` projected to gold.alerts: every rule returns through here, so
     no rule chooses the column order (the driver's INSERT is positional).
 
-    Each keyword is a Column; ``rule_id`` and ``run_id`` may also be a str.
+    ``rule_id`` is the rule id (a str); every other keyword is a Column,
+    and ``run_id`` may also be a str. ``reason_codes`` is the rule's
+    conditional codes (aml_reason_codes.reason_expr); the alert's
+    ``reason_codes`` column is its rule's base code followed by them, so
+    every alert carries at least one code.
     Keyword-only, so a column left out is a TypeError, which the driver
     records as the rule's error, never as zero alerts. The helper supplies
     ``alert_id`` (a uuid), the rule and model versions, ``status`` OPEN, a
@@ -296,13 +314,24 @@ def _alert_frame(
     detection time in batch, the far end of time to detect in continuous).
     Every value is cast to its ALERT_COLUMNS type and named.
     """
-    if isinstance(rule_id, str):
-        rule_id = lit(rule_id)
+    if not isinstance(rule_id, str):
+        raise TypeError(f"_alert_frame rule_id must be a str, got {type(rule_id).__name__}")
+    from aml_reason_codes import BASE_CODE, reason_expr
+    from pyspark.sql.functions import array_distinct, array_union, coalesce
+
+    if reason_codes is None:
+        reason_codes = reason_expr(reason_key or rule_id)
+    codes = array_distinct(
+        array_union(
+            array(lit(BASE_CODE[rule_id])),
+            coalesce(reason_codes, expr("cast(array() as array<string>)")),
+        )
+    )
     if isinstance(run_id, str):
         run_id = lit(run_id)
     values = {
         "alert_id": expr("uuid()"),
-        "rule_id": rule_id,
+        "rule_id": lit(rule_id),
         "rule_version": lit(RULE_VERSION),
         "model_id": lit(MODEL_ID),
         "model_version": lit(MODEL_VERSION),
@@ -319,6 +348,7 @@ def _alert_frame(
         "narrative": narrative,
         "evidence": evidence,
         "detected_ts": current_timestamp(),
+        "reason_codes": codes,
     }
     return df.select(
         *[values[name].cast(ddl_type).alias(name) for name, ddl_type, _ in ALERT_COLUMNS]
@@ -522,7 +552,7 @@ def w2_structuring(
 
     alerts = _alert_frame(
         windowed,
-        rule_id=lit("W2_structuring"),
+        rule_id="W2_structuring",
         entity_id=col("entity_id"),
         # Deduplicate defensively (Spark collect_list preserves duplicates).
         related_txn_ids=array_distinct(col("related_txn_ids")),
@@ -533,7 +563,9 @@ def w2_structuring(
         alert_score=expr(
             f"least(0.95, 0.5 + (suspicious_count - {int(threshold_count)}) * 0.05)"
         ).cast("double"),
-        priority=when(col("suspicious_count") >= 6, lit("HIGH"))
+        priority=when(
+            col("suspicious_count") >= HIGH_PRIORITY_CUTOFFS["W2_structuring"], lit("HIGH")
+        )
         .when(col("suspicious_count") >= 4, lit("MED"))
         .otherwise(lit("LOW")),
         alert_type=col("_type"),
@@ -1233,14 +1265,14 @@ def w3_round_tripping(
     alerts = found.withColumn("hops", size(col("uetrs")))
     return _alert_frame(
         alerts,
-        rule_id=lit("W3_round_tripping"),
+        rule_id="W3_round_tripping",
         entity_id=col("start"),
         related_txn_ids=col("uetrs"),
         related_entity_ids=col("nodes"),
         alert_ts=col("ts_last"),
         # Longer cycles are more deliberate. Bounded [0.6, 0.9].
         alert_score=expr("least(0.9, 0.5 + 0.1 * hops)").cast("double"),
-        priority=when(col("hops") >= 4, lit("HIGH"))
+        priority=when(col("hops") >= HIGH_PRIORITY_CUTOFFS["W3_round_tripping"], lit("HIGH"))
         .when(col("hops") >= 3, lit("MED"))
         .otherwise(lit("LOW")),
         alert_type=lit("round_tripping"),
@@ -1482,7 +1514,7 @@ def w17_layering_chain(
     )
     return _alert_frame(
         merged,
-        rule_id=lit("W17_layering_chain"),
+        rule_id="W17_layering_chain",
         entity_id=col("entity"),
         related_txn_ids=col("uetrs"),
         related_entity_ids=col("nodes"),
@@ -1491,7 +1523,7 @@ def w17_layering_chain(
         alert_ts=col("ts_q"),
         # Longer chains are more deliberate. Bounded [0.6, 0.9].
         alert_score=expr("least(0.9, 0.3 + 0.1 * hops)").cast("double"),
-        priority=when(col("hops") >= 5, lit("HIGH"))
+        priority=when(col("hops") >= HIGH_PRIORITY_CUTOFFS["W17_layering_chain"], lit("HIGH"))
         .when(col("hops") >= 4, lit("MED"))
         .otherwise(lit("LOW")),
         alert_type=lit("layering_chain"),
@@ -1618,7 +1650,7 @@ def w4_risk_propagation(
     )
     return _alert_frame(
         per_entity,
-        rule_id=lit("W4_risk_propagation"),
+        rule_id="W4_risk_propagation",
         entity_id=col("b"),
         related_txn_ids=expr(f"slice(_txns, 1, {cap})"),
         related_entity_ids=expr(f"slice(_entities, 1, {cap})"),
@@ -1629,7 +1661,9 @@ def w4_risk_propagation(
         alert_score=expr(f"least(0.95, 0.7 + (max_forward_ratio - {forward_ratio}) * 0.15)").cast(
             "double"
         ),
-        priority=when(col("chain_count") >= 3, lit("HIGH"))
+        priority=when(
+            col("chain_count") >= HIGH_PRIORITY_CUTOFFS["W4_risk_propagation"], lit("HIGH")
+        )
         .when(col("chain_count") >= 2, lit("MED"))
         .otherwise(lit("LOW")),
         alert_type=lit("risk_propagation"),
@@ -1970,7 +2004,7 @@ def w1_connected_components(
 
     alerts = _alert_frame(
         with_txns,
-        rule_id=lit("W1_connected_components"),
+        rule_id="W1_connected_components",
         # No single entity owns a cluster alert -- pick the min id
         # deterministically so replay is stable across runs.
         entity_id=col("component"),
@@ -1983,7 +2017,9 @@ def w1_connected_components(
             + str(min_cluster_size)
             + " as double)) as double)"
         ),
-        priority=when(col("component_size") >= 8, lit("HIGH"))
+        priority=when(
+            col("component_size") >= HIGH_PRIORITY_CUTOFFS["W1_connected_components"], lit("HIGH")
+        )
         .when(col("component_size") >= 5, lit("MED"))
         .otherwise(lit("LOW")),
         alert_type=lit("cluster"),
@@ -2349,7 +2385,7 @@ def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, 
     h = hits.withColumn("_rn", row_number().over(best)).filter(col("_rn") == 1)
     return _alert_frame(
         h,
-        rule_id=lit(rule_id),
+        rule_id=rule_id,
         entity_id=col("entity_id"),
         related_txn_ids=array(col("uetr")),
         related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
@@ -2437,7 +2473,8 @@ def w5_sanctions_match(
     )
     rescreen = _alert_frame(
         grouped,
-        rule_id=lit("W5_sanctions_match"),
+        rule_id="W5_sanctions_match",
+        reason_key="W5_sanctions_match:rescreen",
         entity_id=col("entity_id"),
         related_txn_ids=expr(
             f"slice(transform(array_sort(_txns), x -> x.uetr), 1, {RESCREEN_MAX_RELATED})"
@@ -2621,7 +2658,7 @@ def w7_cross_border_high_risk(
 
     alerts = _alert_frame(
         hits,
-        rule_id=lit("W7_cross_border_high_risk"),
+        rule_id="W7_cross_border_high_risk",
         entity_id=col("entity_id"),
         related_txn_ids=array(col("uetr")),
         related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
@@ -2701,7 +2738,7 @@ def w8_dormant_reactivation(
 
     alerts = _alert_frame(
         hits,
-        rule_id=lit("W8_dormant_reactivation"),
+        rule_id="W8_dormant_reactivation",
         entity_id=col("originator_id"),
         related_txn_ids=array(col("uetr")),
         related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
