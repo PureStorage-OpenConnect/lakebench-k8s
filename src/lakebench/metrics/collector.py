@@ -483,6 +483,14 @@ class PipelineMetrics:
     # None on a fresh run until it is saved; experiment_block() builds it then.
     experiment: dict[str, Any] | None = None
 
+    # "run" for a pipeline run's own record. "benchmark" for the record
+    # `lakebench benchmark` writes: a copy of the run it measured
+    # (parent_run_id) with the new benchmark, under its own run id. Written
+    # to metrics.json only when not "run", so a run's record is unchanged and
+    # an absent key reads as "run".
+    record_kind: str = "run"
+    parent_run_id: str | None = None
+
     def experiment_block(self) -> dict[str, Any] | None:
         """The experiment block: the stored one whenever the record has one,
         whatever its schema, and otherwise built from the snapshot's
@@ -535,6 +543,10 @@ class PipelineMetrics:
             d["abort_reason"] = self.abort_reason
         if self.series is not None:
             d["series"] = self.series
+        if self.record_kind != "run":
+            d["record_kind"] = self.record_kind
+        if self.parent_run_id is not None:
+            d["parent_run_id"] = self.parent_run_id
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

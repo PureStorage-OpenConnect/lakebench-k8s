@@ -427,10 +427,18 @@ class ReportGenerator:
 
         storage_segment = f" | {storage}" if storage else ""
         domain_label = get_scorecard_block(cs.get("workload_schema")).domain_label
+        kind_note = ""
+        if getattr(metrics, "record_kind", "run") == "benchmark":
+            parent = _html_escape(str(metrics.parent_run_id or "unknown"), quote=True)
+            kind_note = (
+                '<div style="margin-bottom: 0.5rem;"><strong>Benchmark record</strong> of run '
+                f"<code>{parent}</code>: the query benchmark is this record's own; the "
+                "pipeline stages, sizes and timings are that run's.</div>"
+            )
 
         return f"""
         <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
-            <strong>{mode}</strong> pipeline |
+            {kind_note}<strong>{mode}</strong> pipeline |
             {domain_label} at scale {scale} |
             {catalog}-{table_fmt}-{pipe_engine}-{engine}{storage_segment} |
             {duration_m}m {duration_s}s

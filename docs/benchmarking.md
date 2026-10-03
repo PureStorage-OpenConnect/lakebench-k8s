@@ -15,7 +15,13 @@ Lakebench produces two distinct measurements:
 
 The scorecard includes QpH as one of its scores (`composite_qph`), but they
 are separate operations. `lakebench run` produces both automatically.
-`lakebench benchmark` runs only the query engine benchmark.
+`lakebench benchmark` runs only the query engine benchmark. It saves its
+result as a record of its own, `record_kind: "benchmark"` with
+`parent_run_id` naming the run it measured: a copy of that run's record with
+the new benchmark, under a new run id. The run's own record is never
+rewritten, and a benchmark record is never a deployment's "latest run" for
+`report` or `compare`. `lakebench query` prints its result and writes no
+record.
 
 ---
 
@@ -999,10 +1005,14 @@ observed none, is not a difference). The rest is provenance only:
 Every `lakebench run` delivers `lakebench-output/runs/run-<id>/report.html`
 once, at the end of the run. That file is the shareable artifact.
 
-Print the summary of the latest run (does not modify `report.html`):
+Print the summary of the latest run (does not modify `report.html`). With
+no argument, `report` reads `./lakebench.yaml` when it exists and shows the
+latest run of that deployment; otherwise the latest run of any deployment:
 
 ```bash
 lakebench report
+lakebench report other.yaml              # the latest run of other.yaml's deployment
+lakebench report 20260201-143052-a1b2c3  # one run, by id
 ```
 
 List all available runs:
@@ -1032,12 +1042,14 @@ breakdown of the query engine benchmark, and the configuration snapshot.
 
 ### Viewing Results on the Command Line
 
-Use `lakebench results` to display the stage-matrix view in the terminal:
+Use `lakebench report --format` to display the stage-matrix view in the
+terminal (`lakebench results` is the same command with `--format table` as
+its default):
 
 ```bash
-lakebench results                      # latest run, table format
-lakebench results --format json        # JSON output
-lakebench results --run <id>           # specific run
+lakebench report --format table          # latest run, table format
+lakebench report --format json           # the pipeline benchmark block as JSON
+lakebench report --run <id> --format csv # specific run, CSV
 ```
 
 Use `lakebench report` (no flags) to print key scores directly in the terminal

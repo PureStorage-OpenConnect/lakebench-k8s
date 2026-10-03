@@ -190,27 +190,25 @@ def _fake_cfg(name: str) -> Any:
 
 
 class TestBenchmarkScope:
-    """The benchmark path (``_query.benchmark``) must scope its "append to
-    latest run" step by deployment name."""
+    """The benchmark path (``_query.benchmark``) scopes its parent lookup by
+    deployment name and writes its own record: neither A's run record nor
+    B's is rewritten."""
 
     def test_benchmark_for_a_does_not_rewrite_b(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from types import SimpleNamespace
+
+        from lakebench.cli._query import _save_benchmark_record
+
         storage, a_path, b_path = _make_two_deployments(tmp_path)
         b_before = _snapshot(b_path)
         a_before = _snapshot(a_path)
 
-        # Simulate exactly what the benchmark CLI does after a run: look up
-        # the latest run scoped to the config's name, and rewrite it with a
-        # BenchmarkMetrics attached. This is the same call path as
-        # ``cli/_query.py:benchmark`` around the ``get_latest_run_for_deployment``
-        # site.
-        from lakebench.metrics import BenchmarkMetrics
-
         cfg = _fake_cfg("dep-a")
-        latest = storage.get_latest_run_for_deployment(cfg.name)
+        latest = storage.get_latest_run_for_deployment(cfg.name, writable=True)
         assert latest is not None and latest.run_id == "a-001"
-        latest.benchmark = BenchmarkMetrics(
+        result = SimpleNamespace(
             mode="power",
             cache="hot",
             scale=1,
@@ -222,17 +220,21 @@ class TestBenchmarkScope:
             stream_results=[],
             engine="trino",
         )
-        storage.save_run(latest)
+        path = _save_benchmark_record(storage, latest, result)
 
-        # B must be byte-for-byte identical: neither mtime nor sha256 changed.
-        b_after = _snapshot(b_path)
-        assert b_after == b_before, (
-            "deployment B's metrics.json was rewritten when benchmarking A -- "
-            "the scoped lookup is missing at cli/_query.py benchmark path"
+        # Both run records are byte-for-byte identical: neither mtime nor sha256 changed.
+        assert _snapshot(b_path) == b_before
+        assert _snapshot(a_path) == a_before
+        rec = storage.load_run(path.parent.name.removeprefix("run-"))
+        assert rec is not None and rec.run_id != "a-001"
+        assert (rec.record_kind, rec.parent_run_id, rec.deployment_name) == (
+            "benchmark",
+            "a-001",
+            "dep-a",
         )
-        # A was updated (sanity check on the test itself).
-        a_after = _snapshot(a_path)
-        assert a_after != a_before
+        assert rec.benchmark is not None and rec.benchmark.qph == 123.4
+        # The benchmark record is never A's latest run.
+        assert storage.get_latest_run_for_deployment("dep-a").run_id == "a-001"
 
 
 class TestQueryScope:
@@ -248,14 +250,16 @@ class TestQueryScope:
         assert latest.run_id == "a-001"
         assert latest.deployment_name == "dep-a"
 
-    def test_query_for_a_does_not_rewrite_b(self, tmp_path: Path) -> None:
-        storage, _a_path, b_path = _make_two_deployments(tmp_path)
-        b_before = _snapshot(b_path)
-
+    def test_rewriting_a_record_is_refused(self, tmp_path: Path) -> None:
+        """``query`` no longer writes into a record; and a writer that tried
+        (not the owning run) is refused by ``save_run``, both records intact."""
         from lakebench.metrics import QueryMetrics
+        from lakebench.metrics.storage import RecordExistsError
 
-        cfg = _fake_cfg("dep-a")
-        latest = storage.get_latest_run_for_deployment(cfg.name)
+        storage, a_path, b_path = _make_two_deployments(tmp_path)
+        a_before, b_before = _snapshot(a_path), _snapshot(b_path)
+
+        latest = storage.get_latest_run_for_deployment("dep-a")
         assert latest is not None and latest.run_id == "a-001"
         latest.queries.append(
             QueryMetrics(
@@ -266,13 +270,12 @@ class TestQueryScope:
                 success=True,
             )
         )
-        storage.save_run(latest)
+        with pytest.raises(RecordExistsError):
+            storage.save_run(latest)
 
-        b_after = _snapshot(b_path)
-        assert b_after == b_before, (
-            "deployment B's metrics.json was rewritten when querying A -- "
-            "the scoped lookup is missing at cli/_query.py query path"
-        )
+        assert _snapshot(a_path) == a_before
+        assert _snapshot(b_path) == b_before
+        assert not list(a_path.parent.glob("*.tmp"))
 
 
 # ---------------------------------------------------------------------------
