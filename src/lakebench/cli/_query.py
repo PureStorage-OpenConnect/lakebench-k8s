@@ -557,7 +557,7 @@ def _save_benchmark_record(
     parent's in-stream rounds are dropped from the copy, with the aggregates
     taken from them and the experiment block's round counts: they are the
     run's measurement, and the scores would prefer them. The parent's
-    post-maintenance QpH is dropped too. ``provenance.benchmark``
+    maintenance QpH pair (before and after compaction) is dropped too. ``provenance.benchmark``
     names the code that ran this benchmark and when. The record gets a new
     run id, ``record_kind`` "benchmark" and ``parent_run_id``; its series
     stamp is dropped (a benchmark is not a repetition). The save is a
@@ -608,12 +608,21 @@ def _save_benchmark_record(
         )
         # Aggregates of the parent's benchmark that the copy would otherwise
         # carry next to its own QpH: the in-stream QpH trend and event age,
-        # the post-maintenance QpH, and the stage-time sum that held the
-        # parent's query stage.
+        # and the maintenance pair (QpH before and after compaction and the
+        # value between them), measured by the run's own benchmark rounds.
         pb.qph_degradation_pct = None
         pb.query_time_event_age_seconds = 0.0
+        pb.pre_compaction_qph = 0.0
         pb.post_compaction_qph = 0.0
-        pb.total_elapsed_seconds = sum(s.elapsed_seconds for s in pb.stages)
+        pb.maintenance_value_pct = None
+        pb.maintenance_value_reason = ""
+        pb.maintenance_paired_queries = 0
+        pb.pre_compaction_benchmark = None
+        if pb.pipeline_mode != "sustained":
+            # Batch elapsed is the stage-time sum, which held the parent's
+            # query stage. Continuous elapsed is the stream window's wall
+            # clock (the stages overlap) and does not include the benchmark.
+            pb.total_elapsed_seconds = sum(s.elapsed_seconds for s in pb.stages)
     # The stored experiment block is never rebuilt; bring its benchmark half
     # (results, iterations, mode) in line with the benchmark it now holds.
     refresh_benchmark(record)
