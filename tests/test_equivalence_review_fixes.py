@@ -428,8 +428,10 @@ class TestBlockFollowsTheRecord:
         stored = copy.deepcopy(loaded.to_dict()["experiment"])
         assert stored["results"]["not_checked"], "a stored block is never rebuilt"
         ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
+        # ... under its own run id: the run's record is written once.
+        loaded.run_id = "bench-1"
         storage.save_run(loaded)
-        e = storage.load_run(run.run_id).to_dict()["experiment"]
+        e = storage.load_run("bench-1").to_dict()["experiment"]
         assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
         assert e["benchmark_source"].startswith("lakebench benchmark")
         moved = ("results", "limits", "repetitions", "stages", "benchmark_source")

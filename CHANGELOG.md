@@ -41,6 +41,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   order, from the verified set, and these keys would change which copy of a
   class wins. Refused at load by the commands that change data (exit 2), as
   for every key Lakebench owns.
+- **`benchmark` and `query` no longer write into a run's record.**
+  `lakebench benchmark` saves its result as a record of its own under a new
+  run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
+  a copy of that run's record with the new benchmark); 1.6 replaced the
+  benchmark inside the run's own `metrics.json`. A benchmark record is never
+  a deployment's latest run for `report` or `compare`: read it by its run id
+  (`benchmark` prints it). `lakebench query` prints and journals its result
+  and no longer appends it to the latest record. `MetricsStorage.save_run`
+  refuses to replace an existing `metrics.json` unless called with
+  `seal_update=True`.
 
 ### Added
 - **AML batch records attribute gold-finalize time and show stage headroom.**
@@ -66,6 +76,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the gold-finalize job when the driver's status listener lags, and none
   when it keeps up; continuous gold ticks do not profile. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
+  config, reads `./lakebench.yaml` when no argument is given (and says
+  which deployment it shows), and prints the stage matrix with `--format
+  table|json|csv`. `results` is `report --format table`, with the same
+  argument and `--format` passing through. `report --list` shows each
+  record's kind.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock

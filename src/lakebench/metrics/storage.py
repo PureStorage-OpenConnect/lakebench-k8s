@@ -326,6 +326,33 @@ def _deserialize_cycles(
     return cycles
 
 
+class RecordExistsError(FileExistsError):
+    """``save_run`` found a record at the run's path and was not told to
+    replace it (``seal_update``)."""
+
+
+def _create_exclusive(tmp_path: str, filepath: Path) -> None:
+    """Move *tmp_path* to *filepath*, refusing when *filepath* exists.
+
+    ``os.link`` creates the name atomically and fails if it exists, so two
+    writers cannot both succeed. A filesystem without hard links falls back
+    to an exists check and a rename (not atomic against a racing writer)."""
+    try:
+        os.link(tmp_path, filepath)
+    except FileExistsError:
+        raise RecordExistsError(
+            f"{filepath} already exists; a record is written once, by the run that owns it"
+        ) from None
+    except OSError:
+        if filepath.exists():
+            raise RecordExistsError(
+                f"{filepath} already exists; a record is written once, by the run that owns it"
+            ) from None
+        os.rename(tmp_path, filepath)
+        return
+    os.unlink(tmp_path)
+
+
 class MetricsStorage:
     """Stores metrics to local JSON files.
 
@@ -357,11 +384,18 @@ class MetricsStorage:
     # Save / load
     # ------------------------------------------------------------------
 
-    def save_run(self, metrics: PipelineMetrics) -> Path:
-        """Save pipeline run metrics.
+    def save_run(self, metrics: PipelineMetrics, *, seal_update: bool = False) -> Path:
+        """Save pipeline run metrics to ``run-<id>/metrics.json``.
+
+        A record is written once. An existing ``metrics.json`` is replaced
+        only with ``seal_update=True``, which only the run that owns the
+        record passes; every other writer gets ``RecordExistsError`` and
+        the file is left as it was. The write goes to a temporary file in
+        the run directory first, so a reader never sees half a record.
 
         Args:
             metrics: PipelineMetrics to save
+            seal_update: replace an existing record (the owning run only)
 
         Returns:
             Path to saved file
@@ -375,9 +409,13 @@ class MetricsStorage:
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(metrics.to_dict(), f, indent=2)
-            os.rename(tmp_path, filepath)
+            if seal_update:
+                os.replace(tmp_path, filepath)
+            else:
+                _create_exclusive(tmp_path, filepath)
         except BaseException:
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             raise
 
         logger.info(f"Saved metrics to {filepath}")
@@ -460,6 +498,8 @@ class MetricsStorage:
             return {
                 "run_id": data.get("run_id"),
                 "deployment_name": data.get("deployment_name"),
+                "record_kind": data.get("record_kind") or "run",
+                "parent_run_id": data.get("parent_run_id"),
                 "start_time": data.get("start_time"),
                 "success": data.get("success"),
                 "verdict": verdict,
@@ -481,12 +521,15 @@ class MetricsStorage:
             return None
 
     def get_latest_run(self) -> PipelineMetrics | None:
-        """Get the most recent run.
+        """Get the most recent run record.
+
+        A ``benchmark`` record (``record_kind``) is never the latest run:
+        it is a copy of the run it measured, read by its own run id.
 
         Returns:
             PipelineMetrics or None if no runs exist
         """
-        runs = self.list_runs()
+        runs = [r for r in self.list_runs() if r.get("record_kind", "run") == "run"]
         if not runs:
             return None
 
@@ -535,6 +578,10 @@ class MetricsStorage:
 
         legacy_fallback_id: str | None = None
         for info in self.list_runs():
+            if info.get("record_kind", "run") != "run":
+                # A benchmark record is a copy of a run, not a run (see
+                # get_latest_run); compare's config resolution skips it too.
+                continue
             recorded = info.get("deployment_name")
             if recorded == deployment_name:
                 return self.load_run(info["run_id"])
@@ -646,6 +693,8 @@ class MetricsStorage:
             interrupted=data.get("interrupted"),
             abort_reason=data.get("abort_reason"),
             series=data.get("series"),
+            record_kind=str(data.get("record_kind") or "run"),
+            parent_run_id=data.get("parent_run_id"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),

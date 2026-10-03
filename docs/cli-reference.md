@@ -588,6 +588,13 @@ median of `--iterations` timed samples per query. Each successful query is
 then run once more, untimed, to record its result fingerprint. Power mode runs queries sequentially. Throughput mode runs
 N concurrent streams. Composite mode runs both and reports the geometric mean.
 
+The result is saved as a record of its own under a new run id:
+`record_kind: "benchmark"`, `parent_run_id` the deployment's latest run (a
+copy of that run's record with the new benchmark). The run's own record is
+never rewritten. Nothing is recorded when the deployment has no run record,
+or when the query engine now runs another dependency set than that run
+recorded.
+
 ### query
 
 Execute SQL queries against the configured query engine.
@@ -607,7 +614,8 @@ lakebench query [CONFIG_FILE] [OPTIONS]
 | `--timeout` | `-t` | `120` | Query timeout in seconds |
 
 Specify exactly one of `--sql`, `--example`, `--sql-file`, or `--interactive`.
-(`--file` / `-f` is the config file, as on other commands.)
+(`--file` / `-f` is the config file, as on other commands.) The result is
+printed and journalled; no run record is written.
 
 ```bash
 lakebench query --example count
@@ -821,12 +829,18 @@ Use `--render` to regenerate a fresh HTML report at
 delivered file.
 
 ```
-lakebench report [CONFIG_FILE] [OPTIONS]
+lakebench report [RUN|CONFIG] [OPTIONS]
 ```
 
-The optional `CONFIG_FILE` scopes the default-summary lookup to that
-deployment. On a shared `lakebench-output` tree it prevents `report
-other.yaml` from picking up another deployment's latest run.
+The optional argument is a run id (a leading `run-` is dropped) or a config
+file. A config scopes the lookup to that deployment's latest run, so on a
+shared `lakebench-output` tree `report other.yaml` does not pick up another
+deployment's newer run. With no argument and no `--run`, `report` uses
+`./lakebench.yaml` when it exists and says so ("Showing the latest record of
+deployment NAME"); without one it reads the latest run of any deployment. A
+record written by `lakebench benchmark` (`record_kind: "benchmark"`) is
+never the latest run; read it by its run id. `--list` shows each record's
+kind.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
@@ -837,14 +851,19 @@ other.yaml` from picking up another deployment's latest run.
 | `--output` |  | (unset) | Explicit output path for `--render`. Refuses to overwrite an existing file unless `--force` is also given. |
 | `--force` |  | `false` | Allow `--render` to overwrite an existing file at `--output`. Requires both `--render` and `--output`. |
 | `--summary` | `-s` | `false` | With `--render`, also print the summary. Without `--render`, the summary is already printed. |
+| `--format` | `-o` | (summary) | Print the stage matrix instead of the summary: `table`, `json` (the pipeline benchmark block) or `csv`. Not with `--render` or `--list` |
 
 ### results
 
 Display pipeline benchmark results in the terminal.
 
 ```
-lakebench results [CONFIG_FILE] [OPTIONS]
+lakebench results [RUN|CONFIG] [OPTIONS]
 ```
+
+The same as `lakebench report --format table`: the argument, `--run`,
+`--metrics` and `./lakebench.yaml` default work as for `report`, and
+`--format` passes through.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
