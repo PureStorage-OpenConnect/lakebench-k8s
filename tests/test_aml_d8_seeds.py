@@ -352,6 +352,11 @@ def test_registered_look_needs_a_clean_checkout(monkeypatch):
 def test_out_of_tree_ledger_keeps_a_seed_spent(tmp_path, monkeypatch):
     mod = _runner()
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "ledger.jsonl"))
+    # The ledger is under test; the git-history half needs a full clone (CI
+    # checks out at depth 1, where it refuses) and is tested on a temp repo.
+    from lakebench.config import datagen_seed as ds
+
+    monkeypatch.setattr(ds, "_look_commit", lambda rec, seed: None)
     ev = EV
     assert mod.seed_ever_recorded(ev) is None  # no ledger, no commit of the record
     mod.append_ledger({"role": "evaluation", "seed": ev})

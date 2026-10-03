@@ -126,9 +126,8 @@ def registered_corpus_at(cfg: Any) -> str | None:
                 f"line {n} of the corpus ledger {path} cannot be read; repair or remove that "
                 "line (the ledger is local) before any AML command runs"
             )
-        endpoint = entry.get("s3_endpoint")
-        if endpoint is not None and endpoint != s3.endpoint:
-            continue  # the same bucket name on another object store
+        # The bucket and prefix decide, whatever the endpoint: endpoint text
+        # varies (a trailing slash, a port), and a false refusal costs less.
         if kind == "registered_corpus" and uri == here:
             return (
                 f"its bronze prefix {here} holds a registered {entry.get('role')} corpus "
