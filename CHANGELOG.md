@@ -1012,6 +1012,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   clears the prefix again), and that `--force-reset` does not change this
   check. Batch messages, and `run --continuous --generate-only`, which does
   take the flag, are unchanged.
+- **The namespace's committed-sha stamp no longer names the shell's
+  repository.** `lakebench.deployment/committed-sha` was read from the
+  working directory's repository, so a deploy run from one checkout with
+  the shell in another repository stamped the other repository's commit. It
+  now comes from the lakebench package's own checkout (the commit the run
+  record's `provenance.git_sha` names), with `-dirty` for uncommitted
+  changes, and is left off when no checkout commit can be read (a wheel
+  install). It is still written only when the namespace is first stamped.
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
