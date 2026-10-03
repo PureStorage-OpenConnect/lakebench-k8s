@@ -40,6 +40,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines are refused until re-recorded.
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
+- `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
 - Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
 - `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
 - `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
@@ -480,6 +481,18 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   when the record is read (`experiment.requested_effective_mismatches`
   keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
   strategy (`requested.gold_strategy`).
+- **AML continuous runs drain the last detection tick and score
+  `recall_covered`.** At window end the CLI asks gold-refresh to finish its
+  tick (a marker under its checkpoint) instead of deleting it mid-tick, then
+  scores recall over the instances that tick could have detected, at the
+  snapshots it logged. The record gains `continuous.ticks[]`,
+  `continuous.drain`, `continuous.ticks_unpinned`,
+  `financial_scoring` with `mode: "covered"` and
+  `experiment.results.alert_set_continuous`. A drain that times out fails
+  the run. `lakebench stop` drains for up to 300 s before deleting. Each
+  tick now filters silver through the versions table at one recorded
+  snapshot. See
+  [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
 - **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
   deployment's name (OLD's, or the one 1.6 recorded in
   `.lakebench/state.json` for a nameless config) and writes the bucket names

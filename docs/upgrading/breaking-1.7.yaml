@@ -569,3 +569,10 @@
     FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.'
   fix: Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed`
     beside the `verdict` it heads with.
+- id: stop-drains-aml-detection-first
+  title: stop drains AML detection first
+  kind: default-change
+  subject: gold-refresh drain
+  source: src/lakebench/cli/_aml_post.py:STOP_DRAIN_BUDGET_S
+  text: '`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.'
+  fix: 'Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.'

@@ -32,6 +32,7 @@ def test_pin_silver_and_fallback_hide_ghost_rows(spark_subprocess, spark_jars):
     assert out["pinned_row_count"] == 10, out
     # Fallback path (snapshot lookup returns None) also semi-joins.
     assert out["fallback_row_count"] == 10, out
+    assert out["versions_used_is_vsid"], out
 
 
 _TXNS_DDL = """
@@ -106,7 +107,8 @@ def _run(jars):
         raw_row_count = spark.table("lh.silver.transactions").count()
 
         # Pinned-snapshot path.
-        txns_pinned, _sid, _rows, _newest = gr._pin_silver(spark)
+        txns_pinned, _sid, versions_used, _rows, _newest = gr._pin_silver(spark)
+        vsid = gr._current_snapshot(spark, "lh.silver.silver_batch_versions")
         pinned_row_count = txns_pinned.count()
 
         # Force the fallback path by pointing gr at a table that has no
@@ -115,9 +117,10 @@ def _run(jars):
         real_current_snapshot = gr._current_snapshot
         gr._current_snapshot = lambda _s, _fq: None
         try:
-            txns_fallback, sid_fb, _rows_fb, _newest_fb = gr._pin_silver(spark)
+            txns_fallback, sid_fb, versions_fb, _rows_fb, _newest_fb = gr._pin_silver(spark)
             fallback_row_count = txns_fallback.count()
             assert sid_fb is None, sid_fb
+            assert versions_fb == "none", versions_fb
         finally:
             gr._current_snapshot = real_current_snapshot
 
@@ -125,6 +128,8 @@ def _run(jars):
             "raw_row_count": int(raw_row_count),
             "pinned_row_count": int(pinned_row_count),
             "fallback_row_count": int(fallback_row_count),
+            # AML-6: the pinned path names the versions snapshot it read.
+            "versions_used_is_vsid": versions_used == str(vsid),
         }
         print(json.dumps(out))
         spark.stop()

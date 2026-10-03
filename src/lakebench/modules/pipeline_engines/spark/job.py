@@ -544,6 +544,30 @@ def bronze_ingest_checkpoint_uri(cfg) -> str:
     return f"s3a://{s3.buckets.bronze}/{base}/bronze-ingest/"
 
 
+def gold_refresh_checkpoint_uri(cfg) -> str:
+    """Checkpoint location of the continuous gold-refresh driver (its
+    CHECKPOINT_LOCATION). The drain marker lives under it."""
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    return f"s3a://{s3.buckets.gold}/{base}/gold-refresh/"
+
+
+#: The drain marker's name under the gold-refresh checkpoint. Must equal
+#: ``gold_refresh_financial.STOP_MARKER`` (a unit test holds them together).
+GOLD_REFRESH_STOP_MARKER = "_lb_stop"
+
+
+def gold_refresh_stop_marker(cfg) -> tuple[str, str]:
+    """(bucket, key) of the drain marker: the object the driver reads as
+    ``<CHECKPOINT_LOCATION>/_lb_stop``. Built from the same config fields as
+    ``gold_refresh_checkpoint_uri``, with empty path segments dropped, as
+    Hadoop's ``Path`` normalises them."""
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    parts = f"{base}/gold-refresh/{GOLD_REFRESH_STOP_MARKER}".split("/")
+    return s3.buckets.gold, "/".join(p for p in parts if p)
+
+
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
     """Return the resource profile for a given job type.
 
@@ -3077,7 +3101,7 @@ class SparkJobManager:
                 ),
                 JobType.GOLD_REFRESH: (
                     sustained.gold_refresh_interval,
-                    f"s3a://{s3.buckets.gold}/{checkpoint_base}/gold-refresh/",
+                    gold_refresh_checkpoint_uri(cfg),
                 ),
             }
             trigger_interval, checkpoint_location = trigger_map[job_type]

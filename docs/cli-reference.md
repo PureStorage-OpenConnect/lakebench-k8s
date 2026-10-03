@@ -824,6 +824,14 @@ a refused read of the namespace, exits 4 before anything is deleted. A refused
 list of the SparkApplications or read of the datagen Job is a failure like a
 refused deletion: the other targets are still stopped and the exit is 1.
 
+For an AML (financial) deployment whose `lakebench-gold-refresh` is
+running, `stop` first asks it to finish its current detection tick (the
+drain described in
+[AML scoring](aml-scoring.md#continuous-recall-over-covered-instances)) and
+waits up to 300 s for it. If the drain is not confirmed, or Ctrl-C ends
+the wait, `stop` prints a warning that `gold.alerts` may hold a partial tick
+and deletes the jobs anyway.
+
 ### benchmark
 
 Run the query engine benchmark independently.

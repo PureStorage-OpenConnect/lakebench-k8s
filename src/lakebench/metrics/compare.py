@@ -1384,7 +1384,9 @@ def rounds_problem(record: Mapping[str, Any]) -> str | None:
 
     basis = recorded_qph_basis(record)
     if isinstance(basis, Mapping) and basis.get("blended"):
-        return "rounds ran different query sets"
+        from lakebench.metrics.collector import QPH_DEGRADATION_BLENDED
+
+        return QPH_DEGRADATION_BLENDED
     if recorded_executed_query_set(record):
         return "every round missed a query"
     return None

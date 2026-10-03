@@ -597,21 +597,36 @@ def _continuous_results(metrics: Any) -> dict[str, Any]:
     CLI runs once the whole corpus has passed through the pipeline and the
     streams have stopped (cli/_sustained.py), when every table is a function
     of the corpus alone. The in-stream rounds read tables still being
-    written and are never fingerprinted."""
+    written and are never fingerprinted.
+
+    An AML run also carries ``alert_set_continuous``: the alert-set
+    fingerprint of gold.alerts at the scored tick's commit, computed once
+    after the drain by
+    the covered score (cli/_aml_post.py), never per tick. Diagnostic only:
+    continuous alerts depend on when ticks ran."""
     check = (getattr(metrics, "continuous", None) or {}).get("result_check") or {}
     fps = dict(check.get("fingerprints") or {})
     if fps and not check.get("not_checked"):
-        return {
+        out: dict[str, Any] = {
             "query_set_id": check.get("query_set_id"),
             "fingerprints": fps,
             "basis": "continuous result check after the corpus settled",
         }
-    return {
-        "query_set_id": check.get("query_set_id"),
-        "fingerprints": {},
-        "not_checked": "continuous: "
-        + str(check.get("not_checked") or "no end-of-run result check was recorded"),
-    }
+    else:
+        out = {
+            "query_set_id": check.get("query_set_id"),
+            "fingerprints": {},
+            "not_checked": "continuous: "
+            + str(check.get("not_checked") or "no end-of-run result check was recorded"),
+        }
+    scoring = getattr(metrics, "financial_scoring", None) or {}
+    if (
+        scoring.get("mode") == "covered"
+        and scoring.get("status") == "scored"
+        and scoring.get("alert_set")
+    ):
+        out["alert_set_continuous"] = scoring["alert_set"]
+    return out
 
 
 def _results(metrics: Any, mode: str) -> dict[str, Any]:
