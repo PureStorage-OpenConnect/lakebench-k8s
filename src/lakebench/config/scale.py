@@ -203,12 +203,12 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
 
     Scale 1   -> 111K entities, ~26.7M txns, ~8.5 GB pacs.008
     Scale 10  -> 1.1M entities, ~267M txns,  ~94 GB
-    Scale 100 -> 11M entities,  ~2.7B txns,  ~939 GB
+    Scale 100 -> 11M entities,  ~2.7B txns,  ~936 GB
 
     ``approx_bronze_gb`` is measured, not estimated: ``scale *
     financial_gb_per_scale_unit(scale)``, from the pacs.008 bytes
-    bronze-verify read at scales 1, 10 and 100 (docs/data-generation.md has
-    the runs). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
+    bronze-verify read at scales 1 and 10 (docs/data-generation.md has the
+    runs). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
     every complete AML run read as 84% "incomplete", and the flat 8.4 GB of
     scale 1 made complete scale-10 and scale-100 runs read 111% to 112%. The
     reference tables (party, account) and the manifest are excluded, as
@@ -229,16 +229,16 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
     )
 
 
-#: pacs.008 Parquet GB per AML scale unit (64 MB files), measured: what
-#: bronze-verify read at scale 1 (8.47 GB, 26.7M rows), 10 (93.6 GB, 267M
-#: rows) and 100 (939.5 GB, 2.67B rows). Rows are linear in scale; bytes per
-#: row grow from about 318 to 351 between scale 1 and 10 (a larger entity
-#: population repeats less within a file, so Parquet encodes it less tightly)
-#: and are flat by scale 100.
+#: pacs.008 Parquet GB per AML scale unit, measured with the default 64 MB
+#: files on the v1.6 generator: what bronze-verify read at scale 1 (8.47 GB,
+#: 26.7M rows) and 10 (93.6 GB, 267M rows). Rows are linear in scale; bytes
+#: per row grow from about 318 to 351 between the two. Above scale 10 the
+#: scale-10 value holds: the two scale-100 runs on record are not the same
+#: setup (128 MB files, or an earlier generator) and read 0.4% and 1.8% above
+#: it (docs/data-generation.md).
 FINANCIAL_GB_PER_SCALE_UNIT: tuple[tuple[float, float], ...] = (
     (1.0, 8.47),
     (10.0, 9.36),
-    (100.0, 9.39),
 )
 
 
@@ -246,7 +246,7 @@ def financial_gb_per_scale_unit(scale: float) -> float:
     """GB per scale unit at *scale*: the measured value at a measured scale,
     interpolated linearly in log10(scale) between two, and the nearest
     measurement outside them (below scale 1 the scale-1 value, above scale
-    100 the scale-100 value)."""
+    10 the scale-10 value)."""
     import math
 
     points = FINANCIAL_GB_PER_SCALE_UNIT
