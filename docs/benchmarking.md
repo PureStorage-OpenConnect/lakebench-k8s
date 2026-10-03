@@ -23,8 +23,8 @@ rewritten, and a benchmark record is never a deployment's "latest run" for
 `report` or `compare`, nor a candidate or baseline for the perf gate. Its
 QpH, scores and query stage are the new benchmark's; its pipeline stages,
 sizes and timings are the run's, and `provenance.benchmark` names the code
-that ran the benchmark and when. A continuous run's in-stream rounds are not
-copied. `lakebench query` prints its result and writes no
+that ran the benchmark and when. A continuous run's in-stream rounds and the
+run's maintenance QpH pair (before and after compaction) are not copied. `lakebench query` prints its result and writes no
 record.
 
 ---
