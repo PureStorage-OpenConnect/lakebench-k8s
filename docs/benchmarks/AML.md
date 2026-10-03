@@ -303,8 +303,8 @@ after the config loads, before any cluster call, with exit 2
 (`run.protected_corpus`): a config that declares `corpus_role: evaluation`
 or `robustness`, names a seed whose hash matches a held-out role, or (AML)
 points its bronze datagen prefix at one where this host generated a
-registered corpus; `compare`, which loads no config, refuses a stored run
-record from such a corpus. `generate` writes
+registered corpus; `compare` (which loads no config) and `financial reproduce`
+refuse a stored run record from such a corpus. `generate` writes
 a protected corpus only with `--registered-corpus --yes` and a digest-pinned
 `images.datagen`; it records the attempt in the host's corpus ledger
 (`~/.lakebench/aml_corpora.jsonl`, `LB_AML_CORPORA_LEDGER`) before its first
@@ -618,12 +618,24 @@ None of these is part of `lakebench run` or its verdict (`cli/_financial.py`):
   snapshot and the job exits non-zero. It writes to the gold alerts table
   name with an `_replay` suffix (`--output-alerts` to change it), replacing
   only that rule's rows.
-- `lakebench financial reproduce --alert-id <id>` looks up an alert and
-  time-travels silver, but never reports a reproduction: its driver exits 2
-  when the alert is not found, 4 when historical silver is empty and 3
-  otherwise, because rule reproduction is not packaged. The job is retried
-  twice and the command then exits 1 (0 with `--no-wait`, after
-  submission). This is a different command from `lakebench reproduce`.
+- `lakebench financial reproduce CONFIG --alert-id <id>` (`--run RUN_ID`)
+  reruns one batch alert's rule on exactly what that run's gold-finalize
+  read (`cli/_financial.py`, `spark/scripts/reproduce_financial.py`).
+  Gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, and the
+  batch scorer fingerprints each (`financial_scoring.read_snapshots`). The
+  command reads that run record (the deployment's latest AML batch record
+  on this host by default; exit 2 when there is none), refuses one from a
+  protected corpus (exit 2) or with no read snapshots (exit 4) before any
+  cluster call, reads each table at its recorded snapshot (or, once that
+  expired, the current table when its fingerprint is unchanged), filters
+  the transactions to the batches sealed when gold read them, runs the rule
+  with gold's parameters and matches the alert on rule, entity, `alert_ts`
+  and its related transactions. It exits 0 when the alert is reproduced, 1
+  when it is not or the alert is not in `gold.alerts` for that run, and 4
+  when a snapshot is gone and the content changed; the result is written
+  to `scoring/reproduce/<alert_id>/result.json`. Continuous alerts are not
+  reproduced. This is a different command from `lakebench reproduce`.
 - `lakebench financial reference-score` runs the reference detector, the
   band-leakage report and the fidelity gate, installing hash-checked
   scikit-learn wheels from the deployment's dependency set in an init
@@ -1256,8 +1268,12 @@ only.
 - **TM operations figures are simulations.** Dispositions come from
   simulated analysts and investigators with seeded accuracies (8.5). Recall
   and false-positive rate are measured from alerts against the manifest.
-- **`lakebench financial reproduce` is not functional.** Its driver exits 2,
-  3 or 4, never 0, and the command exits 1. Replay is outside the run.
+- **`lakebench financial reproduce` pins the three silver tables only.**
+  W5 and W6 read the bronze watchlist as it is now and W1 its vertex cap
+  from the current config (the result lists them as `not_pinned`), and the
+  W3 and W17 path budgets depend on the job's executor count and scratch
+  size, so a W2 or W4 alert is the clean check. Continuous alerts are not
+  reproduced.
 - **The reference-model score reads unsealed silver.**
   `lakebench financial reference-score` builds its features from silver
   tables read without the sealed-batch filter the detection rules and the

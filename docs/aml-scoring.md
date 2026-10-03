@@ -596,8 +596,8 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   when a snapshot is gone and the content changed. The basis covers the
   three silver tables: W5 and W6 read the bronze watchlist as it is now and
   W1 its vertex cap from the current config, which the result lists as
-  `not_pinned`. W3 and W17 path budgets depend on the driver's memory, so
-  reproduce a W2 or W4 alert for a clean check. A reproduction runs the
+  `not_pinned`. W3 and W17 path budgets depend on the job's executor count
+  and scratch size, so reproduce a W2 or W4 alert for a clean check. A reproduction runs the
   rule over the whole silver snapshot, and the batch scorer's fingerprints
   read all three tables once per run.
 
