@@ -447,6 +447,10 @@ def generate(
                     "was written by another run since this one began. Two generates in one "
                     "namespace are not supported; run again once the other has finished."
                 )
+                # The fleet just written describes the other run's corpus.
+                from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+                drop_sidecar(cfg.get_namespace())
                 _journal_safe(j.end_command, success=False, message="series marker conflict")
                 raise typer.Exit(ExitCode.REFUSED)
             if _mark != "written":
