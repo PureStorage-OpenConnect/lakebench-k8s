@@ -534,7 +534,7 @@ def test_benchmark_path_refreshes_the_stored_block():
     of the run it measured) and must refresh the copied block's benchmark
     half before saving (a stored block is never rebuilt)."""
     src = (ROOT / "src/lakebench/cli/_query.py").read_text()
-    replace = src.index("record.benchmark = BenchmarkMetrics(")
+    replace = src.index("record.benchmark = bench\n")
     save = src.index("storage.save_run(record)", replace)
     assert "refresh_benchmark(record)" in src[replace:save]
 

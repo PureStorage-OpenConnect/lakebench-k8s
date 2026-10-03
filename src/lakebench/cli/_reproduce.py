@@ -498,9 +498,10 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
     if metrics is None:
         print_error(f"Run {run_id!r} not found in {storage.metrics_dir}")
         raise typer.Exit(ExitCode.USAGE)
-    if metrics.record_kind != "run":
+    kind = getattr(metrics, "record_kind", "run")
+    if kind != "run":
         print_error(
-            f"Run {run_id!r} is a {metrics.record_kind} record of run "
+            f"Run {run_id!r} is a {kind} record of run "
             f"{metrics.parent_run_id}, not a run; a package reproduces a run: "
             f"lakebench reproduce --record {metrics.parent_run_id} --write {write}"
         )
