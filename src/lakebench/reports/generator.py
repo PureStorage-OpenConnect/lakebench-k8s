@@ -89,13 +89,17 @@ def _stage_matches_cap(stage_name: str, caps_bound: list[str]) -> bool:
 
     The bound lines carry the job type (``bronze-verify: executor cap 28``);
     a stage row only gets a BOUNDED tag when a cap that bound that stage
-    is in the list, so a gold stage does not wear a bronze cap's tag.
+    is in the list, so a gold stage does not wear a bronze cap's tag. An
+    AML rule skipped on a Lakebench cap (``rule W3_round_tripping skipped:
+    path-cap``) bounds the gold stage, which runs detection.
     """
     if not caps_bound:
         return False
     job_types = _STAGE_TO_JOB_TYPES.get(stage_name, ())
     for cap in caps_bound:
         text = str(cap)
+        if stage_name == "gold" and text.startswith("rule ") and "cap" in text:
+            return True
         for jt in job_types:
             if jt in text:
                 return True
