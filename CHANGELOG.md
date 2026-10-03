@@ -9,8 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Breaking changes
 One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1.7.md says what to do about each. The entries after them give the detail.
 
-- Twenty config keys nothing read are removed; a value other than its 1.6 default is refused by the commands that change data.
-- `platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing and are refused when set.
+- Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another value is refused by the commands that change data.
+- `platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing: set to other than their 1.6 default, they are refused.
 - A removed config key is refused by the commands that change data; read and teardown commands drop it with a note.
 - `lakebench results` is an alias of `report --format table` that prints one line on stderr; it is removed in v1.8.
 - `admin install-spark-operator` and `admin install-scratch-storage-class` are aliases of `admin install --component`, removed in v1.8.
@@ -22,7 +22,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `clean metrics`, `clean journal` and `clean --metrics-dir` are refused (exit 2): records and journals are evidence.
 - `compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`, ...) exit 2.
 - `init --access-key` and `--secret-key` exit 2 without echoing the value; init writes `${VAR}` references.
-- `generate --wait`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
+- `generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
 - The run-from-a-checkout wrapper `lbrun.py` is removed.
 - `status` exits 1 on drift or a missing namespace, `stop` and `logs` exit 1 on a failure, and API errors exit 4 (all were 0).
 - A config that does not load, an unsupported combination, a bad argument or a nameless config exits 2 (was 1 or 0).
@@ -43,7 +43,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
 - `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
 - `reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys only what it created.
-- `init` writes a 12-line config: a unique name per run, `recipe:` once, scale 1 (was 10) and `${VAR}` credentials.
+- `init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
 - A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that change data; 1.6 let it win silently.
 - `${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed as YAML.
 - A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.
@@ -56,6 +56,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A zero, negative or out-of-range count (Trino workers, generators, ports, cores), which 1.6 accepted, is refused.
 - `spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst` and `spark.kubernetes.*`) are refused.
 - `run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams` above 1.
+- Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied or deleted by `destroy`.
+- `run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes or pods cannot be read.
+- A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
+- A new shared observability install gets a generated Grafana password; an existing install keeps `admin`/`lakebench`.
+- `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
+- `recommend` exits 3 on a cluster context conflict instead of falling back to the reference table and exiting 0.
 
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to

@@ -15,13 +15,42 @@ every config a `name:` and a `recipe:`.
 
 ### Config fields nothing read are removed
 
-Twenty config keys nothing read are removed; a value other than its 1.6 default is refused by the commands that change data.
+Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another value is refused by the commands that change data.
+
+The keys:
+
+- `images.hive`
+- `images.prometheus`
+- `images.grafana`
+- `platform.storage.s3.secret_ref`
+- `secret_ref`
+- `architecture.catalog.hive.thrift`
+- `architecture.catalog.polaris.version`
+- `architecture.catalog.unity.version`
+- `architecture.table_format.iceberg.file_format`
+- `architecture.table_format.iceberg.properties`
+- `architecture.table_format.delta.properties`
+- `architecture.pipeline.medallion`
+- `architecture.workload.customer360.date_range_days`
+- `observability.reports`
+- `observability.storage_class`
+- `observability.prometheus_stack_enabled`
+- `observability.s3_metrics_enabled`
+- `observability.spark_metrics_enabled`
+- `version`
+- `description`
 
 **What to do:** Delete the key. Each refusal names it and what to do instead; docs/configuration.md lists them.
 
 ### Sizing settings that sized nothing are removed
 
-`platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing and are refused when set.
+`platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing: set to other than their 1.6 default, they are refused.
+
+The keys:
+
+- `platform.compute.spark.driver`
+- `platform.compute.spark.executor`
+- `platform.storage.scratch.size`
 
 **What to do:** Delete them; set counts with `<job>_executors` and the driver with `driver_memory` and `driver_cores`.
 
@@ -59,7 +88,7 @@ Twenty config keys nothing read are removed; a value other than its 1.6 default 
 
 ### Dead flags are removed
 
-`generate --wait`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
+`generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
 
 **What to do:** Drop `--wait` and `--expired-only`; set `observability.enabled: true` in the config.
 
@@ -157,6 +186,12 @@ A `run` whose datagen did not finish in time exits 1 (was 5); the record says "d
 
 **What to do:** Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the `cmp2` document.
 
+### recommend exits 3 on a context conflict
+
+`recommend` exits 3 on a cluster context conflict instead of falling back to the reference table and exiting 0.
+
+**What to do:** Use `lakebench config recommend CONFIG`, with the config's context reachable.
+
 ## Comparability and identity
 
 ### Customer 360 records are workload version c360-2
@@ -229,7 +264,7 @@ Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity 
 
 ### init writes a first-day config
 
-`init` writes a 12-line config: a unique name per run, `recipe:` once, scale 1 (was 10) and `${VAR}` credentials.
+`init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
 
 **What to do:** Set `--scale`, `--recipe` or `--name` on `init`; `--overwrite` is the new spelling of `--force`.
 
@@ -304,3 +339,33 @@ A zero, negative or out-of-range count (Trino workers, generators, ports, cores)
 `run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams` above 1.
 
 **What to do:** Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+
+### Buckets are stamped with their cluster
+
+Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied or deleted by `destroy`.
+
+**What to do:** Claim such a bucket with `lakebench admin reclaim-bucket BUCKET CONFIG` (an owner action) before you rely on `destroy` to empty it.
+
+### The capacity preflight counts free capacity and fails closed
+
+`run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes or pods cannot be read.
+
+**What to do:** Run on a cluster with room, or pass `--skip-preflight` (the record then says capacity not checked).
+
+### Customer 360 batch verdicts gate on sixteen checks
+
+A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
+
+**What to do:** Re-read a 1.6 PASS or FAIL under 1.7 rules; `verdict.qualifiers.c360_failed_not_gating` lists the rest.
+
+### Grafana gets a generated password
+
+A new shared observability install gets a generated Grafana password; an existing install keeps `admin`/`lakebench`.
+
+**What to do:** Read it with the command `deploy` prints (Secret `lakebench-observability-grafana`).
+
+### config_snapshot drops the unused sizing blocks
+
+`metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
+
+**What to do:** Read executor counts from `jobs[]` and scratch from `scratch.size_per_job` in scripts that parse records.
