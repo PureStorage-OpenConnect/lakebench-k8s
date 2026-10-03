@@ -332,9 +332,11 @@ The report verdicts:
 v1.6 publishes no Level-2 result: the calibration corpora, Level-2 scoring
 and the registered held-out looks are deferred to v1.7. When a Level-2
 result is published, it will be measured on held-out corpora that are never
-used during development. The seeds, the pre-registered gate constants and the
-rules for when the one-shot evaluation and robustness runs may be taken are
-fixed in `src/lakebench/spark/data/aml/aml_preregistration.json`. Maintainers:
+used during development. The pre-registered gate constants and the rules for
+when the one-shot evaluation and robustness runs may be taken are fixed in
+`src/lakebench/spark/data/aml/aml_preregistration.json`; the evaluation and
+robustness seeds are recorded only as salted hashes in
+`src/lakebench/spark/data/aml/heldout_hashes.json`. Maintainers:
 the full protocol is `docs/internal/aml-protocol.md` in the source repository.
 
 **Seed 43 is the calibration corpus.** If you leave

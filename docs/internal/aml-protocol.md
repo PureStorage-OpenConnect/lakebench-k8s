@@ -67,5 +67,10 @@ The one-shot looks are already approved (#41, #42). Take them once:
 2. the paired run-to-run standard deviation is reported (#44a);
 3. per-typology predictions are committed (#46).
 
+No tracked file holds the evaluation or robustness seed. The owner supplies
+the seed for its look out of band; the operator sets it as
+`workload.datagen.seed` with the matching `corpus_role`, and every guard
+checks it by hash against `heldout_hashes.json`. A wrong value is refused.
+
 D8 and A6 are reported beside the result and do not gate it (#46, #47). The
 result is published pass or fail.
