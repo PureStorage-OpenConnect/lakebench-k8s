@@ -640,6 +640,7 @@ class MetricsStorage:
             failure_reasons=[str(r) for r in data.get("failure_reasons") or []],
             autosize_cuts=data.get("autosize_cuts"),
             job_timeout_seconds=data.get("job_timeout_seconds"),
+            benchmark_query_timeout_seconds=data.get("benchmark_query_timeout_seconds"),
             maintenance_outcomes=data.get("maintenance_outcomes"),
             continuous=data.get("continuous"),
             interrupted=data.get("interrupted"),

@@ -45,9 +45,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
-  Spark stage and the TM share; `limits.headroom_pct` gives each stage's and
-  the benchmark phase's headroom against the per-job timeout, which the
-  record now keeps as `job_timeout_seconds`. `scripts/aml_stage_attribution.py`
+  Spark stage and the TM share; `limits.headroom_pct` gives each stage's
+  headroom against the per-job timeout and the timed benchmark's headroom
+  against its per-query timeout, which the record now keeps as
+  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. A job that
+  fails or times out now keeps its whole driver log in the record, as a
+  successful one did, so its per-rule lines are not lost. `scripts/aml_stage_attribution.py`
   builds the same profile from a Spark event log when the driver could not
   read its status store. Diagnostics only. See
   [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
@@ -485,7 +488,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`txn_total`, `txns_truncated`; W4 also `entity_total`,
   `entities_truncated`). Scoring records the cut alerts per rule and labels
   the recall of the typologies those rules detect as bounded by the cap.
-  Every rule now builds its alert columns through one helper, which is
+  Every rule now builds its alert columns through one helper, and W5 and
+  W6 share one persisted screening input when both run; both are
   results-neutral. In continuous mode a W4 hub alert over the cap is
   raised again only when a new payment's uetr sorts into the kept 1,000,
   and payments past the cut get no time to detect; across TM cycles a

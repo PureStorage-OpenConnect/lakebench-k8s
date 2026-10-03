@@ -3275,6 +3275,9 @@ def _run_once(
                 _bench_timeout = (
                     900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                 )
+                if collector.current_run is not None:
+                    # Per-query limit of the timed benchmark: its headroom.
+                    collector.current_run.benchmark_query_timeout_seconds = _bench_timeout
                 if pre_compaction_qph > 0:
                     # The pre round was measured after a warm-up pass; give
                     # this one the same, or the comparison measures the

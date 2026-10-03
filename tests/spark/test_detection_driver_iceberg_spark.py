@@ -259,6 +259,67 @@ def _check_late_entity(spark):
     assert w2_alerts() == [1]
 
 
+def _cached(df):
+    """Whether Spark's cache manager holds *df* (DataFrame.is_cached is a
+    Python-side flag that clearCache does not reset)."""
+    level = df.storageLevel
+    return bool(level.useMemory or level.useDisk)
+
+
+def _check_screen_base(spark):
+    """AML-3: when W5 and W6 both run, the driver builds their screening
+    input once, passes the same persisted frame to both, keeps it cached
+    from W5 to W6 (only W5's alerts frame is dropped), and the cache is
+    cleared after W6. silver.entities exists here (_check_late_entity made
+    it)."""
+    import detection_rules as dr
+    import gold_finalize_financial as gf
+
+    txns = spark.createDataFrame([(f"u{i}",) for i in range(5)], "uetr string")
+    template = dr._empty_alerts_df(spark, "x")
+    built, seen = [], []
+
+    def fake_base(silver_txns, silver_entities):
+        built.append(silver_entities is not None)
+        return silver_txns.select("uetr")
+
+    def screening(rule):
+        def fn(silver_txns, silver_entities=None, run_id="unknown", screen_base=None):
+            seen.append((rule, screen_base, screen_base is not None and _cached(screen_base)))
+            return template
+
+        return fn
+
+    real = (dr.screen_base_frame, dict(dr._RULE_DISPATCH))
+    dr.screen_base_frame = fake_base
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    dr._RULE_DISPATCH["W6_pep_counterparty"] = screening("W6")
+    try:
+        gf.run_detection_rules(
+            spark, txns, "run-sb", rules=("W5_sanctions_match", "W6_pep_counterparty")
+        )
+    finally:
+        dr.screen_base_frame = real[0]
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert built == [True]
+    (r5, b5, cached5), (r6, b6, cached6) = seen
+    assert (r5, r6) == ("W5", "W6")
+    assert b5 is b6 and b5 is not None
+    assert cached5 and cached6, seen
+    assert not _cached(b5)
+
+    # One screening rule alone: no shared base.
+    seen.clear()
+    dr._RULE_DISPATCH["W5_sanctions_match"] = screening("W5")
+    try:
+        gf.run_detection_rules(spark, txns, "run-sb", rules=("W5_sanctions_match",))
+    finally:
+        dr._RULE_DISPATCH.clear()
+        dr._RULE_DISPATCH.update(real[1])
+    assert seen == [("W5", None, False)]
+
+
 if __name__ == "__main__":
     # Run by spark_subprocess (argv: <warehouse> <jars>), which puts the
     # scripts on PYTHONPATH.
@@ -267,6 +328,7 @@ if __name__ == "__main__":
         _check(_spark)
         _check_stage_profile(_spark)
         _check_late_entity(_spark)
+        _check_screen_base(_spark)
     finally:
         _spark.stop()
     print("CHECK OK")

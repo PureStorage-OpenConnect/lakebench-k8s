@@ -8,10 +8,13 @@ Two derived blocks, read from fields the collector already holds:
   (``jobs[].stage_profile``, from the driver's status store) and the TM
   operations pass's share (``jobs[].tm_ops.elapsed_seconds``). Published as
   ``experiment.attribution``.
-- ``headroom_pct(metrics)``: per batch stage and for the benchmark phase,
-  ``100 x (1 - elapsed / per-job timeout)``, with the per-job timeout the
-  run used (``job_timeout_seconds``). Published as ``limits.headroom_pct``;
-  25% or more means the stage finished at or under 75% of its budget.
+- ``headroom_pct(metrics)``: per batch stage, ``100 x (1 - elapsed /
+  per-job timeout)`` with the per-job timeout the run used
+  (``job_timeout_seconds``), and for the timed benchmark ``benchmark_query``,
+  ``100 x (1 - slowest query / per-query timeout)``
+  (``benchmark_query_timeout_seconds``): no per-job timeout applies to the
+  benchmark, its queries are bounded one by one. Published as
+  ``limits.headroom_pct``; 25 or more means at most 75% of the budget used.
 
 Both are diagnostics: neither enters identity, a verdict or a comparison.
 """
@@ -97,21 +100,47 @@ def attribution(metrics: Any) -> dict[str, Any] | None:
     }
 
 
-def headroom_pct(metrics: Any) -> dict[str, float] | None:
-    """``{job_type: pct}`` for each batch job and ``benchmark`` for the
-    benchmark phase, or None when the run did not record its per-job timeout.
-    A job type that ran more than once (multi-cycle runs) reports its
-    slowest run. Negative means over budget."""
+def benchmark_query_headroom(metrics: Any) -> float | None:
+    """``100 x (1 - slowest query / per-query timeout)`` for the run's timed
+    benchmark, or None when there is no benchmark, no recorded per-query
+    timeout, or a query failed (a query that timed out has no headroom)."""
+    bench = getattr(metrics, "benchmark", None)
+    timeout = getattr(metrics, "benchmark_query_timeout_seconds", None)
+    queries = list(getattr(bench, "queries", None) or []) if bench is not None else []
+    if not timeout or timeout <= 0 or not queries:
+        return None
+    if any(not q.get("success", False) for q in queries):
+        return None
+    slowest = max(float(q.get("elapsed_seconds") or 0.0) for q in queries)
+    return round(100.0 * (1.0 - slowest / float(timeout)), 1)
+
+
+def headroom_pct(metrics: Any) -> dict[str, float | None] | None:
+    """``{job_type: pct}`` for each batch job against the per-job timeout,
+    and ``benchmark_query`` for the timed benchmark against its per-query
+    timeout (the limit that bounds the benchmark phase), or None when the
+    run did not record its per-job timeout. A job type that ran more than
+    once (multi-cycle runs) reports its slowest run; a failed job reads None
+    (it has no headroom to report). Negative means over budget."""
     timeout = getattr(metrics, "job_timeout_seconds", None)
     if not timeout or timeout <= 0:
         return None
     worst: dict[str, float] = {}
+    failed: set[str] = set()
     for job in getattr(metrics, "jobs", None) or []:
         elapsed = getattr(job, "elapsed_seconds", None) or 0.0
         jt = getattr(job, "job_type", None)
-        if jt and elapsed > 0:
+        if not jt:
+            continue
+        if getattr(job, "success", True) is False:
+            failed.add(jt)
+        elif elapsed > 0:
             worst[jt] = max(worst.get(jt, 0.0), float(elapsed))
-    bench = getattr(metrics, "benchmark", None)
-    if bench is not None and (getattr(bench, "total_seconds", None) or 0) > 0:
-        worst["benchmark"] = float(bench.total_seconds)
-    return {jt: round(100.0 * (1.0 - s / float(timeout)), 1) for jt, s in sorted(worst.items())}
+    out: dict[str, float | None] = {
+        jt: round(100.0 * (1.0 - s / float(timeout)), 1) for jt, s in worst.items()
+    }
+    for jt in failed:
+        out[jt] = None
+    if getattr(metrics, "benchmark", None) is not None:
+        out["benchmark_query"] = benchmark_query_headroom(metrics)
+    return dict(sorted(out.items()))

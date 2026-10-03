@@ -16,13 +16,17 @@ Each detection rule runs in its own Spark job group ``lb-rule-<rule>-<id>``
 group of each job and its stages; task ends give each stage's executor run
 time and its longest task; stage completions give the stage name, task
 count and wall time. The output has the shape of ``jobs[].stage_profile``
-(the heaviest ``--top`` stages per rule by executor run time), with
-``complete`` true, ``truncated`` false and ``lossy`` false: an event log
-keeps every event. A plain text or ``.gz`` log file is read, or a rolling
+(the heaviest ``--top`` stages per rule by executor run time, the last
+attempt of each stage), with ``complete`` true, ``truncated`` false,
+``lossy`` None (the event-log listener's own drops cannot be seen in the
+log; check the driver log for "Dropped ... events from eventLog") and
+``source`` eventlog. A plain text or ``.gz`` log file is read, or a rolling
 log directory (Spark 4's default), whose ``events_<n>_*`` files are read in
 order.
 
-With ``--record``, the gold-finalize job of that metrics.json gets this
+With ``--record``, the run whose job groups the log names must be that
+record's run (run gold-finalize again with ``run --stage gold-finalize``
+and attach to that run's record), and its gold-finalize job gets this
 profile (its ``stage_profile_unavailable`` entries for the profiled rules are
 removed) and ``experiment.attribution`` is recomputed, marked
 ``"profile_source": "eventlog"``. The file is rewritten in place.
@@ -64,7 +68,14 @@ def _lines(path: Path):
 
 def profile_from_events(lines, top: int = 3) -> dict[str, list[dict[str, Any]]]:
     """``{rule: [stage, ...]}`` from Spark event-log JSON lines."""
+    return read_events(lines, top=top)[0]
+
+
+def read_events(lines, top: int = 3) -> tuple[dict[str, list[dict[str, Any]]], set[str]]:
+    """``(profile, run_ids)``: the per-rule profile, and the Lakebench run ids
+    the rule groups name (each group's description is ``<rule> run <run_id>``)."""
     stage_group: dict[int, str] = {}
+    run_ids: set[str] = set()
     exec_ms: dict[tuple[int, int], int] = defaultdict(int)
     max_ms: dict[tuple[int, int], int] = defaultdict(int)
     shuffle_read: dict[tuple[int, int], int] = defaultdict(int)
@@ -76,7 +87,11 @@ def profile_from_events(lines, top: int = 3) -> dict[str, list[dict[str, Any]]]:
         ev = json.loads(raw)
         kind = ev.get("Event")
         if kind == "SparkListenerJobStart":
-            group = (ev.get("Properties") or {}).get("spark.jobGroup.id")
+            props = ev.get("Properties") or {}
+            group = props.get("spark.jobGroup.id")
+            desc = str(props.get("spark.job.description") or "")
+            if group and _GROUP_RE.match(group) and " run " in desc:
+                run_ids.add(desc.split(" run ", 1)[1].strip())
             if group:
                 for sid in ev.get("Stage IDs") or []:
                     stage_group[int(sid)] = group
@@ -95,12 +110,19 @@ def profile_from_events(lines, top: int = 3) -> dict[str, list[dict[str, Any]]]:
             key = (int(si["Stage ID"]), int(si.get("Stage Attempt ID", 0)))
             sub, comp = si.get("Submission Time"), si.get("Completion Time")
             info[key] = {
+                "status": "FAILED" if si.get("Failure Reason") else "COMPLETE",
                 "name": " ".join(str(si.get("Stage Name") or "").split())[:120],
                 "tasks": int(si.get("Number of Tasks") or 0),
                 "wall_s": round((comp - sub) / 1000.0, 1) if sub and comp else None,
             }
+    # The last attempt of each stage, as the live profile reads it.
+    last_attempt: dict[int, int] = {}
+    for sid, attempt in info:
+        last_attempt[sid] = max(attempt, last_attempt.get(sid, attempt))
     by_rule: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for (sid, attempt), meta in info.items():
+        if attempt != last_attempt[sid]:
+            continue
         m = _GROUP_RE.match(stage_group.get(sid, ""))
         if not m:
             continue
@@ -109,7 +131,7 @@ def profile_from_events(lines, top: int = 3) -> dict[str, list[dict[str, Any]]]:
             {
                 "stage": sid,
                 "attempt": attempt,
-                "status": "COMPLETE",
+                "status": meta["status"],
                 "tasks": meta["tasks"],
                 "wall_s": meta["wall_s"],
                 "exec_s": round(exec_ms[key] / 1000.0, 1),
@@ -121,21 +143,40 @@ def profile_from_events(lines, top: int = 3) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
     for rule, stages in sorted(by_rule.items()):
         stages.sort(key=lambda r: (-r["exec_s"], r["stage"]))
+        # The log holds every event its listener received, but that
+        # listener's queue can drop events too, which the log cannot show:
+        # lossy is unknown (None), not false.
         out[rule] = [
-            {**s, "stages": len(stages), "truncated": False, "complete": True, "lossy": False}
+            {
+                **s,
+                "stages": len(stages),
+                "truncated": False,
+                "complete": True,
+                "lossy": None,
+                "source": "eventlog",
+            }
             for s in stages[:top]
         ]
-    return out
+    return out, run_ids
 
 
-def attach(record_path: Path, profile: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+def attach(
+    record_path: Path, profile: dict[str, list[dict[str, Any]]], run_ids: set[str]
+) -> dict[str, Any]:
     """Put *profile* on the record's gold-finalize job and recompute
-    ``experiment.attribution``. Returns the new attribution block."""
+    ``experiment.attribution``. Returns the new attribution block. Refuses a
+    log whose rule groups do not name the record's run id: stages of one run
+    are never paired with another run's rule times."""
     from lakebench.metrics.attribution import attribution
     from lakebench.metrics.collector import JobMetrics
     from lakebench.metrics.storage import _dataclass_from_dict
 
     data = json.loads(record_path.read_text())
+    if data.get("run_id") not in run_ids:
+        raise SystemExit(
+            f"{record_path}: the event log's rule groups name run(s) {sorted(run_ids)}, "
+            f"not this record's {data.get('run_id')!r}; attach it to that run's record"
+        )
     gold = [j for j in data.get("jobs") or [] if j.get("job_type") == "gold-finalize"]
     if not gold:
         raise SystemExit(f"{record_path}: no gold-finalize job")
@@ -160,12 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--top", type=int, default=3)
     ap.add_argument("--record", type=Path, help="metrics.json to attach the profile to")
     args = ap.parse_args(argv)
-    profile = profile_from_events(_lines(args.eventlog), top=args.top)
+    profile, run_ids = read_events(_lines(args.eventlog), top=args.top)
     if not profile:
         print("no lb-rule-* job groups in the event log", file=sys.stderr)
         return 1
     if args.record:
-        print(json.dumps(attach(args.record, profile), indent=2))
+        print(json.dumps(attach(args.record, profile, run_ids), indent=2))
     else:
         print(json.dumps(profile, indent=2))
     return 0

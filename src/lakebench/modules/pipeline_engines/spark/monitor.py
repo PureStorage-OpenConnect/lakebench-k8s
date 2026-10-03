@@ -306,7 +306,10 @@ class SparkJobMonitor:
                         f"(last observed state: {stuck_in!r})"
                     ),
                     elapsed_seconds=elapsed,
-                    driver_logs=self._get_driver_logs(job_name),
+                    # The whole log, as on success: the per-rule detection
+                    # and stage-profile lines of a gold job that ran out of
+                    # time are what show where the time went.
+                    driver_logs=self._get_driver_logs(job_name, tail_lines=None),
                 )
 
             read_started = time.time()
@@ -418,7 +421,8 @@ class SparkJobMonitor:
                 _close_open_failure()
 
             if status.state in FAILURE_STATES:
-                logs = self._get_driver_logs(job_name)
+                # The whole log, as on success (see the timeout path).
+                logs = self._get_driver_logs(job_name, tail_lines=None)
                 message = f"Job failed: {status.message}"
                 reason = classify_dependency_failure(logs) or self._init_failure(job_name)
                 if reason:

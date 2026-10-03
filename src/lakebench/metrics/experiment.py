@@ -1015,6 +1015,11 @@ def refresh_benchmark(metrics: Any) -> None:
         "benchmark_iterations"
     )
     limits["benchmark_mode"] = getattr(bench, "mode", None)
+    headroom = limits.get("headroom_pct")
+    if isinstance(headroom, dict) and "benchmark_query" in headroom:
+        # The run's per-query timeout does not describe the replacement
+        # benchmark: its headroom is not known.
+        headroom["benchmark_query"] = None
     reps = exp.setdefault("repetitions", {})
     reps["benchmark_samples_per_query"] = _repetitions(metrics).get("benchmark_samples_per_query")
     exp["benchmark_source"] = "lakebench benchmark, after the run (replaced the run's benchmark)"

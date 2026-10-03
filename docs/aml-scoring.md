@@ -347,26 +347,6 @@ matching role, so accidentally scoring against them is not possible.
 Numbers you publish for comparison with other stacks should cite the
 seed the run used and, when it is 43, say so.
 
-The run's record derives two diagnostic blocks from these fields (neither
-enters identity, a verdict or a comparison):
-
-- `experiment.attribution` (AML batch): the gold-finalize job's slowest
-  rule (`dominant_rule`, its `rule_elapsed_s` and `share_of_job`, the rule's
-  time over the job's), that rule's heaviest stage (`dominant_stage`: stage
-  id, name, tasks, executor seconds, wall seconds, longest task, its share
-  of the rule's executor time, and the profile's flags), and the TM pass's
-  time and share (`tm_elapsed_s`, `tm_share`). `profile` is `read`, or says
-  why the stage is missing (`unavailable: <reason>`, `no_stage`,
-  `missing`). When the status store could not be read, the same profile can
-  be built from a Spark event log of a rerun of gold-finalize with
-  `scripts/aml_stage_attribution.py EVENTLOG --record metrics.json`, which
-  marks the block `profile_source: eventlog`.
-- `limits.headroom_pct` (batch): per stage, and `benchmark` for the
-  benchmark phase, `100 x (1 - elapsed / per-job timeout)` against the
-  per-job timeout the run gave every stage (recorded as
-  `job_timeout_seconds`); a stage that ran more than once reports its
-  slowest run. 25 or more means the stage used at most 75% of its budget.
-
 ## Per-alert evidence caps
 
 Some rules cut an alert's related-transaction list so one alert row cannot
@@ -567,6 +547,31 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   writes trigger; the alert inputs and the replay are materialised in
   their own phases, after the cycle is recorded as started, so a failure
   there fails the pass as before.
+
+The run's record derives two diagnostic blocks from the fields above (neither
+enters identity, a verdict or a comparison):
+
+- `experiment.attribution` (AML batch): the gold-finalize job's slowest
+  rule (`dominant_rule`, its `rule_elapsed_s` and `share_of_job`, the rule's
+  time over the job's), that rule's heaviest stage (`dominant_stage`: stage
+  id, name, tasks, executor seconds, wall seconds, longest task, its share
+  of the executor time of the rule's logged stages (the three heaviest),
+  and the profile's flags), and the TM pass's
+  time and share (`tm_elapsed_s`, `tm_share`). `profile` is `read`, or says
+  why the stage is missing (`unavailable: <reason>`, `no_stage`,
+  `missing`). When the status store could not be read, the same profile can
+  be built from a Spark event log of a rerun of gold-finalize with
+  `scripts/aml_stage_attribution.py EVENTLOG --record metrics.json`, which
+  marks the block `profile_source: eventlog`.
+- `limits.headroom_pct` (batch): per stage, `100 x (1 - elapsed / per-job
+  timeout)` against the per-job timeout the run gave every stage (recorded
+  as `job_timeout_seconds`); a stage that ran more than once reports its
+  slowest run, and a failed stage reads null. The benchmark phase has no
+  per-job timeout: its queries are bounded one by one, so
+  `benchmark_query` is `100 x (1 - slowest query / per-query timeout)`
+  (recorded as `benchmark_query_timeout_seconds`, 900 s for AML), null
+  when a query failed or the benchmark was replaced afterwards by
+  `lakebench benchmark`. 25 or more means at most 75% of the budget used.
 
 ## Known limitations in v1.6
 

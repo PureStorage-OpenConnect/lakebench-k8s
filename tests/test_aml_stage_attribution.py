@@ -23,7 +23,11 @@ def _events():
             "Event": "SparkListenerJobStart",
             "Job ID": jid,
             "Stage IDs": stages,
-            "Properties": {"spark.jobGroup.id": group} if group else {},
+            "Properties": (
+                {"spark.jobGroup.id": group, "spark.job.description": f"{group[8:10]} run r1"}
+                if group
+                else {}
+            ),
         }
 
     def task(sid, run_ms, read=0):
@@ -84,12 +88,42 @@ def test_profile_per_rule_from_events():
         "stages": 2,
         "truncated": False,
         "complete": True,
-        "lossy": False,
+        "lossy": None,
+        "source": "eventlog",
     }
     assert [s["stage"] for s in prof["W5_sanctions_match"]] == [1, 2]
     assert mod.profile_from_events([json.dumps(e) for e in _events()], top=1)[
         "W5_sanctions_match"
     ] == [top]
+
+
+def test_a_retried_stage_counts_its_last_attempt_only():
+    mod = _script()
+    events = _events()
+    retry = [
+        {
+            "Event": "SparkListenerTaskEnd",
+            "Stage ID": 2,
+            "Stage Attempt ID": 1,
+            "Task Metrics": {"Executor Run Time": 9_000},
+        },
+        {
+            "Event": "SparkListenerStageCompleted",
+            "Stage Info": {
+                "Stage ID": 2,
+                "Stage Attempt ID": 1,
+                "Stage Name": "collect at x.py:1",
+                "Number of Tasks": 1,
+                "Submission Time": 0,
+                "Completion Time": 9_000,
+            },
+        },
+    ]
+    events[5]["Stage Info"]["Failure Reason"] = "FetchFailed"
+    prof = mod.profile_from_events([json.dumps(e) for e in events + retry])
+    st2 = [s for s in prof["W5_sanctions_match"] if s["stage"] == 2]
+    assert len(st2) == 1 and st2[0]["attempt"] == 1 and st2[0]["exec_s"] == 9.0
+    assert st2[0]["status"] == "COMPLETE"
 
 
 def test_rolling_log_directory_is_read_in_order(tmp_path):
@@ -119,12 +153,14 @@ def test_attach_rewrites_the_gold_job_and_attribution(tmp_path):
                         "stage_profile_unavailable": {"W5_sanctions_match": "Py4JError"},
                     }
                 ],
+                "run_id": "r1",
                 "experiment": {"attribution": {"profile": "unavailable: Py4JError"}},
             }
         )
     )
-    prof = mod.profile_from_events([json.dumps(e) for e in _events()])
-    block = mod.attach(rec, prof)
+    prof, run_ids = mod.read_events([json.dumps(e) for e in _events()])
+    assert run_ids == {"r1"}
+    block = mod.attach(rec, prof, run_ids)
     data = json.loads(rec.read_text())
     job = data["jobs"][0]
     assert job["stage_profile_unavailable"] == {}
@@ -132,3 +168,18 @@ def test_attach_rewrites_the_gold_job_and_attribution(tmp_path):
     assert block["dominant_rule"] == "W5_sanctions_match"
     assert block["dominant_stage"]["stage"] == 1 and block["profile"] == "read"
     assert data["experiment"]["attribution"]["profile_source"] == "eventlog"
+
+
+def test_attach_refuses_another_runs_log(tmp_path):
+    import pytest
+
+    mod = _script()
+    rec = tmp_path / "metrics.json"
+    original = json.dumps(
+        {"run_id": "r2", "jobs": [{"job_type": "gold-finalize", "rule_elapsed_s": {"W5": 1.0}}]}
+    )
+    rec.write_text(original)
+    prof, run_ids = mod.read_events([json.dumps(e) for e in _events()])
+    with pytest.raises(SystemExit, match="r1"):
+        mod.attach(rec, prof, run_ids)
+    assert rec.read_text() == original

@@ -1255,6 +1255,7 @@
   "top": [
    "autosize_cuts",
    "benchmark",
+   "benchmark_query_timeout_seconds",
    "bronze_size_gb",
    "config_snapshot",
    "deployment_name",

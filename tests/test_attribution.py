@@ -82,19 +82,32 @@ def test_no_gold_rule_times_no_attribution():
 
 def test_headroom_per_stage_and_benchmark():
     jobs = [
-        JobMetrics(job_name="b", job_type="bronze-verify", elapsed_seconds=4278.0),
-        JobMetrics(job_name="g", job_type="gold-finalize", elapsed_seconds=6800.0),
-        JobMetrics(job_name="g2", job_type="gold-finalize", elapsed_seconds=9000.0),
+        JobMetrics(job_name="b", job_type="bronze-verify", elapsed_seconds=4278.0, success=True),
+        JobMetrics(job_name="g", job_type="gold-finalize", elapsed_seconds=6800.0, success=True),
+        JobMetrics(job_name="g2", job_type="gold-finalize", elapsed_seconds=9000.0, success=True),
+        JobMetrics(job_name="s", job_type="silver-build", elapsed_seconds=200.0, success=False),
+    ]
+    queries = [
+        {"query_name": "FQ1", "elapsed_seconds": 120.0, "success": True},
+        {"query_name": "FQ5", "elapsed_seconds": 450.0, "success": True},
     ]
     m = SimpleNamespace(
-        jobs=jobs, job_timeout_seconds=12900, benchmark=SimpleNamespace(total_seconds=900.0)
+        jobs=jobs,
+        job_timeout_seconds=12900,
+        benchmark_query_timeout_seconds=900,
+        benchmark=SimpleNamespace(total_seconds=570.0, queries=queries),
     )
     assert headroom_pct(m) == {
-        "benchmark": round(100 * (1 - 900 / 12900), 1),
+        # The benchmark is bounded per query, not by the per-job timeout.
+        "benchmark_query": 50.0,
         "bronze-verify": round(100 * (1 - 4278 / 12900), 1),
         # The slower of two gold-finalize runs.
         "gold-finalize": round(100 * (1 - 9000 / 12900), 1),
+        # A failed job has no headroom.
+        "silver-build": None,
     }
+    queries.append({"query_name": "FQ8", "elapsed_seconds": 900.0, "success": False})
+    assert headroom_pct(m)["benchmark_query"] is None  # a timed-out query
     m.job_timeout_seconds = None
     assert headroom_pct(m) is None
 
@@ -106,7 +119,9 @@ def test_job_timeout_round_trips_through_the_record(tmp_path):
 
     run = PipelineMetrics(run_id="r1", deployment_name="d", start_time=datetime(2026, 10, 2))
     run.job_timeout_seconds = 12900
+    run.benchmark_query_timeout_seconds = 900
     assert run.to_dict()["job_timeout_seconds"] == 12900
     storage = MetricsStorage(tmp_path)
     storage.save_run(run)
-    assert storage.load_run("r1").job_timeout_seconds == 12900
+    back = storage.load_run("r1")
+    assert (back.job_timeout_seconds, back.benchmark_query_timeout_seconds) == (12900, 900)

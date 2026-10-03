@@ -470,6 +470,9 @@ class PipelineMetrics:
     # scale-derived budget run computes). Headroom per stage is read against
     # it (metrics/attribution.headroom_pct). None: not recorded.
     job_timeout_seconds: int | None = None
+    # The per-query timeout of the run's timed benchmark: the limit that
+    # bounds the benchmark phase (no per-job timeout applies to it).
+    benchmark_query_timeout_seconds: int | None = None
 
     # What the run's table-maintenance calls actually did (cli/_sustained
     # _note_outcome): one dict per call with kind (expire, compaction),
@@ -551,6 +554,8 @@ class PipelineMetrics:
             d["autosize_cuts"] = list(self.autosize_cuts)
         if self.job_timeout_seconds is not None:
             d["job_timeout_seconds"] = int(self.job_timeout_seconds)
+        if self.benchmark_query_timeout_seconds is not None:
+            d["benchmark_query_timeout_seconds"] = int(self.benchmark_query_timeout_seconds)
         if self.maintenance_outcomes is not None:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         if self.continuous is not None:
