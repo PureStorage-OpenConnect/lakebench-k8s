@@ -842,10 +842,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   id, debit first) from each account's opening balance, and IQ3 sums its
   second hop per pair as it already did the first. Batch answers are
   unchanged row for row; continuous answers over a settled corpus equal
-  them. The SQL change moves the AML query-set ids (`qs12-70ccb96a1900` for
-  the 12-query set, and the 8-query set before the first TM pass), so QpH
-  from before the change is not compared with QpH after it; workload
-  version `aml-2` covers it. Batch and continuous records are still never
+  them. FQ4 still reads the statements once (the opening balance is two
+  window aggregates over the same rows). The SQL change moves the AML
+  query-set ids: the 12-query set is now `qs12-910d16a91962` (was
+  `qs12-4bd2d9416abb`), FQ1 to FQ8 `qs8-ffe2bc1a012e` (was
+  `qs8-32f521a57551`) and IQ1 to IQ4 `qs4-bc3b5e556bf7`, so QpH from before
+  the change is not compared with QpH after it; workload version `aml-2`
+  covers it. Batch and continuous records are still never
   compared with each other (the mode is a workload identity key).
 - **`RELEASING.md` and `make release-check`.** One release process: the
   scripted steps run in order with `make release-check VERSION=X.Y.Z`

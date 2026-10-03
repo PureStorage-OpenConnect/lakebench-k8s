@@ -371,7 +371,8 @@ _FQ4 = BenchmarkQuery(
     # read from the stored bal_after: continuous silver stores bal_after in
     # arrival order, so a late statement moves every later stored balance.
     # On batch silver the answer is the stored bal_after row for row; on
-    # continuous silver over the same corpus it is the batch answer.
+    # continuous silver over the same corpus it is the batch answer. One
+    # pass over the entries: the opening balance is two window aggregates.
     sql="""\
 WITH top_accts AS (
   SELECT account_id
@@ -386,27 +387,25 @@ entries AS (
          CASE WHEN s.cdt_dbt_ind = 'DBIT' THEN 0 ELSE 1 END AS dbt_ord
   FROM {catalog}.{silver_account_statements} s
   JOIN top_accts t ON t.account_id = s.account_id
-),
-opening AS (
-  SELECT account_id, MAX_BY(bal_after, entry_seq) - SUM(signed_amt) AS opening_balance
-  FROM entries
-  GROUP BY account_id
 )
 SELECT
-  e.account_id,
-  e.book_ts,
-  e.cdt_dbt_ind,
-  e.amt,
-  CAST(o.opening_balance + SUM(e.signed_amt) OVER (
-    PARTITION BY e.account_id ORDER BY e.book_ts, e.txn_id, e.dbt_ord
-  ) AS DECIMAL(38, 2)) AS bal_after,
+  account_id,
+  book_ts,
+  cdt_dbt_ind,
+  amt,
+  CAST(
+    MAX_BY(bal_after, entry_seq) OVER (PARTITION BY account_id)
+    - SUM(signed_amt) OVER (PARTITION BY account_id)
+    + SUM(signed_amt) OVER (PARTITION BY account_id ORDER BY book_ts, txn_id, dbt_ord)
+    AS DECIMAL(38, 2)
+  ) AS bal_after,
   ROW_NUMBER() OVER (
-    PARTITION BY e.account_id ORDER BY e.book_ts, e.txn_id, e.dbt_ord, e.entry_seq
+    PARTITION BY account_id ORDER BY book_ts, txn_id, dbt_ord, entry_seq
   ) AS entry_ord
-FROM entries e
-JOIN opening o ON o.account_id = e.account_id
-ORDER BY e.account_id, entry_ord""",
+FROM entries
+ORDER BY account_id, entry_ord""",
 )
+
 
 _FQ5 = BenchmarkQuery(
     name="FQ5_alert_triage",

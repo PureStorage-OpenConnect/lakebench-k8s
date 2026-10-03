@@ -393,7 +393,7 @@ class TestQueryTiebreakers:
             ("FQ2_top_corridors_window", "volume_usd DESC, originator_bank_bic"),
             ("FQ3_entity_edge_risk", "total_out_usd DESC, e.entity_id"),
             ("FQ4_running_balance_window", "ORDER BY COUNT(*) DESC, account_id"),
-            ("FQ4_running_balance_window", "ORDER BY e.book_ts, e.txn_id, e.dbt_ord, e.entry_seq"),
+            ("FQ4_running_balance_window", "ORDER BY book_ts, txn_id, dbt_ord, entry_seq"),
             ("FQ6_structuring_scan", "txn_count DESC, originator_id, txn_currency"),
             ("FQ7_cross_border_concentration", "xborder_usd DESC, originator_bank_bic"),
             ("FQ8_alert_to_entity_join", "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id"),

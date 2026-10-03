@@ -1,8 +1,8 @@
 # AML (financial) Pipeline Benchmark Specification
 
 Workload version `aml-2` (as stamped in `experiment.workload.version`),
-generator model `datagen-v2-rs-0.3`, query sets `qs12-4bd2d9416abb` (batch
-with TM operations) and `qs8-32f521a57551` (FQ1 to FQ8), maintenance policy
+generator model `datagen-v2-rs-0.3`, query sets `qs12-910d16a91962` (batch
+with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8), maintenance policy
 `m2-2026-09-26`.
 
 Audience: engineers who run, reproduce or compare this benchmark, and
@@ -665,8 +665,8 @@ post-maintenance rounds of an AML batch run time different query sets.
 
 `query_set_id` is `qs<N>-<first 12 hex of sha256>` over the sorted query
 names and SQL of the queries actually recorded, failed ones included. In
-this release FQ1 to FQ8 plus IQ1 to IQ4 is `qs12-4bd2d9416abb`, FQ1 to FQ8 is
-`qs8-32f521a57551`, and IQ1 to IQ4 alone is `qs4-d97fd349eed5`. A `--class`
+this release FQ1 to FQ8 plus IQ1 to IQ4 is `qs12-910d16a91962`, FQ1 to FQ8 is
+`qs8-ffe2bc1a012e`, and IQ1 to IQ4 alone is `qs4-bc3b5e556bf7`. A `--class`
 subset produces its own id. Each continuous in-stream round also records the
 query set it executed; rounds that executed different sets are not combined
 into one assessed QpH (section 8.2).
@@ -678,12 +678,12 @@ into one assessed QpH (section 8.2).
 | `FQ6_structuring_scan` | Originators with 3 or more payments just under a currency's reporting threshold (the W2 shape) | silver.transactions | top 500, total order by count, originator, currency |
 | `FQ3_entity_edge_risk` | Per-entity out-degree and outbound USD | counterparty_edges, entities | top 200 by outbound USD, entity id |
 | `FQ7_cross_border_concentration` | Cross-border share of USD per corridor | silver.transactions | top 100, total order; the fifth column (`xborder_share`) at a quantum of 0.001 |
-| `FQ4_running_balance_window` | Ordered statement entries for the 50 most active accounts | account_statements | ROW_NUMBER over (book_ts, entry_seq); outer order account, entry. Returns every entry of those accounts, so its result grows with scale (1,491,153 rows recorded at scale 10, `run-20260929-214442-825153`) |
+| `FQ4_running_balance_window` | Ordered statement entries for the 50 most active accounts, with the running balance recomputed in ledger order | account_statements | balance = the account's last stored `bal_after` less the sum of its entries, plus the running sum over (book_ts, txn_id, debit first), so batch and settled continuous silver give one answer; ROW_NUMBER over (book_ts, txn_id, debit first, entry_seq); outer order account, entry. Returns every entry of those accounts, so its result grows with scale (1,491,153 rows recorded at scale 10, `run-20260929-214442-825153`) |
 | `FQ5_alert_triage` | Alerts by rule, priority and status with entity count and mean score | gold.alerts | ORDER BY alerts DESC only, no LIMIT; the fingerprint is order-independent; the sixth column (`avg_score`) at a quantum of 0.001 |
 | `FQ8_alert_to_entity_join` | 100 most recent alerts with entity and payment count | gold.alerts, entities | total order by alert_ts, entity, rule, alert_id; `alert_id` volatile (NULL-ness only). `txns_in_alert` is `cardinality(related_txn_ids)`, which the per-alert evidence caps bound (section 7.4), so it is a Lakebench-capped count |
 | `IQ1_customer_360` | 360 view of the top open case | cases, alert_dispositions, accounts, entities | case picked by status, priority, opened date, case id; TM reads scoped to the TM run id |
 | `IQ2_case_activity_12m` | Monthly activity in the 365 days before the newest escalation case | cases, silver.transactions | `allow_empty` |
-| `IQ3_counterparty_two_hop` | Counterparties and two-hop network of the oldest open case | cases, edges, entities, alert_dispositions | top 50 hop-1, top 500 overall, total order |
+| `IQ3_counterparty_two_hop` | Counterparties and two-hop network of the oldest open case | cases, edges, entities, alert_dispositions | both hops sum edge rows per pair (continuous writes one row per pair per micro-batch); top 50 hop-1, top 500 overall, total order |
 | `IQ4_open_cases_over_60_days` | Open cases older than 60 days | cases, entities | ordered by age, case id; `allow_empty` |
 
 Rules that apply to every query:
