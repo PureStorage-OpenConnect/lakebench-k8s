@@ -32,6 +32,7 @@ import os
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    avg,
     broadcast,
     coalesce,
     col,
@@ -42,6 +43,7 @@ from pyspark.sql.functions import (
     when,
 )
 from pyspark.sql.functions import max as smax
+from pyspark.sql.functions import sum as ssum
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
@@ -426,6 +428,11 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # rule: alerts of a rule touching no txn of that rule's target typology.
     total_alerts = alerts.count()
     fp_by_rule: dict[str, float | None] = {}
+    # Alerts of a rule that touch no payment of its target typology, per
+    # rule with a target (a diagnostic count for the screening limitation:
+    # W5/W6 non-planted alerts grow with scale). Before TM, so no Lakebench
+    # cap truncates it.
+    nonplanted_by_rule: dict[str, int] = {}
     txn_precision_by_rule: dict[str, float] = {}
     chance_by_rule: dict[str, float] = {}
     if total_alerts > 0:
@@ -457,8 +464,16 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         # that are planted target txns, so one giant alert over the whole
         # corpus cannot score itself perfect.
         per_alert = refs.groupBy("alert_id", "rule_id").agg(smax("on_target").alias("hit"))
-        for row in per_alert.groupBy("rule_id").agg({"hit": "avg"}).collect():
-            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(hit)"])
+        for row in (
+            per_alert.groupBy("rule_id")
+            .agg(
+                avg(col("hit")).alias("hit_avg"),
+                ssum(when(col("hit") == lit(0), lit(1)).otherwise(lit(0))).alias("off"),
+            )
+            .collect()
+        ):
+            fp_by_rule[row["rule_id"]] = 1.0 - float(row["hit_avg"])
+            nonplanted_by_rule[row["rule_id"]] = int(row["off"])
         for row in refs.groupBy("rule_id").agg({"on_target": "avg"}).collect():
             txn_precision_by_rule[row["rule_id"]] = float(row["avg(on_target)"])
         # Per-rule chance: the share of random-control instances a rule's
@@ -546,6 +561,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         "fp_alerts": int(fp_alerts),
         "fp_rate": fp_rate,
         "fp_rate_by_rule": fp_by_rule,
+        "nonplanted_alerts_by_rule": dict(sorted(nonplanted_by_rule.items())),
         "txn_precision_by_rule": txn_precision_by_rule,
         "chance_by_rule": chance_by_rule,
         "random_control_floor": (float(random_row[0]["incidental_recall"]) if random_row else None),
@@ -631,6 +647,15 @@ def main() -> None:
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)
     summary["subject_customer_check"] = check
+    # Customers in silver.entities (is_customer): the denominator of the
+    # per-customer non-planted alert rate (diagnostic). None when unreadable.
+    try:
+        summary["customer_count"] = int(
+            spark.table(f"{CATALOG}.{SILVER_ENTITIES}").where(col("is_customer")).count()
+        )
+    except Exception as e:  # noqa: BLE001 -- diagnostic only
+        log(f"[score] customer count unavailable: {type(e).__name__}: {e}"[:300])
+        summary["customer_count"] = None
     log(
         f"[score] subject-customer-check status={check['status']} "
         f"subjects={check.get('subjects')} unmapped={check.get('unmapped')} "
