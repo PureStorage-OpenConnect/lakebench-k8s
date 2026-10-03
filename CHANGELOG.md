@@ -613,7 +613,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   manifest stops instead of warning. The continuous preflight checks the
   manifest when it is there, and requires one with `--skip-generate`. A
   financial `run --stage silver-build` or `gold-finalize` runs bronze-verify's
-  check alone first. A check that cannot run (a storage or Spark error) stops
+  check alone first (a manifest is required unless the run is multi-cycle,
+  whose cycles generate their own corpus). A check that cannot run (a storage or Spark error) stops
   the job too, but exits 1 as a failure, not 2.
 - **A registered look scores only the corpus `generate --registered-corpus`
   wrote** (owner decision, 10-03). `scripts/aml_gate.py --registered` refuses
@@ -625,7 +626,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   of it ran one image, and no other attempt on this host had a datagen Job in
   that bronze prefix meanwhile (the ledger is per host; an earlier attempt
   that failed after submitting may have left pods writing, so the corpus is
-  then generated again into an empty bucket). `generate --registered-corpus`
+  then generated again into a different bucket). `generate --registered-corpus`
   now needs `images.datagen` pinned by digest, and exits 1 when it generated
   the corpus but could not fingerprint it or read its pods' image digests.
 - **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role

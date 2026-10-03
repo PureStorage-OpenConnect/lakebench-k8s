@@ -659,7 +659,15 @@ def test_bronze_verify_marker_is_the_cli_marker():
 
 @pytest.mark.parametrize(
     ("mode", "required_env", "required"),
-    [("1", None, True), ("0", None, True), ("schema", None, False), ("schema", "1", True)],
+    [
+        ("1", None, True),
+        ("0", None, True),
+        ("schema", None, False),
+        ("schema", "1", True),
+        ("check", None, True),
+        ("check", "0", False),
+        ("check", "1", True),
+    ],
 )
 def test_manifest_is_required_except_while_continuous_datagen_writes(
     load_script, monkeypatch, mode, required_env, required
@@ -727,15 +735,19 @@ def test_held_out_check_before_a_stage_subset(success, logs, code):
         with pytest.raises(typer.Exit) as info:
             _held_out_check_only(job, monitor, "r1", None, 600)
         assert info.value.exit_code == code
-    assert job.env == {"LB_REGISTER_TABLE": "check", "LB_RUN_ID": "r1"}
+    assert job.env == {
+        "LB_REGISTER_TABLE": "check",
+        "LB_RUN_ID": "r1",
+        "LB_MANIFEST_REQUIRED": "1",
+    }
 
 
 def test_a_financial_stage_subset_runs_the_check_before_its_stages():
     src = (ROOT / "src/lakebench/cli/_run.py").read_text()
     body = src[src.index("def _run_once(") :]
-    check = body.index("_held_out_check_only(job_manager")
+    check = body.index("_held_out_check_only(")
     assert body.index("stages = all_stages") < check < body.index("for cycle_idx in range")
-    guard = body[check - 400 : check]
+    guard = body[check - 700 : check]
     assert "stages[0][0] != JobType.BRONZE_VERIFY" in guard
-    # A multi-cycle run clears the prefix and generates each cycle's corpus.
-    assert "total_cycles == 1" in guard
+    # Every subset is checked; a multi-cycle one may have no manifest yet.
+    assert "required=total_cycles == 1" in body[check : check + 200]

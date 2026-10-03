@@ -97,7 +97,11 @@ CHECK_ONLY = _REGISTER_MODE == "check"
 # lands last, and the config guard checked the seed it generates with), so
 # a missing manifest passes there, unless the run generates nothing
 # (LB_MANIFEST_REQUIRED=1, set by the CLI for --skip-generate).
-MANIFEST_REQUIRED = (not CONTINUOUS_RESET) or env("LB_MANIFEST_REQUIRED", "0") == "1"
+# The CLI may say either way (LB_MANIFEST_REQUIRED 0 or 1): the continuous
+# preflight and run --stage's check before a multi-cycle subset, whose
+# cycles generate their own corpus.
+_REQUIRED = env("LB_MANIFEST_REQUIRED", "")
+MANIFEST_REQUIRED = _REQUIRED == "1" if _REQUIRED in ("0", "1") else not CONTINUOUS_RESET
 # Prefix of the refusal; the CLI reads it in the driver log and exits 2.
 PROTECTED_REFUSAL = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
 # Prefix when the check itself could not run (a storage or Spark error): the
