@@ -1268,11 +1268,37 @@ not a capacity). For AML, the rules continuous mode does not run are named,
 and the detection table reads "excluded in continuous mode" for them, not
 "no data".
 
-The AML detection table labels recall "uncalibrated, in-sample" unless a
-completed registered look names the run, shows the planted-subject customer
-check, and, when the record's scoring or detection data cannot be rendered,
-says "AML results could not be rendered" with the error instead of leaving
-the section out.
+The AML results open with a funnel: rule alerts (from scoring, and in
+`gold.alerts` as transaction monitoring read them), the alerts dispositioned
+on customers (of which over the per-customer cap, and of which withdrawn
+alerts carried from an earlier cycle) and on non-customers (of which not
+declared as counterparties), customer alerts per customer, dispositions, escalations,
+alert cases, continuing-activity review cases and SARs filed, each with the
+record path it comes from. A reconciliation checks the identities the
+transaction-monitoring step holds (scoring and TM alert totals; TM alerts
+equal customer plus non-customer dispositions minus withdrawn carried
+alerts; dispositions sum to the customer plus non-customer count; SARs
+filed equal alert-case SARs plus continuing-activity SARs) and sizes any
+difference, saying when the record does not explain it.
+
+In the detection table, recall reads "uncalibrated, in-sample" unless a
+completed registered look names the run. The random-control chance sits
+beside recall. A continuous run shows recall over the covered instances
+with the coverage beside it (chance and off-target are then over the
+covered instances too), or why it was not scored; it never shows plain
+"recall". Total alerts and the off-target rate say they cover only the
+rules that ran, and carry a BOUNDED BY label when a rule was skipped on a
+Lakebench cap (a skip reason naming a cap); the funnel's alert totals carry
+the same label, with a note that every count below them comes from the
+rules that ran, and the counts worked after the per-customer cap
+(escalated, alert cases, SARs filed) carry that cap when it held alerts
+back. A per-reason-code table follows when the run recorded reason
+codes, the producer's status when it recorded none, or "reason codes not
+recorded". Leakage reads "not measured in this run": the AML fidelity gate
+(`scripts/aml_gate.py`) runs outside `lakebench run`. The block also shows
+the planted-subject customer check, and, when the record's scoring or
+detection data cannot be rendered, says "AML results could not be
+rendered" with the error instead of leaving the section out.
 
 ### Expected results (Customer 360)
 

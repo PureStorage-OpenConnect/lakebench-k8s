@@ -336,6 +336,9 @@ class FinancialScorecardBlock:
 
         recall_by_typology: dict[str, dict] = {}
         typology_index: dict[str, int] = {}
+        # Continuous (covered mode): recall over the instances the last
+        # completed tick covered, with coverage beside it; never "recall".
+        covered_by_typology: dict[str, tuple[int, dict]] = {}
         total_alerts = None
         fp_rate = None
         fp_by_rule: dict = {}
@@ -347,6 +350,10 @@ class FinancialScorecardBlock:
                 if tt:
                     recall_by_typology[tt] = t
                     typology_index[tt] = ti
+            covered = scoring.get("covered") if scoring.get("mode") == "covered" else None
+            for ci, t in enumerate((covered or {}).get("typologies") or []):
+                if isinstance(t, dict) and t.get("typology_type"):
+                    covered_by_typology[t["typology_type"]] = (ci, t)
             total_alerts = scoring.get("total_alerts")
             fp_rate = scoring.get("fp_rate")
             fp_by_rule = dict(scoring.get("fp_rate_by_rule") or {})
@@ -418,6 +425,24 @@ class FinancialScorecardBlock:
                 )
                 recall_cell = "n/a"
                 alerts_cell = "-"
+            elif typ is not None and typ in covered_by_typology:
+                alerts_cell = _alerts(rule, alerts)
+                ci, crow = covered_by_typology[typ]
+                base = dv.path("financial_scoring", "covered", "typologies", ci)
+                if crow.get("recall_covered") is None:
+                    recall_cell = "n/a (no covered instance)"
+                    status = "ran"
+                else:
+                    recall_cell = (
+                        dv.pct(float(crow["recall_covered"]), num_path=f"{base}.recall_covered")
+                        + " covered, coverage "
+                        + (
+                            dv.pct(float(crow["coverage"]), num_path=f"{base}.coverage")
+                            if crow.get("coverage") is not None
+                            else "n/a"
+                        )
+                    )
+                    status = '<span style="color: var(--success, green);">scored (covered)</span>'
             elif typ is None:
                 # A rule with no planted typology to score recall against.
                 status = "ran" if alerts is not None or not continuous_alerts else "no data"
@@ -485,12 +510,36 @@ class FinancialScorecardBlock:
                 if fp_rate is not None
                 else "n/a"
             )
+            from lakebench.reports.formatter import format_measurement
+
+            # The totals cover only the rules that ran. A rule skipped on a
+            # Lakebench cap (the verdict's rule_caps) bounds them: labelled.
+            cap_lines = [
+                f"rule {r} skipped: {why} (Lakebench cap)"
+                for r, why in _rule_caps(metrics, rules_skipped)
+            ]
+            if rules_skipped:
+                scope = (
+                    " over the rules that ran ("
+                    + ", ".join(f"{r} skipped: {why}" for r, why in sorted(rules_skipped.items()))
+                    + ")"
+                )
+            elif continuous_run:
+                scope = " over the rules continuous mode runs"
+            else:
+                scope = ""
+            total_html = format_measurement(f"{total_alerts:,}", caps_bound=cap_lines)
+            fp_html = (
+                fp_str + format_measurement("", caps_bound=cap_lines)
+                if cap_lines and fp_rate is not None
+                else fp_str
+            )
             footer += (
                 '<div style="margin-top: 0.5rem; color: var(--text-muted); '
                 'font-size: 0.8125rem;">'
-                f"Total alerts: <strong>{total_alerts:,}</strong> | "
-                f"Overall off-target rate (alerts touching no planted txn): <strong>{fp_str}</strong>"
-                + "</div>"
+                f"Total alerts{escape(scope)}: <strong>{total_html}</strong> | "
+                f"Overall off-target rate{' (covered)' if (scoring or {}).get('mode') == 'covered' else ''} "
+                f"(alerts touching no planted txn): <strong>{fp_html}</strong>" + "</div>"
             )
 
         alerts_th = (
@@ -500,23 +549,45 @@ class FinancialScorecardBlock:
             else '<th title="Alerts emitted by this rule">Alerts</th>'
         )
         look_role = registered_look_role(getattr(metrics, "run_id", None))
+        sc: dict = scoring if isinstance(scoring, dict) else {}
+        covered_mode = sc.get("mode") == "covered"
+        if covered_mode and sc.get("status") == "not_scored":
+            footer += (
+                '<div style="margin-top: 0.5rem; color: var(--warning); font-size: 0.8125rem;">'
+                "Recall over covered instances not scored: "
+                f"{escape(str(sc.get('reason') or 'no reason recorded'))}</div>"
+            )
         if look_role:
-            recall_label = f"Recall (registered look: {escape(look_role)})"
+            recall_label = (
+                f"Recall over covered instances (registered look: {escape(look_role)})"
+                if covered_mode
+                else f"Recall (registered look: {escape(look_role)})"
+            )
             recall_title = (
                 "Fraction of planted instances detected by this rule, on the "
                 f"registered {escape(look_role)} look that names this run."
             )
         else:
-            recall_label = "Recall (uncalibrated, in-sample)"
+            recall_label = (
+                "Recall over covered instances (uncalibrated, in-sample)"
+                if covered_mode
+                else "Recall (uncalibrated, in-sample)"
+            )
             recall_title = (
                 "Fraction of planted instances detected by this rule. Uncalibrated and "
                 "in-sample: measured on this run's own corpus, which no registered look "
                 "names (docs/aml-scoring.md)."
             )
+        # In covered mode chance and off-target are over the covered
+        # instances too.
+        covered_suffix = " (covered)" if covered_mode else ""
         footer += _subject_check_html(scoring)
+        footer += _reason_code_html(scoring)
+        footer += _leakage_html()
         tm_html = _safe_tm_section(metrics, gold_jobs)
         return (
-            tm_html
+            _safe_funnel_html(metrics, scoring, gold_jobs, rules_skipped)
+            + tm_html
             + f"""
         <section>
             <h3>Detection Scorecard</h3>
@@ -527,9 +598,9 @@ class FinancialScorecardBlock:
                         <th>Target typology</th>
                         {alerts_th}
                         <th title="{recall_title}">{recall_label}</th>
-                        <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
+                        <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance{covered_suffix}</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
-                        <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>
+                        <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target{covered_suffix}</th>
                         <th title="Share of the txns in this rule's alerts that are planted target txns">Txn precision</th>
                         <th>Status</th>
                     </tr>
@@ -542,6 +613,318 @@ class FinancialScorecardBlock:
         </section>
         """
         )
+
+
+def _rule_caps(metrics, rules_skipped: dict | None = None) -> list[tuple[str, str]]:
+    """(rule, reason) for each AML rule skipped on a Lakebench cap: a skip
+    reason naming a cap, from the scorecard's own skip list and the stored
+    experiment block, the rule metrics/bounds.py applies to limits.bound."""
+    found: dict[str, str] = {}
+    try:
+        exp = metrics.experiment_block() or {}
+    except Exception:  # noqa: BLE001 -- a bad block must not break the render
+        exp = {}
+    rules = exp.get("rules") if isinstance(exp, dict) else None
+    stored = rules.get("skipped") if isinstance(rules, dict) else None
+    for source in (rules_skipped, stored):
+        if isinstance(source, dict):
+            for rule, why in source.items():
+                if "cap" in str(why):
+                    found.setdefault(str(rule), str(why))
+    return sorted(found.items())
+
+
+def _tm_cap_line(metrics, ops: dict) -> list[str]:
+    """The TM per-customer cap as a bound line, when it held alerts back."""
+    over = ops.get("alerts_over_capacity")
+    if not isinstance(over, (int, float)) or isinstance(over, bool) or over <= 0:
+        return []
+    return [f"TM max_alerts_per_customer: {int(over):,} alerts over capacity"]
+
+
+def _reason_code_html(scoring) -> str:
+    """Per-reason-code recall and FP (``recall_by_code``, ``fp_by_code``:
+    ``{rule: {code: fraction}}``, with ``alerts_by_code`` and
+    ``by_code_status`` beside them), or why there is none."""
+    from html import escape
+
+    from lakebench.reports import derived as dv
+
+    if not isinstance(scoring, dict):
+        return ""
+    note_style = 'style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;"'
+    status = scoring.get("by_code_status")
+    recall = scoring.get("recall_by_code")
+    fp = scoring.get("fp_by_code")
+    alerts = scoring.get("alerts_by_code")
+    recall = recall if isinstance(recall, dict) else {}
+    fp = fp if isinstance(fp, dict) else {}
+    alerts = alerts if isinstance(alerts, dict) else {}
+    rows = []
+    for rule in sorted(set(recall) | set(fp)):
+        r_entry, f_entry, a_entry = recall.get(rule), fp.get(rule), alerts.get(rule)
+        codes_r: dict = r_entry if isinstance(r_entry, dict) else {}
+        codes_f: dict = f_entry if isinstance(f_entry, dict) else {}
+        codes_a: dict = a_entry if isinstance(a_entry, dict) else {}
+        for code in sorted(set(codes_r) | set(codes_f)):
+
+            def cell(table, key, code=code, rule=rule):
+                v = table.get(code)
+                if v is None:
+                    return "-"
+                return dv.pct(float(v), num_path=dv.path("financial_scoring", key, rule, code))
+
+            n_alerts = codes_a.get(code)
+            note = (
+                " <small>(no alert carries this code)</small>"
+                if isinstance(n_alerts, (int, float)) and n_alerts == 0
+                else ""
+            )
+            rows.append(
+                f"<tr><td>{escape(rule)}</td><td><code class='mono'>{escape(code)}</code>{note}</td>"
+                f"<td>{cell(codes_r, 'recall_by_code')}</td><td>{cell(codes_f, 'fp_by_code')}</td></tr>"
+            )
+    status_html = f"<div {note_style}>Reason codes: {escape(str(status))}</div>" if status else ""
+    if not rows:
+        return status_html or (
+            f"<div {note_style}>Per-reason-code recall and FP: reason codes not recorded "
+            "in this run.</div>"
+        )
+    return (
+        "<h4>By reason code</h4><table><thead><tr><th>Rule</th><th>Reason code</th>"
+        '<th title="Share of the typology\'s instances hit by an alert of this rule carrying this code">'
+        "Recall (uncalibrated, in-sample)</th>"
+        '<th title="1 minus the on-target share of this rule\'s alerts carrying this code">FP</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>" + status_html
+    )
+
+
+def _leakage_html() -> str:
+    """No run stage records a leakage result in v1.7: the AML fidelity gate
+    (``scripts/aml_gate.py``) runs outside ``lakebench run``, so the block
+    says so rather than leave the reader to infer it."""
+    return (
+        '<div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">'
+        "Leakage: not measured in this run (the AML fidelity gate, "
+        "<code>scripts/aml_gate.py</code>, runs outside <code>lakebench run</code>).</div>"
+    )
+
+
+def _safe_funnel_html(metrics, scoring, gold_jobs: list, rules_skipped: dict) -> str:
+    try:
+        return _funnel_html(metrics, scoring, gold_jobs, rules_skipped)
+    except Exception as exc:  # noqa: BLE001 -- render must never crash the report
+        from html import escape
+
+        logger.exception("AML funnel could not be rendered")
+        return (
+            "<section><h3>AML results funnel</h3>"
+            '<p style="color: var(--danger);">The funnel could not be rendered: '
+            f"{escape(type(exc).__name__)}</p></section>"
+        )
+
+
+def _funnel_html(metrics, scoring, gold_jobs: list, rules_skipped: dict) -> str:
+    """Alerts to SARs, each count with the record path it comes from, nested
+    counts shown as "of which", and the identities tm_operations holds
+    checked, with the size of any difference."""
+    from html import escape
+
+    from lakebench.reports import derived as dv
+    from lakebench.reports.formatter import format_measurement
+
+    tm = getattr(metrics, "tm_operations", None)
+    ops = tm.get("ops") if isinstance(tm, dict) and isinstance(tm.get("ops"), dict) else None
+    base = "tm_operations.ops" if ops else None
+    if ops is None:
+        all_jobs = list(getattr(metrics, "jobs", None) or [])
+        for j in reversed(gold_jobs or []):
+            if isinstance(getattr(j, "tm_ops", None), dict) and j.tm_ops:
+                ops = j.tm_ops
+                base = f"jobs[{next(i for i, x in enumerate(all_jobs) if x is j)}].tm_ops"
+                break
+    total = scoring.get("total_alerts") if isinstance(scoring, dict) else None
+    if ops is None and total is None:
+        return ""
+    ops_d: dict = ops if isinstance(ops, dict) else {}
+    f_raw, r_raw, d_raw = (
+        ops_d.get("funnel"),
+        ops_d.get("reconciliation"),
+        ops_d.get("alerts_by_disposition"),
+    )
+    funnel: dict = f_raw if isinstance(f_raw, dict) else {}
+    rec: dict = r_raw if isinstance(r_raw, dict) else {}
+    disp: dict = d_raw if isinstance(d_raw, dict) else {}
+
+    def p(*parts) -> str:
+        return f"{base}.{dv.path(*parts)}" if base else ""
+
+    def _int(v):
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+    def num(v) -> str:
+        n = _int(v)
+        return f"{n:,}" if n is not None else "n/a"
+
+    # Every count here comes from the rules that ran: a rule skipped on a
+    # Lakebench cap bounds them all (invariant 6).
+    rule_caps = [f"rule {r} skipped: {why}" for r, why in _rule_caps(metrics, rules_skipped)]
+
+    def bounded(v, caps) -> str:
+        return format_measurement(num(v), caps_bound=caps) if caps else num(v)
+
+    rows: list[tuple[str, str, str]] = []
+    if total is not None:
+        rows.append(
+            ("Rule alerts (scoring)", bounded(total, rule_caps), "financial_scoring.total_alerts")
+        )
+    if "alerts_total" in ops_d:
+        rows.append(
+            (
+                "Rule alerts in gold.alerts (TM)",
+                bounded(ops_d.get("alerts_total"), rule_caps),
+                p("alerts_total"),
+            )
+        )
+    if "alerts" in funnel:
+        rows.append(
+            (
+                "dispositioned on customers (monitored)",
+                num(funnel.get("alerts")),
+                p("funnel", "alerts"),
+            )
+        )
+    if "alerts_over_capacity" in ops_d:
+        rows.append(
+            (
+                "&nbsp;&nbsp;of which over the per-customer cap (held back, not worked)",
+                num(ops_d.get("alerts_over_capacity")),
+                p("alerts_over_capacity"),
+            )
+        )
+    if "alerts_withdrawn_carried" in ops_d:
+        rows.append(
+            (
+                "&nbsp;&nbsp;of which withdrawn, carried from an earlier cycle",
+                num(ops_d.get("alerts_withdrawn_carried")),
+                p("alerts_withdrawn_carried"),
+            )
+        )
+    if "alerts_out_of_scope" in ops_d:
+        rows.append(
+            (
+                "dispositioned on non-customers (outside the monitored population)",
+                num(ops_d.get("alerts_out_of_scope")),
+                p("alerts_out_of_scope"),
+            )
+        )
+    if "alerts_noncustomer_undeclared" in ops_d:
+        rows.append(
+            (
+                "&nbsp;&nbsp;of which not declared as counterparties",
+                num(ops_d.get("alerts_noncustomer_undeclared")),
+                p("alerts_noncustomer_undeclared"),
+            )
+        )
+    customers = rec.get("completeness.customers")
+    if _int(funnel.get("alerts")) is not None and _int(customers):
+        per = dv.ratio(
+            funnel["alerts"],
+            customers,
+            a_path=p("funnel", "alerts"),
+            b_path=p("reconciliation", "completeness.customers"),
+            fmt=".2f",
+            suffix="",
+        )
+        rows.append(
+            (
+                "customer alerts per customer",
+                per,
+                f"{p('funnel', 'alerts')} / {p('reconciliation', 'completeness.customers')}",
+            )
+        )
+    for k in sorted(disp):
+        rows.append((f"disposition: {escape(str(k))}", num(disp[k]), p("alerts_by_disposition", k)))
+    # The per-customer cap held alerts back from the analysts: everything
+    # worked after it is bounded by it.
+    tm_cap = _tm_cap_line(metrics, ops_d)
+    if "escalated" in funnel:
+        rows.append(
+            ("escalated", bounded(funnel.get("escalated"), tm_cap), p("funnel", "escalated"))
+        )
+    if "cases" in funnel:
+        rows.append(("alert cases", bounded(funnel.get("cases"), tm_cap), p("funnel", "cases")))
+    if "funnel.continuing_review_cases" in rec:
+        rows.append(
+            (
+                "continuing-activity review cases",
+                num(rec.get("funnel.continuing_review_cases")),
+                p("reconciliation", "funnel.continuing_review_cases"),
+            )
+        )
+    if "sars_filed" in ops_d:
+        rows.append(("SARs filed", bounded(ops_d.get("sars_filed"), tm_cap), p("sars_filed")))
+
+    # The identities tm_operations holds, checked; a difference is sized,
+    # and named as unexplained when the record does not say why.
+    checks: list[str] = []
+    alerts_tm = _int(ops_d.get("alerts_total"))
+    if total is not None and alerts_tm is not None:
+        diff = int(total) - alerts_tm
+        checks.append(
+            "scoring and TM rule alerts agree"
+            if diff == 0
+            else f"scoring rule alerts differ from TM's by {diff:+,}; the record does not say why"
+        )
+    cust, non = _int(funnel.get("alerts")), _int(ops_d.get("alerts_out_of_scope"))
+    withdrawn = _int(ops_d.get("alerts_withdrawn_carried")) or 0
+    if alerts_tm is not None and cust is not None and non is not None:
+        current = cust + non - withdrawn
+        checks.append(
+            "TM rule alerts = customer + non-customer dispositions - withdrawn carried alerts"
+            if current == alerts_tm
+            else "customer + non-customer dispositions - withdrawn carried alerts differ from "
+            f"TM rule alerts by {current - alerts_tm:+,}; the record does not say why"
+        )
+    if disp and cust is not None and non is not None:
+        dsum = sum(_int(v) or 0 for v in disp.values())
+        checks.append(
+            "dispositions sum to customer + non-customer dispositions"
+            if dsum == cust + non
+            else f"dispositions sum to {dsum:,}, {dsum - cust - non:+,} against customer + "
+            "non-customer dispositions"
+        )
+    sars, alert_sars = _int(ops_d.get("sars_filed")), _int(funnel.get("sars"))
+    cont = _int(rec.get("funnel.continuing_sars"))
+    if sars is not None and alert_sars is not None:
+        if cont is not None and sars == alert_sars + cont:
+            checks.append(
+                f"SARs filed = {alert_sars:,} on alert cases + {cont:,} continuing-activity SARs"
+            )
+        else:
+            other = sars - alert_sars - (cont or 0)
+            checks.append(
+                f"SARs filed differ from alert-case plus continuing-activity SARs by {other:+,}; "
+                "the record does not say why"
+            )
+    body = "".join(
+        f"<tr><td>{label}</td><td>{value}</td><td><code class='mono'>{escape(src)}</code></td></tr>"
+        for label, value, src in rows
+    )
+    recon = "".join(f"<li>{escape(c)}</li>" for c in checks)
+    cap_note = (
+        '<p style="color: var(--text-muted); font-size: 0.8125rem;">Every count here comes '
+        "from the rules that ran; " + escape("; ".join(rule_caps)) + ".</p>"
+        if rule_caps
+        else ""
+    )
+    return (
+        "<section><h3>AML results funnel</h3>"
+        "<table><thead><tr><th>Step</th><th>Count</th><th>Source</th></tr></thead>"
+        f"<tbody>{body}</tbody></table>{cap_note}"
+        + (f"<h4>Reconciliation</h4><ul>{recon}</ul>" if recon else "")
+        + "</section>"
+    )
 
 
 def registered_look_role(run_id: str | None) -> str | None:

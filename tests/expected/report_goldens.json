@@ -36,6 +36,10 @@
     {
       "text": "L1 escalation rate 10.8%; QA disagreement 14.2%",
       "from": "tm_operations.ops.l1_escalation_rate, qa_disagreement_rate 0.1422"
+    },
+    {
+      "text": "SARs filed = 7,457 on alert cases + 442 continuing-activity SARs",
+      "from": "tm_operations.ops.sars_filed 7899 = funnel.sars 7457 + reconciliation funnel.continuing_sars 442"
     }
   ],
   "be2b70": [
@@ -92,6 +96,10 @@
     {
       "text": "54.0 CPU-hours requested",
       "from": "streaming jobs: stage executors x cores x streaming[i].elapsed_seconds / 3600, summed = 54.0"
+    },
+    {
+      "text": "SARs filed = 258 on alert cases + 14 continuing-activity SARs",
+      "from": "tm_operations.ops.sars_filed 272 = funnel.sars 258 + reconciliation funnel.continuing_sars 14"
     }
   ],
   "5105a0": [

@@ -580,6 +580,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   open as a new alert. Records stamped `aml-1` do not compare with `aml-2`
   runs. See
   [aml-scoring.md](docs/aml-scoring.md#per-alert-evidence-caps).
+- **The AML results block shows the funnel and labels capped totals.** The
+  report opens the AML results with a funnel from rule alerts to SARs filed,
+  each count with its record path and nested counts shown as "of which",
+  and checks the identities the transaction-monitoring step holds, sizing
+  any difference. Total alerts, the overall off-target rate and the funnel
+  say they cover only the rules that ran and carry a BOUNDED BY label when
+  a rule was skipped on a Lakebench cap. A continuous run's recall is shown
+  over covered instances with coverage beside it, per-reason-code recall
+  and FP are shown when recorded (or the scorer's status), and leakage
+  reads "not measured in this run".
 - **Reports open with the front matter.** The HTML report, `lakebench
   report` and the end of `run` show, before any metric: the verdict (the
   strictest of the stored and the recomputed one, with "stored X;
