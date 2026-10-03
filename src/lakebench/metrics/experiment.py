@@ -946,8 +946,23 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "stages": {"executed": executed, "skipped": skipped},
         "rules": rules,
         "limits": limits,
+        **_requested_effective(metrics, limits),
         "results": _results(metrics, mode),
         "lakebench": experiment_lakebench(metrics.provenance),
+    }
+
+
+def _requested_effective(metrics: Any, limits: Mapping[str, Any]) -> dict[str, Any]:
+    """``requested_effective`` (what the run asked for against what it did,
+    per decision) and ``requested_effective_mismatches`` (the keys of the
+    requests not met; metrics/requested_effective.py). Observational, never
+    identity."""
+    from lakebench.metrics import requested_effective as re_
+
+    entries = re_.derive(metrics, limits)
+    return {
+        "requested_effective": entries,
+        "requested_effective_mismatches": re_.mismatches(entries),
     }
 
 

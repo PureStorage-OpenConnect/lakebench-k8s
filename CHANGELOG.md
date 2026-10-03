@@ -65,6 +65,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   for every key Lakebench owns.
 
 ### Added
+- **Requested and effective values.** Each run records what it asked for
+  against what it did, for the gold strategy (Customer 360), the pipeline
+  mode, each job's executors and the continuous trickle, in
+  `experiment.requested_effective`. A request that was not met, or
+  automatic incremental gold outside a multi-cycle cycle, is listed in
+  `experiment.requested_effective_mismatches` and labelled in the verdict
+  (`qualifiers.requested_effective`) and the report; it never fails the
+  run or enters identity. The config snapshot records the requested gold
+  strategy (`requested.gold_strategy`).
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock

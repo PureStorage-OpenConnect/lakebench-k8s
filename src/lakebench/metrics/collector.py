@@ -2491,6 +2491,14 @@ def build_config_snapshot(
             snapshot["config_sha256"] = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
         except OSError:
             snapshot["config_sha256"] = None
+    if cfg.architecture.workload.schema_type.value == "customer360":
+        # What the config asked the gold scripts for, against what each gold
+        # job reports it ran (metrics/requested_effective.py). Outside the
+        # perf-gate fingerprint keys: the user conf is already hashed there.
+        from lakebench.config.c360_run import GOLD_STRATEGY_KEY
+
+        value = str((cfg.spark.conf or {}).get(GOLD_STRATEGY_KEY) or "auto").strip().lower()
+        snapshot["requested"] = {"gold_strategy": value or "auto"}
 
     return snapshot
 
