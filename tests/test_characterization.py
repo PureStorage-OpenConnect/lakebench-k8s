@@ -148,8 +148,9 @@ class TestConfigResolution:
         assert cfg.architecture.table_format.iceberg.version == "1.11.0"
 
     def test_delta_version_default(self):
+        # The recipe's Spark 4.1 image (release-matrix row) resolves Delta 4.1.0.
         cfg = _make_config(recipe="hive-delta-spark-trino")
-        assert cfg.architecture.table_format.delta.version == "4.0.0"
+        assert cfg.architecture.table_format.delta.version == "4.1.0"
 
     def test_delta_version_auto_resolution_spark41(self):
         """Spark 4.1 with delta auto -> 4.1.0."""

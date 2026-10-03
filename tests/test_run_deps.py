@@ -111,7 +111,7 @@ def test_run_refuses_changed_request_and_names_the_change(recording_k8s):
     _deployed(recording_k8s, deployed)
     now = make_config(
         name=NS,
-        images={"spark": "apache/spark:4.1.1-python3"},
+        images={"spark": "apache/spark:4.0.2-python3"},
         platform={
             "storage": {"s3": {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}}
         },

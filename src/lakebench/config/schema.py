@@ -443,7 +443,7 @@ class ImagesConfig(ConfigModel):
     provenance. Output is byte-identical to the v1.6 AML generator freeze
     (`datagen-v2-rs-0.3`); this build cuts datagen pod memory.
     """
-    spark: str = "apache/spark:4.0.2-python3"
+    spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Spark 4.x images are auto-detected."""
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     """PostgreSQL image (metadata backend)."""
@@ -2968,6 +2968,28 @@ def _is_recipe_shaped(name: str, recipes: Any) -> bool:
     return len(parts) == 4 and all(p in slots[i] for i, p in enumerate(parts))
 
 
+def _default_spark_image_for_components(data: dict) -> None:
+    """A config with no recipe and no ``images.spark`` takes the Spark image of
+    the recipe its components name (catalog, table format, query engine, with
+    the schema's defaults for the ones it leaves out), so it runs the Spark
+    minor that recipe's release-matrix row is proven on. Components that no
+    recipe names keep the schema default."""
+    from lakebench.config.recipes import RECIPES, written_recipe
+
+    images = data.get("images")
+    if isinstance(images, dict) and images.get("spark") is not None:
+        return
+    if images is not None and not isinstance(images, dict):
+        return
+    try:
+        matched = written_recipe(data, "hive-iceberg-spark-trino")
+    except Exception:  # noqa: BLE001 -- a malformed block is refused by validation
+        return
+    image = (RECIPES.get(matched or "", {}).get("images") or {}).get("spark")
+    if image:
+        data["images"] = {**(images or {}), "spark": image}
+
+
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -3111,6 +3133,8 @@ class LakebenchConfig(ConfigModel):
                     data["recipe"] = written
                     defaults = RECIPES[written]
             _deep_setdefault(data, defaults, injected)
+        else:
+            _default_spark_image_for_components(data)
         model = handler(data)
         model._recipe_injected = frozenset(injected)
         return model

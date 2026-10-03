@@ -660,7 +660,7 @@ def test_fingerprint_v2_default_golden():
             "worker": {"replicas": 2, "cpu": "4", "memory": "16Gi"},
         },
     }
-    assert images.spark == "apache/spark:4.0.2-python3"  # the conf below assumes 4.0
+    assert images.spark == "apache/spark:4.1.1-python3"  # the conf below assumes 4.1
     assert fp == expected
     assert inputs["job_profiles"] == _GOLDEN_PROFILES
     # Heap = 80% of the pod limit in whole MiB (jvm_heap_for_limit): 8Gi ->

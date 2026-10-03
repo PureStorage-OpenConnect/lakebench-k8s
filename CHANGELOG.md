@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
+- **The Hive recipes default to Spark 4.1.1.** Each recipe's default
+  Spark image is now the Spark minor of its release-matrix row:
+  `hive-iceberg-spark-trino` (the default recipe), `hive-iceberg-spark-thrift`,
+  `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none` and
+  `hive-delta-spark-trino` take `apache/spark:4.1.1-python3`; the Polaris
+  recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` stay on
+  `4.0.2-python3`. A config with no recipe and no `images.spark` takes the
+  image of the recipe its components name (so a recipe-less Polaris config
+  stays on 4.0.2). With the format version at `auto`, Delta follows to 4.1.0
+  and Iceberg 1.11.0 uses its native Spark 4.1 runtime. A config that did
+  not set `images.spark` therefore runs a different Spark, jar set and
+  perf-gate fingerprint than under v1.6: pin `images.spark:
+  apache/spark:4.0.2-python3` to keep the old one. `--local` runs keep their
+  own 4.0.2 image.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
