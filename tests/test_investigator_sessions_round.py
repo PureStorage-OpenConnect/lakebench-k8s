@@ -64,11 +64,12 @@ def test_bind_case_takes_only_a_case_id(bad):
 
 
 #: The default investigator SQL, pinned: the subject constants render it
-#: byte for byte as before (the qs12 id did not move).
+#: byte for byte as the query registry had it before them (IQ3 as it sums
+#: its second hop per pair), so the qs12 id did not move.
 PINNED = {
     "IQ1_customer_360": "377015e8166e3946c814cc4e1cf2e2af941640a84197150d1020bcb3d8e5ab76",
     "IQ2_case_activity_12m": "b0846dddea2d8c3a38688f1e4216e06c93ed22dcef12f366d13fe351c48c40db",
-    "IQ3_counterparty_two_hop": "418ac05cbc52a04e14297914e13f77ac352a6a4a26e914aedf512ac9595b3bf0",
+    "IQ3_counterparty_two_hop": "c16faa93287030016929c4944917c795b0471d2782d28e4452367655d7737e12",
     "IQ4_open_cases_over_60_days": "63109f35baa824da5dd217907707257e9f508d60829f086483b9dddcac7a4a92",
 }
 
@@ -77,7 +78,7 @@ def test_default_investigator_sql_is_unchanged():
     got = {q.name: hashlib.sha256(q.sql.encode()).hexdigest() for q in INVESTIGATOR_QUERIES}
     assert got == PINNED
     names = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
-    assert query_set_id(names) == "qs12-4bd2d9416abb"
+    assert query_set_id(names) == "qs12-70ccb96a1900"
 
 
 def test_the_case_query_orders_as_iq1():
