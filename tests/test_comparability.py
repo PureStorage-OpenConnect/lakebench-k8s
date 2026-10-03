@@ -727,6 +727,17 @@ class TestLadder:
         v = _verdict(self._rounds_side("a", (4, 5)), side_b)
         assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
 
+    def test_confounded_pair_keeps_the_side_outcome_reason(self):
+        side_a = self._rounds_side("a", (4, 5))
+        side_b = self._rounds_side("b", (4,))
+        side_b[0]["experiment"]["architecture"]["recipe"] = "other"
+        side_b[0]["experiment"]["system_identity"] = _sys(ca="d" * 12)
+        for rec in side_a:
+            rec["experiment"]["system_identity"] = _sys()
+        v = _verdict(side_a, side_b)
+        assert v.verdict == cmp.CONFOUNDED, v.reasons
+        assert any(r.startswith("side A: benchmark rounds differs inside") for r in v.reasons)
+
     def test_is_outcome_difference_predicate(self):
         d = cmp.Difference
         assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", 4, 5))
@@ -734,6 +745,11 @@ class TestLadder:
         assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", None, 5))
         assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", 2, 3))
         assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", None, 3))
+        # Not counts on both runs, or none against some: strict.
+        for va, vb in ((0, 3), ([], ["s1"]), ({"c": 1}, {"c": 8}), ("unreadable", 3), (True, 2)):
+            assert not cmp.is_outcome_difference(
+                d(cmp.CONDITIONS, "investigator sessions", va, vb)
+            ), (va, vb)
         assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark mode", "power", "x"))
         assert not cmp.is_outcome_difference(d(cmp.CORPUS, "scale", 1.0, 2.0))
 
@@ -1197,6 +1213,18 @@ class TestSkippedMaintenance:
         v = _verdict(*self._pair(self.ICE, self.DELTA))
         assert "effective maintenance" not in v.keys(cmp.CONDITIONS), v.reasons
         assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "architecture differential")
+
+    def test_settings_of_maintenance_that_never_ran_are_not_compared(self):
+        a, b = self._pair(self.ICE, self.DELTA)
+        a["experiment"]["maintenance_settings"] = {"retention_interval": 1800}
+        b["experiment"]["maintenance_settings"] = {"retention_interval": 600}
+        v = _verdict(a, b)
+        assert v.keys(cmp.CONDITIONS) == [], v.reasons
+        ran = "m2-2026-09-26:vacuum=ran,compaction=not_supported"
+        a2, b2 = self._pair(ran, ran)
+        a2["experiment"]["maintenance_settings"] = {"retention_interval": 1800}
+        b2["experiment"]["maintenance_settings"] = {"retention_interval": 600}
+        assert "maintenance settings" in _verdict(a2, b2).keys(cmp.CONDITIONS)
 
     def test_one_side_ran_maintenance_is_not_like_for_like(self):
         ran = "m2-2026-09-26:vacuum=ran,compaction=not_supported"

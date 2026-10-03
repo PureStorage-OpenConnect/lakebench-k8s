@@ -150,9 +150,11 @@ bound, a differing round count. Commands name the side's config from its
 record (`provenance.config_path`), or "the config of deployment <name>"
 for a record that does not carry it. A continuous side cannot be repeated
 with `--repeat`, so its hint says to run it again with `--continuous` and
-pass the run ids. Two continuous runs whose in-stream rounds differ are not
-one experiment when they are on one side: rounds are an outcome of speed,
-so compare single runs.
+pass the run ids. Two continuous runs on one side whose in-stream rounds
+differ are still one experiment (rounds are an outcome of speed): the pair
+is NOT LIKE-FOR-LIKE, with no command. A run with no in-stream round (its
+QpH is the post-stream benchmark) beside runs with rounds is not one
+experiment.
 
 **Metrics.** Each score is shown with the median, range and n of each side
 and the delta of the medians. No winner is named and no colour marks a

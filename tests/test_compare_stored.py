@@ -624,6 +624,36 @@ def test_within_side_rounds_are_an_outcome_hint() -> None:
     assert doc["missing"]["command"] is None
 
 
+def test_p4_with_maintenance_skipped_on_both_sides_follows_its_hint() -> None:
+    # P4's hint says run both with --skip-maintenance; its continuous runs
+    # also differ in maintenance settings, which must not keep the pair from
+    # following the hint (no maintenance ran on either side).
+    spec = PAIRS["P4"]
+    a, b = sr.load_record(spec["a"]), sr.load_record(spec["b"])
+    assert a["experiment"]["maintenance_settings"] != b["experiment"]["maintenance_settings"]
+    a["experiment"]["effective_maintenance"]["id"] = (
+        "m2-2026-09-26+skipped:expire_snapshots=skipped_by_user,"
+        "remove_orphan_files=skipped_by_user,compaction=skipped_by_user"
+    )
+    b["experiment"]["effective_maintenance"]["id"] = (
+        "m2-2026-09-26+skipped:vacuum=skipped_by_user,compaction=skipped_by_user"
+    )
+    doc = cm.compare_records([a], [b])
+    reasons = " ".join(doc["reasons"])
+    assert "maintenance" not in reasons, doc["reasons"]
+    assert "maintenance policy differs" not in " ".join(doc["warnings"])
+
+
+def test_rounds_against_the_post_stream_estimator_names_the_estimator() -> None:
+    a = sr.load_record("011043-e338c5")
+    a["experiment"]["limits"]["benchmark_rounds"] = 4
+    b = _with_id(a, "20261001-000000-r0b009")
+    b["experiment"]["limits"]["benchmark_rounds"] = 0
+    doc = cm.compare_records([a], [b])
+    assert "B's QpH is the post-stream benchmark" in doc["missing"]["hint"]
+    assert "medians over different numbers of rounds" not in doc["missing"]["hint"]
+
+
 def test_maintenance_skipped_on_both_formats_is_like_for_like() -> None:
     # Owner decision 10-03 (b), through the compare document: P6's Iceberg
     # and Delta runs with every operation skipped by the user.
@@ -642,6 +672,18 @@ def test_maintenance_skipped_on_both_formats_is_like_for_like() -> None:
     doc = cm.compare_records([a], [b])
     assert (doc["verdict"], doc["step"], doc["exit_code"]) == (cmp.LIKE_FOR_LIKE, "8", 0)
     assert doc["reasons"] == []
+    # One run stamped +skipped and one with pre_benchmark_maintenance off:
+    # the same maintenance, and no "policy differs" warning beside it.
+    b["experiment"]["effective_maintenance"]["id"] = (
+        "m2-2026-09-26:vacuum=skipped_by_user,compaction=skipped_by_user"
+    )
+    a["maintenance_policy_id"], b["maintenance_policy_id"] = (
+        "m2-2026-09-26+skipped",
+        "m2-2026-09-26",
+    )
+    doc = cm.compare_records([a], [b])
+    assert doc["verdict"] == cmp.LIKE_FOR_LIKE
+    assert not any("maintenance policy differs" in w for w in doc["warnings"])
 
 
 def test_newer_schema_says_upgrade() -> None:

@@ -1066,6 +1066,16 @@ def _condition_hint(cause: cmp.Cause, a: Side, b: Side) -> MissingCondition:
             "Re-run when the cluster can grant both requests, or set the same override on both "
             "sides",
         )
+    if key == "benchmark rounds" and isinstance(cause.a, int) and isinstance(cause.b, int):
+        if (cause.a > 0) != (cause.b > 0):
+            zero = "A" if cause.a == 0 else "B"
+            return MissingCondition(
+                "in-stream rounds on both sides",
+                None,
+                f"in-stream rounds differ ({va} vs {vb}): {zero}'s QpH is the post-stream "
+                "benchmark (no in-stream round ran), the other side's an in-stream median, "
+                "two different estimators. Missing: in-stream rounds on both sides",
+            )
     if key in cmp.OUTCOME_CONDITION_KEYS:
         what = "in-stream rounds" if key == "benchmark rounds" else key
         return MissingCondition(
@@ -1492,6 +1502,15 @@ def _warnings(a: Side, b: Side) -> list[str]:
             from lakebench.metrics.maintenance_policy import policy_mismatch, recorded_policy
 
             problem = policy_mismatch(recorded_policy(fa), recorded_policy(fb))
+            ids = [
+                ((r.get("experiment") or {}).get("effective_maintenance") or {}).get("id")
+                for r in (fa, fb)
+            ]
+            if problem and all(ids) and cmp.maintenance_equal(*ids):
+                # Both skipped every operation: the same maintenance
+                # (comparability.maintenance_equal), whatever the policy
+                # suffix says.
+                problem = None
         except Exception:  # noqa: BLE001 -- a policy that cannot be read is not a warning
             problem = None
         if problem:

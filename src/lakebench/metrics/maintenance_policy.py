@@ -37,7 +37,10 @@ failure stopped it. Compaction outcomes now count tables (a table succeeds
 when every chunk does) and name each failed table.
 
 A run with ``--skip-maintenance`` is stamped ``<id>+skipped``: it ran no
-table maintenance, so it compares with nothing measured under the policy.
+table maintenance, so the perf gate matches it with nothing measured under
+the policy. ``compare`` reads two runs that each skipped every operation
+under one policy (``+skipped``, or ``pre_benchmark_maintenance`` off in
+batch) as the same maintenance (comparability.maintenance_equal).
 
 Bump MAINTENANCE_POLICY_ID whenever the maintenance policy changes (which
 operations run, at what retention or threshold, on which tables, when, and

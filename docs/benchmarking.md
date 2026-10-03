@@ -336,12 +336,14 @@ actually got (`experiment.effective_maintenance`), one label per operation
 
 Two runs whose effective maintenance differs are comparable at best, not
 like-for-like. The one exception: two runs that each skipped every
-operation by the user's choice (`--skip-maintenance`, or
+operation by the user's choice (`--skip-maintenance`, or in batch mode
 `pre_benchmark_maintenance: false`) under one maintenance policy count as
 the same maintenance, even across table formats, where the labels name
-different operations: no maintenance ran on either side. A `not_supported`
-label is not a skip, so a DuckDB run never matches a skipped Trino run on
-this key.
+different operations: no maintenance ran on either side, so their
+maintenance settings are not compared either. A `not_supported` label is
+not a skip: a DuckDB run with maintenance on records `not_supported` and
+does not match a skipped run, while with `--skip-maintenance` it records
+`skipped_by_user` like any other run.
 
 Compaction differs by engine: Trino runs `optimize` with a 128 MB file size
 threshold, Spark Thrift runs Iceberg `rewrite_data_files` with its defaults.
@@ -1189,7 +1191,11 @@ operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
 `rewrite_data_files` are different operations), maintenance settings,
 benchmark iterations and mode, in-stream rounds (continuous), and the
 Lakebench limits that bound. A delta between runs whose conditions differ
-may come from those conditions rather than the architecture.
+may come from those conditions rather than the architecture. Each verdict
+is printed with the one condition the pair is missing and, where one
+exists, the command that supplies it. Medians, ranges and n are shown for
+every score, with the delta of medians where the pair is comparable; no
+winner is named in this release. See the [CLI reference](cli-reference.md#compare).
 
 Two of these rules decide pairs that would otherwise read differently:
 
@@ -1201,17 +1207,16 @@ Two of these rules decide pairs that would otherwise read differently:
   means the QpH is the post-stream benchmark, another estimator, so that
   side is not one experiment (NOT COMPARABLE). Any other difference inside
   a side, in the workload, corpus, architecture, system, another condition
-  or the query results, still makes it not one experiment.
+  or the query results, still makes it not one experiment. Investigator
+  sessions count as an outcome only when both runs recorded a count and
+  neither ran none against some. Such a pair shows its medians, but no
+  directional row is assessed, since it is not like-for-like.
 - **Maintenance skipped on both sides.** Effective maintenance skipped by
   the user on every operation, on both sides, is the same maintenance
   (above), so an Iceberg and a Delta run with `--skip-maintenance` can be
   LIKE-FOR-LIKE, attributed to the architecture. With maintenance on, an
   Iceberg and a Delta run always differ on this key, and the hint says to
-  run both with `--skip-maintenance`. Each verdict
-is printed with the one condition the pair is missing and, where one
-exists, the command that supplies it. Medians, ranges and n are shown for every score, with the
-delta of medians where the pair is comparable; no winner is named in this
-release. See the [CLI reference](cli-reference.md#compare).
+  run both with `--skip-maintenance`.
 
 The architecture (the recipe, its components and versions, the query access
 path, the dependency set) and the system (the cluster and object store,

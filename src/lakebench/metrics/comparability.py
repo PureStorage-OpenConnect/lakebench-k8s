@@ -635,20 +635,18 @@ def is_outcome_difference(d: Difference) -> bool:
     own speed, so a side whose repeats differ in it is still one
     experiment; the pair is NOT LIKE-FOR-LIKE, as when the sides differ in
     it, not NOT COMPARABLE. Every other key, and the query results, still
-    make the side not one experiment, and so does an outcome key that only
-    one run recorded, or a round count of 0 against more than 0: with no
-    in-stream round the QpH is the post-stream benchmark, another
+    make the side not one experiment. So does an outcome value that is not
+    a count on both runs (missing, unreadable, a list or a mapping, which
+    may be a setting rather than an outcome), and 0 against more than 0:
+    with no in-stream round the QpH is the post-stream benchmark, another
     estimator (the perf gate refuses the same switch,
-    ``experiment.stored_identity_refusals``)."""
+    ``experiment.stored_identity_refusals``), and no investigator session
+    against some is a run without the load against one with it."""
     if d.group != CONDITIONS or d.key not in OUTCOME_CONDITION_KEYS:
         return False
-    if d.a is None or d.b is None:
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (d.a, d.b)):
         return False
-    if d.key == "benchmark rounds":
-        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (d.a, d.b)):
-            return False
-        return (d.a > 0) == (d.b > 0)
-    return True
+    return (d.a > 0) == (d.b > 0)
 
 
 def _all_skipped_policy(effective_id: Any) -> str | None:
@@ -666,6 +664,11 @@ def _all_skipped_policy(effective_id: Any) -> str | None:
     return policy.removesuffix(SKIPPED_SUFFIX)
 
 
+def _both_skipped(ka: Mapping[str, Any], kb: Mapping[str, Any]) -> bool:
+    pa = _all_skipped_policy(ka.get("effective maintenance"))
+    return pa is not None and pa == _all_skipped_policy(kb.get("effective maintenance"))
+
+
 def maintenance_equal(a: Any, b: Any) -> bool:
     """Whether two effective-maintenance ids are the same maintenance
     (owner decision 10-03 (b)): the same id, or both runs skipped every
@@ -673,7 +676,9 @@ def maintenance_equal(a: Any, b: Any) -> bool:
     ``pre_benchmark_maintenance`` off) under one maintenance policy. No
     maintenance ran on either side, so an Iceberg run and a Delta run, whose
     ids name different operations, are equal here. ``not_supported`` (the
-    composition cannot run it) is not a skip and stays a difference."""
+    composition cannot run it) is not a skip and stays a difference. When
+    it holds through the skip case, ``maintenance settings`` (how
+    aggressive the maintenance would have been) is not compared either."""
     if a == b:
         return True
     pa = _all_skipped_policy(a)
@@ -702,6 +707,10 @@ def diff_group(a: Classified, b: Classified, group: str, *, skip: Any = ()) -> l
                 out.append(Difference(group, key, va, vb))
             continue
         if key == "effective maintenance" and key in ka and key in kb and maintenance_equal(va, vb):
+            continue
+        if key == "maintenance settings" and _both_skipped(ka, kb):
+            # How aggressive maintenance would have been, when none ran on
+            # either side (maintenance_equal's skip case), changes nothing.
             continue
         if (key in ka) != (key in kb) or va != vb:
             out.append(Difference(group, key, va, vb))
@@ -1233,12 +1242,17 @@ def pair_verdict(
             cause=cause or Cause("none"),
         )
 
+    inside = [
+        f"side {lb}: {d.key} differs inside the side ({r} {d.a!r} vs {o} {d.b!r})"
+        for lb, r, o, d in side_outcomes
+    ]
     # Step 6: architecture and system both differ.
     if arch and rel in ("different", UNOBSERVED):
         return verdict(
             CONFOUNDED,
             "6",
-            [f"architecture and system both differ ({', '.join(d.key for d in arch)}; {why})"],
+            [f"architecture and system both differ ({', '.join(d.key for d in arch)}; {why})"]
+            + inside,
             cause=Cause(
                 "confounded",
                 group=ARCHITECTURE,
@@ -1251,10 +1265,6 @@ def pair_verdict(
     # Step 7: conditions differ, between the sides or, in an outcome key,
     # inside one.
     if cond or side_outcomes:
-        inside = [
-            f"side {lb}: {d.key} differs inside the side ({r} {d.a!r} vs {o} {d.b!r})"
-            for lb, r, o, d in side_outcomes
-        ]
         if cond:
             cause = Cause("condition", group=CONDITIONS, key=cond[0].key, a=cond[0].a, b=cond[0].b)
         else:
