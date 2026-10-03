@@ -179,8 +179,18 @@ def _note_benchmark_record(metrics) -> None:
         )
 
 
-def _print_report_summary(metrics) -> None:
-    """Print key scores from saved metrics to the terminal."""
+_STATUS_WORDS = {
+    "PASSED": "[green]Passed[/green]",
+    "INTERRUPTED": "[yellow]Interrupted[/yellow]",
+    "REFUSED": "[red]Refused[/red]",
+}
+
+
+def _print_report_summary(metrics, judged: dict | None = None) -> None:
+    """Print key scores from saved metrics to the terminal. *judged* is
+    ``verdict.verdict_of`` of the stored record: the status line is its
+    headline (the strictest of the stored and the recomputed verdict, as
+    every reader takes it), naming both when they differ."""
     _note_benchmark_record(metrics)
     pb = metrics.pipeline_benchmark
     if pb is None:
@@ -188,7 +198,16 @@ def _print_report_summary(metrics) -> None:
         return
 
     # Header
-    status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
+    if judged is not None and judged.get("status"):
+        status = _STATUS_WORDS.get(str(judged["status"]), "[red]Failed[/red]")
+        if (
+            judged.get("stored")
+            and judged.get("recomputed")
+            and (judged["stored"] != judged["recomputed"])
+        ):
+            status += f" (stored {judged['stored']}; recomputed {judged['recomputed']})"
+    else:
+        status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
     header = (
         f"[bold]{pb.deployment_name}[/bold]  run {pb.run_id}\n"
         f"Mode: {pb.pipeline_mode} | Status: {status}"
@@ -1596,6 +1615,29 @@ def _report_list_row(r: dict) -> dict:
     }
 
 
+def _stored_record(runs_dir: Path, rid: str) -> dict:
+    """The record *rid* as stored (the per-run file, else the legacy flat
+    one, as ``load_run`` reads them), or {} when neither is readable."""
+    import json as _json_mod
+
+    for path in (runs_dir / f"run-{rid}" / "metrics.json", runs_dir / f"run-{rid}.json"):
+        try:
+            data = _json_mod.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _stored_verdict(runs_dir: Path, rid: str) -> dict | None:
+    """``verdict.verdict_of`` of the stored record *rid*, or None."""
+    from lakebench.metrics.verdict import verdict_of
+
+    record = _stored_record(runs_dir, rid)
+    return verdict_of(record) if record else None
+
+
 def _report_run_data(
     metrics, runs_dir: Path, delivered: Path | None, requested: str | None = None
 ) -> dict:
@@ -1607,18 +1649,10 @@ def _report_run_data(
     strictest of them, as compare, the perf gate and the release gate read
     it. A record that cannot be read as stored gives null for all three and
     for the scores."""
-    import json as _json_mod
-
     from lakebench.metrics.verdict import verdict_of
 
-    record: dict = {}
-    rid = requested or metrics.run_id  # the id load_run was given, when one was
-    for path in (runs_dir / f"run-{rid}" / "metrics.json", runs_dir / f"run-{rid}.json"):
-        try:
-            record = _json_mod.loads(path.read_text())
-            break
-        except (OSError, ValueError):
-            continue
+    # The id load_run was given, when one was.
+    record = _stored_record(runs_dir, requested or metrics.run_id)
     pbd = record.get("pipeline_benchmark") or {}
     judged = verdict_of(record) if record else {"stored": None, "recomputed": None, "status": None}
     return {
@@ -1807,9 +1841,10 @@ def report(
         for r in runs:
             # Prefer the persisted verdict (OD-6: v1.6 records) and fall
             # back to raw ``success`` for legacy v1.5 records.
+            headline = r.get("verdict_headline")
             if r.get("passed", _record_passed(r)):
                 status = "[green]Passed[/green]"
-            elif (_verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
+            elif (headline or _verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
                 status = "[yellow]Interrupted[/yellow]"
             else:
                 status = "[red]Failed[/red]"
@@ -1882,7 +1917,9 @@ def report(
                 else storage.get_latest_run_for_deployment(deployment_name)
             )
             if resolved:
-                _print_report_summary(resolved)
+                _print_report_summary(
+                    resolved, _stored_verdict(storage.metrics_dir, run_id or resolved.run_id)
+                )
 
         console.print(
             Panel(
@@ -1914,7 +1951,7 @@ def report(
         _print_stage_matrix(metrics, output_format)
         return
 
-    _print_report_summary(metrics)
+    _print_report_summary(metrics, _stored_verdict(storage.metrics_dir, run_id or metrics.run_id))
 
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{run_id or metrics.run_id}" / "report.html"

@@ -97,8 +97,8 @@ class ReportListRow(TypedDict):
     deployment_name: str | None
     start_time: str | None
     verdict: str | None  # strictest of verdict_stored and verdict_recomputed
-    verdict_stored: str | None
-    verdict_recomputed: str | None
+    verdict_stored: str | None  # verdict.status as stored; null: no verdict block
+    verdict_recomputed: str | None  # verdict_from_record's status; null: not recomputable
     total_elapsed_seconds: float | None
 
 

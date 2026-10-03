@@ -447,11 +447,11 @@ def _mark_exclusions(side: Side) -> None:
     record from before the experiment block is not excluded: the ladder
     refuses it at step 1."""
     for m in side.members:
-        ok, status = cmp._member_passed(m.record)
+        ok, status, why = cmp._member_verdict(m.record)
         m.passed, m.status = ok, status
         if not ok and cmp.generation(m.record) != cmp.LEGACY:
             reason = cmp._first_reason(m.record)
-            m.excluded = f"{status or 'did not pass'}" + (f": {reason}" if reason else "")
+            m.excluded = why or (f"{status or 'did not pass'}" + (f": {reason}" if reason else ""))
 
 
 def equal_name_problem(*sides: Side) -> str | None:

@@ -640,6 +640,8 @@ def _save_benchmark_record(
         engine=result.engine,
     )
     record.benchmark = bench
+    # The parent's benchmark failure describes the benchmark this replaces.
+    record.benchmark_error = None
     record.benchmark_rounds = []
     pb = record.pipeline_benchmark
     if pb is not None:
@@ -687,6 +689,11 @@ def _save_benchmark_record(
     record.record_kind = "benchmark"
     record.parent_run_id = parent_run_id
     record.series = None
+    # The record's success follows its verdict (the parent's pipeline, this
+    # benchmark): a stored success never stands beside a FAILED verdict.
+    from lakebench.metrics.verdict import apply_save_gate
+
+    apply_save_gate(record, record.success, print_warning)
 
     def _new_id() -> str:
         return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]

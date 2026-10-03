@@ -884,3 +884,116 @@ def test_benchmark_record_is_never_the_latest_run(tmp_path: Path) -> None:
         (d / "metrics.json").write_text(json.dumps(rec))
     latest = MetricsStorage(tmp_path).get_latest_run_for_deployment(None)
     assert latest is not None and latest.record_kind == "run"
+
+
+# ---------------------------------------------------------------------------
+# verdict_of: one rule for the headline (r3 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stored,success,recomputed,want",
+    [
+        ("PASSED", True, "PASSED", "PASSED"),
+        ("PASSED", True, "FAILED", "FAILED"),
+        ("PASSED", True, "REFUSED", "REFUSED"),
+        ("PASSED", True, "INTERRUPTED", "INTERRUPTED"),
+        ("FAILED", True, "PASSED", "FAILED"),
+        ("INTERRUPTED", False, "FAILED", "FAILED"),
+        ("REFUSED", True, "INTERRUPTED", "INTERRUPTED"),
+        (None, True, "PASSED", "PASSED"),
+        (None, False, "PASSED", "FAILED"),
+        ("VOID", True, "PASSED", "VOID"),
+    ],
+)
+def test_verdict_of_takes_the_strictest(monkeypatch, stored, success, recomputed, want) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(V, "_recompute", lambda rec: SimpleNamespace(status=recomputed, reasons=[]))
+    rec = sr.load_record(C360_BATCH)
+    rec["success"] = success
+    if stored is None:
+        del rec["verdict"]
+    else:
+        rec["verdict"]["status"] = stored
+    got = V.verdict_of(rec)
+    assert got == {"stored": stored, "recomputed": recomputed, "status": want}
+    assert V.passed(rec) is (want == "PASSED")
+
+
+def test_verdict_of_an_unreadable_record_is_failed() -> None:
+    rec = sr.load_record(C360_BATCH)
+    rec["jobs"][0]["start_time"] = "not a time"
+    assert V.verdict_of(rec) == {"stored": "PASSED", "recomputed": None, "status": "FAILED"}
+
+
+def test_verdict_of_a_summary_row_is_what_it_stored() -> None:
+    row = {"run_id": "r", "success": True, "verdict": {"status": "PASSED"}}
+    assert V.verdict_of(row) == {"stored": "PASSED", "recomputed": None, "status": "PASSED"}
+
+
+def test_compare_member_verdict_is_a_status_and_the_reason_says_why(tmp_path: Path) -> None:
+    """compare --json members[].verdict is a status, as report --json's; the
+    explanation is in reason. An unreadable record is refused, not a crash."""
+    from lakebench.metrics import compare as cm
+
+    bad = sr.load_record(C360_BATCH)
+    _silver_zero(bad)
+    doc = cm.compare_records([bad], [sr.load_record(C360_BATCH)])
+    (member,) = doc["sides"]["a"]["members"]
+    assert member["verdict"] == "FAILED" and member["excluded"]
+    assert member["reason"].startswith("recomputed FAILED: silver has 0 rows")
+    broken = sr.load_record(C360_BATCH)
+    broken["jobs"][0]["start_time"] = "not a time"
+    doc = cm.compare_records([broken], [sr.load_record(C360_BATCH)])
+    (member,) = doc["sides"]["a"]["members"]
+    assert member["verdict"] == "FAILED"
+    assert member["reason"].startswith("the verdict could not be recomputed")
+
+
+def test_text_report_heads_with_the_strictest_verdict(monkeypatch, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+
+    rec = sr.load_record(C360_BATCH)
+    _silver_zero(rec)
+    d = tmp_path / "lakebench-output" / "runs" / f"run-{rec['run_id']}"
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text(json.dumps(rec))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    res = CliRunner().invoke(app, ["report", rec["run_id"]])
+    text = " ".join(res.output.split())
+    assert "Status: Failed (stored PASSED; recomputed FAILED)" in text, text
+    res = CliRunner().invoke(app, ["report", "--list"])
+    assert "Failed" in res.output and "Passed" not in res.output
+
+
+def test_benchmark_record_success_follows_its_verdict(tmp_path: Path) -> None:
+    """A benchmark record copies its parent's pipeline: when that record
+    reads FAILED (a stored pass the record no longer shows), its success is
+    False too; the parent's benchmark error does not survive the new
+    benchmark."""
+    import shutil
+
+    from lakebench.cli._query import _save_benchmark_record
+    from lakebench.metrics.storage import MetricsStorage
+    from tests.test_record_writers import _bench_result
+
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    rec = sr.load_record(C360_BATCH)
+    _silver_zero(rec)
+    rec["benchmark_error"] = "an earlier failure"
+    d = runs / f"run-{rec['run_id']}"
+    d.mkdir()
+    (d / "metrics.json").write_text(json.dumps(rec))
+    storage = MetricsStorage(runs)
+    path = _save_benchmark_record(storage, storage.load_run(rec["run_id"]), _bench_result())
+    saved = json.loads(Path(path).read_text())
+    assert saved["record_kind"] == "benchmark"
+    assert "benchmark_error" not in saved
+    assert saved["success"] is False and saved["verdict"]["status"] == "FAILED"
+    assert any("silver has 0 rows" in r for r in saved["verdict"]["reasons"])
+    shutil.rmtree(runs)

@@ -507,7 +507,8 @@ class MetricsStorage:
                 "success": data.get("success"),
                 "verdict": verdict,
                 # The strictest of the stored verdict and the one recomputed
-                # from the whole record (a summary row cannot recompute).
+                # from the whole record (verdict.verdict_of): a reader of the
+                # row cannot recompute, so the row carries it.
                 "verdict_recomputed": judged["recomputed"],
                 "verdict_headline": judged["status"],
                 "passed": judged["status"] == "PASSED",

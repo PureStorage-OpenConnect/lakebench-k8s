@@ -206,25 +206,43 @@ def verdict_of(record: Mapping[str, Any] | None) -> dict[str, str | None]:
     reader never promotes. None only for no record at all."""
     if record is None:
         return {"stored": None, "recomputed": None, "status": None}
-    stored = verdict_status(record)
+    return {k: v for k, v in judge(record).items() if k in ("stored", "recomputed", "status")}
+
+
+def judge(record: Mapping[str, Any]) -> dict[str, Any]:
+    """``verdict_of`` plus why: ``reasons`` (the recomputed verdict's
+    reasons, without the gate markers) and ``error`` (why the record could
+    not be recomputed, else None). Readers that explain a refusal (compare)
+    use this; everything else uses ``verdict_of`` or ``passed``."""
+    stored = verdict_status(record) or None
     base = stored if stored is not None else ("PASSED" if record.get("success") else "FAILED")
     recomputed: str | None = None
-    unreadable = False
+    reasons: list[str] = []
+    error: str | None = None
     if _is_run_record(record):
         try:
-            recomputed = _recompute(record).status
+            again = _recompute(record)
+            recomputed = again.status
+            reasons = [str(r) for r in again.reasons if not str(r).startswith("Gate '")]
         except Exception as e:  # noqa: BLE001 -- an unreadable record never reads passed
             import logging
 
-            unreadable = True
+            error = f"{type(e).__name__}: {e}"
             logging.getLogger(__name__).warning(
                 "run %s: verdict not recomputable (%s); read as not passed",
                 record.get("run_id"),
                 e,
             )
-    candidates = [base] + ([recomputed] if recomputed else []) + (["FAILED"] if unreadable else [])
+    candidates = [base] + ([recomputed] if recomputed else []) + (["FAILED"] if error else [])
+    # An unknown status ranks with FAILED: never read as a pass.
     status = min(candidates, key=lambda x: _STRICTNESS.get(x, 0))
-    return {"stored": stored, "recomputed": recomputed, "status": status}
+    return {
+        "stored": stored,
+        "recomputed": recomputed,
+        "status": status,
+        "reasons": reasons,
+        "error": error,
+    }
 
 
 def passed(record: Mapping[str, Any] | None) -> bool:
