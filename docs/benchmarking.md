@@ -20,7 +20,11 @@ result as a record of its own, `record_kind: "benchmark"` with
 `parent_run_id` naming the run it measured: a copy of that run's record with
 the new benchmark, under a new run id. The run's own record is never
 rewritten, and a benchmark record is never a deployment's "latest run" for
-`report` or `compare`. `lakebench query` prints its result and writes no
+`report` or `compare`, nor a candidate or baseline for the perf gate. Its
+QpH, scores and query stage are the new benchmark's; its pipeline stages,
+sizes and timings are the run's, and `provenance.benchmark` names the code
+that ran the benchmark and when. A continuous run's in-stream rounds are not
+copied. `lakebench query` prints its result and writes no
 record.
 
 ---

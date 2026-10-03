@@ -525,15 +525,21 @@ def load_run(ref: str | Path, runs_dir: Path | list[Path] | None = None) -> RunR
 
 
 def iter_runs(runs_dir: Path) -> Iterator[RunRecord]:
-    """Every readable run under *runs_dir*, newest run id first."""
+    """Every readable run under *runs_dir*, newest run id first.
+
+    A ``lakebench benchmark`` record (``record_kind`` "benchmark") is not a
+    run: it copies the run it measured, so yielding it would offer that run's
+    pipeline numbers twice, under a newer run id."""
     if not runs_dir.is_dir():
         return
     for d in sorted(runs_dir.glob("run-*"), reverse=True):
         if (d / "metrics.json").is_file():
             try:
-                yield load_run(d)
+                run = load_run(d)
             except PerfGateError:
                 continue
+            if (run.raw.get("record_kind") or "run") == "run":
+                yield run
 
 
 def _is_datagen_stage(stage: Mapping[str, Any]) -> bool:
@@ -825,6 +831,11 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     from lakebench.metrics.verdict import passed as _record_passed
 
     reasons: list[str] = []
+    kind = run.raw.get("record_kind") or "run"
+    if kind != "run":
+        reasons.append(
+            f"a {kind} record (of run {run.raw.get('parent_run_id') or 'unknown'}), not a run"
+        )
     # Prefer the persisted verdict (OD-6: v1.6 records) and fall back to
     # raw ``success`` for legacy v1.5 records. A verdict of FAILED refuses
     # even when the raw flag is True (LB-044 shape).

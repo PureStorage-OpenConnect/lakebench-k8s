@@ -587,8 +587,11 @@ N concurrent streams. Composite mode runs both and reports the geometric mean.
 
 The result is saved as a record of its own under a new run id:
 `record_kind: "benchmark"`, `parent_run_id` the deployment's latest run (a
-copy of that run's record with the new benchmark). The run's own record is
-never rewritten. Nothing is recorded when the deployment has no run record,
+copy of that run's record with the new benchmark as its QpH, scores and
+query stage, and `provenance.benchmark` naming the code and time of the
+benchmark; a continuous run's in-stream rounds are not copied). The run's
+own record is never rewritten, and the perf gate never takes a benchmark
+record as a run. Nothing is recorded when the deployment has no run record,
 or when the query engine now runs another dependency set than that run
 recorded.
 
