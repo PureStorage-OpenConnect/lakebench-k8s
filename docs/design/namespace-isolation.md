@@ -82,6 +82,8 @@ On `deploy`, `_deploy_namespace` writes these identity annotations to the namesp
 - `lakebench.deployment/committed-sha: <git rev-parse HEAD>` (best-effort, informational)
 - `lakebench.deployment/stamped-at: <ISO 8601 timestamp>`
 
+A redeploy by the same identity refreshes `committed-sha` to the code that deployed last, or removes it when that code cannot name its commit. It patches only that annotation, under the read's `resourceVersion`; the identity annotations and `stamped-at` stay as the first deploy wrote them, and a failed refresh never refuses the deploy.
+
 Deploy also writes three bookkeeping annotations to the same namespace:
 
 - `lakebench.deployment/deploy-nonce` -- a fresh random value on every deploy. Destroy records it at start and stops if it changes (a redeploy into the same namespace, which the namespace UID cannot show).
