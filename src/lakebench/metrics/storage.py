@@ -806,6 +806,7 @@ class MetricsStorage:
                 ),
                 cycles=_deserialize_cycles(pb_data.get("cycles", []), recorded_at),
                 qph_degradation_pct=scores.get("qph_degradation_pct"),
+                qph_degradation_withheld=scores.get("qph_degradation_withheld"),
                 # Maintenance metrics (v1.3)
                 maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),
                 maintenance_stopped=bool(scores.get("maintenance_stopped", False)),

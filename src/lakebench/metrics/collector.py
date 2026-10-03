@@ -981,6 +981,11 @@ class PipelineBenchmark:
     # Percent drop from first-half median to second-half median QpH.
     # Positive = degradation, negative = improvement, None = insufficient data.
     qph_degradation_pct: float | None = None
+    # Why qph_degradation_pct is withheld though there are enough rounds:
+    # the rounds ran different query sets (an AML continuous run's 8-query
+    # rounds before its first case, 12 after), so the halves time different
+    # work. The same rule compare applies (composite_qph_basis.blended).
+    qph_degradation_withheld: str | None = None
 
     # Maintenance cost metrics (v1.3)
     maintenance_elapsed_seconds: float = 0.0
@@ -1302,8 +1307,15 @@ class PipelineBenchmark:
             if round_event_age:
                 self.query_time_event_age_seconds = statistics.median(round_event_age)
 
-        # QpH degradation: compare first-half vs second-half median QpH
-        if self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
+        # QpH degradation: compare first-half vs second-half median QpH,
+        # withheld when the rounds ran different query sets.
+        blended = bool(
+            self.benchmark_rounds and composite_qph_basis(self.benchmark_rounds)[0]["blended"]
+        )
+        if blended and len(self.benchmark_rounds) >= 4:
+            self.qph_degradation_pct = None
+            self.qph_degradation_withheld = QPH_DEGRADATION_BLENDED
+        elif self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
             mid = len(self.benchmark_rounds) // 2
             first_half = [r.qph for r in self.benchmark_rounds[:mid] if r.qph > 0]
             second_half = [r.qph for r in self.benchmark_rounds[mid:] if r.qph > 0]
@@ -1587,6 +1599,8 @@ class PipelineBenchmark:
                 scores["composite_qph_by_set"] = by_set
             if self.qph_degradation_pct is not None:
                 scores["qph_degradation_pct"] = self.qph_degradation_pct
+            if self.qph_degradation_withheld:
+                scores["qph_degradation_withheld"] = self.qph_degradation_withheld
             # Maintenance metrics (v1.3) -- same fields for sustained
             if self.maintenance_elapsed_seconds > 0:
                 scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
@@ -2088,6 +2102,10 @@ def build_pipeline_benchmark(
     benchmark.compute_aggregates()
     return benchmark
 
+
+#: ``scores.qph_degradation_withheld`` when the rounds ran different query
+#: sets: the first and second halves time different work.
+QPH_DEGRADATION_BLENDED = "rounds ran different query sets"
 
 #: ``investigator_queries`` of a round: the investigator queries ran in it,
 #: were left out because no case existed yet, or their case probe failed.

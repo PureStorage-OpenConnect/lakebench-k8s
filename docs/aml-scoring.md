@@ -402,6 +402,9 @@ the shipped AML example is batch mode.
 - **`qph_degradation_pct`** (continuous mode only) wants at least four
   rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
+  With the TM operations layer the early rounds run 8 queries and the later
+  ones 12, so the halves time different work: the figure is withheld and
+  `scores.qph_degradation_withheld` says why.
 - **`pattern_span_s`** (per rule, was labelled "time-to-detect") is NOT
   detection latency. It is the span from a planted typology's injection
   start to the event time of the last transaction a rule cites for it,

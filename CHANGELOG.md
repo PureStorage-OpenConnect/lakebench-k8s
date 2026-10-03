@@ -629,7 +629,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   continuous query set therefore changes, AML records carry `aml-2` and do
   not compare with `aml-1` records, and an AML continuous run's in-stream
   composite QpH usually reads `blended` (median per set in
-  `scores.composite_qph_by_set`).
+  `scores.composite_qph_by_set`). `qph_degradation_pct`, which compares the
+  first and second halves of the rounds, is withheld for any continuous
+  run whose rounds ran different query sets, and
+  `scores.qph_degradation_withheld` says why.
 - **Customer 360 gold is never silently incremental (workload version
   `c360-2`).** gold-finalize used to switch to its incremental strategy
   whenever gold already had rows and silver was over 1,000 GB, so a repeat
