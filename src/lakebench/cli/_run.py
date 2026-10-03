@@ -2778,8 +2778,9 @@ def _run_once(
                             pipeline_success = False
                             break
                         _interrupt.finished("Job", "lakebench-datagen")
-                        _cycle_dg_end = utc_now().isoformat()
                         _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
+                        # After the marker write, which is datagen's work too.
+                        _cycle_dg_end = utc_now().isoformat()
                         _cycle_series_after(collector.current_run, cfg, _series_mark)
                         if _series_mark == "conflict":
                             pipeline_success = False

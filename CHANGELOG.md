@@ -689,7 +689,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `datagen_start` and `datagen_end`, and the overlap of those intervals with
   the span is subtracted and reported as
   `pipeline_benchmark.scores.time_to_value_datagen_excluded_seconds`.
-  Single-cycle time to value is unchanged; a multi-cycle record from before
+  Customer 360 only (an AML multi-cycle time to value is unchanged);
+  single-cycle time to value is unchanged; a multi-cycle record from before
   this does not compare with one after it (workload version `c360-2.dev1`).
 - **A multi-cycle Customer 360 run takes one data clock (workload version
   `c360-2.dev1`).** Each cycle's silver job anchored `customer_recency_score`
