@@ -263,6 +263,11 @@ _FRACTION_UNITS = frozenset(
         "sar_conversion",
         # A fraction despite its name (tm_operations writes count / total).
         "filed_over_30_days_pct",
+        # Continuous covered-mode scoring and per-reason-code figures.
+        "recall_covered",
+        "coverage",
+        "recall_by_code",
+        "fp_by_code",
     }
 )
 _GIB = "/1073741824"
