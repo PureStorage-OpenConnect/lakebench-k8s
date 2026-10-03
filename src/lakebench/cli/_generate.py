@@ -17,7 +17,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
-from lakebench.exit_codes import ExitCode
+from lakebench.exit_codes import ExitCode, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
 from lakebench.k8s.target import ContextConflictError
@@ -127,6 +127,21 @@ def generate(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+
+    # A multi-cycle config generates each cycle inside `run`, before that
+    # cycle's stages; a corpus generated here in one go would be read as
+    # cycle 0. Refused before any cluster call.
+    from lakebench.config.c360_run import run_cycles
+
+    if run_cycles(cfg) > 1:
+        raise UsageError(
+            f"lakebench generate does not apply to a multi-cycle config "
+            f"(architecture.pipeline.cycles is {run_cycles(cfg)}): multi-cycle runs "
+            "generate each cycle before its stages",
+            next=f"run `lakebench run {config_file}` (add --regenerate to replace an "
+            "existing corpus), or set architecture.pipeline.cycles to 1",
+            path="generate.multi_cycle",
+        )
 
     check_datagen_scale(cfg)
 
@@ -250,7 +265,9 @@ def generate(
         engine = DeploymentEngine(cfg)
         # The gate's decision, not the flag: objects that appear after the
         # gate saw an empty prefix are refused, never written over unrecorded.
-        datagen = DatagenDeployer(engine, allow_stale_bronze=_gate.stale_allowed)
+        datagen = DatagenDeployer(
+            engine, allow_stale_bronze=_gate.stale_allowed, stale_record=_gate.record()
+        )
 
         # Submit job
         print_info("Submitting datagen job...")
@@ -414,6 +431,29 @@ def generate(
                 print_info(f"  written to {out_path}")
             except Exception as e:
                 logger.warning("failed to collect per-pod datagen metrics: %s", e)
+
+            # The corpus series marker: this generate's cycle is complete
+            # (deploy.corpus), with the image digest its pods ran.
+            from lakebench.deploy.corpus import pod_image_digest, record_cycle
+            from lakebench.deploy.datagen import _s3_client_for
+
+            _digest, _why = pod_image_digest(cfg.get_namespace())
+            if (
+                record_cycle(
+                    cfg,
+                    _s3_client_for(cfg),
+                    0,
+                    1,
+                    os.environ.get("LB_RUN_ID", ""),
+                    _digest,
+                    _why,
+                )
+                != "written"
+            ):
+                print_warning(
+                    "could not record the corpus series marker: a later run that reuses "
+                    "this corpus refuses it as unfinished; regenerate to record it"
+                )
 
             _journal_safe(
                 j.record,

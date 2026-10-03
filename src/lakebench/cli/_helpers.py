@@ -271,9 +271,7 @@ def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> No
         raise typer.Exit(code) from None
 
 
-def enforce_bronze_gate(
-    cfg, regenerate: bool, allow_stale_bronze: bool = False, clear_owned: bool = False
-):
+def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False):
     """Run the bronze gate before datagen; a refusal exits with its code.
 
     ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
@@ -291,7 +289,6 @@ def enforce_bronze_gate(
         cfg,
         regenerate=regenerate,
         allow_stale_bronze=allow_stale_bronze,
-        clear_owned=clear_owned,
     )
     if not result.proceed:
         print_error(result.message)

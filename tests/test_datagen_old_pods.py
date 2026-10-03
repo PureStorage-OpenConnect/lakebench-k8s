@@ -90,9 +90,18 @@ def _install(monkeypatch, world: _World, *, owned: bool = True):
 
     class _S3:
         _init_error = None
+        #: The corpus series marker the deployer writes after its clear
+        #: (kept apart from the part files in ``world.keys``).
+        markers: dict = {}
 
         def __init__(self, **kw):
             pass
+
+        @property
+        def raw_client(self):
+            from tests.fixtures.memory_s3 import MemoryBoto
+
+            return MemoryBoto(_S3.markers)
 
         def bucket_exists(self, bucket):
             return True

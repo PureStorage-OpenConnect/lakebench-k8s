@@ -141,7 +141,8 @@ only with `--skip-preflight` (`--skip-deploy` still runs it); the record
 then says `capacity: skipped` and the verdict carries "capacity not
 checked". A batch
 `run` counts datagen only when it creates datagen pods: with `--generate`
-(and not `--skip-generate`), or in a multi-cycle run. A plain batch `run`
+(and not `--skip-generate`), or in a multi-cycle run without
+`--skip-generate`. A plain batch `run`
 over data from an earlier `lakebench generate` checks the Spark peak and the
 always-on pods. `lakebench deploy` runs the same check, without datagen,
 before it creates anything (so do `run --deploy-only`, `--generate-only`

@@ -1015,6 +1015,10 @@ in the `cycle_progression` score when `cycles > 1`.
 
 - `cycles > 1` requires `mode: batch`. Continuous mode has its own iteration
   model via streaming micro-batches.
+- The run generates each cycle before its stages: `lakebench generate`,
+  `run --generate` and `run --generate-only` refuse a multi-cycle config.
+  `run --skip-generate` reuses a finished multi-cycle corpus of the same
+  config (checked against its corpus series marker), except for AML.
 - DuckDB cannot run Iceberg maintenance or compaction (read-only). Table
   health is still probed but compaction is skipped.
 

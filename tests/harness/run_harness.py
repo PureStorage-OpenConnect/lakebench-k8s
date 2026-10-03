@@ -1248,7 +1248,25 @@ class _FakeBoto:
         for (bucket, key), body in self._rec.objects.items():
             if bucket == Bucket and key.replace("<run_id>", run_id) == Key:
                 return {"Body": io.BytesIO(body)}
+        if Key.endswith("/_corpus/series.json"):
+            # No corpus series marker yet: what S3 answers for a missing key.
+            from botocore.exceptions import ClientError
+
+            raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "missing"}}, "GetObject")
         raise self._rec.refuse(f"unscripted S3 object {Bucket}/{Key}")
+
+    def put_object(self, Bucket, Key, Body, **kw):  # noqa: N803 -- boto3 keywords
+        """The corpus series marker (deploy/corpus.py), the only object a
+        batch run writes itself; it lands in the bronze listing."""
+        import hashlib
+
+        self._rec.add("S3", "put_object", Bucket, Key)
+        if Bucket != f"{NAME}-bronze" or not Key.endswith("/_corpus/series.json"):
+            raise self._rec.refuse(f"unscripted put {Bucket}/{Key}")
+        body = bytes(Body)
+        self._rec.objects[(Bucket, Key)] = body
+        self._rec.bronze_objects[Key] = (len(body), hashlib.md5(body).hexdigest())  # noqa: S324
+        return {}
 
     def list_objects_v2(self, Bucket, Prefix="", MaxKeys=1000, **kw):  # noqa: N803
         self._rec.add("S3", "list_objects_v2", Bucket, Prefix, MaxKeys)
