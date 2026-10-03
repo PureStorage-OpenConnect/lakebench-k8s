@@ -220,3 +220,127 @@ def test_raw_config_fields_follow_the_loader(audit_mod, tmp_path):
         "    datagen:\n      corpus_role: robustness\n"
     )
     assert audit_mod.raw_corpus_fields(nested) == ("financial", None, "robustness")
+
+
+# -- review regressions: none of these may read as clean ---------------------
+
+
+def _env(tmp_path, monkeypatch):
+    pc.use_heldout(monkeypatch)
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
+    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
+
+
+def _journal(dirpath: Path, config: Path | str) -> Path:
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "session-x.jsonl").write_text(
+        json.dumps(
+            {
+                "event_type": "session.start",
+                "session_id": "s1",
+                "details": {"config_file": str(config)},
+            }
+        )
+        + "\n"
+    )
+    return dirpath
+
+
+def _rc(audit_mod, tmp_path, *extra):
+    """main() over tmp paths only: never the host's own journals or runs."""
+    base = ["--runs-dir", str(tmp_path / "none"), "--journal-dir", str(tmp_path / "no-journal")]
+    return audit_mod.main([*base, "--out", str(tmp_path / "o.json"), *extra])
+
+
+def test_unreadable_record_is_not_clean(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    d = tmp_path / "runs" / "run-x"
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text('{"run_id": "x", "experiment": {"corpus": {"corpus_role": "ev')
+    rc = audit_mod.main(
+        ["--runs-dir", str(tmp_path / "runs"), "--journal-dir", str(tmp_path / "j")]
+    )
+    assert rc == 2
+
+
+def test_split_workload_blocks_are_both_read(audit_mod, tmp_path):
+    c = tmp_path / "c.yaml"
+    c.write_text(
+        "name: x\narchitecture:\n  workload:\n    schema: financial\n"
+        "workload:\n  datagen:\n    corpus_role: evaluation\n"
+    )
+    assert audit_mod.raw_config_reason(audit_mod._raw_config(c)) == "corpus_role evaluation"
+
+
+def test_journal_config_with_unset_variables_is_still_checked(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    monkeypatch.delenv("LB_PROBE_UNSET", raising=False)
+    c = tmp_path / "c.yaml"
+    c.write_text(
+        "name: x\nplatform:\n  storage:\n    s3:\n      access_key: ${LB_PROBE_UNSET}\n"
+        "workload:\n  schema: financial\n  datagen:\n    corpus_role: evaluation\n"
+    )
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(_journal(tmp_path / "j", c))) == 1
+
+
+def test_journal_config_on_a_registered_prefix_is_found(audit_mod, tmp_path, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    _env(tmp_path, monkeypatch)
+    ds.append_corpus_ledger(
+        {
+            "kind": "registered_corpus",
+            "state": "generated",
+            "role": "evaluation",
+            "bronze_uri": "s3://lb-reg-bronze/pacs008/",
+            "attempt": "a1",
+        }
+    )
+    c = tmp_path / "dev.yaml"
+    c.write_text(
+        "name: dev\nplatform:\n  storage:\n    s3:\n      buckets:\n        bronze: lb-reg-bronze\n"
+        "workload:\n  schema: financial\n"
+    )
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(_journal(tmp_path / "j", c))) == 1
+
+
+def test_relative_journal_config_resolves_beside_lakebench_output(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    (tmp_path / "c.yaml").write_text(
+        "name: x\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: robustness\n"
+    )
+    j = _journal(tmp_path / "lakebench-output" / "journal", "c.yaml")
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
+
+
+def test_ledger_shapes_found_in_real_ledgers(audit_mod, tmp_path):
+    led = tmp_path / "E.md"
+    led.write_text(
+        "## pipe-aml-c1 deployment ledger entry\n"
+        "- namespace: pipe-aml-c1 (destroyed), config: /x/c.yaml\n- session: s\n\n"
+        "## smoke ledger\nNamespace: ds-1\nConfig: /x/d.yaml\n\n"
+        "## AML batch redo\n- Namespace: lb-redo\n- Config: /x/e.yaml\n\n"
+        "## Deployments ledger\n\nfree text only\n"
+    )
+    rows, unparsed = audit_mod.parse_ledger(led)
+    assert {(r.namespace, r.config) for r in rows} == {
+        ("pipe-aml-c1", "/x/c.yaml"),
+        ("ds-1", "/x/d.yaml"),
+        ("lb-redo", "/x/e.yaml"),
+    }
+    assert unparsed == ["Deployments ledger"]
+
+
+def test_an_unparsable_ledger_section_is_not_clean(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    led = tmp_path / "E.md"
+    led.write_text("## Deployments ledger\n\nsomething that is not a row\n")
+    assert _rc(audit_mod, tmp_path, "--ledger", str(led)) == 2
+
+
+def test_a_non_utf8_journal_does_not_crash(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    j = tmp_path / "j"
+    j.mkdir()
+    (j / "session-bin.jsonl").write_bytes(b"\xff\xfe not json\n")
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) in (0, 2)
