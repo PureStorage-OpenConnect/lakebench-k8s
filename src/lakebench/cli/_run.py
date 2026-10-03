@@ -13,6 +13,8 @@ import typer
 from rich.panel import Panel
 
 from lakebench._clock import utc_now
+from lakebench.cli._aml_post import run_financial_scoring as _run_financial_scoring
+from lakebench.cli._aml_post import scoring_count_line  # noqa: F401 -- re-exported
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -1109,28 +1111,6 @@ def empty_benchmark_queries(queries) -> list[str]:
     return out
 
 
-def scoring_count_line(summary: dict) -> str:
-    """'6 of 15 typologies scored; 8 no rule, 1 rule skipped' from a
-    recall.json summary: never every manifest typology as scored."""
-    typs = summary.get("typologies", []) or []
-    counts = summary.get("typology_counts")
-    if counts is None:
-        counts = {}
-        for t in typs:
-            st = t.get("detection_status") or "unknown"
-            counts[st] = counts.get(st, 0) + 1
-    labels = (
-        ("partial", "partial"),
-        ("no_rule", "no rule"),
-        ("rule_skipped", "rule skipped"),
-        ("rule_error", "rule error"),
-        ("unknown", "unknown"),
-    )
-    rest = [f"{counts[k]} {lab}" for k, lab in labels if counts.get(k)]
-    line = f"{counts.get('scored', 0)} of {len(typs)} typologies scored"
-    return line + (f"; {', '.join(rest)}" if rest else "")
-
-
 def _aml_batch_gate_problems(
     gold_jobs: list, scoring: dict | None = None
 ) -> tuple[list[str], list[str]]:
@@ -1260,95 +1240,6 @@ def _behavioural_subset() -> set[str]:
     except (OSError, ValueError):
         return set()
     return set(data.get("behavioural_subset", []))
-
-
-def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout, interrupt=None):
-    """Fold ``financial score`` into a batch run (LB-123).
-
-    After gold-finalize, score recall/precision against the datagen manifest
-    and return the recall.json summary so the batch scorecard can render real
-    recall, not just alert counts. Best-effort: a scoring failure never fails
-    the pipeline (the pipeline result is still valid), it just leaves the
-    scorecard without recall. Returns the parsed recall.json dict, or None.
-    """
-    # Whole body is best-effort: NOTHING here (imports, config access, submit,
-    # wait, S3 read) may propagate and fail a pipeline that already reported
-    # success. One outer try guarantees that.
-    try:
-        import json as _json
-
-        from lakebench.s3 import S3Client
-        from lakebench.spark.job import JobState, JobType
-
-        s3 = cfg.platform.storage.s3
-        # Manifest URI mirrors bronze_verify_financial:
-        # {bronze}/{prefix}/manifest/manifest.parquet.
-        from lakebench.deploy.datagen import bronze_datagen_prefix
-
-        prefix = bronze_datagen_prefix(cfg).rstrip("/")
-        # Glob over every cycle's manifest (manifest.parquet, manifest-cNNN.parquet).
-        manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest*.parquet"
-        json_key = f"scoring/{run_id}/recall.json"
-        output_uri = f"s3a://{s3.buckets.gold}/scoring/{run_id}/recall.parquet"
-        # Derive the SparkApplication name from the enum rather than a literal
-        # so it can never drift from submit_job's f"lakebench-{value}".
-        app_name = f"lakebench-{JobType.SCORE_FINANCIAL.value}"
-
-        console.print()
-        console.print("[bold]Stage: financial score[/bold]")
-        print_info("Scoring recall/precision against the datagen manifest...")
-
-        if interrupt is not None:
-            interrupt.creating("SparkApplication", app_name)
-        status = job_manager.submit_job(
-            JobType.SCORE_FINANCIAL,
-            arguments=["--manifest", manifest_uri, "--output", output_uri],
-            # The score refuses a gold.detection_status another run wrote; it
-            # needs this run's id for that (job.py exports one only with
-            # observability on).
-            cycle_env={"LB_RUN_ID": run_id},
-        )
-        if interrupt is not None:
-            interrupt.submitted(status)
-        if status.state == JobState.FAILED:
-            print_warning(f"Could not submit score job: {status.message}")
-            return None
-        result = monitor.wait_for_completion(
-            app_name,
-            timeout_seconds=timeout,
-            poll_interval=15,
-        )
-        if interrupt is not None and result.success:
-            interrupt.finished("SparkApplication", app_name)
-        if not result.success:
-            print_warning(f"Financial scoring did not complete: {result.message}")
-            # Surface the score driver's own error -- scoring is best-effort so
-            # its failure is easy to miss, and without the driver tail the only
-            # signal is a generic "driver container failed".
-            if getattr(result, "driver_logs", None):
-                console.print("[dim]Score driver logs (last 25 lines):[/dim]")
-                for line in result.driver_logs.split("\n")[-25:]:
-                    console.print(f"  {line}")
-            return None
-
-        # Read the recall.json sidecar (boto3 only -- the CLI has no
-        # pandas/pyarrow to read recall.parquet).
-        client = S3Client(
-            endpoint=s3.endpoint,
-            access_key=s3.access_key,
-            secret_key=s3.secret_key,
-            region=s3.region,
-            path_style=s3.path_style,
-            ca_cert=s3.ca_cert,
-            verify_ssl=s3.verify_ssl,
-        )
-        body = client.raw_client.get_object(Bucket=s3.buckets.gold, Key=json_key)["Body"].read()
-        summary = _json.loads(body)
-        print_success(f"Financial scoring complete ({scoring_count_line(summary)})")
-        return summary
-    except Exception as e:  # noqa: BLE001 -- scoring is best-effort enrichment
-        print_warning(f"Financial scoring failed ({e}); scorecard will omit recall.")
-        return None
 
 
 def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:

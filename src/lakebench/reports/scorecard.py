@@ -470,14 +470,7 @@ class FinancialScorecardBlock:
                 "Continuous run: counts are new alert versions measured by time to "
                 "detect, summed over gold-refresh ticks (an alert is counted again when "
                 "its evidence changes; alerts without a matched silver transaction are "
-                "not counted), not gold.alerts rows."
-                + (
-                    ""
-                    if scoring
-                    else " Recall is not scored in continuous mode: stopping the streams "
-                    "can interrupt a detection pass, and scoring refuses a partial one."
-                )
-                + "</div>"
+                "not counted), not gold.alerts rows." + _continuous_recall_note(scoring) + "</div>"
             )
         if total_alerts is not None:
             fp_str = (
@@ -908,3 +901,25 @@ def get_scorecard_block(schema_name: str | None) -> ScorecardBlock:
     if not schema_name:
         return _REGISTRY["customer360"]
     return _REGISTRY.get(schema_name, _REGISTRY["customer360"])
+
+
+def _continuous_recall_note(scoring) -> str:
+    """The continuous footer's recall sentence. A covered score is
+    not the batch recall and is not rendered in the table yet; a covered
+    record that holds no score says why."""
+    import html
+
+    if not scoring:
+        return (
+            " Recall is not scored in continuous mode: stopping the streams "
+            "can interrupt a detection pass, and scoring refuses a partial one."
+        )
+    if scoring.get("mode") != "covered":
+        return ""
+    if scoring.get("status") == "scored":
+        return (
+            " Recall is scored over the instances the last drained tick covered "
+            "(recall_covered in financial_scoring.covered); it is not the batch "
+            "recall and the table does not show it."
+        )
+    return " Recall is not scored: " + html.escape(str(scoring.get("reason") or "no reason")) + "."

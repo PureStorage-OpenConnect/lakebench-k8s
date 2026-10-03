@@ -164,5 +164,7 @@ def test_bronze_verify_registers_manifest_iceberg_table():
 
 
 def test_run_scores_against_every_cycles_manifest():
-    code = _code_only(_read("src/lakebench/cli/_run.py"))
+    # The scoring call moved to cli/_aml_post.py (AML-6), shared by batch
+    # and continuous runs.
+    code = _code_only(_read("src/lakebench/cli/_aml_post.py"))
     assert MANIFEST_GLOB in code

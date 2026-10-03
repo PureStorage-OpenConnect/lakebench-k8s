@@ -150,7 +150,7 @@ def _check(spark):
     _append(spark, 1, now - 100)
 
     # The pin: an append after the pin is not in the pinned frame.
-    txns, sid, rows, newest = g._pin_silver(spark)
+    txns, sid, _versions, rows, newest = g._pin_silver(spark)
     assert sid is not None and rows == len(_rows(1)), (sid, rows)
     assert abs(newest - (now - 100)) < 1e-3, newest
     _append(spark, 2, now - 50)
@@ -191,6 +191,24 @@ def _check(spark):
     assert abs(parts - phases1["total"]) < 0.5, phases1
     g_metrics = MetricsCollector().parse_streaming_logs("\n".join(lines), "gold-refresh")
     assert [t["cycle"] for t in g_metrics.tick_timings] == [1]
+    # AML-6 tick record: pinned before detection, committed after it, then
+    # completed, with the snapshots the tick read and wrote.
+    from lakebench.metrics.tick_records import is_pin, parse_tick_records
+
+    rec = parse_tick_records("\n".join(lines), "run-tick")["ticks"]
+    assert [t["cycle"] for t in rec] == [1], lines
+    assert rec[0]["completed"], rec
+    for key in ("pinned_txns", "pinned_entities", "committed_alerts", "committed_status"):
+        assert is_pin(rec[0][key]), (key, rec)
+    assert rec[0]["pinned_txns"] == g._current_snapshot(spark, "lakehouse.silver.transactions")
+    assert rec[0]["committed_alerts"] == g._current_snapshot(spark, "lakehouse.gold.alerts")
+    order = [
+        i
+        for i, ln in enumerate(lines)
+        for marker in ("Cycle 1: pinned", "Cycle 1: committed", "Cycle 1: completed")
+        if ln.startswith(marker)
+    ]
+    assert len(order) == 3 and order == sorted(order), lines
 
     # Tick 2 over unchanged silver: same content, nothing new to measure.
     lines.clear()

@@ -441,6 +441,18 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **AML continuous runs drain the last detection tick and score
+  `recall_covered`.** At window end the CLI asks gold-refresh to finish its
+  tick (a marker under its checkpoint) instead of deleting it mid-tick, then
+  scores recall over the instances that tick could have detected, at the
+  snapshots it logged. The record gains `continuous.ticks[]`,
+  `continuous.drain`, `continuous.ticks_unpinned`,
+  `financial_scoring` with `mode: "covered"` and
+  `experiment.results.alert_set_continuous`. A drain that times out fails
+  the run. `lakebench stop` drains for up to 300 s before deleting. Each
+  tick now filters silver through the versions table at one recorded
+  snapshot. See
+  [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
 - **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
   deployment's name (OLD's, or the one 1.6 recorded in
   `.lakebench/state.json` for a nameless config) and writes the bucket names
