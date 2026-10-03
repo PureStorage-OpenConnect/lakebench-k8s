@@ -638,6 +638,22 @@ def _continuous_results(metrics: Any) -> dict[str, Any]:
     return out
 
 
+def _alert_set_results(metrics: Any) -> dict[str, Any]:
+    """``alert_set`` (or ``alert_set_unavailable``, the reason) from the
+    run's last gold-finalize job, the one whose alerts gold.alerts holds.
+    Empty when no gold-finalize job printed the line (C360, or a
+    run that stopped before gold)."""
+    gold = [j for j in metrics.jobs if getattr(j, "job_type", None) == "gold-finalize"]
+    if not gold:
+        return {}
+    last = gold[-1]
+    if getattr(last, "alert_set", None):
+        return {"alert_set": copy.deepcopy(last.alert_set)}
+    if getattr(last, "alert_set_unavailable", None):
+        return {"alert_set_unavailable": last.alert_set_unavailable}
+    return {}
+
+
 def _results(metrics: Any, mode: str) -> dict[str, Any]:
     if mode in ("sustained", "continuous"):
         return _continuous_results(metrics)
@@ -645,7 +661,12 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
     if bench is None:
-        return {"query_set_id": None, "fingerprints": {}, "not_checked": "no benchmark ran"}
+        return {
+            "query_set_id": None,
+            "fingerprints": {},
+            "not_checked": "no benchmark ran",
+            **_alert_set_results(metrics),
+        }
     fps: dict[str, Any] = {}
     for q in _benchmark_queries(metrics):
         name = q.get("name") or q.get("query_name")
@@ -654,6 +675,7 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
     return {
         "query_set_id": getattr(bench, "query_set_id", None),
         "fingerprints": fps,
+        **_alert_set_results(metrics),
     }
 
 
@@ -1227,15 +1249,25 @@ def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
     return list(((exp or {}).get("corpus") or {}).get("problems") or [])
 
 
-def results_established(exp: Mapping[str, Any] | None) -> bool | str:
+def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True) -> bool | str:
     """True when the run recorded benchmark results that can be checked for
     equivalence, else the reason they cannot (DESIGN 6.5: comparable means
-    the results are equivalent, which needs results)."""
+    the results are equivalent, which needs results). An AML batch record
+    written by 1.7 also needs its alert set; *alert_set* False
+    asks about the benchmark results alone (ladder step 0's query set id)."""
     res = (exp or {}).get("results") or {}
     if res.get("not_checked"):
         return str(res["not_checked"])
     if not res.get("fingerprints"):
         return "no benchmark query results were recorded"
+    if not alert_set:
+        return True
+    from lakebench.metrics.alert_set import alert_set_missing
+
+    missing = alert_set_missing(exp)
+    if missing:
+        # An exp2 AML batch record must carry its alert set.
+        return missing
     return True
 
 
@@ -1366,8 +1398,10 @@ def refusals(
     performance: (provenance refusals, result refusals, notes).
 
     Provenance refusals mean the runs are different experiments. Result
-    refusals mean the same experiment returned different query results.
-    Notes are caveats that do not refuse (results that were not checked).
+    refusals mean the same experiment returned different query results or
+    alert sets. Notes are caveats that do not refuse; a "result equivalence
+    not checked" note means the results were NOT compared (no benchmark, or
+    a missing alert set), so empty result refusals then prove nothing.
     Execution conditions are not refusals: see ``like_for_like``.
     """
     ea, eb = experiment_of(record_a), experiment_of(record_b)
@@ -1395,11 +1429,26 @@ def refusals(
     if unchecked:
         notes.append(f"result equivalence not checked: {unchecked}")
         return prov, [], notes
+    from lakebench.metrics.alert_set import (
+        alert_set_missing,
+        alert_set_notes,
+        alert_set_of,
+        diff_alert_sets,
+    )
+
+    missing = [
+        f"{lb}: {m}" for lb, e in ((label_a, ea), (label_b, eb)) if (m := alert_set_missing(e))
+    ]
+    if missing:
+        notes.append(f"result equivalence not checked: {'; '.join(missing)}")
+        return prov, [], notes
     qa, qb = res_a.get("query_set_id"), res_b.get("query_set_id")
     results: list[str] = []
     if qa != qb:
         results.append(f"benchmark query sets differ ({qa} vs {qb})")
     results.extend(fingerprint_differences(ea, eb, label_a, label_b))
+    results.extend(diff_alert_sets(alert_set_of(ea), alert_set_of(eb), label_a, label_b))
+    notes.extend(alert_set_notes(ea, eb, label_a, label_b))
     return prov, results, notes
 
 

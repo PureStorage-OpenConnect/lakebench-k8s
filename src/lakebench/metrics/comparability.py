@@ -885,14 +885,16 @@ def _first_reason(record: Mapping[str, Any]) -> str | None:
 def _results_differences(
     ea: Mapping[str, Any], eb: Mapping[str, Any], la: str, lb: str
 ) -> list[str]:
-    """Step 5: a different query set or a per-query result mismatch (the
-    alert-set fingerprint joins here once it is recorded)."""
+    """Step 5 (and step 2 inside a side): a different query set, a
+    per-query result mismatch, or a different alert set."""
+    from lakebench.metrics.alert_set import alert_set_of, diff_alert_sets
     from lakebench.metrics.experiment import fingerprint_differences
 
     qa = (ea.get("results") or {}).get("query_set_id")
     qb = (eb.get("results") or {}).get("query_set_id")
     out = [f"benchmark query sets differ ({qa} vs {qb})"] if qa != qb else []
-    return out + fingerprint_differences(ea, eb, la, lb)
+    out += fingerprint_differences(ea, eb, la, lb)
+    return out + diff_alert_sets(alert_set_of(ea), alert_set_of(eb), la, lb)
 
 
 def _member_verdict(record: Mapping[str, Any]) -> tuple[bool, str | None, str | None]:
@@ -986,7 +988,7 @@ def pair_verdict(
             c = classify(exp, rec)
             classified[label].append(c)
             gens[label].add(c.generation)
-            checked = results_established(exp) is True
+            checked = results_established(exp, alert_set=False) is True
             for key in missing_required(c, results=checked):
                 incomplete.append(f"identity incomplete: {key} not recorded on {_rid(rec)}")
                 first_incomplete = first_incomplete or Cause(
@@ -1208,6 +1210,13 @@ def pair_verdict(
             notes=notes,
             cause=Cause("results", detail=different[0]),
         )
+    from lakebench.metrics.alert_set import alert_set_notes
+
+    for label, members in sides:
+        for rec in members:
+            for note in alert_set_notes(ea, rec["experiment"], label_a, f"{label} run {_rid(rec)}"):
+                if note not in notes:
+                    notes.append(note)
 
     arch = diff_group(ca, cb, ARCHITECTURE)
     cond = diff_group(ca, cb, CONDITIONS)

@@ -64,6 +64,15 @@ def _release(kind: str) -> dict:
         )
     if kind == "aml_batch":
         exp["rules"]["executed"] = sorted(_rule_targets() - set(exp["rules"]["skipped"]))
+        # 1.7 AML batch evidence carries its alert set (EVD-10).
+        exp["results"]["alert_set"] = {
+            "spec": "as1",
+            "columns": ["rule_id", "entity_id", "alert_ts"],
+            "cols_sha": "0123456789abcdef",
+            "rows": 3,
+            "h": "-5",
+            "by_rule": {"W2_structuring": {"rows": 3, "h": "-5"}},
+        }
     return rec
 
 
@@ -124,6 +133,12 @@ def _problems(rec: dict, expected: dict | None = None) -> list[str]:
 @pytest.mark.parametrize("kind", sorted(BASES))
 def test_clean_record_passes(ready, kind):
     assert _problems(_release(kind)) == []
+
+
+def test_aml_batch_without_alert_set_fails(ready):
+    rec = _release("aml_batch")
+    del rec["experiment"]["results"]["alert_set"]
+    _fails(rec, "the alert-set fingerprint was not recorded")
 
 
 def test_layer_rows_fails_closed_until_the_verdict_computes_it(monkeypatch):

@@ -159,7 +159,10 @@ A run is refused, never compared, when:
   end-of-run result check over the settled corpus (see "Continuous Gate" and
   "Result check" in `benchmarking.md`); a run whose corpus did not settle, or
   whose result fingerprints differ from the baseline's, is refused like a
-  batch run;
+  batch run. An AML batch run from 1.7 must also carry its alert-set
+  fingerprint (`experiment.results.alert_set`, see
+  [aml-scoring.md](aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same));
+  the gate requires it but does not yet compare it with the baseline's;
 - its datagen fleet reported `data_quality` other than `complete` (from 1.7
   a continuous run that generates records its own fleet, read at window end:
   datagen pods removed by their TTL before then make it `partial` or

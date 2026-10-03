@@ -2532,6 +2532,22 @@ def frame_fingerprint(df, cols):
     signed long), a repeated name, or a name that is not a top-level
     column of ``df``.
     """
+    from pyspark.sql import functions as F
+
+    h, cols_sha = _fingerprint_hash(df, cols)
+    row = df.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(h.cast("decimal(38,0)")).alias("s"),
+    ).collect()[0]
+    rows = int(row["n"])
+    fp = str(int(row["s"])) if row["s"] is not None else "0"
+    return rows, fp, cols_sha
+
+
+def _fingerprint_hash(df, cols):
+    """``(h, cols_sha)``: the per-row hash column and the column spec hash
+    of ``frame_fingerprint`` (whose docstring is the contract), so the
+    grouped form below sums the same row hash."""
     import hashlib
 
     from pyspark.sql import functions as F
@@ -2580,15 +2596,72 @@ def frame_fingerprint(df, cols):
         bit = F.lit(1 << i).cast("long")
         mask = mask + F.when(c.isNull(), bit).otherwise(F.lit(0).cast("long"))
     h = F.xxhash64(F.lit(_FINGERPRINT_VERSION), *hashed, mask)
-    row = df.agg(
-        F.count(F.lit(1)).alias("n"),
-        F.sum(h.cast("decimal(38,0)")).alias("s"),
-    ).collect()[0]
-    rows = int(row["n"])
-    fp = str(int(row["s"])) if row["s"] is not None else "0"
     spec = ",".join(f"{name}:{fields[name].dataType.simpleString()}" for name in cols)
     cols_sha = hashlib.sha256(spec.encode("utf-8")).hexdigest()[:16]
-    return rows, fp, cols_sha
+    return h, cols_sha
+
+
+def frame_fingerprint_by(df, cols, key):
+    """``frame_fingerprint`` per value of column ``key``, in one aggregate.
+
+    Returns ``(cols_sha, groups)``: ``groups`` maps each value of ``key``
+    (None for a NULL key) to ``(rows, fp)``, exactly what
+    ``frame_fingerprint`` gives for ``df.where(key <=> value)`` over the same
+    ``cols``. The row hash is ``frame_fingerprint``'s, so the groups' rows
+    and fps sum to the whole frame's. ``key`` must be a top-level column of
+    ``df``; it need not be one of ``cols``. An empty frame gives no group.
+    """
+    from pyspark.sql import functions as F
+
+    names = {f.name for f in df.schema.fields}
+    if key not in names:
+        raise ValueError(f"frame_fingerprint_by: key {key!r} not in {sorted(names)}")
+    h, cols_sha = _fingerprint_hash(df, cols)
+    out = df.groupBy(F.col("`" + key.replace("`", "``") + "`").alias("k")).agg(
+        F.count(F.lit(1)).alias("n"),
+        F.sum(h.cast("decimal(38,0)")).alias("s"),
+    )
+    groups = {}
+    for row in out.collect():
+        groups[row["k"]] = (int(row["n"]), str(int(row["s"])) if row["s"] is not None else "0")
+    return cols_sha, groups
+
+
+#: The alert-set fingerprint: one alert is (rule, subject,
+#: window), where the window is the event time the rule derived from the data.
+#: Generated ids (alert_id, run_id) and wall-clock times (detected_ts) are not
+#: part of it. Batch gold-finalize and the continuous covered score both use
+#: alert_set_fingerprint, so the two alert sets mean one thing.
+ALERT_SET_SPEC = "as1"
+ALERT_SET_COLUMNS = ("rule_id", "entity_id", "alert_ts")
+
+
+def alert_set_fingerprint(alerts):
+    """The alert-set fingerprint of an alerts frame (gold.alerts columns).
+
+    Returns ``{"spec", "columns", "cols_sha", "rows", "h", "by_rule"}``:
+    ``by_rule`` maps each ``rule_id`` to ``{"rows", "h"}``
+    (``frame_fingerprint`` over ``ALERT_SET_COLUMNS`` of that rule's rows),
+    and ``rows`` and ``h`` are their sums, which equal
+    ``frame_fingerprint`` of the whole frame. Order-independent; a
+    duplicated alert changes it. One Spark aggregate. The caller scopes
+    ``alerts`` to one run.
+    """
+    cols = list(ALERT_SET_COLUMNS)
+    cols_sha, groups = frame_fingerprint_by(alerts, cols, "rule_id")
+    by_rule = {}
+    for rule, (n, fp) in sorted(groups.items(), key=lambda kv: (kv[0] is None, str(kv[0]))):
+        # gold.alerts.rule_id is NOT NULL; a NULL key is still recorded, under
+        # a name no rule has, rather than dropped.
+        by_rule["<null>" if rule is None else str(rule)] = {"rows": n, "h": fp}
+    return {
+        "spec": ALERT_SET_SPEC,
+        "columns": cols,
+        "cols_sha": cols_sha,
+        "rows": sum(v["rows"] for v in by_rule.values()),
+        "h": str(sum(int(v["h"]) for v in by_rule.values())),
+        "by_rule": by_rule,
+    }
 
 
 def _s3_table_path(bucket_uri, fq_table):

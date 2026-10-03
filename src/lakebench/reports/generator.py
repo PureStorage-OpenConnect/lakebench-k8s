@@ -2288,6 +2288,13 @@ class ReportGenerator:
                     f"<br><small>incl. {job.submission_retry_seconds:.0f}s on "
                     f"{n_fail} failed submission{'s' if n_fail != 1 else ''}</small>"
                 )
+            fp_s = getattr(job, "alert_set_seconds", None)
+            if fp_s is not None:
+                # Lakebench's own scan ran in the stage's pod; the CLI
+                # took its seconds off the stage (cli/_run.py).
+                elapsed += (
+                    f"<br><small>excludes {fp_s:.1f}s of Lakebench's alert-set fingerprint</small>"
+                )
 
             rows.append(f"""
             <tr>

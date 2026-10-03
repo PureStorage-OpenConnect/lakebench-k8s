@@ -204,8 +204,8 @@ passed members, and the exit code is the verdict:
 | Verdict | Meaning | Exit |
 |---|---|---|
 | LIKE-FOR-LIKE | Same experiment, equal results, same execution conditions. The attribution says what differs: the architecture, the system, or nothing (a repeat) | 0 |
-| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results, a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment (a side whose runs differ only in in-stream rounds or investigator sessions is one experiment: NOT LIKE-FOR-LIKE) | 10 |
-| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results (no benchmark, a recipe without a query engine, a continuous run without an end-of-run result check) | 11 |
+| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results (benchmark query results, or an AML batch alert set), a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment (a side whose runs differ only in in-stream rounds or investigator sessions is one experiment: NOT LIKE-FOR-LIKE) | 10 |
+| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results (no benchmark, a recipe without a query engine, a continuous run without an end-of-run result check, an AML batch record from 1.7 without its alert-set fingerprint) | 11 |
 | NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs: effective maintenance or its compaction operation (maintenance skipped by the user on both sides counts as the same, across table formats), maintenance settings, benchmark iterations or mode, in-stream rounds (between the sides or inside one), the Lakebench limits that bound; or the only architecture difference is the dependency set | 12 |
 | CONFOUNDED | Comparable, but the architecture and the system both differ, so no difference can be put down to either | 13 |
 

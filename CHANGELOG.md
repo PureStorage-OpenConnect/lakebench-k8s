@@ -541,6 +541,20 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `c360-batch-s10`); the release workflow now runs the `perf-baselines`
   check, which fails a tag only for configs marked required (none until the
   post-freeze data commit). See docs/perf-regression-gate.md.
+- **AML batch runs record their alert set, and `compare` checks it.**
+  After its last alert write, gold-finalize fingerprints the run's alerts
+  over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
+  generated ids and wall-clock times (`experiment.results.alert_set`, equal
+  on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are NOT
+  COMPARABLE (exit 10), naming the rule; an AML batch record written by
+  1.7 without one is NOT ESTABLISHED (exit 11), and the perf gate,
+  `reproduce` and the release record refuse it. The fingerprint runs last in
+  the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
+  off the stage's time, as the Customer 360 check's are (time to value of a
+  multi-cycle run keeps the earlier cycles'), and the report shows them
+  beside it. The covered continuous score uses the same
+  definition. See
+  [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in

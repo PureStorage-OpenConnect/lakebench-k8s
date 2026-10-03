@@ -20,6 +20,9 @@ this). Steps:
    scenario coverage, L1 dispositions, cases and SAR decisions, then the
    workflow invariants the CLI gates on.
 
+5. Prints the alert-set fingerprint of the run's alerts (``LB_ALERT_SET``),
+   last, so the CLI can take its seconds off the stage's time.
+
 The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
 from `metrics.json` without a separate `lakebench financial replay`
@@ -28,11 +31,14 @@ invocation (LB-092).
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
 from common import (
+    ALERT_SET_SPEC,
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    alert_set_fingerprint,
     ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -335,6 +341,13 @@ def main() -> None:
 
     run_tm_operations(spark, txns, RUN_ID)
 
+    # The alert-set fingerprint, after the last write to gold.alerts
+    # (run_tm_operations only reads it) and last in the stage. It is
+    # Lakebench's work, not the pipeline's: the line carries its seconds and
+    # the CLI takes them off the stage's time (cli/_run.py
+    # _exclude_alert_set_time), as it does for the c360 check.
+    log(alert_set_line(spark, RUN_ID))
+
     elapsed = time.time() - start
     log("=" * 60)
     log(f"Gold finalize complete in {elapsed:.1f}s")
@@ -353,6 +366,30 @@ def main() -> None:
         elapsed_seconds=elapsed,
     )
     spark.stop()
+
+
+ALERT_SET_TAG = "LB_ALERT_SET"
+
+
+def alert_set_line(spark, run_id: str, table: str | None = None) -> str:
+    """The ``LB_ALERT_SET {json}`` line for this run's rows of gold.alerts:
+    ``common.alert_set_fingerprint`` plus ``seconds``, the time
+    the fingerprint took. Never raises: when the fingerprint cannot be
+    computed the line carries ``unavailable`` with the reason instead, and
+    the record then has no alert set, which ``compare`` reads as results
+    not established on an exp2 record. Computed in Spark, never through the
+    query engine (engines hash differently), and never per continuous tick.
+    """
+    t0 = time.time()
+    try:
+        alerts = spark.table(table or f"{CATALOG}.{GOLD_ALERTS}").where(
+            col("run_id") == lit(run_id)
+        )
+        body = alert_set_fingerprint(alerts)
+    except Exception as e:  # noqa: BLE001
+        body = {"spec": ALERT_SET_SPEC, "unavailable": one_line(e)}
+    body["seconds"] = round(time.time() - t0, 3)
+    return f"{ALERT_SET_TAG} {json.dumps(body, sort_keys=True)}"
 
 
 def run_detection_rules(

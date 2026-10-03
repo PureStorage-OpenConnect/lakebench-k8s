@@ -628,6 +628,14 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
   writes trigger; the alert inputs and the replay are materialised in
   their own phases, after the cycle is recorded as started, so a failure
   there fails the pass as before.
+- `alert_set_seconds`: the seconds the alert-set fingerprint took (next
+  section). It runs last in the gold-finalize pod, after the TM pass. It is
+  Lakebench's work, not the pipeline's, so the CLI takes it off the stage's
+  `elapsed_seconds` and end time, and so off CPU-seconds, as it does for the
+  Customer 360 check; the report prints it beside the stage time ("excludes
+  1.2s of Lakebench's alert-set fingerprint"). Time to value loses it in a
+  single-cycle run; with `cycles` above 1 the earlier cycles' fingerprints
+  stay inside time to value, as the Customer 360 check's do.
 
 The run's record derives two diagnostic blocks from the fields above (neither
 enters identity, a verdict or a comparison):
@@ -653,6 +661,40 @@ enters identity, a verdict or a comparison):
   (recorded as `benchmark_query_timeout_seconds`, 900 s for AML), null
   when a query failed or the benchmark was replaced afterwards by
   `lakebench benchmark`. 25 or more means at most 75% of the budget used.
+
+### The alert set: are two runs' alerts the same?
+
+Two AML batch runs are compared on their results before their speed, and
+the benchmark queries alone do not show that both runs raised the same
+alerts. After its last write to `gold.alerts`, gold-finalize fingerprints
+the run's alerts in Spark and prints one `LB_ALERT_SET` line; the record
+keeps it as `experiment.results.alert_set`:
+
+- an alert is `(rule_id, entity_id, alert_ts)`: the rule, the subject and
+  the event time the rule derived from the data. `alert_id`, `run_id`,
+  `detected_ts` and every other column are left out, so two runs that
+  raised the same alerts read equal;
+- `by_rule` holds each rule's alert count (`rows`) and an order-independent
+  hash (`h`, an exact sum of one xxhash64 per alert); `rows` and `h` are
+  their totals. `spec` (`as1`) and `cols_sha` name the definition and the
+  column types. The value is the same on the Spark 4.0 and 4.1 lines.
+
+`lakebench compare` treats a different alert set like a different query
+result: any rule whose count or hash differs makes the pair NOT
+COMPARABLE (exit 10), and the reason names the rule. An AML batch record
+written by 1.7 (exp2, or exp1 with `v2_unavailable`) that has no alert set,
+because the fingerprint failed (the reason is in
+`results.alert_set_unavailable`) or gold-finalize did not run, has results
+not established: NOT ESTABLISHED (exit 11), never compared on its query
+results alone. The perf gate and `reproduce` refuse such a run too; they
+do not yet compare alert sets with their baseline or package. Records from
+1.6 have no alert set, and two of them compare as before. A rule that ran
+and raised no alert is absent from `by_rule`, like a rule that did not run;
+which rules ran is recorded separately (`experiment.rules`).
+
+Continuous runs never fingerprint inside a tick (that would be a full scan
+inside time to detect). Their alert set is taken once after the drain
+(`results.alert_set_continuous`, below) and is diagnostic only.
 
 ## Known limitations in v1.6
 
