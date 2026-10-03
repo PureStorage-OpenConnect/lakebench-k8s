@@ -493,24 +493,3 @@ def test_a_transient_read_is_not_taken_for_no_marker():
     s3 = Flaky()
     assert corpus.record_cycle(_cfg(1), s3, 0, 1, "r", D1, None) == "unwritten"
     assert s3.store == {}
-
-
-def test_clean_bronze_keeps_the_marker_until_the_bucket_is_empty():
-    from lakebench.cli._clean import _empty_layer
-
-    calls: list = []
-
-    class Bucket(S3):
-        def empty_bucket(self, bucket, progress_callback=None, keep_prefixes=()):
-            calls.append(("empty", tuple(keep_prefixes), dict(self.store)))
-            return 7
-
-    s3 = Bucket()
-    boto = MemoryBoto(s3.store)
-    boto.delete_object = lambda **kw: calls.append(("delete", kw["Key"]))  # type: ignore[attr-defined]
-    type(s3).raw_client = property(lambda self: boto)  # type: ignore[assignment]
-    assert _empty_layer(_cfg(1), s3, "bronze", BUCKET, None) == 7
-    (_, keep, before), last = calls
-    assert keep == (".lakebench/", SERIES)
-    assert json.loads(before[(BUCKET, SERIES)])["clearing"] is True
-    assert last == ("delete", SERIES)

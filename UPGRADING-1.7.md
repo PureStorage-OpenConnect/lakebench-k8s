@@ -425,3 +425,9 @@ Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain
 Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
 
 **What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.
+
+### Multi-cycle runs and reused corpora check a corpus series marker
+
+A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and `generate` or `run --generate-only` on a multi-cycle config exits 2.
+
+**What to do:** Generate a multi-cycle corpus with `lakebench run` (add `--regenerate` over an old corpus); regenerate a single-cycle corpus the marker refuses with `run --generate --regenerate`.

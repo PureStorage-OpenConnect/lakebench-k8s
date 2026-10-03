@@ -70,6 +70,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+- A run that reuses bronze exits 3 when its corpus series marker is unfinished or names another generation, a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`, and `generate` or `run --generate-only` on a multi-cycle config exits 2.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -134,8 +135,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   single-cycle run over a corpus with no marker (1.6, or an older
   `generate`) proceeds as before and records `cycle_series.marker:
   "absent"`, unless the corpus holds files of later cycles. The clears of
-  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset,
-  `clean bronze`) first write a marker that says a clear is under way and
+  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset)
+  first write a marker that says a clear is under way and
   keep it until the clear is done; a generate whose marker another run
   replaced exits 3. A multi-cycle `--skip-generate` now reuses a finished
   multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever

@@ -629,7 +629,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-deploy` |  | flag |  | Skip the deploy and the infrastructure readiness check; the read-only prerequisite checks, cluster capacity included, still run |
 | `--skip-generate` |  | flag |  | Batch: reuse the corpus already in bronze. Refused (exit 3) when its series marker says the generate did not finish or was made for another cycle count, window or generation than the config's; a multi-cycle run needs a marker |
 | `--regenerate` |  | flag |  | Clears the datagen prefix in a bronze bucket this deployment created, before generating (before cycle 0 of a multi-cycle run); refused on any other bucket. Without it, a non-empty datagen prefix is refused (exit 3), so existing datagen output is never overwritten silently. Takes --generate on a single-cycle run, nothing more on a multi-cycle run, and is refused when the run does not generate. |
-| `--allow-stale-bronze` |  | flag |  | On a batch run with --generate or more than one cycle, or with --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
+| `--allow-stale-bronze` |  | flag |  | On a batch run with --generate, a multi-cycle batch run without --skip-generate, or --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
 | `--skip-maintenance` |  | flag |  | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--force-rebuild` |  | flag |  | Silver batch only: opt in to a full rebuild that would drop an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. |
 | `--force-reset` |  | flag |  | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data before starting |
@@ -752,7 +752,7 @@ scale, customer id space, file size, target size per cycle, dirty ratio,
 image, window bounds and, for AML, the robustness perturbation; the image
 digest is not compared), and exits 4 when bronze cannot be read. The clears
 of the datagen prefix (`--regenerate`, the deployer's clear before a fresh
-generate, a continuous run's reset, `clean bronze`) first write a marker
+generate, a continuous run's reset) first write a marker
 that says a clear is under way and keep it until the clear is done, so such
 a clear that stops part way never leaves part of a corpus unmarked (a
 destroy that keeps the bronze bucket and stops while emptying it is not
