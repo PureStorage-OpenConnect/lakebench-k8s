@@ -62,11 +62,18 @@ other commands also offers. No command writes `.lakebench/state.json` any
 more, and the read-only commands create no files.
 
 The v1.6 name is read from `.lakebench/state.json` beside the path given,
-as v1.6 read it, with symbolic links not followed. When a nameless config
-is reached through a link and the directory of the file it points to
-records a different v1.6 name (or the link's directory records none), every
-command refuses it unless the config sets `name:` or `--name` is given, so
-one config cannot act on another directory's deployment.
+as v1.6 read it, with symbolic links not followed; `--name` is checked
+against that name. When a nameless config is reached through a link and the
+directory of the file it points to records a different v1.6 name (or the
+link's directory records none), every command that may look at a
+deployment refuses it without `--name`, so one config cannot act on, or
+report, the other directory's deployment. `info` and the `config` commands
+load it under the link directory's name with a note. Because both
+directories share the one file, the fix is not to add `name:` to it: pass
+`--name`, or replace the link with a copy and name each copy. `init
+--overwrite` refuses such a file when either directory records a v1.6 name,
+and `relocate` refuses it through the link. The v1.7 deploy state
+(`.lakebench/<name>.json`, below) stays with the file the link points to.
 
 ### Deploy state and nameless teardown
 

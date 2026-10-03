@@ -62,9 +62,10 @@ class NameResolution:
     legacy_name: str | None = None
     #: A config reached through a symbolic link: the v1.6 state file beside
     #: the file the link resolves to, and the name it records, when that
-    #: names something other than the state beside the path given (which is
-    #: the one 1.6 read, ``legacy_state_path``). Name checks refuse rather
-    #: than pick one of the two.
+    #: differs from the name beside the path given (``legacy_name``, the one
+    #: 1.6 read). The loader refuses a nameless config with this set, except
+    #: under ``--name`` (checked against ``legacy_name`` and the namespace's
+    #: stamps) and for commands that look at no deployment.
     resolved_legacy: tuple[Path, str] | None = None
 
     @property
@@ -110,6 +111,22 @@ def _legacy_name_in(path: Path) -> str | None:
     if isinstance(name, str) and name:
         return name
     return None
+
+
+def legacy_names(config_path: str | Path) -> dict[Path, str]:
+    """Every v1.6 name recorded for this config, by state file: the one
+    beside the path given (the one 1.6 read) and, through a symbolic link,
+    the one beside the file the link resolves to (one file when they are
+    the same), so a caller can refuse when either names a deployment."""
+    found: dict[Path, str] = {}
+    given = given_legacy_state_path(config_path)
+    resolved = legacy_state_path(config_path)
+    paths = [given] if _same_file(given, resolved) else [given, resolved]
+    for path in paths:
+        name = _legacy_name_in(path)
+        if name:
+            found[path] = name
+    return found
 
 
 def _config_marker_keys() -> frozenset[str]:
@@ -229,25 +246,13 @@ def resolve_name(
                 "--name is only for configs that set no name"
             )
         return NameResolution(name, "config", legacy_path, legacy, resolved_legacy)
-    if resolved_legacy is not None and name_override is None:
-        # Through a symbolic link the two directories' v1.6 names disagree:
-        # 1.6 read the link's, while the file the link points to has another.
-        # Neither can be assumed, or one config could act on the other's
-        # deployment.
-        other_path, other = resolved_legacy
-        here = f"'{legacy}'" if legacy else "no name"
-        raise ValueError(
-            f"config has no name and is reached through a symbolic link: v1.6 recorded "
-            f"{here} in {legacy_path} and '{other}' in {other_path} (beside the file the "
-            "link points to), so which deployment it names cannot be told. Fix: add the "
-            "deployment's name to the config, or pass --name, which the namespace's "
-            "stamps then confirm"
-        )
     if name_override:
         return NameResolution(name_override, "override", legacy_path, legacy, resolved_legacy)
     if legacy:
-        return NameResolution(legacy, "legacy-state", legacy_path, legacy)
-    return NameResolution(suggested_name(config_path), "suggested", legacy_path, None)
+        return NameResolution(legacy, "legacy-state", legacy_path, legacy, resolved_legacy)
+    return NameResolution(
+        suggested_name(config_path), "suggested", legacy_path, None, resolved_legacy
+    )
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -722,6 +727,16 @@ def relocate_state(
         raise RelocateRefused(f"{src} is not a file")
     if dst_dir == src.parent:
         raise RelocateRefused(f"{dst_dir} is the config's own directory")
+    if not _same_file(given_legacy_state_path(config_path), legacy_state_path(config_path)):
+        recorded = legacy_names(config_path)
+        if recorded:
+            # The v1.6 state copied is the target directory's; through a link
+            # 1.6 read the link's, so the copy could carry another name.
+            raise RelocateRefused(
+                f"{config_path} is a symbolic link and v1.6 recorded "
+                + " and ".join(f"'{n}' in {p}" for p, n in recorded.items())
+                + f"; relocate {src} from its own path"
+            )
     if name:
         import yaml
 

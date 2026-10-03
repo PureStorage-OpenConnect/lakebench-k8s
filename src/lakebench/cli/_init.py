@@ -408,16 +408,20 @@ def init(
         old_name = None  # an unresolved reference names no deployment
     kept_name = None if name else old_name
     if replacing and not name and not kept_name:
-        from lakebench.config.deploy_state import read_legacy_name
+        from lakebench.config.deploy_state import legacy_names
 
-        legacy = read_legacy_name(output)
-        if legacy:
-            # v1.6 gave every nameless config in this directory that name, so
-            # it may be this file's deployment or a sibling's.
+        # v1.6 gave every nameless config in a directory one name, so it may
+        # be this file's deployment or a sibling's. Through a symbolic link
+        # both the link's directory and the target's are read: the file
+        # replaced is the target, which either may have deployed.
+        recorded = sorted(set(legacy_names(output).values()))
+        if recorded:
+            legacy = recorded[0]
             _refuse(
-                f"{output} has no name, and v1.6 recorded '{legacy}' for nameless "
-                f"configs here: pass --name {legacy} if this file deployed it, or "
-                "--name with a new name"
+                f"{output} has no name, and v1.6 recorded "
+                + " and ".join(f"'{n}'" for n in recorded)
+                + f" for nameless configs here: pass --name {legacy} if this file "
+                "deployed it, or --name with a new name"
             )
 
     from lakebench.config.support import recipe_names, workloads

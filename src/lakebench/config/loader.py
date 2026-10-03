@@ -176,7 +176,10 @@ class ConfigNameRequired(ConfigValidationError):
     under that name and leaves the proof to the namespace's own stamps
     (``config.deploy_state.check_nameless_target``). ``siblings`` lists the
     other nameless configs found there, for the message (None when the
-    directory could not be listed).
+    directory could not be listed). ``linked`` is a nameless config reached
+    through a symbolic link whose two directories record different v1.6
+    names (``NameResolution.resolved_legacy``); every command that may look
+    at a deployment refuses it.
     """
 
     def __init__(
@@ -186,6 +189,7 @@ class ConfigNameRequired(ConfigValidationError):
         teardown: bool = False,
         siblings: list[Path] | None = None,
         suggestion: str | None = None,
+        linked: bool = False,
     ):
         self.resolution = resolution
         self.siblings = siblings
@@ -195,7 +199,19 @@ class ConfigNameRequired(ConfigValidationError):
             others = "this directory could not be listed"
         else:
             others = "this directory also holds nameless " + ", ".join(p.name for p in siblings)
-        if teardown and resolution.source == "legacy-state":
+        if linked and resolution.resolved_legacy is not None:
+            other_path, other = resolution.resolved_legacy
+            here = f"'{resolution.legacy_name}'" if resolution.legacy_name else "no name"
+            msg = (
+                "config has no name and is reached through a symbolic link: v1.6 "
+                f"recorded {here} in {resolution.legacy_state_path} and '{other}' in "
+                f"{other_path}, beside the file the link points to. The two directories "
+                "share this one file, so which deployment it names cannot be told. Fix: "
+                "pass --name to destroy, stop, status or logs, which then check the "
+                "namespace's stamps; to keep using the config, replace the link with a "
+                "copy of the file and add each deployment's name to its own copy."
+            )
+        elif teardown and resolution.source == "legacy-state":
             also = f", and {others}" if shared else ""
             msg = (
                 f"config has no name; '{name}' (read from {resolution.legacy_state_path}) "
@@ -361,7 +377,9 @@ def load_config(
             keys with a note. A nameless config loads under its resolved
             name, except that TEARDOWN refuses one whose name is only a
             suggestion, and TEARDOWN and READ refuse one whose name comes
-            from the v1.6 state file. Defaults to MUTATE, or to TEARDOWN
+            from the v1.6 state file. Every purpose but INSPECT refuses a
+            nameless config reached through a symbolic link whose target's
+            directory records another v1.6 name. Defaults to MUTATE, or to TEARDOWN
             when only ``allow_long_names`` is given.
         name_override: The name for a config that sets none (``--name``).
             It must equal the config's own name when the config has one.
@@ -417,6 +435,21 @@ def _load_and_validate(
             errors=[{"loc": ("name",), "msg": str(e), "type": "name_override"}],
         ) from None
     if resolution.nameless:
+        if resolution.resolved_legacy is not None and resolution.source != "override":
+            # Reached through a symbolic link, and the directory of the file
+            # it points to records another v1.6 name than the link's own
+            # directory, the one 1.6 read. A command that looks at no
+            # deployment loads it under 1.6's name; every other refuses, or
+            # it could act on, or report, the other directory's deployment.
+            if purpose != LoadPurpose.INSPECT:
+                raise ConfigNameRequired(resolution, linked=True)
+            other_path, other = resolution.resolved_legacy
+            emit_note(
+                f"no name: loaded as '{resolution.name}', the name v1.6 used through "
+                f"this path; {other_path} records '{other}' for the file the link "
+                "points to",
+                category=None,
+            )
         siblings = other_nameless_configs(path) if resolution.source == "legacy-state" else []
         if purpose in CHANGES_DATA:
             raise ConfigNameRequired(resolution, siblings=siblings, suggestion=suggested_name(path))
