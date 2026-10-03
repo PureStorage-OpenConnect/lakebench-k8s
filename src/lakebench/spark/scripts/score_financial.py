@@ -430,8 +430,9 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     fp_by_rule: dict[str, float | None] = {}
     # Alerts of a rule that touch no payment of its target typology, per
     # rule with a target (a diagnostic count for the screening limitation:
-    # W5/W6 non-planted alerts grow with scale). Before TM, so no Lakebench
-    # cap truncates it.
+    # W5/W6 non-planted alerts grow with scale). Counted before TM, so no
+    # Lakebench cap truncates the count; an evidence cap can still make a
+    # planted alert read non-planted (see evidence_capped_alerts_by_rule).
     nonplanted_by_rule: dict[str, int] = {}
     txn_precision_by_rule: dict[str, float] = {}
     chance_by_rule: dict[str, float] = {}
@@ -441,6 +442,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         fp_alerts = total_alerts - tp_global
         fp_rate: float | None = fp_alerts / total_alerts
         targeted = {rid: typ for typ, rids in designated.items() for rid in rids}
+        nonplanted_by_rule.update(dict.fromkeys(targeted, 0))
         target_df = spark.createDataFrame(
             list(targeted.items()) or [("", "")], "rule_id STRING, target STRING"
         )

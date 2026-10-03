@@ -346,4 +346,6 @@ def test_nonplanted_alerts_are_counted_per_rule(spark):
     _, s = compute_scores(spark, _manifest(spark), alerts, status)
     assert s["nonplanted_alerts_by_rule"]["W5_sanctions_match"] == 2
     assert s["nonplanted_alerts_by_rule"]["W2_structuring"] == 0
+    # A targeted rule with no alerts reads 0, not absent.
+    assert s["nonplanted_alerts_by_rule"]["W8_dormant_reactivation"] == 0
     assert s["fp_rate_by_rule"]["W5_sanctions_match"] == pytest.approx(2 / 3)
