@@ -1,9 +1,9 @@
 """Executed: Customer 360 gold is the same from batch and continuous (V16-7).
 
-The batch ``gold_finalize`` over a silver table and the continuous
-``gold_refresh`` ticking three times while that silver grows must leave the
-same gold rows, on Iceberg and on Delta: a reader of gold gets the same
-answers from either pipeline over the same corpus. A one-cent change to one
+The continuous ``gold_refresh``, ticking three times while silver grows, must
+leave after every tick the same gold rows as the batch ``gold_finalize``
+over silver as it stands then, on Iceberg and on Delta: a reader of gold
+gets the same answers from either pipeline over the same corpus. A one-cent change to one
 silver purchase must change the batch fingerprint, so equality is not an
 accident of what the fingerprint covers.
 
@@ -34,14 +34,17 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_stream_gold_equals_batch_gold(result, fmt):
+def test_stream_gold_equals_batch_gold_after_every_tick(result, fmt):
     case = result[fmt]
-    assert case["silver_rows"] > 0 and case["batch"]["rows"] > 0
-    assert case["stream"] == case["batch"]
+    rows = [t["stream"]["rows"] for t in case["ticks"]]
+    assert len(rows) == 3 and rows[0] > 0 and rows[0] < rows[1] < rows[2], rows
+    for i, t in enumerate(case["ticks"]):
+        assert t["stream"] == t["batch"], i
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_one_changed_silver_amount_changes_gold(result, fmt):
     case = result[fmt]
-    assert case["changed"]["rows"] == case["batch"]["rows"]
-    assert case["changed"]["sha256"] != case["batch"]["sha256"]
+    final = case["ticks"][-1]["batch"]
+    assert case["changed"]["rows"] == final["rows"]
+    assert case["changed"]["sha256"] != final["sha256"]
