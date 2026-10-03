@@ -244,6 +244,8 @@ def start_from_args(group: Any, args: list[str]) -> None:
     flag = False
     i = 0
     while i < len(rest):
+        if rest[i] == "--":
+            break  # everything after it is an argument
         if rest[i] in takes_value:
             i += 2  # the option and its value, whatever the value says
             continue

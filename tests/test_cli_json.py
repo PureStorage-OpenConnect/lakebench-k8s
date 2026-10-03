@@ -335,6 +335,7 @@ def test_every_stdout_console_is_redirected():
         ["journal", "--session", "--json"],  # a value, not the flag
         ["query", "--example", "--json"],
         ["deploy", "--json"],  # a command with no --json
+        ["query", "c.yaml", "--", "--json"],  # an argument after --
     ],
 )
 def test_json_as_a_value_or_undeclared_starts_no_document(argv, monkeypatch, tmp_path):
