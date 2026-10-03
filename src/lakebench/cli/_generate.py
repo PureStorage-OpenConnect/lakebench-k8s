@@ -293,7 +293,6 @@ def _registered_corpus_record(
         "bronze_uri": bronze_uri(
             cfg.platform.storage.s3.buckets.bronze, bronze_datagen_prefix(cfg)
         ),
-        "s3_endpoint": cfg.platform.storage.s3.endpoint,
         "image": cfg.images.datagen,
         "lakebench_commit": code.get("git_sha"),
         "lakebench_dirty": code.get("git_dirty"),
