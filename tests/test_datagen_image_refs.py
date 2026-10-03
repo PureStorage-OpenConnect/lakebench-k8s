@@ -18,15 +18,19 @@ from lakebench.config.schema import ImagesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The image's own name, bare (``lb-datagen:x``) or under docker.io/sillidata,
-# with ``-rs`` for the retired repository. A reference under another registry
-# (``your-registry/lb-datagen:custom``) is a placeholder, not a pin.
+# The image's name: bare (``lb-datagen:x``) or under the sillidata namespace on
+# any registry host, with ``-rs`` for the retired repository; the tag or digest
+# runs to the next space, quote or delimiter. A name under another namespace
+# (``your-registry/lb-datagen:custom``, ``${REG}/lb-datagen:x``) is a
+# placeholder for the user's own build, not a pin. A bare untagged
+# ``lb-datagen`` is prose; ``sillidata/lb-datagen`` with no tag pulls
+# ``:latest`` and is flagged.
 _REF = re.compile(
-    r"(?:(?<=[\s`'\"(=])|^)(?:docker\.io/)?(?:sillidata/)?lb-datagen(?:-rs)?[:@][A-Za-z0-9._:@-]+",
-    re.M,
+    r"(?<![\w./${}-])((?:[\w.-]+/)?sillidata/)?(lb-datagen(?:-rs)?)"
+    r"((?:[:@][^\s`'\"<>|,()\[\]]*)?)"
 )
 
-#: Path pattern -> why an old or floating tag is allowed there.
+#: Path pattern -> why any datagen reference is allowed in that file.
 ALLOWLIST = {
     "CHANGELOG.md": "release history names the images each release used",
     "tests/fixtures/records/*": "recorded run output names the image that ran",
@@ -39,54 +43,60 @@ ALLOWLIST = {
     "tests/test_aml_scale_invariance.py": "refusal test feeds a floating tag on purpose",
     "tests/test_root_lakebench_yaml.py": "docstring on the floating tag it guards against",
     "tests/test_datagen_image_refs.py": "this file plants references on purpose",
-    "docs/perf-regression-gate.md": "history: the earlier baselines ran a floating tag",
-    "docs/benchmarks/C360.md": "names the deleted image a recorded run used",
-    "docs/reproductions/c360-scale-0-1.yaml": "legacy package `reproduce` refuses; kept as history",
-    "scripts/check_doc_overlap.py": "comments on whole-token matching of a versioned name",
+    "tests/test_aml_protocol_look_image.py": "builds patterns of the default image's tag",
     "tests/test_doc_overlap.py": "whole-token matching cases (1.6.01, 1.6.0.1) on purpose",
 }
 
+#: Path -> the exact references (registry prefix dropped) allowed in it, and why.
+ALLOW_REFS = {
+    "docs/perf-regression-gate.md": ({"lb-datagen:latest"}, "history of the earlier baselines"),
+    "docs/benchmarks/C360.md": ({"lb-datagen:034f998"}, "the deleted image a recorded run used"),
+    "docs/reproductions/c360-scale-0-1.yaml": (
+        {"lb-datagen:latest"},
+        "legacy package `reproduce` refuses; kept as history",
+    ),
+    "scripts/check_doc_overlap.py": ({"lb-datagen:1.6.0.1"}, "whole-token matching comment"),
+}
 
-def _allowed_values() -> set[str]:
-    default = ImagesConfig().datagen
-    tag_ref, digest = default.split("@", 1)
+
+def _allowed(namespaced: bool, name: str, suffix: str) -> bool:
+    """The default image (tag, digest or both), 1.6.0 (still in the registry,
+    the lineage root), an untagged prose mention, or code building a digest."""
+    tag_ref, digest = ImagesConfig().datagen.split("@", 1)
     tag = tag_ref.rsplit(":", 1)[1]
-    values = {default, tag_ref, f"docker.io/sillidata/lb-datagen@{digest}"}
-    for name in ("lb-datagen", "sillidata/lb-datagen", "docker.io/sillidata/lb-datagen"):
-        values |= {f"{name}:{tag}", f"{name}:1.6.0"}
-    return values
-
-
-def _allowed(ref: str, values: set[str], digest: str) -> bool:
-    ref = ref.rstrip(".,;)")
-    if ref in values:
+    if name != "lb-datagen":
+        return False  # the retired lb-datagen-rs repository
+    suffix = suffix.rstrip(".,;)")
+    if suffix == "":
+        return not namespaced
+    if suffix in {f":{tag}", f":{tag}@{digest}", f"@{digest}", ":1.6.0"}:
         return True
-    if ref.endswith("@sha256:"):
-        # Code or prose that builds a digest reference (``... + "0" * 64``,
-        # ``@sha256:<digest above>``), not a pin.
+    if suffix in {"@sha256:", f":{tag}@sha256:"}:
+        # ``... + "0" * 64`` or ``@sha256:<digest above>``: builds a digest.
         return True
-    # A shortened digest in prose (``@sha256:48e18a41...``).
-    m = re.fullmatch(r"(?:docker\.io/)?(?:sillidata/)?lb-datagen@(sha256:[0-9a-f]{8,})", ref)
+    # A shortened digest of the default in prose (``@sha256:48e18a41...``).
+    m = re.fullmatch(rf"(?::{tag})?@(sha256:[0-9a-f]{{8,}})\.*", suffix)
     return bool(m and digest.startswith(m.group(1)))
 
 
 def stale_refs(root: Path, files: list[str]) -> list[str]:
-    """``path:line: ref`` for every datagen image reference that is neither
-    the default, 1.6.0, nor in an allowlisted file."""
-    values = _allowed_values()
-    digest = ImagesConfig().datagen.split("@", 1)[1]
+    """``path:line: ref`` for every datagen image reference that is not
+    allowed (see ``_allowed``, ALLOWLIST and ALLOW_REFS)."""
     out = []
     for rel in files:
         if any(fnmatch.fnmatch(rel, pat) for pat in ALLOWLIST):
             continue
+        extra = ALLOW_REFS.get(rel, (set(), ""))[0]
         try:
-            text = (root / rel).read_text()
-        except (UnicodeDecodeError, OSError):
-            continue
+            text = (root / rel).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue  # binary
         for m in _REF.finditer(text):
-            if not _allowed(m.group(0), values, digest):
-                line = text.count("\n", 0, m.start()) + 1
-                out.append(f"{rel}:{line}: {m.group(0)}")
+            namespaced, name, suffix = bool(m.group(1)), m.group(2), m.group(3)
+            if _allowed(namespaced, name, suffix) or f"{name}{suffix}".rstrip(".,;)") in extra:
+                continue
+            line = text.count("\n", 0, m.start()) + 1
+            out.append(f"{rel}:{line}: {m.group(0)}")
     return out
 
 
@@ -95,8 +105,8 @@ def _tracked() -> list[str]:
         r = subprocess.run(
             ["git", "-C", str(ROOT), "ls-files"], capture_output=True, text=True, check=True
         )
-    except (OSError, subprocess.CalledProcessError):
-        pytest.skip("not a git checkout")
+    except (OSError, subprocess.CalledProcessError) as e:
+        pytest.fail(f"the drift test needs a git checkout: {e}")
     return [f for f in r.stdout.splitlines() if (ROOT / f).is_file()]
 
 
@@ -106,7 +116,7 @@ def test_no_stale_datagen_image_reference():
 
 def test_allowlist_entries_still_match_a_file():
     files = _tracked()
-    for pat in ALLOWLIST:
+    for pat in [*ALLOWLIST, *ALLOW_REFS]:
         assert any(fnmatch.fnmatch(f, pat) for f in files), f"stale allowlist entry {pat}"
 
 
@@ -122,8 +132,24 @@ def test_drift_fails_on_planted_reference(tmp_path):
     )
     (tmp_path / "job.yaml").write_text("image: docker.io/sillidata/lb-datagen-rs:latest\n")
     (tmp_path / "CHANGELOG.md").write_text("- was `lb-datagen:v3`\n")
-    found = stale_refs(tmp_path, ["docs/ok.md", "perf.yaml", "job.yaml", "CHANGELOG.md"])
+    (tmp_path / "more.yaml").write_text(
+        "a: docker.io/sillidata/lb-datagen\n"  # untagged: pulls :latest
+        "b: index.docker.io/sillidata/lb-datagen:gone\n"
+        "c,lb-datagen:gone\n"
+        "|lb-datagen:gone|\n"
+        "e:docker.io/sillidata/lb-datagen:gone@sha256:\n"
+        f"f: docker.io/sillidata/lb-datagen:gone@{default.split('@')[1]}\n"
+        "the lb-datagen image\n"  # prose, not a pin
+    )
+    files = ["docs/ok.md", "perf.yaml", "job.yaml", "CHANGELOG.md", "more.yaml"]
+    found = [f.split(": ", 1)[0] for f in stale_refs(tmp_path, files)]
     assert found == [
-        "perf.yaml:2: docker.io/sillidata/lb-datagen:14c4eee",
-        "job.yaml:1: docker.io/sillidata/lb-datagen-rs:latest",
+        "perf.yaml:2",
+        "job.yaml:1",
+        "more.yaml:1",
+        "more.yaml:2",
+        "more.yaml:3",
+        "more.yaml:4",
+        "more.yaml:5",
+        "more.yaml:6",
     ]
