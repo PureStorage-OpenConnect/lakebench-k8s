@@ -479,8 +479,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   are built**, before any apply and in the continuous runner's pre-check, so
   a refusal comes before the continuous reset drops any state. Every integer
   token, every 6 to 19 digit window of a longer digit run and every comma-
-  or space-grouped number is hashed and compared with the held-out hashes. A hit refuses the deploy (`absence_check:
-  enforce`), naming the map and key, never the value.
+  or space-grouped number is hashed and compared with the held-out hashes.
+  A hit refuses the run (exit 1) before any job is submitted or any state
+  is reset (`absence_check: enforce`), naming the map and key, never the
+  value.
 - **The pre-registration and the protocol no longer hold the held-out seeds
   in plaintext.** The pre-registration drops `corpora.evaluation_seed` and
   `corpora.robustness_seed` and names those seeds by role in its notes, and

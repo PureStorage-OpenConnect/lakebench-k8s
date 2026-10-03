@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -307,7 +308,9 @@ def heldout_absence_refusal(maps: Iterable[Mapping[str, Any]]) -> str | None:
         held = ds.load_heldout()
         problems = ds.absence_problems(texts, held)
     except Exception as e:  # noqa: BLE001 -- any failure refuses the apply
-        return f"the held-out absence check could not run ({type(e).__name__}: {e}); not applying"
+        # Long digit runs are masked: an exception text must not carry a seed.
+        why = re.sub(r"[0-9]{5,}", "<n>", str(e))
+        return f"the held-out absence check could not run ({type(e).__name__}: {why})"
     if not problems:
         return None
     if held.absence_check == "enforce":
