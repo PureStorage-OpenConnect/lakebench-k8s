@@ -492,7 +492,15 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   not the configured number, so a run whose round was lowered or skipped
   compares as not like-for-like with one that ran at N (an outcome
   condition: the perf gate and `reproduce` do not refuse on it). A config
-  without the key records and identifies exactly as before.
+  without the key records and identifies exactly as before. With the key,
+  the run adds one round after its first in-stream round with a case: N
+  concurrent sessions, one open case each in IQ1's queue order, run IQ1 to
+  IQ3 bound to their case and IQ4, once each, recorded as
+  `continuous.investigators` (sessions run, per-session rows, p50 and p95
+  per query, the baseline round's times, status, and the overlap of the
+  detection ticks with the session window as `tick_delta` and
+  `load_label`); it never counts as a benchmark round. See
+  [aml-scoring.md](docs/aml-scoring.md).
 - **AML continuous runs drain the last detection tick and score
   `recall_covered`.** At window end the CLI asks gold-refresh to finish its
   tick (a marker under its checkpoint) instead of deleting it mid-tick, then

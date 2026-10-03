@@ -22,7 +22,8 @@ The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 
 from lakebench.config.schema import WorkloadSchema
 
@@ -493,19 +494,45 @@ ORDER BY a.alert_ts DESC, a.alert_id""",
 # unless this run's TM layer ran: otherwise they would time a stale or empty
 # table under the same query-set id.
 
+# Each subject CTE body is its own constant, so a session can bind it to one
+# case (bind_case) while the default render stays byte-identical.
+#: IQ1's queue order: open before closed, by priority, oldest first. The
+#: investigator sessions pick their cases in this order.
+IQ1_CASE_ORDER = """CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
+           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+           opened_date, case_id"""
+
+_IQ1_SUBJECT = (
+    """  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY """
+    + IQ1_CASE_ORDER
+    + """
+  LIMIT 1"""
+)
+
+_IQ2_SUBJECT = """  SELECT customer_id, opened_date
+  FROM {catalog}.{gold_cases}
+  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
+  ORDER BY opened_date DESC, case_id
+  LIMIT 1"""
+
+_IQ3_SUBJECT = """  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
+  LIMIT 1"""
+
 _IQ1 = BenchmarkQuery(
     name="IQ1_customer_360",
     display_name="Investigator: customer 360 for the top open case",
     query_class="investigator",
     sql="""\
 WITH subject AS (
-  SELECT customer_id
-  FROM {catalog}.{gold_cases}
-  WHERE base_run_id = '{tm_run_id}'
-  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
-           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-           opened_date, case_id
-  LIMIT 1
+"""
+    + _IQ1_SUBJECT
+    + """
 ),
 alerts AS (
   SELECT d.entity_id,
@@ -551,11 +578,9 @@ _IQ2 = BenchmarkQuery(
     query_class="investigator",
     sql="""\
 WITH subject AS (
-  SELECT customer_id, opened_date
-  FROM {catalog}.{gold_cases}
-  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
-  ORDER BY opened_date DESC, case_id
-  LIMIT 1
+"""
+    + _IQ2_SUBJECT
+    + """
 )
 SELECT date_trunc('month', t.txn_timestamp) AS activity_month,
        COUNT(*) AS txns,
@@ -580,11 +605,9 @@ _IQ3 = BenchmarkQuery(
     query_class="investigator",
     sql="""\
 WITH subject AS (
-  SELECT customer_id
-  FROM {catalog}.{gold_cases}
-  WHERE base_run_id = '{tm_run_id}'
-  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
-  LIMIT 1
+"""
+    + _IQ3_SUBJECT
+    + """
 ),
 hop1 AS (
   SELECT cp, SUM(amount_usd) AS amount_usd, SUM(txns) AS txns
@@ -640,6 +663,42 @@ ORDER BY age_days DESC, c.case_id""",
 )
 
 INVESTIGATOR_QUERIES: list[BenchmarkQuery] = [_IQ1, _IQ2, _IQ3, _IQ4]
+
+#: Name suffix of a query bound to one case (an investigator session's).
+SESSION_SUFFIX = "@session"
+
+#: The case ids gold.cases holds (tm_operations.case_id_for): bind_case takes
+#: nothing else, so a bound id needs no quoting.
+CASE_ID_RE = re.compile(r"case-[0-9a-f]{24}")
+
+# (subject body, the columns a bound subject selects), per query that takes a case.
+_SUBJECTS: dict[str, tuple[str, str]] = {
+    _IQ1.name: (_IQ1_SUBJECT, "customer_id"),
+    _IQ2.name: (_IQ2_SUBJECT, "customer_id, opened_date"),
+    _IQ3.name: (_IQ3_SUBJECT, "customer_id"),
+}
+
+
+def bind_case(query: BenchmarkQuery, case_id: str) -> BenchmarkQuery:
+    """*query* with its subject bound to one case, for an investigator
+    session: IQ1, IQ2 and IQ3 read that case's customer (and IQ2 its opened
+    date) instead of the top case of the queue, and the name gains
+    ``@session``. IQ4 (the open-case list) takes no case and is returned
+    unchanged. Raises ValueError on an id that is not a gold.cases case id."""
+    if not CASE_ID_RE.fullmatch(case_id or ""):
+        raise ValueError(f"not a case id: {case_id!r}")
+    subject = _SUBJECTS.get(query.name)
+    if subject is None:
+        return query
+    body, columns = subject
+    bound = (
+        f"  SELECT {columns}\n"
+        "  FROM {catalog}.{gold_cases}\n"
+        f"  WHERE base_run_id = '{{tm_run_id}}' AND case_id = '{case_id}'"
+    )
+    if query.sql.count(body) != 1:
+        raise ValueError(f"{query.name}: subject CTE not found")
+    return replace(query, name=query.name + SESSION_SUFFIX, sql=query.sql.replace(body, bound))
 
 
 _FINANCIAL_QUERIES: list[BenchmarkQuery] = [

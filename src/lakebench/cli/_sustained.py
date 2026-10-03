@@ -2010,6 +2010,90 @@ def _run_benchmark_round(
     )
 
 
+def investigator_sessions_after_round(
+    bench_runner,
+    collector,
+    console,
+    j,
+    requested: int,
+    *,
+    remaining_s: float,
+    baseline_round_s: float,
+) -> bool:
+    """After an in-stream round: run the investigator sessions when that
+    round included IQ1 to IQ4 (it is the baseline), or record them as
+    ``no_time`` when less than ``TIME_FACTOR`` baseline rounds are left.
+    Returns whether the sessions are still pending (the round had no case)."""
+    from lakebench.benchmark import investigator_sessions as inv
+
+    run = collector.current_run
+    rounds = getattr(run, "benchmark_rounds", None) or []
+    last = rounds[-1] if rounds else None
+    record_of = getattr(last, "round_record", None) or {}
+    if record_of.get("investigator_queries") != "included":
+        return True
+    if remaining_s < inv.TIME_FACTOR * baseline_round_s:
+        record = inv.skipped(
+            requested,
+            "no_time",
+            f"{remaining_s:.0f}s left in the window, under {inv.TIME_FACTOR:g} x the "
+            f"{baseline_round_s:.0f}s baseline round",
+        )
+    else:
+        console.print(f"  Investigator sessions: {requested} requested...")
+        record = inv.run_sessions(
+            bench_runner,
+            requested,
+            inv.baseline_seconds(getattr(last, "queries", None) or []),
+            now=utc_now,
+        )
+    if run is not None:
+        if run.continuous is None:
+            run.continuous = {}
+        run.continuous["investigators"] = record
+    console.print(
+        f"  Investigator sessions: {record['status']} ({record['sessions_run']} of {requested} ran)"
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message="Investigator sessions",
+        details={
+            k: record.get(k)
+            for k in ("sessions_requested", "sessions_run", "status", "lowered_reason")
+        },
+    )
+    return False
+
+
+def finish_investigator_sessions(
+    continuous: dict,
+    requested: int,
+    *,
+    pending: bool,
+    rounds_ran: bool,
+    ticks: list,
+    clock_offset_s: float | None,
+) -> None:
+    """At window close: a sessions round that never found a case is
+    recorded as ``no_cases``; one that ran gets the overlap of the detection
+    ticks with its window (``tick_delta``, ``load_label``)."""
+    from lakebench.benchmark import investigator_sessions as inv
+
+    if pending or "investigators" not in continuous:
+        why = (
+            "no in-stream round found a case of this run"
+            if rounds_ran
+            else "no in-stream round ran"
+        )
+        continuous["investigators"] = inv.skipped(requested, "no_cases", why)
+        return
+    record = continuous["investigators"]
+    overlap = inv.tick_overlap(record, ticks, clock_offset_s)
+    if overlap is not None:
+        record.update(overlap)
+
+
 def _investigator_state(bench_runner, run_id: str) -> str:
     """Whether this run has a case yet, for the investigator queries: an
     untimed ``SELECT 1`` on the cases table for the run's ``base_run_id``
@@ -3663,6 +3747,10 @@ def _run_sustained(
         # rounds they can't finish.
         last_round_seconds: float = 0.0
         min_remaining_floor = 60
+        # AML investigator sessions (benchmark.investigator_sessions): one
+        # extra round after the first round that included IQ1 to IQ4.
+        sessions_requested: int | None = cfg.architecture.benchmark.investigator_sessions
+        sessions_pending = sessions_requested is not None and bench_runner_instream is not None
 
         while time.time() - start < run_duration:
             elapsed = time.time() - start
@@ -3701,6 +3789,17 @@ def _run_sustained(
                 # the next pass without a sleep.
                 _ns_watch.check(time.time() - start)
                 last_round_seconds = time.time() - round_start
+                if sessions_pending and sessions_requested is not None:
+                    sessions_pending = investigator_sessions_after_round(
+                        bench_runner_instream,
+                        collector,
+                        console,
+                        j,
+                        sessions_requested,
+                        remaining_s=run_duration - (time.time() - start),
+                        baseline_round_s=last_round_seconds,
+                    )
+                    _ns_watch.check(time.time() - start)
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
                 continue
@@ -3980,6 +4079,15 @@ def _run_sustained(
             if collector.current_run.continuous is None:
                 collector.current_run.continuous = {}
             collector.current_run.continuous.update(continuous_record)
+            if sessions_requested is not None:
+                finish_investigator_sessions(
+                    collector.current_run.continuous,
+                    sessions_requested,
+                    pending=sessions_pending,
+                    rounds_ran=round_index > 0,
+                    ticks=getattr(parsed.get("gold-refresh"), "tick_timings", None) or [],
+                    clock_offset_s=clock_offset,
+                )
         _journal_safe(
             j.record,
             EventType.STREAMING_HEALTH,
