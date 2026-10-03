@@ -980,34 +980,48 @@ before reading any result, and the perf gate and `reproduce` refuse the
 pair.
 
 **Investigators under load (`architecture.benchmark.investigator_sessions`).**
-Set to N (1 to 32) on an AML continuous run with TM operations on Trino or
-Spark Thrift, it adds one round right after the first in-stream round that
-included the investigator queries (that round is the baseline). N sessions
-run concurrently, each working one case of this run picked in IQ1's queue
-order (open before closed, by priority, oldest first): IQ1, IQ2 and IQ3 bound
-to that case and IQ4 unchanged, once each. The round is not a benchmark
-round, so in-stream QpH and the round count do not move; it takes window
-time, so the round count can be lower than without it. It runs only when at
-least twice the baseline round's time is left (`status: no_time`
-otherwise). `continuous.investigators` records `sessions_requested`,
-`sessions_run` (fewer when fewer cases are open, with `lowered_reason`), the
-`case_ids`, `rows_per_session`, the nearest-rank `latency` p50 and p95 per
-query over the sessions, the `baseline` round's time per query, the
-session `window` on the CLI clock, any `failed` or `empty` queries and a
-`status`: `pass`, or `fail` when a session query failed or a session's IQ1
-or IQ3 returned no rows (it fails the investigators check, not the run),
-`no_cases`, `no_time` or `case_query_failed`. It is labelled `n=1 per arm`
-and `shared S3 contention`, and `BOUNDED BY Trino query.max-memory
-(Lakebench-set)` when a session query failed on memory. After the window,
-each detection tick is placed against the session window (its end from the
-log, shifted to the CLI clock, minus its `total`): `tick_delta` gives the
+Set to N (1 to 32) on an AML config with TM operations on Trino or Spark
+Thrift (refused at load otherwise; `run` refuses it in batch, so it needs a
+continuous run), it adds one round right after the first in-stream round
+that included the investigator queries (that round is the baseline). N
+sessions run concurrently, each working one case of this run picked in IQ1's
+queue order (open cases first, by priority, oldest first; closed cases fill
+in when fewer are open): IQ1, IQ2 and IQ3 bound to that case and IQ4
+unchanged, once each. The round is not a benchmark round, so in-stream QpH
+and the round count do not move; it takes window time, so the round count
+can be lower than without it. It runs only when at least twice the baseline
+round's time is left, and each session query's timeout is at most 300 s and
+a quarter of the time left, so the round never stretches the window
+(`status: no_time` otherwise). `continuous.investigators` records
+`sessions_requested`, `sessions_run` (the sessions started: fewer when the
+run has fewer cases, with `lowered_reason`; a session whose queries failed
+still counts, and shows in `failed` and `status`), the `case_ids`,
+`rows_per_session`, `seconds_per_session`, the nearest-rank `latency` p50 and
+p95 per query over the sessions whose query succeeded (with `n` and the
+`failed` count), the `baseline` round's time per query, the session `window`
+(on the Lakebench host's clock, while `continuous.window` is on the cluster's),
+`query_timeout_s`, `session_sql` (a hash of each bound query's SQL), any
+`failed` or `empty` queries and a `status`: `pass`; `fail` when a session
+query failed or a session's IQ1 or IQ3 returned no rows (it fails the
+investigators check, not the run); `no_cases`; `no_rounds` (no in-stream
+round ran, for example under `--skip-benchmark`); `no_time`; or
+`case_query_failed`. It is labelled `n=1 per arm` and `shared S3
+contention`, plus `BOUNDED BY Lakebench per-query timeout (Ns)` when a
+session query timed out and the engine's Lakebench-set memory bound when one
+failed on memory. After the window, each detection tick that ended inside
+the continuous window is placed against the session window (its end from the
+log, shifted to the host clock, minus its `total`): `tick_delta` gives the
 count and median tick time of the ticks with at least half their time inside
-the window and of those entirely outside, and `load_label` ("investigator
-load START-END: k of m ticks overlap") goes with time to detect and
-continuous throughput, whose values do not change. `experiment.investigators`
-holds `{requested, run}`; the identity key `investigator sessions` is the
-number that ran, an outcome condition, so two runs that ran different numbers
-compare as not like-for-like.
+the sessions' window and of those entirely outside, and `load_label`
+("investigator load START-END: k of m ticks overlap") states it. The verdict
+carries the check and the label as its `investigators` qualifier, shown
+beside the verdict: time to detect and continuous throughput keep their
+values and include those ticks. `experiment.investigators` holds
+`{requested, run}`; the identity key `investigator sessions` is the number
+that ran, an outcome condition: two runs that ran different numbers compare
+as not like-for-like, and the perf gate does not refuse on the number, but it
+refuses a run with the sessions configured against a baseline without them,
+and the other way round.
 
 ## What the AML workload deliberately does not measure
 

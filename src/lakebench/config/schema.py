@@ -322,12 +322,15 @@ def is_continuous_mode(mode: object) -> bool:
 INVESTIGATOR_QUERY_ENGINES = ("trino", "spark-thrift")
 
 
-def investigator_sessions_problem(arch: Any, run_mode: str | None = None) -> str | None:
+def investigator_sessions_problem(
+    arch: Any, run_mode: str | None = None, *, check_mode: bool = True
+) -> str | None:
     """Why ``architecture.benchmark.investigator_sessions`` cannot run, or None
     (unset, or every condition holds). The one predicate for the load-time
-    refusal and ``run``'s (``cli._run_args.RUN_RULES``, with the run's
-    resolved mode). *run_mode* is ``batch`` or ``continuous``; None reads the
-    config's pipeline mode. The text names every condition that fails."""
+    refusal (``check_mode=False``: workload, TM operations and engine) and
+    ``run``'s (``cli._run_args.RUN_RULES``: also the run's resolved mode).
+    *run_mode* is ``batch`` or ``continuous``; None reads the config's
+    pipeline mode. The text names every condition that fails."""
     n = arch.benchmark.investigator_sessions
     if n is None:
         return None
@@ -338,7 +341,7 @@ def investigator_sessions_problem(arch: Any, run_mode: str | None = None) -> str
     missing: list[str] = []
     if workload.schema_type.value != "financial":
         missing.append(f"the workload is {workload.schema_type.value}, not financial")
-    if not continuous:
+    if check_mode and not continuous:
         missing.append("the run is batch, not continuous")
     if workload.schema_type.value == "financial" and not workload.tm_operations.enabled:
         missing.append("workload.tm_operations.enabled is false")
@@ -2548,11 +2551,12 @@ class BenchmarkConfig(ConfigModel):
     """Batch: the storage settle wait between maintenance and the scored round."""
     investigator_sessions: int | None = Field(default=None, ge=1, le=32)
     """AML continuous only: concurrent investigator sessions run once, as an extra round
-    after the first in-stream round, each working one open case (IQ1 to IQ4). Range: 1--32.
-    Unset runs no such round. Refused unless the workload is `financial`, the run is
-    continuous, `tm_operations.enabled` is true and the query engine is `trino` or
-    `spark-thrift`. The sessions that ran (fewer when fewer cases are open) are an outcome
-    condition: two runs that differ in it compare as not like-for-like.
+    after the first in-stream round that had a case, each working one case of the run (IQ1
+    to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is
+    `financial`, `tm_operations.enabled` is true and the query engine is `trino` or
+    `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer
+    when the run has fewer cases) are an outcome condition: two runs that differ in it
+    compare as not like-for-like.
     """
 
     @model_validator(mode="after")
@@ -2698,10 +2702,12 @@ class ArchitectureConfig(ConfigModel):
 
     @model_validator(mode="after")
     def validate_investigator_sessions(self) -> ArchitectureConfig:
-        """Refuse ``benchmark.investigator_sessions`` outside AML continuous
-        with TM operations on trino or spark-thrift (``run`` checks it again
-        with the mode it resolves)."""
-        problem = investigator_sessions_problem(self)
+        """Refuse ``benchmark.investigator_sessions`` outside AML with TM
+        operations on trino or spark-thrift. The mode is ``run``'s to check
+        (``RUN_RULES``, with the mode it resolves), so ``run --continuous`` on
+        a batch config with the key runs, and ``run`` of it in batch is
+        refused before any cluster call."""
+        problem = investigator_sessions_problem(self, check_mode=False)
         if problem:
             raise ValueError(problem + ". Delete the key, or fix the config")
         return self

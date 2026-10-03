@@ -30,6 +30,7 @@ from lakebench.benchmark.result import QueryExecutorResult
 from lakebench.config.schema import WorkloadSchema
 from lakebench.metrics import MetricsCollector
 from lakebench.metrics.collector import parse_tick_timing
+from lakebench.metrics.tick_records import investigator_tick_overlap
 from tests.conftest import make_config
 
 RUN = "20261003-120000-abc123"
@@ -188,7 +189,7 @@ def _clock():
 
 def test_sessions_record_on_success():
     runner = _runner(_Exec(cases=CASES))
-    rec = inv.run_sessions(runner, 3, {"IQ1_customer_360": 1.5}, now=_clock())
+    rec = inv.run_sessions(runner, 3, {"IQ1_customer_360": 1.5}, now=_clock(), remaining_s=1200)
     assert rec["status"] == "pass" and rec["sessions_run"] == 3
     assert rec["lowered_reason"] is None and rec["case_ids"] == CASES
     assert set(rec["rows_per_session"]) == set(CASES)
@@ -196,37 +197,59 @@ def test_sessions_record_on_success():
     assert rec["latency"]["IQ1_customer_360"]["n"] == 3
     assert rec["latency"]["IQ3_counterparty_two_hop"]["p95_s"] is not None
     assert rec["baseline"] == {"IQ1_customer_360": 1.5}
-    assert rec["window"] == {"start": "2026-10-03T12:00:30Z", "end": "2026-10-03T12:01:00Z"}
+    assert rec["window"] == {
+        "start": "2026-10-03T12:00:30Z",
+        "end": "2026-10-03T12:01:00Z",
+        "clock": "lakebench host (UTC)",
+    }
+    assert set(rec["seconds_per_session"][CASES[1]]) == {q.name for q in INVESTIGATOR_QUERIES}
+    assert rec["latency"]["IQ2_case_activity_12m"]["failed"] == 0
+    assert rec["query_timeout_s"] == 300
+    assert set(rec["session_sql"]) == {q.name for q in INVESTIGATOR_QUERIES}
     assert "n=1 per arm" in rec["labels"] and "shared S3 contention" in rec["labels"]
 
 
 def test_fewer_cases_lower_the_sessions():
-    rec = inv.run_sessions(_runner(_Exec(cases=CASES[:2])), 8, {}, now=_clock())
+    rec = inv.run_sessions(_runner(_Exec(cases=CASES[:2])), 8, {}, now=_clock(), remaining_s=1200)
     assert (rec["sessions_run"], rec["lowered_reason"]) == (2, "fewer cases than sessions")
 
 
 def test_no_case_skips_the_round():
-    rec = inv.run_sessions(_runner(_Exec(cases=[])), 8, {}, now=_clock())
+    rec = inv.run_sessions(_runner(_Exec(cases=[])), 8, {}, now=_clock(), remaining_s=1200)
     assert (rec["status"], rec["sessions_run"]) == ("no_cases", 0)
 
 
 def test_an_empty_iq1_or_iq3_fails_the_check():
-    rec = inv.run_sessions(_runner(_Exec(cases=CASES, empty_on="hop1 AS")), 3, {}, now=_clock())
+    rec = inv.run_sessions(
+        _runner(_Exec(cases=CASES, empty_on="hop1 AS")), 3, {}, now=_clock(), remaining_s=1200
+    )
     assert rec["status"] == "fail" and rec["failed"] == []
     assert {e["query"] for e in rec["empty"]} == {"IQ3_counterparty_two_hop"}
 
 
 def test_an_empty_iq2_or_iq4_does_not():
     rec = inv.run_sessions(
-        _runner(_Exec(cases=CASES, empty_on="activity_month")), 3, {}, now=_clock()
+        _runner(_Exec(cases=CASES, empty_on="activity_month")),
+        3,
+        {},
+        now=_clock(),
+        remaining_s=1200,
     )
     assert rec["status"] == "pass", rec
 
 
 def test_a_memory_failure_fails_the_check_and_names_the_bound():
-    rec = inv.run_sessions(_runner(_Exec(cases=CASES, fail_on="hop2 AS")), 3, {}, now=_clock())
+    rec = inv.run_sessions(
+        _runner(_Exec(cases=CASES, fail_on="hop2 AS")), 3, {}, now=_clock(), remaining_s=1200
+    )
     assert rec["status"] == "fail" and len(rec["failed"]) == 3
-    assert inv.TRINO_MEMORY_BOUND in rec["labels"]
+    assert inv.MEMORY_BOUNDS["trino"] in rec["labels"]
+    assert rec["latency"]["IQ3_counterparty_two_hop"] == {
+        "p50_s": None,
+        "p95_s": None,
+        "n": 0,
+        "failed": 3,
+    }
 
 
 def test_a_failed_case_query_is_recorded():
@@ -234,7 +257,7 @@ def test_a_failed_case_query_is_recorded():
     runner.executor.execute_query = lambda sql, timeout=300: QueryExecutorResult(
         sql, "trino", 0.0, 0, "", error="boom"
     )
-    rec = inv.run_sessions(runner, 4, {}, now=_clock())
+    rec = inv.run_sessions(runner, 4, {}, now=_clock(), remaining_s=1200)
     assert rec["status"] == "case_query_failed" and "boom" in rec["reason"]
 
 
@@ -253,17 +276,24 @@ def test_overlap_classifier_at_49_50_and_0_percent():
         _tick("2026-10-03T11:59:50Z", 10.0),  # ends at the window start: clean
         _tick("2026-10-03T12:00:30Z", 20.0),  # all inside
     ]
-    out = inv.tick_overlap(rec, ticks, None)
+    out = investigator_tick_overlap(rec, ticks, None)
     assert out["tick_delta"]["overlapping"] == {"n": 2, "median_total_s": 15.0}
     assert out["tick_delta"]["clean"] == {"n": 1, "median_total_s": 10.0}
     assert out["load_label"].endswith(": 2 of 4 ticks overlap")
+    # The continuous window keeps only the ticks that ended inside it: the
+    # clean tick ended before the window opened (a warm-up tick).
+    inside = investigator_tick_overlap(
+        rec, ticks, None, window={"start": "2026-10-03T12:00:00Z", "end": "2026-10-03T13:00:00Z"}
+    )
+    assert inside["tick_delta"]["clean"] == {"n": 0, "median_total_s": None}
+    assert inside["load_label"].endswith(": 2 of 3 ticks overlap")
 
 
 def test_overlap_shifts_ticks_to_the_cli_clock():
     """A cluster clock 30 s ahead: a tick that ended at 12:00:35 cluster
     time ended at 12:00:05 on the CLI clock."""
     rec = {"window": {"start": "2026-10-03T12:00:00Z", "end": "2026-10-03T12:00:10Z"}}
-    out = inv.tick_overlap(rec, [_tick("2026-10-03T12:00:35Z", 5.0)], 30.0)
+    out = investigator_tick_overlap(rec, [_tick("2026-10-03T12:00:35Z", 5.0)], 30.0)
     assert out["tick_delta"]["overlapping"]["n"] == 1
 
 
@@ -274,6 +304,7 @@ def test_tick_timing_lines_carry_their_end_time():
     )
     tt = parse_tick_timing(line)
     assert tt["ended_at"] == "2026-10-03T12:00:05.123456Z" and tt["phases"]["total"] == 3.0
+    assert tt["started_at"] == "2026-10-03T12:00:02.123456Z"
     assert parse_tick_timing("Cycle 4: tick timing silver_rows=1 total=1.0s")["ended_at"] is None
 
 
@@ -320,8 +351,8 @@ def test_sessions_run_after_the_baseline_round(monkeypatch):
     collector = _collector_with_round("included")
     seen = {}
 
-    def fake(runner, requested, baseline, *, now):
-        seen.update(requested=requested, baseline=baseline)
+    def fake(runner, requested, baseline, *, now, remaining_s):
+        seen.update(requested=requested, baseline=baseline, remaining_s=remaining_s)
         return {"status": "pass", "sessions_run": 8, "sessions_requested": 8}
 
     monkeypatch.setattr(inv, "run_sessions", fake)
@@ -329,21 +360,24 @@ def test_sessions_run_after_the_baseline_round(monkeypatch):
         MagicMock(), collector, MagicMock(), MagicMock(), 8, remaining_s=120, baseline_round_s=60
     )
     assert pending is False
-    assert seen == {"requested": 8, "baseline": {"IQ1_customer_360": 2.0}}
+    assert seen == {"requested": 8, "baseline": {"IQ1_customer_360": 2.0}, "remaining_s": 120}
     assert collector.current_run.continuous["investigators"]["status"] == "pass"
     # Not a benchmark round: the round count does not move.
     assert len(collector.current_run.benchmark_rounds) == 1
 
 
-@pytest.mark.parametrize(("rounds_ran", "why"), [(True, "found a case"), (False, "round ran")])
-def test_window_close_records_a_round_that_never_ran(rounds_ran, why):
+@pytest.mark.parametrize(
+    ("rounds_ran", "status", "why"),
+    [(True, "no_cases", "found a case"), (False, "no_rounds", "--skip-benchmark")],
+)
+def test_window_close_records_a_round_that_never_ran(rounds_ran, status, why):
     from lakebench.cli._sustained import finish_investigator_sessions
 
     cont: dict = {}
     finish_investigator_sessions(
         cont, 8, pending=True, rounds_ran=rounds_ran, ticks=[], clock_offset_s=None
     )
-    assert cont["investigators"]["status"] == "no_cases" and why in cont["investigators"]["reason"]
+    assert cont["investigators"]["status"] == status and why in cont["investigators"]["reason"]
 
 
 def test_window_close_adds_the_tick_overlap():
@@ -366,3 +400,64 @@ def test_window_close_adds_the_tick_overlap():
     rec = cont["investigators"]
     assert rec["tick_delta"]["overlapping"]["n"] == 1 and rec["tick_delta"]["clean"]["n"] == 1
     assert "1 of 2 ticks overlap" in rec["load_label"]
+
+
+def test_the_query_timeout_keeps_the_round_inside_the_window():
+    """Four queries per stream, each at most the timeout: they end inside
+    the time left, and too little time skips the round."""
+    assert inv.query_timeout(10_000) == 300
+    assert inv.query_timeout(400) == 100
+    rec = inv.run_sessions(_runner(_Exec(cases=CASES)), 3, {}, now=_clock(), remaining_s=100)
+    assert rec["status"] == "no_time" and rec["sessions_run"] == 0
+
+
+def test_a_timed_out_query_names_the_lakebench_timeout():
+    runner = _runner(_Exec(cases=CASES))
+    real = runner.executor.execute_query
+
+    def slow(sql, timeout=300):
+        if "hop2 AS" in sql:
+            return QueryExecutorResult(
+                sql, "trino", timeout, 0, "", error=f"Query timed out ({timeout}s)"
+            )
+        return real(sql, timeout)
+
+    runner.executor.execute_query = slow
+    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=480)
+    assert rec["query_timeout_s"] == 120
+    assert "BOUNDED BY Lakebench per-query timeout (120s)" in rec["labels"]
+
+
+def test_the_verdict_shows_the_investigators_check_and_the_load():
+    from lakebench.metrics.verdict import investigators_qualifier
+    from lakebench.reports.front_matter import _qualifier_lines
+
+    rec = {
+        "status": "fail",
+        "sessions_run": 8,
+        "sessions_requested": 8,
+        "failed": [{"query": "IQ3_counterparty_two_hop"}],
+        "empty": [],
+        "load_label": "investigator load A-B: 3 of 9 ticks overlap",
+        "labels": ["n=1 per arm", inv.MEMORY_BOUNDS["trino"]],
+    }
+    text = investigators_qualifier(rec)
+    assert text.startswith("investigators check: FAIL (8 of 8 sessions; 1 failed")
+    assert "not a run FAIL" in text
+    assert "3 of 9 ticks overlap: time to detect and continuous throughput" in text
+    assert inv.MEMORY_BOUNDS["trino"] in text
+    assert _qualifier_lines({"investigators": text}) == [text]
+    skipped = investigators_qualifier(inv.skipped(8, "no_time", "40s left"))
+    assert skipped == "investigators check: no_time (40s left)"
+
+
+def test_a_run_without_sessions_gets_no_qualifier():
+    from lakebench.metrics.verdict import compute_verdict
+    from tests.test_experiment import _cfg, _metrics
+
+    m = _metrics(_cfg(schema="financial", mode="continuous"))
+    assert "investigators" not in compute_verdict(m).qualifiers
+    m.continuous = {"investigators": inv.skipped(8, "no_cases", "no case")}
+    assert (
+        compute_verdict(m).qualifiers["investigators"].startswith("investigators check: no_cases")
+    )
