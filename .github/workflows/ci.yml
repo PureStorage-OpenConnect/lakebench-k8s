@@ -11,7 +11,7 @@ on:
     branches: [main, 'integrate/**']
   # release.yml calls this workflow on the tagged commit and publishes only
   # if it passes. That binds only tags whose commit carries the current
-  # release.yml; see docs/releasing.md for the repository settings that
+  # release.yml; see RELEASING.md for the repository settings that
   # cover the rest.
   workflow_call:
 
@@ -216,7 +216,7 @@ jobs:
           # to it would be its own trusted config, and train review is the
           # control. An allowlist entry merged to integrate applies to the
           # branches on integrate, and reaches main's pass only through its
-          # own pull request to main (see docs/releasing.md). A branch can
+          # own pull request to main (see RELEASING.md). A branch can
           # still edit this workflow; review of the pull request is that
           # control.
           # trust-order begin

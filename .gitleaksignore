@@ -4,7 +4,7 @@
 # msgs/commits/<sha>.txt:<rule>:<line> or msgs/tags/<object id>.txt:<rule>:<line>.
 # scripts/gitleaks_history.py passes this file to gitleaks explicitly. CI's
 # history scan uses origin/main's copy (origin/integrate/v1.5.0's while main
-# has none) instead of a branch's; see docs/releasing.md.
+# has none) instead of a branch's; see RELEASING.md.
 # tests/test_gitleaks_baseline.py pins the list.
 
 # The old default Polaris client secret, public on PyPI in 1.0.0 to 1.4.0. It

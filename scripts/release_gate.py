@@ -198,7 +198,7 @@ def check_prose() -> Result:
     return Result("prose", PASS, f"tracked files clean{note}")
 
 
-# UAT evidence for a release lives at this path (docs/releasing.md). The
+# UAT evidence for a release lives at this path (RELEASING.md). The
 # file must start its record with the exact heading below and contain at
 # least one markdown table data row; the rows are the maintainers' record of
 # which recipe x workload x mode runs passed, with run ids.
@@ -305,7 +305,7 @@ def check_uat_results() -> Result:
     path = ROOT / UAT_RESULTS.format(version=version)
     rel = path.relative_to(ROOT)
     if not path.is_file():
-        return Result("uat-results", FAIL, f"{rel} not found (see docs/releasing.md)")
+        return Result("uat-results", FAIL, f"{rel} not found (see RELEASING.md)")
     text = path.read_text()
     heading = UAT_HEADING.format(version=version)
     if heading not in [ln.rstrip() for ln in text.splitlines()]:

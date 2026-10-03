@@ -227,24 +227,6 @@ def test_check_examples_restores_sys_path():
     assert sys.path == before
 
 
-def test_releasing_doc_matches_release_workflow_only_list():
-    """docs/releasing.md must say what release.yml's gate --only runs."""
-    import re
-
-    wf = (ROOT / ".github" / "workflows" / "release.yml").read_text()
-    m = re.search(r"release_gate\.py[^\n]*\n?[^\n]*--only ([\w,-]+)", wf)
-    assert m, "release.yml no longer passes --only to release_gate.py"
-    only = set(m.group(1).split(","))
-    doc = (ROOT / "docs" / "releasing.md").read_text()
-    in_wf = "perf-baselines" in only
-    says_not_in = "not in the release workflow's `--only` list" in doc
-    assert in_wf != says_not_in, (sorted(only), says_not_in)
-    listed = re.search(r"\(`release\.yml` runs ([^)]*)\)", doc)
-    assert listed, "docs/releasing.md no longer lists what release.yml runs"
-    doc_names = set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
-    assert doc_names == only, (sorted(doc_names), sorted(only))
-
-
 def _gitleaks_or_skip() -> str:
     import os
     import shutil

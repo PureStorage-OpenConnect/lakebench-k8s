@@ -21,7 +21,7 @@ name: Release
 # pushed on an older commit runs that commit's release workflow, which may
 # have no gates. Protection against that lives in repository settings (a
 # required reviewer on the pypi environment and a v* tag ruleset); see
-# docs/releasing.md.
+# RELEASING.md.
 
 on:
   push:

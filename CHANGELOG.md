@@ -473,6 +473,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **`scripts/gen_docs.py`** regenerates every generated docs block in one
+  command (support states, configuration and CLI references, sizing tables,
+  exit codes, prerequisites); `--check` exits 1 when any is stale. Every
+  config schema field, section blocks included, now has a description.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
@@ -632,7 +636,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   until `uat/freeze-<version>` exists and `support-record` until `--tag`; the
   release workflow runs all four with `--require-all` on the full history.
   The perf gate now refuses a run an evaluation profile or a Lakebench limit
-  bound. See `docs/releasing.md`, "Release evidence".
+  bound. See `RELEASING.md`, "Release evidence".
 - **Compaction by engine, and blended in-stream QpH.** A run's effective
   maintenance records the compaction operation and its parameters (Trino
   `optimize` with its 128 MB threshold, Iceberg `rewrite_data_files`
@@ -738,6 +742,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- **`RELEASING.md` and `make release-check`.** One release process: the
+  scripted steps run in order with `make release-check VERSION=X.Y.Z`
+  (`DRY=1` for the dry run, `make rc-<step>` for one step), and the
+  owner-only steps are a checklist. It replaces `docs/releasing.md`.
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
   sides.** A side whose repeat runs differ only in in-stream rounds or
   investigator sessions (outcomes of the runs' speed) is now one

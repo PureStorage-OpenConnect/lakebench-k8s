@@ -683,8 +683,11 @@ def _make_targets() -> dict[str, str]:
             targets[current] = ""
         elif line.startswith("\t") and current:
             body = line.strip()
-            while re.search(r"\$\(([A-Z_]+)\)", body):  # make expands recursively
-                body = re.sub(r"\$\(([A-Z_]+)\)", lambda v: variables[v.group(1)], body)
+            # make expands recursively; variables the Makefile does not set
+            # (VERSION, DRY, MAKEFLAGS) are left as written.
+            known = re.compile(r"\$\((" + "|".join(map(re.escape, variables)) + r")\)")
+            while variables and known.search(body):
+                body = known.sub(lambda v: variables[v.group(1)], body)
             targets[current] += " ".join(body.split()) + "\n"
     return targets
 

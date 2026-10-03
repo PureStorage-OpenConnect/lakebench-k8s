@@ -187,4 +187,11 @@ architecture:
       version: "1.11.0"
 ```
 
+`images.pull_policy` (default `Always`) is the pull policy of the pods
+Lakebench renders with it, Spark, Trino and datagen among them, so a tag
+pushed again is pulled again there. Lakebench sets no pull policy on the
+Unity, Pushgateway and Stackable Hive pods. A private registry needs an
+`imagePullSecret` on the namespace's service accounts; Lakebench does not
+set one.
+
 See [Configuration](configuration.md) for the full YAML reference.
