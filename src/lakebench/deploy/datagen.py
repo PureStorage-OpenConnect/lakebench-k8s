@@ -190,8 +190,10 @@ def ensure_seed_secret(cfg: Any, core_v1: Any) -> None:
     The Secret is immutable and named after the seed's seed_ref, so a name is
     never reused for another seed. An existing Secret of that name labelled
     for this deployment and carrying the same seed_ref is kept; one labelled
-    for another deployment is refused. Call after ``stop_previous_datagen``.
-    Raises :class:`SeedSecretError`, whose message never holds the seed."""
+    for another deployment is refused. A failure to delete an older seed
+    Secret fails the generate too, so no other registered seed is left
+    behind silently. Call after ``stop_previous_datagen``. Raises
+    :class:`SeedSecretError`, whose message never holds the seed."""
     from kubernetes.client.rest import ApiException
 
     namespace = cfg.get_namespace()
