@@ -888,7 +888,7 @@ rounds for trend analysis.
 | `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
 | `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
 | `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
-| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Empty bronze (`lakebench clean bronze`) and rerun; the report warns above 1.05 and the perf gate refuses the run |
+| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts; the report warns above 1.05 and the perf gate refuses the run |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
 | Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |

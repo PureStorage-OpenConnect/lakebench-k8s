@@ -307,7 +307,7 @@ VERB_PURPOSES = [
     ("lakebench.cli._run", ["run"], LoadPurpose.RUN, False),
     ("lakebench.cli._query", ["benchmark"], LoadPurpose.MUTATE, False),
     ("lakebench.cli._query", ["query", "--example", "count"], LoadPurpose.MUTATE, False),
-    ("lakebench.cli._clean", ["clean", "data"], LoadPurpose.MUTATE, True),
+    ("lakebench.cli._clean", ["clean", "silver"], LoadPurpose.MUTATE, True),
     ("lakebench.cli", ["stop"], LoadPurpose.TEARDOWN, False),
     ("lakebench.cli._destroy", ["destroy"], LoadPurpose.TEARDOWN, False),
     ("lakebench.cli._admin", ["admin", "doctor"], LoadPurpose.TEARDOWN, False),

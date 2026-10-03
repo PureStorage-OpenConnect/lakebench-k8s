@@ -1172,19 +1172,18 @@ class TestOwnershipHooksFire:
 
         with pytest.raises(typer.Exit) as exc:
             clean(
-                target="data",
+                target="silver",
                 config_file=Path(cfg_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
         assert exc.value.exit_code == 3  # refused: the bucket belongs to another deployment
 
         # empty_bucket must never fire on any bucket.
         assert s3.empty_bucket.call_count == 0
 
-    @pytest.mark.parametrize("target", ["bronze", "silver", "gold"])
+    @pytest.mark.parametrize("target", ["silver", "gold"])
     @patch("lakebench.deploy.ownership.verify_namespace_identity")
     @patch("lakebench.deploy.ownership.build_identity_from_config")
     @patch("kubernetes.client.CoreV1Api")
@@ -1253,7 +1252,6 @@ class TestOwnershipHooksFire:
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
 
         # verify_bucket_ownership was called with the specific bucket.
@@ -1305,12 +1303,11 @@ class TestOwnershipHooksFire:
         # Without --force-legacy: refuse.
         with pytest.raises(typer.Exit):
             clean(
-                target="data",
+                target="silver",
                 config_file=Path(cfg_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
         assert s3.empty_bucket.call_count == 0
 
@@ -1368,14 +1365,13 @@ class TestOwnershipHooksFire:
 
         # With --force-legacy: empty_bucket fires.
         clean(
-            target="data",
+            target="silver",
             config_file=Path(cfg_path),
             file_option=None,
             force=True,
             force_legacy=True,
-            metrics_dir=Path("/tmp/nonexistent-metrics"),
         )
-        assert s3.empty_bucket.call_count == 3
+        assert s3.empty_bucket.call_count == 1
 
 
 class TestBucketCreationRecord:

@@ -26,6 +26,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 import yaml
 
+from lakebench.cli._aliases import ALIASED_FLAGS
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
     console,
@@ -59,7 +60,7 @@ _SCALE_COMMENT = {
     "financial": "1 is about 8.4 GB of bronze",
 }
 
-_WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
+_WIZARD_REMOVED = ALIASED_FLAGS["init"]["--interactive"]
 
 
 def default_name(user: str | None = None, token: str | None = None) -> str:

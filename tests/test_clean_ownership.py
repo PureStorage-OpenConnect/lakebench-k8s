@@ -92,12 +92,11 @@ def _clean(cfg, **kw):
     from lakebench.cli._clean import clean
 
     args = {
-        "target": "data",
+        "target": "silver",
         "config_file": cfg,
         "file_option": None,
         "force": True,
         "force_legacy": False,
-        "metrics_dir": Path("/tmp/nonexistent-metrics"),
     }
     args.update(kw)
     with _verified_namespace():
@@ -161,7 +160,7 @@ def test_unsupported_cleans_on_prefix_match(
     s3_cls.return_value = s3
     verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
     _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 3
+    assert s3.empty_bucket.call_count == 1  # clean silver: one bucket
 
 
 @patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=False)
@@ -224,11 +223,10 @@ def test_clean_refuses_when_namespace_absent(s3_cls, _k8s, tmp_path):
         core.return_value.list_namespace.return_value.items = []
         with pytest.raises(typer.Exit):
             clean(
-                target="data",
+                target="silver",
                 config_file=_cfg(tmp_path),
                 file_option=None,
                 force=True,
                 force_legacy=False,
-                metrics_dir=Path("/tmp/nonexistent-metrics"),
             )
     s3.empty_bucket.assert_not_called()

@@ -9,7 +9,6 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
     _journal_safe,
@@ -31,11 +30,13 @@ from lakebench.config import (
     load_config,
 )
 from lakebench.exit_codes import ExitCode
-from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journal
+from lakebench.journal import CommandName, EventType
 from lakebench.k8s.target import ContextConflictError
 
-# Valid clean targets
-CLEAN_TARGETS = ["bronze", "silver", "gold", "data", "metrics", "journal"]
+# Valid clean targets. bronze, data, metrics and journal are refused
+# (cli/_aliases.REFUSED): a run regenerates its own corpus, and evidence is
+# not deleted by the CLI.
+CLEAN_TARGETS = ["silver", "gold"]
 
 
 def clean(
@@ -94,30 +95,27 @@ def clean(
             ),
         ),
     ] = False,
-    metrics_dir: Annotated[
-        Path,
-        typer.Option(
-            "--metrics-dir",
-            "-m",
-            help="Metrics/runs directory (for 'metrics' target)",
-        ),
-    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
 ) -> None:
     """Delete data without destroying infrastructure.
 
     Granular data cleanup for re-running pipeline stages.
 
     Targets:
-      bronze  - Empty the bronze S3 bucket
       silver  - Empty the silver S3 bucket
       gold    - Empty the gold S3 bucket
-      data    - Empty all three buckets (bronze + silver + gold)
-      metrics - Delete local metrics/runs directory
-      journal - Delete all journal session files
+
+    bronze and data are refused: `lakebench run CONFIG --generate
+    --regenerate` regenerates the corpus. metrics and journal are refused:
+    evidence is not deleted by the CLI.
     """
     if force_short_f:
         force = deprecated_short_f_force("--force or -y", force)
     target = target.lower().strip()
+    from lakebench.cli._aliases import REFUSED, refusal
+
+    if f"clean {target}" in REFUSED:
+        # Before the config is read: nothing the caller passed is echoed.
+        raise refusal(f"clean {target}")
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")
         raise typer.Exit(ExitCode.USAGE)
@@ -144,27 +142,14 @@ def clean(
 
     s3_cfg = cfg.platform.storage.s3
 
-    # Determine which buckets to clean
-    if target == "data":
-        bucket_targets = {
-            "bronze": s3_cfg.buckets.bronze,
-            "silver": s3_cfg.buckets.silver,
-            "gold": s3_cfg.buckets.gold,
-        }
-    elif target in ("metrics", "journal"):
-        bucket_targets = {}
-    else:
-        bucket_targets = {target: getattr(s3_cfg.buckets, target)}
+    # The bucket to clean
+    bucket_targets = {target: getattr(s3_cfg.buckets, target)}
 
     # Build description of what will be cleaned
     descriptions = []
     if bucket_targets:
         for layer, bucket in bucket_targets.items():
             descriptions.append(f"  - {layer}: s3://{bucket}/ (all objects)")
-    if target == "metrics":
-        descriptions.append(f"  - metrics: {metrics_dir}/ (all files)")
-    if target == "journal":
-        descriptions.append(f"  - journal: {DEFAULT_JOURNAL_DIR}/ (all session files)")
 
     # Confirmation
     if not force:
@@ -514,34 +499,6 @@ def clean(
             errors.append(f"S3 connection: {e}")
             print_error(f"S3 connection failed: {e}")
 
-    # Clean metrics directory
-    if target == "metrics":
-        import shutil
-
-        if metrics_dir.exists():
-            file_count = sum(1 for _ in metrics_dir.rglob("*") if _.is_file())
-            shutil.rmtree(metrics_dir)
-            total_deleted += file_count
-            print_success(f"Cleaned metrics: {file_count} files deleted from {metrics_dir}/")
-        else:
-            print_info(f"Metrics directory {metrics_dir}/ does not exist")
-
-    # Clean journal files
-    if target == "journal":
-        journal_path = Path(DEFAULT_JOURNAL_DIR)
-        if journal_path.exists():
-            purge_journal = Journal(journal_dir=journal_path)
-            deleted = purge_journal.purge()
-            total_deleted += deleted
-            if deleted > 0:
-                print_success(
-                    f"Cleaned journal: {deleted} session files deleted from {journal_path}/"
-                )
-            else:
-                print_info(f"Journal directory {journal_path}/ has no session files")
-        else:
-            print_info(f"Journal directory {journal_path}/ does not exist")
-
     # Journal recording
     _journal_safe(
         j.record,
@@ -555,8 +512,6 @@ def clean(
         },
     )
     _journal_safe(j.end_command, success=len(errors) == 0)
-    if target == "data":
-        _journal_safe(j.close_session)
 
     # Summary
     console.print()

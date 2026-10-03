@@ -41,6 +41,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   order, from the verified set, and these keys would change which copy of a
   class wins. Refused at load by the commands that change data (exit 2), as
   for every key Lakebench owns.
+- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are
+  refused** (exit 2, `alias.refused`), without echoing any argument.
+  `bronze` and `data` name `lakebench run CONFIG --generate --regenerate`,
+  which clears the run's datagen prefix and generates afresh; `metrics` and
+  `journal` are refused because run records and journals are evidence the
+  CLI does not delete. `clean silver` and `clean gold` are unchanged;
+  `clean --metrics-dir` is removed.
+- **Renamed commands print one line and are removed in v1.8.** `results`
+  (now `report --format table`), `admin install-spark-operator` and `admin
+  install-scratch-storage-class` (now `admin install --component ...`) are
+  hidden aliases that print "`lakebench OLD` is now `lakebench NEW`; the old
+  name is removed in v1.8" on stderr, then run the new command. The list of
+  aliased and refused commands and flags is `lakebench.cli._aliases`.
 - **`benchmark` and `query` no longer write into a run's record.**
   `lakebench benchmark` saves its result as a record of its own under a new
   run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
@@ -82,8 +95,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
   config, reads `./lakebench.yaml` when no argument is given (and says
   which deployment it shows), and prints the stage matrix with `--format
-  table|json|csv`. `results` is `report --format table`, with the same
-  argument and `--format` passing through. `report --list` shows each
+  table|json|csv`. `results` is an alias of `report --format table`, with the
+  same argument and `--format` passing through. `report --list` shows each
   record's kind.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
