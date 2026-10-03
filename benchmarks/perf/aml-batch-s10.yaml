@@ -8,9 +8,10 @@
 # See docs/perf-regression-gate.md.
 #
 # The AML point of the v1.7 re-baseline, on the default Hive recipe and the
-# Spark minor the release matrix runs AML batch scale 10 on. The datagen
-# image is the one the other pins name until the post-freeze data commit
-# sets every pin to the release image.
+# Spark minor the release matrix runs AML batch scale 10 on, with the
+# development seed 43 the release matrix's AML rows use. The datagen image is
+# the tree's default image (a test holds them equal); when the default moves
+# to the release image, the pins move with it before anything is recorded.
 #
 # Run it as-is. Identity and credentials come from the environment:
 #   LAKEBENCH_PERF_NAME, LAKEBENCH_S3_ENDPOINT, LAKEBENCH_S3_ACCESS_KEY,
@@ -20,7 +21,7 @@ name: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s10}
 recipe: hive-iceberg-spark-trino
 
 images:
-  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  datagen: docker.io/sillidata/lb-datagen:1.6.0
   spark: apache/spark:4.1.1-python3
   postgres: postgres:17
   trino: trinodb/trino:483
@@ -68,6 +69,7 @@ architecture:
     datagen:
       scale: 10
       mode: batch
+      seed: 43
       parallelism: 4
       cpu: "8"
       generators: 0

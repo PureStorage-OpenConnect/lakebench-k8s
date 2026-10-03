@@ -804,6 +804,33 @@ def test_checked_in_store_requires_exactly_the_v17_rebaseline_set(tmp_path):
         assert all(ln.startswith(("warn", "ok")) for ln in lines)
 
 
+def test_the_rebaseline_pins_name_the_trees_datagen_image_and_their_seeds():
+    # A pin whose image no registry holds cannot run; and records of one
+    # corpus need the image the release matrix rows use, the tree default.
+    from lakebench.config.schema import ImagesConfig
+
+    for name, seed in (
+        ("aml-batch-s10.yaml", 43),
+        ("c360-batch-s10.yaml", 42),
+        ("c360-batch-s10-polaris.yaml", 42),
+    ):
+        raw = yaml.safe_load((PERF / name).read_text())
+        assert raw["images"]["datagen"] == ImagesConfig().datagen, name
+        assert raw["architecture"]["workload"]["datagen"]["seed"] == seed, name
+
+
+def test_a_dated_170_changelog_requires_the_rebaseline_set():
+    # The tag must not pass without the data commit: once CHANGELOG dates the
+    # 1.7.0 section, exactly the re-baseline set is required.
+    import re
+
+    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text()
+    if not re.search(r"^## \[1\.7\.0\] - \d{4}-\d{2}-\d{2}", changelog, flags=re.M):
+        pytest.skip("1.7.0 is not dated yet")
+    store = pg.load_store(PERF / "baselines.yaml")
+    assert {n for n, b in store.baselines.items() if b.required} == REBASELINE_V17
+
+
 def test_the_rebaseline_twins_differ_only_in_the_catalog():
     hive = yaml.safe_load((PERF / "c360-batch-s10.yaml").read_text())
     polaris = yaml.safe_load((PERF / "c360-batch-s10-polaris.yaml").read_text())

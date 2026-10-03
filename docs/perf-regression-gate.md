@@ -20,7 +20,7 @@ Pinned configs today:
 
 | Name | Workload | Mode | Scale | Required by the release gate | Baseline |
 |---|---|---|---|---|---|
-| `c360-batch-s10` | Customer 360 | batch | 10 | no (v1.6) | accepted, but poll-timed (pre-v1.6), so every current run is refused against it |
+| `c360-batch-s10` | Customer 360 (Hive) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
 | `c360-continuous-s10` | Customer 360 | continuous | 10 | no (v1.6) | pending first run |
 | `aml-batch-s1` | AML (financial) | batch | 1 | no | pending first run |
 | `aml-batch-s10` | AML (financial) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
@@ -32,7 +32,18 @@ the freeze tree; the post-freeze data commit accepts their baselines and
 marks exactly these three required. Until then no config is required and the
 `perf-baselines` release check reports each config as `warn` without failing
 the release. `c360-batch-s10-polaris` is `c360-batch-s10` with the Polaris
-catalog and nothing else changed, so the pair compares the catalog alone.
+catalog and nothing else changed, so the pair compares the catalog alone;
+both run Spark 4.0, the only minor Polaris is validated on, so the Hive
+side of the pair is outside the release matrix's versions and reads
+unverified. The three pins name the tree's default datagen image (a test
+holds them equal) and seed 42 (Customer 360) or 43 (AML).
+
+A baseline is one run: `record` accepts one record. For the re-baseline,
+each config runs once as `lakebench run --generate --repeat 3`; repetition
+1 (the one that generates, so it carries the datagen figures) is recorded
+as the baseline, labelled n=1, and all three records are checked in under
+`uat/perf/`, where the release check compares the newest against the
+baseline.
 
 ## How "like for like" is enforced
 

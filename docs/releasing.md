@@ -224,10 +224,12 @@ where the check finds it.
 The v1.7 re-baseline pins three configs: `aml-batch-s10` (AML batch scale
 10, hive-iceberg-spark-trino on Spark 4.1) and `c360-batch-s10` with its
 Polaris twin `c360-batch-s10-polaris` (Customer 360 batch scale 10; the
-two differ only in the catalog). Each is run three times on the freeze tree
-with `lakebench run --generate --repeat 3`, its baseline accepted through
-`scripts/perf_gate.py`, and the post-freeze data commit marks exactly these
-three `required: true`; until then none is required. See
+two differ only in the catalog, both on Spark 4.0). Each runs once on the
+freeze tree as `lakebench run --generate --repeat 3`; repetition 1 is
+recorded as its baseline (n=1) through `scripts/perf_gate.py`, all three
+records go to `uat/perf/`, and the post-freeze data commit marks exactly
+these three `required: true`; until then none is required, and once the
+CHANGELOG dates 1.7.0 a test requires exactly these three. See
 [perf-regression-gate.md](perf-regression-gate.md).
 
 ## After tagging
