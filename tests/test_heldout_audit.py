@@ -73,16 +73,16 @@ def world(tmp_path, monkeypatch):
     pc.use_heldout(monkeypatch)
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
     monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
-    cfgs = tmp_path / "dev-artifacts" / "ledger-configs"
+    cfgs = tmp_path / "notes" / "configs"
     cfgs.mkdir(parents=True)
     a = _config(cfgs / "a.yaml", "lb-a", "lb-a-bronze", "lb-a-gold")
     b = _config(cfgs / "b.yaml", "lb-b", "lb-b-bronze", "lb-b-gold")
-    ledger = tmp_path / "dev-artifacts" / "EVIDENCE-test.md"
+    ledger = tmp_path / "notes" / "EVIDENCE-test.md"
     ledger.write_text(
         "# Evidence\n\n## Deployments ledger\n\n"
         "| Namespace | Config path | Session or lane | Scale | Deployed |\n"
         "|---|---|---|---|---|\n"
-        f"| lb-a | dev-artifacts/ledger-configs/{a.name} | test | 1 | 2026-10-02 |\n\n"
+        f"| lb-a | notes/configs/{a.name} | test | 1 | 2026-10-02 |\n\n"
         "## Deployments ledger entry -- lb-b\n\n"
         "- Namespace: lb-b\n"
         f"- Config: {b}\n\n"
@@ -344,3 +344,88 @@ def test_a_non_utf8_journal_does_not_crash(audit_mod, tmp_path, monkeypatch):
     j.mkdir()
     (j / "session-bin.jsonl").write_bytes(b"\xff\xfe not json\n")
     assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) in (0, 2)
+
+
+def _sessions(path: Path, *sessions) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for sid, config, extra in sessions:
+        lines.append(
+            json.dumps(
+                {
+                    "event_type": "session.start",
+                    "session_id": sid,
+                    "details": {"config_file": str(config), **extra},
+                }
+            )
+        )
+    path.write_text("\n".join(lines) + "\n")
+    return path.parent
+
+
+def test_every_session_of_a_journal_is_checked(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    dev = tmp_path / "dev.yaml"
+    dev.write_text("name: x\nworkload:\n  schema: financial\n")
+    ev = tmp_path / "eval.yaml"
+    ev.write_text(
+        "name: x\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: evaluation\n"
+    )
+    j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", dev, {}), ("s2", ev, {}))
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
+
+
+def test_variables_in_the_corpus_fields_are_substituted(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    c = tmp_path / "c.yaml"
+    c.write_text(
+        "name: x\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: ${LB_T_ROLE:-evaluation}\n"
+    )
+    assert audit_mod.raw_config_reason(audit_mod._raw_config(c)) == "corpus_role evaluation"
+    monkeypatch.setenv("LB_T_SEED", str(pc.RB))
+    c.write_text("name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: ${LB_T_SEED}\n")
+    assert "robustness" in audit_mod.raw_config_reason(audit_mod._raw_config(c))
+    monkeypatch.delenv("LB_T_SEED")
+    with pytest.raises(audit_mod.Unresolved):
+        audit_mod.raw_config_reason(audit_mod._raw_config(c))
+    j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {}))
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 2
+
+
+def test_a_ledger_row_config_naming_a_protected_role_is_found(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    c = tmp_path / "eval.yaml"
+    c.write_text(
+        "name: lb-eval\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: evaluation\n"
+    )
+    led = tmp_path / "E.md"
+    led.write_text(f"## Deployments ledger\n\n- Namespace: lb-eval\n- Config: {c}\n")
+    audit = audit_mod.run_audit([], [], [led], lambda s3: FakeS3({}))
+    assert any(f["kind"] == "protected_config" for f in audit.findings)
+
+
+def test_a_config_changed_since_its_session_is_not_clean(audit_mod, tmp_path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    c = tmp_path / "c.yaml"
+    c.write_text("name: x\nworkload:\n  schema: financial\n")
+    j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {"config_hash": "0" * 16}))
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 2
+
+
+def test_a_nameless_config_uses_the_session_name_for_its_bucket(audit_mod, tmp_path, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    _env(tmp_path, monkeypatch)
+    ds.append_corpus_ledger(
+        {
+            "kind": "registered_corpus",
+            "state": "generated",
+            "role": "robustness",
+            "bronze_uri": "s3://lb-reg-bronze/pacs008/",
+            "attempt": "a1",
+        }
+    )
+    c = tmp_path / "c.yaml"
+    c.write_text("workload:\n  schema: financial\n")
+    j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {"config_name": "lb-reg"}))
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
