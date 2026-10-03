@@ -89,7 +89,10 @@ pull request to `main`.
 ### Release harness
 
 The release matrix runs through `scripts/release/harness.py` from a
-worktree detached at the freeze commit. It is not part of the wheel. It
+worktree detached at the freeze commit (with `scripts/release/ledger.py`,
+the row log and the deployments-ledger edits, and
+`scripts/release/cluster.py`, the read-only cluster queries and the
+admission decision). It is not part of the wheel. It
 runs lakebench only as `env PYTHONPATH=<worktree>/src python3.11 -m
 lakebench`, so the editable install never shadows the release tree.
 

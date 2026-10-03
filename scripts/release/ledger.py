@@ -11,8 +11,8 @@ Two stores, both written only by ``harness.py``:
     ``run_ids`` and the like survive the transitions that do not repeat them.
 
 ``MarkdownLedger``
-    The deployments table in the evidence file (CLAUDE.md section 8: the
-    authority for "your own deployment"). Every write is defensive: under an
+    The deployments table in the evidence file (the maintainers' record of
+    which deployments are whose). Every write is defensive: under an
     exclusive lock (``--ledger-lock``; pass the lock the other writers of the
     file use, or ``<ledger>.lock`` by default) it reads the file, keeps a byte
     copy under ``<out>/ledger-backups/``, inserts or replaces exactly one

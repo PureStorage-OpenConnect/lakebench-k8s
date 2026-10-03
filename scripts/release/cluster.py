@@ -10,7 +10,7 @@ tested without a cluster:
   ``app.kubernetes.io/managed-by=lakebench``, live rows of the markdown
   deployments ledger (a row admitted by the main lane before its namespace
   exists) and this harness's own active rows. The union must be below
-  ``max_deployments`` (4, CLAUDE.md section 8) before a row is admitted.
+  ``max_deployments`` (4, the shared cluster's limit) before a row is admitted.
 * **Load.** Every namespace's pod requests (non-terminal pods), except that
   a ledger or own namespace counts at least its plan peak: the harness's own
   rows by their computed peak, other ledger rows by the peak of their config

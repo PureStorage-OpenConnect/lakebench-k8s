@@ -70,15 +70,20 @@ HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]
 
 
+#: The harness's sibling modules, by name and tracked path.
+SIBLINGS = {"cluster": "scripts/release/cluster.py", "ledger": "scripts/release/ledger.py"}
+
+
 def _sibling(name: str) -> Any:
-    """Load ``scripts/release/<name>.py`` as ``lb_release_<name>`` (generic
-    names such as ``cluster`` must not collide with other modules)."""
+    """Load a sibling module as ``lb_release_<name>`` (generic names such as
+    ``cluster`` must not collide with other modules)."""
     key = f"lb_release_{name}"
     if key in sys.modules:
         return sys.modules[key]
-    spec = importlib.util.spec_from_file_location(key, HERE / f"{name}.py")
+    path = TREE / SIBLINGS[name]
+    spec = importlib.util.spec_from_file_location(key, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {HERE / f'{name}.py'}")
+        raise ImportError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[key] = mod
     spec.loader.exec_module(mod)
