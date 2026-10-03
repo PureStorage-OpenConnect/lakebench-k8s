@@ -410,7 +410,7 @@ A PASSED verdict also needs rows in every layer, the expected AML rules (W1 gian
 
 ### The datagen generator refuses arguments it cannot read
 
-The datagen image exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
+The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 
 **What to do:** Lakebench's own Jobs pass valid arguments; correct scripts and manual Jobs that call the image directly (`--node-id abc` used to run as node 0).
 
@@ -422,6 +422,6 @@ Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain
 
 ### Datagen pods honour path style, TLS and CA settings
 
-Datagen pods honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
 
 **What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.

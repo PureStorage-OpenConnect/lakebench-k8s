@@ -17,8 +17,11 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
   (`scripts/aml_gate.py --registered`, `corpora.registered_looks_open`), once
   each, after the generator freeze.
 - Spent seeds (42, 50000042) are refused for the AML schema
-  (`config/datagen_seed.py`). A seed is appended to `spent_seeds` when a look
-  at it is taken, voided or burned.
+  (`config/datagen_seed.py`). A seed is spent when a look at it is taken,
+  voided or burned: a look or burn is recorded in `aml_registered_looks.json`
+  and the seed is appended to `heldout_hashes.json`'s `spent` (the
+  pre-registration's `corpora.spent_seeds` changes only with the owner's
+  locked-file commit).
 - A held-out seed that becomes public, or whose started look is voided, is
   burned and replaced, never reused. The owner runs `oa-seed-redraw.py`
   (kept outside the repository, beside `oa-heldout-init.py`). It draws a
@@ -29,8 +32,8 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
   it; appends its salted hash to the role in `heldout_hashes.json` and to
   the compiled floor in `config/datagen_seed.py`; records the old seed as
   `burned`, with the owner's reason, in `aml_registered_looks.json`
-  (`datagen_seed.burn_seed`, beside a voided `started` entry if there is
-  one); and appends the old seed to the hash file's `spent`. The
+  (`datagen_seed.burn_seed`; a seed with a `started` look is burned only
+  with `--void` and a reason naming the void decision); and appends the old seed to the hash file's `spent`. The
   append-only rule (`heldout_history_problems`) accepts that spent append
   only beside a completed look or a burn for the same role and seed. The
   Rust floor keeps the first hashes until the next datagen image; the

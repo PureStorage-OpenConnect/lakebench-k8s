@@ -521,7 +521,7 @@ def test_spent_append_of_heldout_allowed_beside_a_burn():
         assert _no_seed_in(problems[0])
 
 
-def test_burn_seed_records_a_spent_seed(tmp_path):
+def test_burn_seed_records_a_spent_seed(tmp_path, held):
     p = tmp_path / ds.LOOKS_FILENAME
     p.write_text(json.dumps({"_doc": "x", "looks": []}))
     entry = ds.burn_seed("evaluation", EV, " public since 09-24 ", path=p)
@@ -539,6 +539,11 @@ def test_burn_seed_records_a_spent_seed(tmp_path):
         ds.burn_seed("robustness", RB, " ", path=p)
     with pytest.raises(ValueError, match="only"):
         ds.burn_seed("calibration", 43, "x", path=p)
+    # Only a seed registered for the role is burned: not 43, not the other role's.
+    with pytest.raises(ValueError, match="not a registered evaluation seed"):
+        ds.burn_seed("evaluation", 43, "x", path=p)
+    with pytest.raises(ValueError, match="not a registered evaluation seed"):
+        ds.burn_seed("evaluation", RB, "x", path=p)
     assert ds.load_looks(p) == [entry]
     # The burn plus the spent append pass the append-only rule together.
     old, new = _doc(), _doc()
@@ -547,11 +552,11 @@ def test_burn_seed_records_a_spent_seed(tmp_path):
     assert ds.heldout_history_problems(old, new, looks) == []
 
 
-def test_a_void_burns_a_started_look(tmp_path):
+def test_a_void_burns_a_started_look(tmp_path, held):
     p = tmp_path / ds.LOOKS_FILENAME
     p.write_text(json.dumps({"_doc": "x", "looks": []}))
     ds.claim_look("evaluation", EV, path=p)
-    with pytest.raises(ValueError, match="other-role"):
+    with pytest.raises(ValueError, match="not a registered robustness seed"):
         ds.burn_seed("robustness", EV, "void", path=p)
     entry = ds.burn_seed("evaluation", EV, "void #99", path=p)
     assert [e["state"] for e in ds.load_looks(p)] == ["started", "burned"]

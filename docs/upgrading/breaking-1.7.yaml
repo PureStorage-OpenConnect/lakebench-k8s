@@ -581,7 +581,7 @@
   kind: refused-command
   subject: datagen generator arguments
   source: datagen_rs/src/bin/generate.rs:check_known_flags
-  text: 'The datagen image exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.'
+  text: 'The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.'
   fix: 'Lakebench''s own Jobs pass valid arguments; correct scripts and manual Jobs that call the image directly (`--node-id abc` used to run as node 0).'
 - id: the-datagen-image-builds-only-with-its-commit
   title: The datagen image builds only with its commit
@@ -595,5 +595,5 @@
   kind: default-change
   subject: datagen S3 transport settings
   source: datagen_rs/src/s3sink.rs:S3_PATH_STYLE
-  text: 'Datagen pods honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
+  text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
   fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.'

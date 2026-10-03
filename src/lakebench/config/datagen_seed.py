@@ -227,6 +227,7 @@ def burn_seed(
     reason: str,
     meta: dict | None = None,
     path: str | os.PathLike | None = None,
+    heldout: HeldOut | None = None,
 ) -> dict:
     """Record that a held-out ``role`` seed is retired without a completed
     look (burned: it became public, or a void retires a look that started).
@@ -236,11 +237,17 @@ def burn_seed(
     (``heldout_history_problems``). The seed is written in plaintext, which
     is why only a seed that is public or given up is burned. A seed whose
     only entries are ``started`` looks for the same role (a void) gets the
-    burn beside them; any other entry, or an empty reason, raises."""
+    burn beside them; any other entry, an empty reason, or a seed that is
+    not registered for ``role`` (``heldout``, or the packaged hash file and
+    floor) raises."""
     if role not in PROTECTED_ROLES:
         raise ValueError(f"only {PROTECTED_ROLES} seeds are burned, not {role!r}")
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("a burn needs a reason (the owner decision that retires the seed)")
+    if heldout_role(seed, heldout) != role:
+        raise ValueError(
+            f"the seed is not a registered {role} seed; only a held-out seed is burned"
+        )
 
     def update(doc):
         mine = [e for e in doc["looks"] if int(e["seed"]) == int(seed)]
