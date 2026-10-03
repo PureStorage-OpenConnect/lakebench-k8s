@@ -19,6 +19,7 @@ from lakebench.cli._helpers import (
     _journal_safe,
     console,
     enforce_bronze_gate,
+    esc,
     journal_open,
     load_deps_handle,
     print_error,
@@ -1271,7 +1272,7 @@ def _held_out_check_only(job_manager, monitor, run_id, interrupt, timeout) -> No
     if interrupt is not None:
         interrupt.submitted(status)
     if status.state == JobState.FAILED:
-        print_error(f"Could not submit the held-out check: {status.message}")
+        print_error(f"Could not submit the held-out check: {esc(status.message)}")
         raise typer.Exit(ExitCode.FAILED)
     result = monitor.wait_for_completion(
         app, timeout_seconds=max(600, timeout or 0), poll_interval=15
@@ -1283,13 +1284,13 @@ def _held_out_check_only(job_manager, monitor, run_id, interrupt, timeout) -> No
         return
     refused = refusal_in_log(getattr(result, "driver_logs", None))
     if refused:
-        print_error(f"Refused: the corpus is a protected AML corpus ({refused})")
+        print_error(f"Refused: the corpus is a protected AML corpus ({esc(refused)})")
         raise typer.Exit(ExitCode.USAGE)
-    print_error(f"The held-out check failed: {result.message}")
+    print_error(f"The held-out check failed: {esc(result.message)}")
     if getattr(result, "driver_logs", None):
         console.print("[dim]Driver logs (last 20 lines):[/dim]")
         for line in result.driver_logs.split("\n")[-20:]:
-            console.print(f"  {line}")
+            console.print(f"  {esc(line)}")
     raise typer.Exit(ExitCode.FAILED)
 
 
@@ -2400,7 +2401,9 @@ def _run_once(
             from lakebench.cli._sustained import _stop_leftover_streams
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
-            if stages[0][0] != JobType.BRONZE_VERIFY:
+            # A multi-cycle run generates each cycle's corpus itself (its
+            # seed passed the load-time guard) after clearing the prefix.
+            if stages[0][0] != JobType.BRONZE_VERIFY and total_cycles == 1:
                 # A stage subset runs no bronze-verify, but its stages read the
                 # corpus: its held-out check runs alone first.
                 _stage = "held-out check"
@@ -2810,7 +2813,7 @@ def _run_once(
                         # bronze-verify found a corpus from a held-out or spent
                         # AML seed and read nothing: the protected-corpus refusal.
                         print_error(
-                            f"Refused: {stage_name} found a protected AML corpus ({_refused})"
+                            f"Refused: {stage_name} found a protected AML corpus ({esc(_refused)})"
                         )
                         results.append((stage_name, False, job_metrics.elapsed_seconds))
                         _journal_safe(

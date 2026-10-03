@@ -229,12 +229,15 @@ CORPUS = {
 
 
 class FakeBronze:
-    def list_objects_v2(self, Bucket, Prefix, **kw):  # noqa: N803 -- boto3's names
-        keys = sorted(k for k in CORPUS if k.startswith(Prefix))
-        return {
-            "Contents": [{"Key": k, "Size": len(CORPUS[k])} for k in keys],
-            "IsTruncated": False,
-        }
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+
+        class _Pages:
+            def paginate(self, Bucket, Prefix, **kw):  # noqa: N803 -- boto3's names
+                keys = sorted(k for k in CORPUS if k.startswith(Prefix))
+                yield {"Contents": [{"Key": k, "Size": len(CORPUS[k])} for k in keys]}
+
+        return _Pages()
 
     def get_object(self, Bucket, Key):  # noqa: N803
         import io
@@ -539,12 +542,26 @@ def test_an_earlier_unfinished_submit_into_the_prefix_is_refused(env):
     assert "same bronze prefix" in _gate_problem(env, corpus)
 
 
-def test_an_earlier_finished_attempt_does_not_block(env):
+def test_an_earlier_failure_after_submit_blocks(env):
+    """A failure after submit leaves the Job behind (OOM, crash loop,
+    timeout): its pods may still have been writing."""
     corpus = _local_copy(env.tmp / "copy")
     fp = ds.local_corpus_fingerprint(corpus)
     ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
     ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
     ds.append_corpus_ledger(_base(env, attempt="a0", state="failed", submitted=True))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
+    ds.append_corpus_ledger(_gen_ok(env, fp))
+    assert "empty bucket" in _gate_problem(env, corpus)
+
+
+def test_an_earlier_generated_attempt_does_not_block(env):
+    corpus = _local_copy(env.tmp / "copy")
+    fp = ds.local_corpus_fingerprint(corpus)
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
+    ds.append_corpus_ledger(_base(env, attempt="a0", state="generated", corpus_fingerprint=None))
     ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
     ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
     ds.append_corpus_ledger(_gen_ok(env, fp))
@@ -622,7 +639,7 @@ def test_a_failed_fingerprint_fails_generate(env, monkeypatch):
     _fake_generate(monkeypatch, env)
 
     class Broken:
-        def list_objects_v2(self, **kw):
+        def get_paginator(self, name):
             raise RuntimeError("503")
 
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **k: SimpleNamespace(raw_client=Broken()))
@@ -667,3 +684,25 @@ def test_aml_gate_registered_preflight_requires_the_entry(env, monkeypatch, caps
     err = capsys.readouterr().err
     assert rc == 1 and "no generation of the registered evaluation corpus" in err, err
     _no_seed(err)
+
+
+def test_unread_pod_images_fail_generate(env, monkeypatch):
+    _fake_generate(monkeypatch, env)
+
+    def no_pods(**k):
+        raise RuntimeError("pods gone")
+
+    monkeypatch.setattr("lakebench.metrics.datagen_aggregator.collect_from_k8s", no_pods)
+    r = _gen(_registered(env), "--registered-corpus", "--yes")
+    assert r.exit_code == 1 and "image digests could not be read" in r.output, r.output
+
+
+def test_a_directory_marker_key_is_not_a_file(env, monkeypatch):
+    CORPUS["pacs008/bronze/"] = b""
+    try:
+        _fake_generate(monkeypatch, env)
+        assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
+        gen = _lines(env.ledger)[-1]
+        assert gen["corpus_fingerprint"]["files"] == 3
+    finally:
+        del CORPUS["pacs008/bronze/"]
