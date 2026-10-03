@@ -12,9 +12,11 @@ Also here, because AML-2 is the first change to these modules after the
 freeze rule (design 04 "Frozen-symbol recheck (d3)", Open risk 13): the
 frozen ``aml_features.py`` imports ``detection_rules`` and the frozen
 ``bronze_verify_financial.py`` imports ``tm_operations``, so their module top
-level runs inside frozen scripts. Their module-level imports and bare
-expressions, and the pinned symbols, stay byte-identical to integrate
-dfc8afa7.
+level runs inside frozen scripts. Their module-level statements other than
+defs, classes and literal assignments, and the pinned symbols, stay
+byte-identical to integrate dfc8afa7. Interim: decorators, default
+arguments and class bodies are not hashed; QR-10's frozen guard replaces
+this check.
 """
 
 from __future__ import annotations
@@ -259,7 +261,7 @@ def _is_literal_assign(n: ast.stmt) -> bool:
         return False  # x[k] = 1 or x.a = 1 mutates an existing object
     try:
         ast.literal_eval(n.value)
-    except ValueError:
+    except (ValueError, TypeError, SyntaxError):
         return False
     return True
 
@@ -291,6 +293,8 @@ def _frozen_signature(path: Path, pinned: set[str]) -> tuple[str, dict[str, str]
             names = [n.name]
         elif isinstance(n, ast.Assign):
             names = [t.id for t in n.targets if isinstance(t, ast.Name)]
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            names = [n.target.id]
         for name in names:
             if name in pinned:
                 found[name] = _h(ast.get_source_segment(src, n) or "")
@@ -308,27 +312,32 @@ def test_frozen_import_targets_top_level_unchanged():
 
 
 def _ddl_column_names(text: str) -> list[str]:
-    """Column names of the first CREATE TABLE ... ( ... ) block in *text*."""
+    """(name, type) of each column of the first CREATE TABLE ( ... ) block
+    in *text*, the type without NOT NULL."""
     body = text.split("(", 1)[1]
-    names = []
+    cols = []
     for line in body.splitlines():
-        line = line.split("--", 1)[0].strip()
+        line = line.split("--", 1)[0].strip().rstrip(",")
         if not line:
             continue
         if line.startswith(")"):
             break
-        names.append(line.split()[0])
-    return names
+        name, rest = line.split(None, 1)
+        cols.append((name, rest.replace(" NOT NULL", "").strip()))
+    return cols
 
 
 def test_other_alert_ddl_copies_match_alert_columns():
     """Two gold.alerts column lists are not built from ALERT_COLUMNS yet
-    (replay's target table, deploy's DDL). A column appended to
-    ALERT_COLUMNS without them fails here, not at run time."""
-    names = [c[0] for c in _alert_columns()]
+    (replay's target table and empty schema, deploy's DDL). A column
+    appended to ALERT_COLUMNS, or a type changed, without them fails here.
+    (A reused replay target table still needs its own upgrade for a new
+    column; replay adds only detected_ts today.)"""
+    cols = [(n, t) for n, t, _ in _alert_columns()]
+    names = [n for n, _ in cols]
     rp = (SCRIPTS / "replay_financial.py").read_text()
     replay_ddl = rp[rp.index("CREATE TABLE IF NOT EXISTS {args.output_alerts}") :]
-    assert _ddl_column_names(replay_ddl) == names
+    assert _ddl_column_names(replay_ddl) == cols
     empty = rp[rp.index("def _empty_alerts_df") :]
     empty = empty[: empty.index("return spark.createDataFrame")]
     import re
@@ -337,4 +346,4 @@ def test_other_alert_ddl_copies_match_alert_columns():
     fd = (SCRIPTS.parent.parent / "deploy" / "financial_ddl.py").read_text()
     i = fd.index("related_txn_ids    ARRAY<STRING>")
     start = fd.rindex("CREATE TABLE", 0, i)
-    assert _ddl_column_names(fd[start:]) == names
+    assert [n for n, _ in _ddl_column_names(fd[start:])] == names
