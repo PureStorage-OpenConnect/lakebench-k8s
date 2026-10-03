@@ -10,6 +10,7 @@ multi-cycle run goes through the bronze gate before cycle 0.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -207,9 +208,15 @@ def test_s3_failure_is_an_error_not_an_absence():
 
 
 def test_financial_seed_ref_is_never_plaintext():
+    # datagen_seed.seed_ref (CD-3+4) is the official form: the salted hash
+    # the datagen pods write into their corpus markers (config_seed_ref), so
+    # the series marker and the markers name one seed the same way.
+    from lakebench.config.seed_secret import config_seed_ref
+
     cfg = _cfg(1, schema="financial")
     ref = corpus.seed_ref(cfg)
-    assert ref.startswith("sha256:") and "43" != ref
+    assert ref == config_seed_ref(cfg)
+    assert re.fullmatch(r"[0-9a-f]{64}", ref) and "43" != ref
     assert corpus.seed_ref(_cfg(1)) == "42"
 
 
