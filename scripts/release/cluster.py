@@ -76,11 +76,16 @@ class ActiveRow:
 
 @dataclass(frozen=True)
 class Candidate:
+    """What asks for admission: one row, or a scenario's ``size``
+    deployments at once (``namespaces``, ``peak`` their sum)."""
+
     row: str
     namespace: str
     peak: Peak
     alone: bool = False
     aml_continuous: bool = False
+    size: int = 1
+    namespaces: tuple[str, ...] = ()
 
 
 @dataclass
@@ -118,12 +123,16 @@ def admit(
         reasons.append("an alone row is running")
     if cand.aml_continuous and sum(a.aml_continuous for a in own) >= max_aml_continuous:
         reasons.append(f"{max_aml_continuous} AML continuous rows already running")
-    deployments = (managed_set | ledger_set | own_ns) - {cand.namespace}
+    mine = {cand.namespace, *cand.namespaces}
+    deployments = (managed_set | ledger_set | own_ns) - mine
     if cand.alone and deployments:
         reasons.append("alone row: other lakebench deployments exist")
         blocking.extend(sorted(deployments - own_ns))
-    if len(deployments) >= max_deployments:
-        reasons.append(f"{len(deployments)} lakebench deployments (limit {max_deployments})")
+    if len(deployments) + cand.size > max_deployments:
+        reasons.append(
+            f"{len(deployments)} lakebench deployments plus {cand.size} more would pass "
+            f"the limit of {max_deployments}"
+        )
         blocking.extend(sorted(deployments - own_ns))
 
     if isinstance(snapshot, Unknown):

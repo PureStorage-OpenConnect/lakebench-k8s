@@ -151,6 +151,48 @@ and destroys finish. `resume` continues every unfinished row and never
 re-deploys, re-runs or re-destroys; it refuses while a row's child process
 is still alive.
 
+### Parallel-safety scenarios
+
+The six S-P scenarios live in `scripts/release/scenarios/` and run one at a
+time through the harness, from the same detached worktree:
+
+```bash
+python3.11 scripts/release/harness.py scenario S-P1 --freeze <sha> --context <kube context> \
+    --out /root/lakebench-release/<version> --deployments-ledger <deployments ledger file>
+```
+
+| Scenario | Script | What it proves |
+|---|---|---|
+| S-P1 | `s-p1-destroy-running.sh` | Destroying A while B's pipeline runs leaves B's record passing (success, scale ratio at least 0.95) |
+| S-P2 | `s-p2-concurrent-deploy.sh` | Two deploys two seconds apart both finish, with distinct identities, nonces and SecretClasses |
+| S-P3 | `s-p3-destroy-during-deploy.sh` | Destroying B while A generates leaves A's datagen Job and buckets alone |
+| S-P4 | `s-p4-double-destroy.sh` | Two destroys of A a second apart: exactly one deletes, the other converges with a named outcome |
+| S-P5 | `s-p5-legacy-bucket-destroy.sh` | An untagged pre-existing bucket is refused at deploy and at destroy and left as it was |
+| S-P6 | `s-p6-same-bucket-two-configs.sh` | A second deployment naming a bucket another owns is refused at deploy |
+
+The harness writes the scenario's configs (Customer 360 batch, scale 1,
+hive-iceberg-spark-trino, explicit bucket names) and their ledger rows,
+admits all of the scenario's deployments together, and runs the script with
+`LB_CONFIG_A`, `LB_CONFIG_B`, `LB_UAT_LOG_DIR`, `LB_KUBE_CONTEXT` and
+`LB_EXIT_<NAME>` (each exit code of the release tree) exported, and a
+`lakebench` shim for the release tree first on `PATH`. The scripts check
+exit codes and the paths `LB_EXIT_PATH_FILE` names, not message text, and
+call `kubectl` and `helm` only with the pinned context. For S-P5 the
+harness creates the untagged bucket with one object and deletes it
+afterwards, after checking it is unchanged; for S-P6 A creates the shared
+bucket.
+
+After the script, whatever its exit code, the harness checks that each
+deployment the scenario keeps is present with its incarnation, destroys
+every leftover namespace with `--expect-incarnation` (B before A), allowing
+only the refusal the scenario expects (a legacy or foreign bucket refused
+and left), and closes a ledger row only when the namespace and the buckets
+that deployment owns are gone. A scenario passes when the script exits 0
+with its `PASS:` line and every harness check holds. Scenario results go to
+`<out>/results-extra.md`, never to `results.md`, so the release gate's
+records check does not read them. `resume` cleans up a scenario the harness
+stopped in and marks it failed; it never re-runs the script.
+
 ### UAT results
 
 The gate requires `uat/results-<version>.md`, for example

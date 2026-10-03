@@ -549,6 +549,454 @@ def record_verdict(record: dict[str, Any], freeze: str, version: str) -> list[st
     return record_problems(record, freeze, expected, root=TREE)
 
 
+# -- parallel-safety scenarios -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    """One S-P script and what the harness checks around it.
+
+    ``kept``: configs whose namespace must still be present, with a
+    confirmed incarnation, when the script ends. ``cleanup_refusals``: the
+    exit-3 paths the harness's own destroy of a leftover may meet by design
+    (a legacy or foreign bucket refused and left); the namespace must still
+    be gone. ``legacy_bucket``: the harness creates an untagged bronze bucket
+    for A with one object and deletes it afterwards. ``shared_bucket``: A
+    and B name one bronze bucket, which A creates.
+    """
+
+    id: str
+    script: str
+    configs: tuple[str, ...]
+    kept: tuple[str, ...] = ()
+    cleanup_refusals: tuple[tuple[str, frozenset[str]], ...] = ()
+    legacy_bucket: bool = False
+    shared_bucket: bool = False
+
+    def allowed(self, config: str) -> frozenset[str]:
+        return dict(self.cleanup_refusals).get(config, frozenset())
+
+
+SCENARIOS: dict[str, ScenarioSpec] = {
+    s.id: s
+    for s in (
+        ScenarioSpec("S-P1", "s-p1-destroy-running.sh", ("A", "B"), kept=("B",)),
+        ScenarioSpec("S-P2", "s-p2-concurrent-deploy.sh", ("A", "B"), kept=("A", "B")),
+        ScenarioSpec("S-P3", "s-p3-destroy-during-deploy.sh", ("A", "B")),
+        ScenarioSpec("S-P4", "s-p4-double-destroy.sh", ("A",)),
+        ScenarioSpec(
+            "S-P5",
+            "s-p5-legacy-bucket-destroy.sh",
+            ("A",),
+            cleanup_refusals=(("A", frozenset({"deploy.identity_foreign"})),),
+            legacy_bucket=True,
+        ),
+        ScenarioSpec(
+            "S-P6",
+            "s-p6-same-bucket-two-configs.sh",
+            ("A", "B"),
+            kept=("A",),
+            cleanup_refusals=(("B", frozenset({"deploy.identity_foreign"})),),
+            shared_bucket=True,
+        ),
+    )
+}
+#: Every scenario deployment is this row's composition (C360 batch s1).
+SCENARIO_BASE = Row("base", "customer360", "batch", "hive-iceberg-spark-trino", 1.0, 42)
+SHIM = """#!{python}
+# The release harness's lakebench for scenario scripts: the release tree only.
+import os
+import runpy
+import sys
+
+sys.path.insert(0, {src!r})
+os.environ["PYTHONPATH"] = {src!r}
+if os.environ.get("LB_SHIM_WHICH"):
+    import lakebench
+
+    print(lakebench.__file__)
+    sys.exit(0)
+sys.argv[0] = "lakebench"
+runpy.run_module("lakebench", run_name="__main__", alter_sys=True)
+"""
+
+
+def write_shim(tree: Path, bin_dir: Path) -> Path:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    shim = bin_dir / "lakebench"
+    shim.write_text(SHIM.format(python=sys.executable, src=str(tree / "src")))
+    shim.chmod(0o755)
+    return shim
+
+
+def shim_imports_from(bin_dir: Path, env: dict[str, str]) -> str:
+    """``lakebench.__file__`` as the scenario scripts' ``lakebench`` sees it."""
+    probe = dict(env, LB_SHIM_WHICH="1")
+    found = shutil.which("lakebench", path=probe.get("PATH"))
+    if found is None or Path(found).resolve() != (bin_dir / "lakebench").resolve():
+        return f"(PATH resolves lakebench to {found}, not the shim)"
+    out = subprocess.run([found], capture_output=True, text=True, env=probe, check=False)
+    return out.stdout.strip() if out.returncode == 0 else f"(shim failed: {out.stderr.strip()})"
+
+
+def exit_code_env() -> dict[str, str]:
+    """``LB_EXIT_<NAME>=<code>`` for every exit code of the release tree."""
+    from lakebench.exit_codes import ExitCode
+
+    return {f"LB_EXIT_{c.name}": str(int(c)) for c in ExitCode}
+
+
+def default_s3(config: Path) -> Any:
+    """The release tree's S3 client for *config* (credentials from the env)."""
+    from lakebench.config import load_config
+    from lakebench.config._load_context import LoadPurpose
+    from lakebench.s3 import S3Client
+
+    cfg = load_config(config, purpose=LoadPurpose.INSPECT, print_notes=False)
+    s3 = cfg.platform.storage.s3
+    return S3Client(
+        endpoint=s3.endpoint,
+        access_key=s3.access_key,
+        secret_key=s3.secret_key,
+        region=s3.region,
+        path_style=s3.path_style,
+        ca_cert=s3.ca_cert,
+        verify_ssl=s3.verify_ssl,
+    )
+
+
+def run_script(argv: Sequence[str], *, env: dict[str, str], cwd: Path, log: Path) -> int:
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as out:
+        proc = subprocess.Popen(  # noqa: S603 -- our own scenario script
+            list(argv),
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            _signal_group(proc.pid)
+            return proc.wait()
+
+
+@dataclass
+class ScenarioRun:
+    spec: ScenarioSpec
+    plans: dict[str, RowPlan]
+    buckets: dict[str, list[str]]
+    legacy: str | None = None
+    legacy_keys: list[str] = field(default_factory=list)
+    shared: str | None = None
+
+
+class ScenarioMixin:
+    """The scenario half of the harness (``Harness.scenario``)."""
+
+    def scenario_rows(self: Any, spec: ScenarioSpec) -> dict[str, RowPlan]:
+        sdir = self.out / "scenarios" / spec.id
+        tag = secrets.token_hex(3)
+        plans: dict[str, RowPlan] = {}
+        for c in spec.configs:
+            row = Row(
+                f"{spec.id}-{c}",
+                SCENARIO_BASE.workload,
+                SCENARIO_BASE.mode,
+                SCENARIO_BASE.recipe,
+                SCENARIO_BASE.scale,
+                SCENARIO_BASE.seed,
+            )
+            name = f"rel17-{spec.id.lower()}-{c.lower()}-{tag}"
+            plans[c] = self.plan_row(row, sdir / c, name)
+        return plans
+
+    def _set_buckets(self: Any, plan: RowPlan, bronze: str | None = None) -> list[str]:
+        """Write explicit bucket names; returns the buckets the config owns."""
+        data = yaml.safe_load(plan.config.read_text())
+        name = data["name"]
+        buckets = {k: f"{name}-{k}" for k in ("bronze", "silver", "gold")}
+        if bronze:
+            buckets["bronze"] = bronze
+        s3 = data.setdefault("platform", {}).setdefault("storage", {}).setdefault("s3", {})
+        s3["buckets"] = buckets
+        plan.config.write_text(yaml.safe_dump(data, sort_keys=False))
+        return [v for k, v in buckets.items() if not (bronze and k == "bronze")]
+
+    def scenario(self: Any, spec: ScenarioSpec) -> int:
+        existing = self.rowlog.latest()
+        clash = [r for r in existing if r.startswith(f"{spec.id}-")]
+        if clash:
+            raise Refused(f"{spec.id} already ran in this --out ({', '.join(clash)})")
+        plans = self.scenario_rows(spec)
+        run = ScenarioRun(spec, plans, {})
+        a = plans["A"]
+        if spec.legacy_bucket:
+            run.legacy = f"{a.namespace}-legacy"
+        if spec.shared_bucket:
+            run.shared = f"rel17-{spec.id.lower()}-shared-{secrets.token_hex(3)}"
+        for c, plan in plans.items():
+            bronze = run.legacy if c == "A" and run.legacy else run.shared
+            run.buckets[c] = self._set_buckets(plan, bronze)
+            if run.shared and c == "A":
+                run.buckets[c].append(run.shared)
+            self.log(
+                plan.row.id,
+                "planned",
+                namespace=plan.namespace,
+                config=str(plan.config),
+                peak=[plan.peak.cores, plan.peak.gib],
+                scenario=spec.id,
+                owned_buckets=run.buckets[c],
+            )
+        self._admit_group(spec, plans)
+        for plan in plans.values():
+            self.ledger_add(plan)
+            self.log(plan.row.id, "ledgered")
+        problems: list[str] = []
+        try:
+            if run.legacy:
+                problems += self._make_legacy_bucket(run)
+            if not problems:
+                problems += self._run_scenario_script(run)
+        finally:
+            problems += self._scenario_cleanup(run)
+        verdict = "PASS" if not problems else "FAIL"
+        self.log(
+            f"{spec.id}-A",
+            self.rowlog.latest()[f"{spec.id}-A"]["status"],
+            scenario_verdict=verdict,
+            scenario_problems=problems,
+        )
+        self.write_extra_results()
+        for p in problems:
+            self.say(f"{spec.id}: {p}")
+        self.say(f"{spec.id}: {verdict}")
+        return 0 if verdict == "PASS" else 1
+
+    def _admit_group(self: Any, spec: ScenarioSpec, plans: dict[str, RowPlan]) -> None:
+        peak = Peak(0.0, 0.0)
+        for p in plans.values():
+            peak = peak + p.peak
+        group = RowPlan(
+            Row(spec.id, "customer360", "batch", SCENARIO_BASE.recipe, 1.0, 42),
+            plans["A"].namespace,
+            plans["A"].config,
+            peak,
+        )
+        last = -BLOCKING_REPORT_S
+        while True:
+            decision = self.decide(
+                group, peak, size=len(plans), namespaces=tuple(p.namespace for p in plans.values())
+            )
+            if not isinstance(decision, Unknown) and decision.admit:
+                return
+            if self.stopping:
+                raise Refused(f"{spec.id}: stopped before admission")
+            reasons = [decision.reason] if isinstance(decision, Unknown) else decision.reasons
+            if self.monotonic() - last >= BLOCKING_REPORT_S:
+                self.say(f"{spec.id} waits: {'; '.join(reasons)}")
+                last = self.monotonic()
+            self.sleep(ADMIT_POLL_S)
+
+    def _make_legacy_bucket(self: Any, run: ScenarioRun) -> list[str]:
+        s3 = self.s3_factory(run.plans["A"].config)
+        assert run.legacy is not None
+        if s3.bucket_exists(run.legacy):
+            return [f"legacy bucket {run.legacy} already exists; not touched"]
+        if not s3.create_bucket(run.legacy):
+            return [f"could not create the legacy bucket {run.legacy}"]
+        key = "harness-legacy/object.txt"
+        s3.raw_client.put_object(Bucket=run.legacy, Key=key, Body=b"legacy\n")
+        run.legacy_keys = [key]
+        self.log(f"{run.spec.id}-A", "ledgered", legacy_bucket=run.legacy, legacy_keys=[key])
+        return []
+
+    def _run_scenario_script(self: Any, run: ScenarioRun) -> list[str]:
+        spec = run.spec
+        sdir = self.out / "scenarios" / spec.id
+        bin_dir = sdir / "bin"
+        write_shim(self.tree, bin_dir)
+        env = child_env(self.tree)
+        env.update(exit_code_env())
+        env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        env["LB_KUBE_CONTEXT"] = self.context
+        env["LB_UAT_LOG_DIR"] = str(sdir / "logs")
+        for c, plan in run.plans.items():
+            env[f"LB_CONFIG_{c}"] = str(plan.config)
+        if run.legacy:
+            env["LB_LEGACY_BUCKET"] = run.legacy
+        if run.shared:
+            env["LB_SHARED_BUCKET"] = run.shared
+        seen = shim_imports_from(bin_dir, env)
+        if not _under(seen, self.tree / "src" / "lakebench"):
+            return [f"the scenario shim imports lakebench from {seen}, not the release tree"]
+        script = self.tree / "scripts" / "release" / "scenarios" / spec.script
+        log = sdir / "script.log"
+        runner = self.script_runner or run_script
+        rc = runner(["bash", str(script)], env=env, cwd=sdir, log=log)
+        problems = []
+        text = log.read_text(errors="replace") if log.exists() else ""
+        if rc != 0:
+            problems.append(f"script exited {rc}")
+        elif f"PASS: {spec.id}" not in text:
+            problems.append("script exited 0 without its PASS line")
+        self.log(f"{spec.id}-A", "ledgered", script_rc=rc)
+        return problems
+
+    def _scenario_incarnation(self: Any, config: Path) -> tuple[str | None, str]:
+        """``uid#nonce`` when the namespace carries any confirmed nonce the
+        config's state kept (a script may deploy the same config twice)."""
+        from lakebench.config.deploy_state import StateError, current_incarnation, read_state
+
+        try:
+            state = read_state(config)
+        except StateError as e:
+            return None, f"deploy state unreadable: {e}"
+        if state is None or not state.nonces:
+            return None, "no deploy state with a nonce"
+        try:
+            inc = current_incarnation(state, self.cluster.core_v1)
+        except Exception as e:  # noqa: BLE001
+            return None, f"namespace read failed: {e}"
+        if inc is None:
+            return None, "the namespace is absent or carries no nonce this state recorded"
+        nonce = inc.rsplit("#", 1)[1]
+        if any(e.nonce == nonce and e.status == "pending" for e in state.nonces):
+            return None, "the namespace's nonce is still pending"
+        return inc, ""
+
+    def _scenario_cleanup(self: Any, run: ScenarioRun, check_kept: bool = True) -> list[str]:
+        """Check what the script left, then destroy every leftover by
+        incarnation (B before A); never by name, never forced."""
+        spec = run.spec
+        problems: list[str] = []
+        order = [c for c in reversed(spec.configs) if c in run.plans]
+        for c in order:
+            plan = run.plans[c]
+            try:
+                present = self.cluster.namespace_exists(plan.namespace)
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{c}: namespace unreadable ({e}); not destroyed")
+                self.log(plan.row.id, "failed", detail=f"namespace unreadable: {e}")
+                continue
+            inc, why = self._scenario_incarnation(plan.config) if present else (None, "absent")
+            if check_kept and c in spec.kept and inc is None:
+                problems.append(
+                    f"{c}: expected present with its incarnation after the script ({why})"
+                )
+            if not present:
+                problems += self._close_if_buckets_gone(run, c, "gone after the script")
+                continue
+            if inc is None:
+                problems.append(f"{c}: present without a confirmed incarnation ({why}); left")
+                self.log(plan.row.id, "left", detail=f"present after the script: {why}")
+                continue
+            self.log(plan.row.id, "deployed", incarnation=inc)
+            res = self.runner(
+                ["destroy", str(plan.config), "--yes", "--expect-incarnation", inc],
+                cwd=plan.config.parent,
+                log=self.log_path(plan.row, "destroy"),
+                on_spawn=self._spawn_logger(plan, "destroying"),
+            )
+            from lakebench.exit_codes import ExitCode
+
+            allowed = spec.allowed(c)
+            refused_by_design = (
+                res.code == ExitCode.REFUSED and res.paths and set(res.paths) <= allowed
+            )
+            if res.code == ExitCode.OK or refused_by_design:
+                try:
+                    gone = not self.cluster.namespace_exists(plan.namespace)
+                except Exception:  # noqa: BLE001
+                    gone = False
+                if gone:
+                    problems += self._close_if_buckets_gone(
+                        run,
+                        c,
+                        f"destroyed by the harness (exit {res.code} {res.paths or ''})".strip(),
+                    )
+                    continue
+            if res.code == ExitCode.INCOMPLETE:
+                self.poll_gone(plan, "scenario cleanup destroy exited 6")
+                if self.rowlog.latest()[plan.row.id]["status"] != "destroyed":
+                    problems.append(f"{c}: namespace still terminating after cleanup")
+                continue
+            self.classify_destroy(plan, res)
+            problems.append(f"{c}: cleanup destroy exited {res.code} ({', '.join(res.paths)})")
+        if run.legacy and "A" in run.plans:
+            problems += self._remove_legacy_bucket(run)
+        return problems
+
+    def _close_if_buckets_gone(self: Any, run: ScenarioRun, c: str, why: str) -> list[str]:
+        plan = run.plans[c]
+        try:
+            s3 = self.s3_factory(plan.config)
+            left = [b for b in run.buckets[c] if s3.bucket_exists(b)]
+        except Exception as e:  # noqa: BLE001
+            self.log(plan.row.id, "left", detail=f"{why}; buckets unreadable ({e})")
+            return [f"{c}: buckets unreadable after the namespace went ({e})"]
+        if left:
+            self.log(plan.row.id, "left", detail=f"{why}; buckets remain: {', '.join(left)}")
+            return [f"{c}: buckets remain after the namespace went: {', '.join(left)}"]
+        self.log(plan.row.id, "destroyed", detail=why)
+        self.ledger_close(plan)
+        return []
+
+    def _remove_legacy_bucket(self: Any, run: ScenarioRun) -> list[str]:
+        """The legacy bucket is the harness's own: check it was left as it
+        was made, then empty and delete it."""
+        assert run.legacy is not None
+        problems: list[str] = []
+        s3 = self.s3_factory(run.plans["A"].config)
+        if not s3.bucket_exists(run.legacy):
+            return [f"legacy bucket {run.legacy} is gone: something deleted it"]
+        listing = sorted(
+            o["Key"]
+            for page in s3.raw_client.get_paginator("list_objects_v2").paginate(Bucket=run.legacy)
+            for o in page.get("Contents", [])
+        )
+        if listing != sorted(run.legacy_keys):
+            problems.append(f"legacy bucket {run.legacy} changed: {listing}")
+        s3.empty_bucket(run.legacy, keep_prefixes=())
+        if not s3.delete_bucket(run.legacy):
+            problems.append(f"could not delete the harness's legacy bucket {run.legacy}")
+        self.log(
+            f"{run.spec.id}-A",
+            self.rowlog.latest()[f"{run.spec.id}-A"]["status"],
+            legacy_bucket_removed=not problems,
+        )
+        return problems
+
+    def write_extra_results(self: Any) -> Path:
+        """``results-extra.md``: scenario (and upgrade) runs, which are not
+        release-matrix evidence and stay out of results.md."""
+        states = self.rowlog.latest()
+        lines = [
+            f"# Parallel-safety and upgrade runs {self.version}",
+            "",
+            f"Freeze commit: {self.freeze}",
+            "",
+            "| run | deployments | verdict | problems |",
+            "|---|---|---|---|",
+        ]
+        for rid, s in states.items():
+            if "scenario_verdict" not in s:
+                continue
+            spec_id = s.get("scenario") or rid.rsplit("-", 1)[0]
+            ns = [
+                st.get("namespace", "?") for r, st in states.items() if r.startswith(f"{spec_id}-")
+            ]
+            problems = "; ".join(s.get("scenario_problems") or []) or "-"
+            lines.append(f"| {spec_id} | {', '.join(ns)} | {s['scenario_verdict']} | {problems} |")
+        path = self.out / "results-extra.md"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+
 # -- the harness -------------------------------------------------------------
 
 
@@ -561,7 +1009,7 @@ class RowPlan:
 
 
 @dataclass
-class Harness:
+class Harness(ScenarioMixin):
     tree: Path
     out: Path
     freeze: str
@@ -578,6 +1026,8 @@ class Harness:
     monotonic: Callable[[], float] = time.monotonic
     say: Callable[[str], None] = print
     rows: dict[str, Row] = field(default_factory=dict)
+    script_runner: Callable[..., int] | None = None
+    s3_factory: Callable[[Path], Any] | None = None
     _log_lock: threading.Lock = field(default_factory=threading.Lock)
     _stop: threading.Event = field(default_factory=threading.Event)
     _active: dict[str, RowPlan] = field(default_factory=dict)
@@ -666,7 +1116,14 @@ class Harness:
             self._ledger_peaks[row.namespace] = peak
         return self._ledger_peaks[row.namespace]
 
-    def decide(self, plan: RowPlan, fallback: Peak) -> Any:
+    def decide(
+        self,
+        plan: RowPlan,
+        fallback: Peak,
+        *,
+        size: int = 1,
+        namespaces: tuple[str, ...] = (),
+    ) -> Any:
         try:
             live_rows = self.ledger.live_rows()
         except (OSError, LedgerError) as e:
@@ -682,7 +1139,13 @@ class Harness:
         ]
         return admit(
             Candidate(
-                plan.row.id, plan.namespace, plan.peak, plan.row.alone, plan.row.aml_continuous
+                plan.row.id,
+                plan.namespace,
+                plan.peak,
+                plan.row.alone,
+                plan.row.aml_continuous,
+                size=size,
+                namespaces=namespaces,
             ),
             snapshot,
             managed=managed,
@@ -1013,7 +1476,9 @@ class Harness:
                 f"--deployments-ledger {self.ledger.path}"
             )
         bad = [
-            r for r, s in states.items() if s.get("verdict") != "PASS" or s["status"] != "destroyed"
+            r
+            for r, s in states.items()
+            if r in self.rows and (s.get("verdict") != "PASS" or s["status"] != "destroyed")
         ]
         return 0 if not bad and not open_rows else 1
 
@@ -1078,6 +1543,8 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
         status = s["status"]
         if status in TERMINAL:
             continue
+        if s.get("scenario") in SCENARIOS:
+            continue  # resumed below, one cleanup per scenario
         row = rows.get(rid)
         if row is None:
             raise Refused(f"row {rid} of {h.rowlog.path} is not in the matrix")
@@ -1113,8 +1580,46 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
             )
         else:
             h.log(rid, "failed", detail=f"cannot resume from {status} without an incarnation")
+    for spec_id in dict.fromkeys(
+        st["scenario"]
+        for st in states.values()
+        if st.get("scenario") in SCENARIOS and st["status"] not in TERMINAL
+    ):
+        continuing.append(_bind(h, spec_id, lambda sid=spec_id: _resume_scenario(h, sid, states)))
     h.schedule(pending, continuing)
     return h.finish()
+
+
+def _resume_scenario(h: Harness, spec_id: str, states: dict[str, dict[str, Any]]) -> None:
+    """Clean up a scenario the harness stopped in: destroy each leftover
+    by incarnation, remove the harness's legacy bucket; never re-run it."""
+    spec = SCENARIOS[spec_id]
+    run = ScenarioRun(spec, {}, {})
+    for c in spec.configs:
+        st = states.get(f"{spec_id}-{c}")
+        if st is None:
+            continue
+        if c == "A" and st.get("legacy_bucket") and not st.get("legacy_bucket_removed"):
+            run.legacy = st["legacy_bucket"]
+            run.legacy_keys = list(st.get("legacy_keys") or [])
+        if st["status"] in TERMINAL and not (c == "A" and run.legacy):
+            continue
+        row = Row(f"{spec_id}-{c}", *astuple_base())
+        run.plans[c] = _rebuild_plan(row, st)
+        run.buckets[c] = list(st.get("owned_buckets") or [])
+    problems = h._scenario_cleanup(run, check_kept=False)
+    h.log(
+        f"{spec_id}-A",
+        h.rowlog.latest()[f"{spec_id}-A"]["status"],
+        scenario_verdict="FAIL",
+        scenario_problems=["the harness stopped during the scenario", *problems],
+    )
+    h.write_extra_results()
+
+
+def astuple_base() -> tuple[str, str, str, float, int]:
+    b = SCENARIO_BASE
+    return (b.workload, b.mode, b.recipe, b.scale, b.seed)
 
 
 def _bind(h: Harness, rid: str, fn: Callable[[], None]) -> Callable[[], None]:
@@ -1170,9 +1675,14 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--matrix", type=Path, required=True)
     plan.add_argument("--freeze", required=True)
     plan.add_argument("--rows")
-    for name in ("run", "resume"):
+    for name in ("run", "resume", "scenario"):
         sp = sub.add_parser(name)
-        if name == "run":
+        if name == "scenario":
+            sp.add_argument("scenario_id", choices=sorted(SCENARIOS))
+            sp.add_argument("--freeze", required=True)
+            sp.add_argument("--rehearsal", action="store_true")
+            sp.add_argument("--matrix", type=Path, default=HERE / "matrix-1.7.yaml")
+        elif name == "run":
             sp.add_argument("--matrix", type=Path, required=True)
             sp.add_argument("--freeze", required=True)
             sp.add_argument("--rows")
@@ -1224,7 +1734,8 @@ def _main(args: argparse.Namespace) -> int:
         rehearsal = bool(next(iter(prior.values())).get("rehearsal"))
         slots = 3
     else:
-        freeze, rehearsal, slots = args.freeze, args.rehearsal, args.slots
+        freeze, rehearsal = args.freeze, args.rehearsal
+        slots = getattr(args, "slots", 3)
     reasons = refuse_reasons(
         TREE,
         freeze=freeze,
@@ -1256,6 +1767,7 @@ def _main(args: argparse.Namespace) -> int:
         ledger=MarkdownLedger(args.deployments_ledger, out / "ledger-backups"),
         slots=slots,
         s3_endpoint=os.environ["LB_S3_ENDPOINT"],
+        s3_factory=default_s3,
     )
     h.rows = {r.id: r for r in rows}
 
@@ -1267,6 +1779,8 @@ def _main(args: argparse.Namespace) -> int:
     try:
         if args.cmd == "resume":
             return resume(h, {r.id: r for r in rows})
+        if args.cmd == "scenario":
+            return h.scenario(SCENARIOS[args.scenario_id])
         return h.run(_select(rows, args.rows))
     finally:
         rowlog.release()

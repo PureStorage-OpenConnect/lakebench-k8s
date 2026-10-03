@@ -167,6 +167,7 @@ class FakeRunner:
         self.run_records = 1
         self.destroy_override: tuple[int, list[str], str] | None = None
         self.on_deploy: Any = None
+        self.on_destroy: Any = None
         self.counter = 0
 
     def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None):
@@ -222,6 +223,8 @@ class FakeRunner:
             if found != expected:
                 return H.ChildResult(3, ["destroy.incarnation_mismatch"], log)
             del self.core.namespaces[name]
+            if self.on_destroy is not None:
+                self.on_destroy(cfg)
             return H.ChildResult(0, [], log)
         raise AssertionError(f"unexpected verb {verb}")
 
@@ -839,7 +842,7 @@ def test_reader_sums_requests_per_namespace():
 
 def test_ledger_rows_count_toward_the_deployment_limit():
     d = _admit(_cand(), _snap(), managed=["a", "b"], ledger_live=["c", "d"])
-    assert not d.admit and any("4 lakebench deployments" in r for r in d.reasons)
+    assert not d.admit and any("4 lakebench deployments plus 1" in r for r in d.reasons)
     assert _admit(_cand(), _snap(), managed=["a", "b"], ledger_live=["a", "c"]).admit
 
 
@@ -1002,3 +1005,370 @@ def test_threads_finish_before_schedule_returns(env):
     env.h.decide = lambda p, f: C.Decision(True)
     env.h.schedule([plan], [])
     assert not [t for t in threading.enumerate() if t.name == "M01"]
+
+
+# -- scenarios (S-P1 to S-P6) ----------------------------------------------------
+
+SCEN = RELEASE / "scenarios"
+
+
+class FakeS3:
+    def __init__(self) -> None:
+        self.buckets: dict[str, dict[str, bytes]] = {}
+        self.owner: dict[str, str] = {}
+        self.raw_client = self
+
+    def bucket_exists(self, b):
+        return b in self.buckets
+
+    def create_bucket(self, b):
+        self.buckets.setdefault(b, {})
+        return True
+
+    def put_object(self, Bucket, Key, Body):  # noqa: N803 -- boto3 names
+        self.buckets[Bucket][Key] = Body
+
+    def get_paginator(self, _name):
+        return self
+
+    def paginate(self, Bucket):  # noqa: N803
+        return [{"Contents": [{"Key": k} for k in self.buckets[Bucket]]}]
+
+    def empty_bucket(self, b, keep_prefixes=()):
+        self.buckets[b].clear()
+        return 0
+
+    def delete_bucket(self, b):
+        return self.buckets.pop(b, None) is not None
+
+
+@pytest.fixture
+def senv(env):
+    # a scenario admits two s1 deployments at once: give the fake room
+    env.core.nodes = [_node(f"w{i}", "100", "1000Gi") for i in range(4)]
+    s3 = FakeS3()
+    env.h.s3_factory = lambda cfg: s3
+    env.s3 = s3
+    env.runner.on_destroy = lambda cfg: _destroy_fake(env, cfg)
+    return env
+
+
+def _deploy_fake(env, cfg: Path, nonce: str, uid: str) -> str:
+    data = yaml.safe_load(cfg.read_text())
+    name = data["name"]
+    env.core.add_ns(name, uid, nonce)
+    from lakebench.config.deploy_state import read_state
+
+    old = read_state(cfg)
+    kept = [(e.nonce, e.status) for e in (old.nonces if old else [])]
+    write_state(cfg, name, name, [(nonce, "confirmed"), *kept])
+    for b in data["platform"]["storage"]["s3"]["buckets"].values():
+        if b not in env.s3.buckets:
+            env.s3.create_bucket(b)
+            env.s3.owner[b] = name
+    return name
+
+
+def _destroy_fake(env, cfg: Path) -> None:
+    data = yaml.safe_load(cfg.read_text())
+    env.core.namespaces.pop(data["name"], None)
+    for b in data["platform"]["storage"]["s3"]["buckets"].values():
+        if env.s3.owner.get(b) == data["name"]:
+            env.s3.buckets.pop(b, None)
+
+
+def _script(env, body, rc=0, pass_line=True):
+    def run(argv, *, env: dict, cwd: Path, log: Path) -> int:
+        assert argv[0] == "bash" and Path(argv[1]).parent == SCEN
+        assert env["LB_EXIT_REFUSED"] == "3"
+        body(env)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        sid = Path(argv[1]).name.split("-")[1].upper()
+        log.write_text(f"PASS: S-{sid} -- fake\n" if pass_line else "done\n")
+        return rc
+
+    return run
+
+
+def _scen_states(env, sid):
+    return {r: s for r, s in env.h.rowlog.latest().items() if r.startswith(sid)}
+
+
+def test_scenario_shim_imports_release_tree(tmp_path):
+    bin_dir = tmp_path / "bin"
+    H.write_shim(ROOT, bin_dir)
+    env = H.child_env(ROOT)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+    seen = H.shim_imports_from(bin_dir, env)
+    assert seen == str(ROOT / "src" / "lakebench" / "__init__.py")
+
+
+def test_scenario_shim_runs_the_cli(tmp_path):
+    bin_dir = tmp_path / "bin"
+    H.write_shim(ROOT, bin_dir)
+    env = H.child_env(ROOT, {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"})
+    pf = tmp_path / "p"
+    env["LB_EXIT_PATH_FILE"] = str(pf)
+    out = subprocess.run(
+        ["lakebench", "destroy", str(tmp_path / "x.yaml"), "--yes", "--expect-incarnation", "bad"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 2
+    assert pf.read_text().split() == ["2", "cli.bad_argument"]
+
+
+def test_scenario_leftover_namespace_destroyed_by_incarnation(senv):
+    def body(e):
+        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
+        _destroy_fake(senv, Path(e["LB_CONFIG_A"]))
+
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P1"]) == 0
+    st = _scen_states(senv, "S-P1")
+    assert st["S-P1-A"]["status"] == "destroyed" and st["S-P1-B"]["status"] == "destroyed"
+    destroys = [c for c in senv.runner.calls if c[0] == "destroy"]
+    assert len(destroys) == 1 and destroys[0][4] == "ub#nb"
+    text = senv.ledger.read_text()
+    assert text.count("closed rel17-s-p1-") == 2
+    assert st["S-P1-A"]["scenario_verdict"] == "PASS"
+    assert (senv.out / "results-extra.md").read_text().count("| S-P1 |") == 1
+    assert "S-P1" not in (senv.h.write_results().read_text())
+
+
+def test_scenario_kept_namespace_missing_fails(senv):
+    def body(e):
+        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
+        _destroy_fake(senv, Path(e["LB_CONFIG_A"]))
+        _destroy_fake(senv, Path(e["LB_CONFIG_B"]))
+
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P1"]) == 1
+    assert any(
+        "expected present" in p for p in _scen_states(senv, "S-P1")["S-P1-A"]["scenario_problems"]
+    )
+
+
+def test_scenario_exit_0_without_pass_line_fails(senv):
+    senv.h.script_runner = _script(senv, lambda e: None, pass_line=False)
+    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
+
+
+def test_scenario_script_failure_still_cleans_up(senv):
+    def body(e):
+        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+
+    senv.h.script_runner = _script(senv, body, rc=1)
+    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    assert _scen_states(senv, "S-P4")["S-P4-A"]["status"] == "destroyed"
+    assert not senv.core.namespaces
+
+
+def test_scenario_redeployed_config_uses_its_current_kept_nonce(senv):
+    def body(e):
+        cfg = Path(e["LB_CONFIG_A"])
+        _deploy_fake(senv, cfg, "n1", "u1")
+        _destroy_fake(senv, cfg)
+        _deploy_fake(senv, cfg, "n2", "u2")
+
+    senv.h.script_runner = _script(senv, body)
+    senv.h.scenario(H.SCENARIOS["S-P4"])
+    destroy = [c for c in senv.runner.calls if c[0] == "destroy"][0]
+    assert destroy[4] == "u2#n2"
+
+
+def test_scenario_cleanup_allows_its_designed_refusal(senv):
+    def body(e):
+        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
+
+    real = senv.runner.__call__
+
+    def runner(args, **kw):
+        if args[0] == "destroy" and "s-p6-b" in args[1].lower():
+            _destroy_fake(senv, Path(args[1]))
+            return H.ChildResult(3, ["deploy.identity_foreign"], kw["log"])
+        return real(args, **kw)
+
+    senv.h.runner = runner
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P6"]) == 0, senv.said
+    st = _scen_states(senv, "S-P6")
+    assert st["S-P6-B"]["status"] == "destroyed" and st["S-P6-A"]["status"] == "destroyed"
+    order = [Path(c[1]).name for c in senv.runner.calls if c[0] == "destroy"]
+    assert order == ["S-P6-A.yaml"]  # B went through the designed refusal first
+
+
+def test_scenario_cleanup_unexpected_refusal_fails_and_stops(senv):
+    def body(e):
+        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+
+    senv.runner.destroy_override = (3, ["deploy.identity_foreign"], "")
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    assert _scen_states(senv, "S-P4")["S-P4-A"]["status"] == "failed"
+    assert senv.h.stopping
+
+
+def test_scenario_buckets_left_keep_the_ledger_row(senv):
+    def body(e):
+        cfg = Path(e["LB_CONFIG_A"])
+        _deploy_fake(senv, cfg, "na", "ua")
+        senv.core.namespaces.clear()  # namespace gone, buckets not
+
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    st = _scen_states(senv, "S-P4")["S-P4-A"]
+    assert st["status"] == "left"
+    assert f"| {st['namespace']} |" in senv.ledger.read_text()
+
+
+def test_legacy_bucket_created_checked_and_removed(senv):
+    seen = {}
+
+    def body(e):
+        seen["legacy"] = e["LB_LEGACY_BUCKET"]
+        seen["objects"] = dict(senv.s3.buckets[e["LB_LEGACY_BUCKET"]])
+        cfg = Path(e["LB_CONFIG_A"])
+        assert (
+            yaml.safe_load(cfg.read_text())["platform"]["storage"]["s3"]["buckets"]["bronze"]
+            == seen["legacy"]
+        )
+
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P5"]) == 0
+    assert list(seen["objects"]) == ["harness-legacy/object.txt"]
+    assert seen["legacy"] not in senv.s3.buckets
+
+
+def test_legacy_bucket_changed_fails_the_scenario(senv):
+    def body(e):
+        senv.s3.buckets[e["LB_LEGACY_BUCKET"]]["extra"] = b"x"
+
+    senv.h.script_runner = _script(senv, body)
+    assert senv.h.scenario(H.SCENARIOS["S-P5"]) == 1
+
+
+def test_shared_bucket_is_bronze_of_both_configs(senv):
+    seen = {}
+
+    def body(e):
+        a = yaml.safe_load(Path(e["LB_CONFIG_A"]).read_text())
+        b = yaml.safe_load(Path(e["LB_CONFIG_B"]).read_text())
+        seen["a"] = a["platform"]["storage"]["s3"]["buckets"]["bronze"]
+        seen["b"] = b["platform"]["storage"]["s3"]["buckets"]["bronze"]
+        seen["env"] = e["LB_SHARED_BUCKET"]
+
+    senv.h.script_runner = _script(senv, body)
+    senv.h.scenario(H.SCENARIOS["S-P6"])
+    assert seen["a"] == seen["b"] == seen["env"]
+
+
+def test_scenario_admission_asks_for_all_its_deployments(senv):
+    asked = {}
+
+    def decide(plan, fallback, size=1, namespaces=()):
+        asked["size"], asked["ns"] = size, namespaces
+        return C.Decision(True)
+
+    senv.h.decide = decide
+    senv.h.script_runner = _script(senv, lambda e: None)
+    senv.h.scenario(H.SCENARIOS["S-P2"])
+    assert asked["size"] == 2 and len(asked["ns"]) == 2
+
+
+def test_group_admission_counts_size():
+    d = _admit(
+        C.Candidate("S", "a", C.Peak(1, 1), size=2, namespaces=("a", "b")),
+        _snap(),
+        managed=["x", "y", "z"],
+    )
+    assert not d.admit
+    assert _admit(
+        C.Candidate("S", "a", C.Peak(1, 1), size=2, namespaces=("a", "b")),
+        _snap(),
+        managed=["x", "y"],
+    ).admit
+
+
+def test_scenario_resume_cleans_up_without_rerunning(senv):
+    plans = senv.h.scenario_rows(H.SCENARIOS["S-P4"])
+    plan = plans["A"]
+    senv.h._set_buckets(plan)
+    senv.h.log(
+        "S-P4-A",
+        "planned",
+        namespace=plan.namespace,
+        config=str(plan.config),
+        peak=[1, 1],
+        scenario="S-P4",
+        owned_buckets=[],
+    )
+    senv.h.log("S-P4-A", "ledgered")
+    _deploy_fake(senv, plan.config, "na", "ua")
+    H.resume(senv.h, {})
+    st = _scen_states(senv, "S-P4")["S-P4-A"]
+    assert st["status"] == "destroyed" and st["scenario_verdict"] == "FAIL"
+    assert [c[0] for c in senv.runner.calls if c[0] != "init"] == ["destroy"]
+
+
+# -- the scripts themselves --------------------------------------------------------
+
+
+SCRIPTS = sorted(SCEN.glob("s-p*.sh"))
+
+
+def test_six_scenario_scripts_are_tracked_with_their_specs():
+    assert [p.name for p in SCRIPTS] == sorted(s.script for s in H.SCENARIOS.values())
+
+
+@pytest.mark.parametrize("path", [*SCRIPTS, SCEN / "lib-checks.sh"], ids=lambda p: p.name)
+def test_scenario_script_bash_syntax(path):
+    assert subprocess.run(["bash", "-n", str(path)], check=False).returncode == 0
+
+
+@pytest.mark.parametrize("path", SCRIPTS, ids=lambda p: p.name)
+def test_scenario_scripts_use_the_v17_cli(path):
+    """No removed flag, no forced destroy, no unpinned kubectl, no reworded
+    message grep; every lakebench verb and flag exists in the release tree."""
+    import re
+
+    import click
+    import typer
+
+    from lakebench.cli import app
+
+    text = path.read_text()
+    assert 'source "$(dirname "$0")/lib-checks.sh"' in text
+    assert not re.search(r"--force\b(?!-)", text)
+    assert "--force-legacy" not in text and "--wait" not in text
+    assert not re.search(r"(^|[^.\w])kubectl ", text), "use kc (context-pinned)"
+    assert not re.search(r"\bpython3 ", text)
+    for stale in (
+        "owned by another lakebench deployment",
+        "tag-mismatch",
+        "verify_bucket_ownership",
+    ):
+        assert stale not in text
+    root = typer.main.get_command(app)
+    ctx = click.Context(root)
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith(("#", "echo")))
+    calls = re.findall(r"(?:^|[\s(])lakebench (\w[\w-]*)([^\n>&|]*)", code)
+    calls += re.findall(r"lb_run \"[^\"]+\" (\w[\w-]*)([^\n>&|]*)", code)
+    assert calls
+    for verb, rest in calls:
+        cmd = root.get_command(ctx, verb)
+        assert cmd is not None, verb
+        opts = {o for p in cmd.params for o in getattr(p, "opts", [])}
+        for flag in re.findall(r"(?<![\w-])(--[\w-]+)", rest):
+            assert flag in opts, (path.name, verb, flag)
+
+
+def test_lib_checks_reads_credentials_from_the_environment():
+    text = (SCEN / "lib-checks.sh").read_text()
+    assert "os.path.expandvars" in text
+    assert "print(key" not in text and "print(secret" not in text
