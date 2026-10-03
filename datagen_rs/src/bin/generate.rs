@@ -23,6 +23,7 @@ use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
+use datagen_rs::heldout::HeldOut;
 use datagen_rs::kyc::is_customer;
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_p;
@@ -139,7 +140,9 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
 /// Seeds the AML pre-registration has spent (corpora.spent_seeds). Defence in
 /// depth for manual Jobs and direct runs: lakebench refuses the full,
 /// current list from the pre-registration before it ever launches datagen;
-/// tests/test_datagen_seed.py checks this list stays a subset of it.
+/// tests/test_datagen_seed.py checks this list stays a subset of it. The hash
+/// file's `spent` list is unioned with it, so an old file cannot un-spend a
+/// seed and a newly spent one needs no image.
 const SPENT_SEEDS: &[i64] = &[42, 50_000_042];
 
 /// Environment variable a registered (held-out) corpus's seed arrives in, from
@@ -150,7 +153,7 @@ const SEED_ENV: &str = "LB_DATAGEN_SEED";
 /// absent: required, strictly parsed, never a spent seed. Both at once is
 /// refused, and a bad environment value is never echoed. The lenient `arg()`
 /// would turn a typo into the old default 42.
-fn financial_seed() -> i64 {
+fn financial_seed(held: &HeldOut) -> i64 {
     let args: Vec<String> = std::env::args().collect();
     let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
         if a == "--seed" {
@@ -187,7 +190,7 @@ fn financial_seed() -> i64 {
             }
         },
     };
-    if SPENT_SEEDS.contains(&seed) {
+    if SPENT_SEEDS.contains(&seed) || held.is_spent(seed) {
         eprintln!(
             "--seed {seed} is spent in the AML pre-registration (corpora.spent_seeds); \
              use the calibration seed or another unregistered seed"
@@ -195,6 +198,28 @@ fn financial_seed() -> i64 {
         std::process::exit(2);
     }
     seed
+}
+
+/// The held-out hash file named by `LB_HELDOUT_HASHES` (a ConfigMap on the
+/// pod). The financial schema never runs without it: missing, unreadable or
+/// malformed exits 2 before anything is written. The compiled floor does not
+/// replace the file.
+fn heldout_or_exit() -> HeldOut {
+    let env = datagen_rs::heldout::ENV;
+    let Ok(path) = std::env::var(env) else {
+        eprintln!("held-out hash file {env} is not set; refusing to generate a financial corpus");
+        std::process::exit(2);
+    };
+    match HeldOut::load(&path) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "held-out hash file {env}={path} unreadable: {e}; refusing to generate a \
+                 financial corpus"
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 use datagen_rs::robustness::FLAG as ROBUSTNESS_FLAG;
@@ -214,8 +239,8 @@ fn robustness_flag() -> bool {
 
 /// The perturbation for the financial driver (see
 /// robustness::perturbation_for_seed for the seed rules).
-fn financial_perturbation(seed: i64) -> Perturbation {
-    match perturbation_for_seed(seed, robustness_flag()) {
+fn financial_perturbation(seed: i64, held: &HeldOut) -> Perturbation {
+    match perturbation_for_seed(seed, robustness_flag(), held) {
         Ok(p) => {
             if p != Perturbation::NONE {
                 eprintln!(
@@ -364,8 +389,9 @@ fn pacs008_main() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed = financial_seed();
-    let perturb = financial_perturbation(seed);
+    let held = heldout_or_exit();
+    let seed = financial_seed(&held);
+    let perturb = financial_perturbation(seed, &held);
     // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
     // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a

@@ -295,45 +295,67 @@ fn dormancy_scales_each_episode_and_nothing_else_in_the_schedule() {
     assert!((r - 1.2).abs() < 0.01, "mean dormancy ratio {r}");
 }
 
+/// The test-only hash file and seeds (tests/fixtures/heldout_test.json and
+/// heldout_test_seeds.py); they are not AML seeds.
+fn fixture() -> datagen_rs::heldout::HeldOut {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/fixtures/heldout_test.json");
+    datagen_rs::heldout::HeldOut::load(p.to_str().unwrap()).expect("fixture loads")
+}
+const TEST_EVALUATION_SEED: i64 = 8_763_195_430_032_412_900;
+const TEST_ROBUSTNESS_SEED: i64 = 4_695_594_915_748_112_205;
+
 #[test]
 fn registered_seeds_get_the_right_corpus_only() {
-    use datagen_rs::robustness::{
-        perturbation_for_seed, CALIBRATION_REPLICATE_SEEDS, EVALUATION_SEED, ROBUSTNESS_SEED,
-    };
-    // Pure decision function only: the registered seeds are never generated
-    // here.
-    assert!(perturbation_for_seed(ROBUSTNESS_SEED, false).is_err());
+    use datagen_rs::robustness::{perturbation_for_seed, CALIBRATION_REPLICATE_SEEDS};
+    // Pure decision function only, over the fixture hash file: the
+    // registered seeds are known by hash, never compiled in.
+    let held = fixture();
+    let (ev, rb) = (TEST_EVALUATION_SEED, TEST_ROBUSTNESS_SEED);
+    assert!(perturbation_for_seed(rb, false, &held).is_err());
     assert_eq!(
-        perturbation_for_seed(ROBUSTNESS_SEED, true),
+        perturbation_for_seed(rb, true, &held),
         Ok(Perturbation::REGISTERED)
     );
-    assert!(perturbation_for_seed(EVALUATION_SEED, true).is_err());
+    assert!(perturbation_for_seed(ev, true, &held).is_err());
     assert_eq!(
-        perturbation_for_seed(EVALUATION_SEED, false),
+        perturbation_for_seed(ev, false, &held),
         Ok(Perturbation::NONE)
     );
-    // Calibration replicate seeds (added 2026-09-28, Wave 1 A1) must refuse
-    // --robustness-perturbation the same way EVALUATION_SEED does; without
-    // the flag they run as an ordinary calibration corpus.
+    // Calibration replicate seeds refuse --robustness-perturbation the same
+    // way the evaluation seed does; without the flag they run as an ordinary
+    // calibration corpus.
     for &s in CALIBRATION_REPLICATE_SEEDS {
         assert!(
-            perturbation_for_seed(s, true).is_err(),
+            perturbation_for_seed(s, true, &held).is_err(),
             "calibration replicate seed {s} accepted --robustness-perturbation"
         );
         assert_eq!(
-            perturbation_for_seed(s, false),
+            perturbation_for_seed(s, false, &held),
             Ok(Perturbation::NONE),
             "calibration replicate seed {s} did not accept the unperturbed path"
         );
     }
     assert_eq!(
-        perturbation_for_seed(DEV_SEED, false),
+        perturbation_for_seed(DEV_SEED, false, &held),
         Ok(Perturbation::NONE)
     );
     assert_eq!(
-        perturbation_for_seed(DEV_SEED, true),
+        perturbation_for_seed(DEV_SEED, true, &held),
         Ok(Perturbation::REGISTERED)
     );
+}
+
+#[test]
+fn refusal_text_has_no_seed() {
+    use datagen_rs::robustness::perturbation_for_seed;
+    let held = fixture();
+    for (seed, on) in [(TEST_ROBUSTNESS_SEED, false), (TEST_EVALUATION_SEED, true)] {
+        let e = perturbation_for_seed(seed, on, &held).unwrap_err();
+        for spelling in [seed.to_string(), format!("{seed:x}"), format!("{seed:X}")] {
+            assert!(!e.contains(&spelling), "the refusal names the seed");
+        }
+    }
 }
 
 /// The Rust CALIBRATION_REPLICATE_SEEDS list must equal the Python-side

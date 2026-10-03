@@ -69,15 +69,14 @@ def test_floor_matches_file():
 
 
 def test_floor_matches_rust():
-    rs = ROOT / "datagen_rs/src/heldout.rs"
-    if not rs.is_file():
-        pytest.skip("datagen_rs/src/heldout.rs lands with the Rust seed check (CD-5)")
-    src = rs.read_text()
+    src = (ROOT / "datagen_rs/src/heldout.rs").read_text()
     salt = re.search(r'FLOOR_SALT: &str = "([0-9a-f]{64})"', src)
     assert salt and salt.group(1) == ds._HELDOUT_FLOOR["salt"]
     for role in ds.PROTECTED_ROLES:
         found = re.findall(rf'Role::{role.capitalize()},\s*"([0-9a-f]{{64}})"', src)
         assert tuple(found) == tuple(ds._HELDOUT_FLOOR["roles"][role]), role
+        # ...and each is the first entry of the role's list in the tracked file.
+        assert found[:1] == json.loads(PROD.read_text())["roles"][role][:1], role
 
 
 def test_fixture_is_not_production():
@@ -930,26 +929,12 @@ def test_absence_finds_embedded_and_grouped_seeds(held):
     assert ds.absence_problems(clean, held, exclude=[]) == []
 
 
-def _rust_seed_reads_as(role: str) -> bool | None:
-    """True when the seed robustness.rs compiles in for ``role`` hashes to that
-    role; None when the constant is gone (CD-5 moves the Rust check to the
-    hash file). Returns a bool so a failure prints no value."""
+def test_rust_compiles_no_heldout_seed():
+    # The generator knows the registered seeds only by hash (heldout.rs);
+    # robustness.rs no longer names them.
     src = (ROOT / "datagen_rs/src/robustness.rs").read_text()
-    m = re.search(rf"pub const {role.upper()}_SEED: i64 = ([0-9_]+);", src)
-    if m is None:
-        assert f"{role.upper()}_SEED" not in src, f"{role.upper()}_SEED in an unreadable form"
-        return None
-    return ds.heldout_role(int(m.group(1).replace("_", ""))) == role
-
-
-@pytest.mark.parametrize("role", ds.PROTECTED_ROLES)
-def test_rust_compiled_seed_hashes_to_its_role(role):
-    # Until CD-5, robustness.rs compiles the two seeds in; they must be the
-    # registered ones, checked by hash so no value is read into a message.
-    ok = _rust_seed_reads_as(role)
-    if ok is None:
-        pytest.skip("robustness.rs no longer compiles the seed in (CD-5)")
-    assert ok is True, f"robustness.rs {role.upper()}_SEED is not the registered {role} seed"
+    assert "ROBUSTNESS_SEED" not in src and "EVALUATION_SEED" not in src
+    assert ds.absence_problems({"robustness.rs": src}, exclude=()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1036,10 +1021,9 @@ def test_shipped_hash_file_history_is_clean():
     assert ds.heldout_history_problems(None, json.loads(PROD.read_text()), looks) == []
 
 
-# Tracked files that may still hold a held-out value, each with the work
-# item that removes it. CD-5 moves the Rust check onto the hash file and
-# deletes this entry.
-_PLAINTEXT_ALLOWED = {"datagen_rs/src/robustness.rs": "CD-5"}
+# Tracked files that may still hold a held-out value, each with the change
+# that removes it. Empty since the Rust check reads the hash file.
+_PLAINTEXT_ALLOWED: dict[str, str] = {}
 
 
 def test_no_tracked_file_holds_a_heldout_seed():

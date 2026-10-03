@@ -29,20 +29,14 @@
 //!   days_since_prior_send is null and the history ratios see an empty H, as
 //!   for a new account. The unperturbed range (max 365 d) never reaches it.
 
+use crate::heldout::{HeldOut, Role};
+
 /// Pre-registration `corpora.robustness_perturbation.median_amount_multiplier`.
 pub const ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER: f64 = 1.2;
 /// Pre-registration `corpora.robustness_perturbation.persona_sd_multiplier`.
 pub const ROBUSTNESS_PERSONA_SD_MULTIPLIER: f64 = 1.2;
 /// Pre-registration `corpora.robustness_perturbation.dormancy_range_multiplier`.
 pub const ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER: f64 = 1.2;
-
-/// The pre-registered robustness seed (`corpora.robustness_seed`). The driver
-/// refuses it without the perturbation, so a corpus generated from it is the
-/// perturbed one by construction.
-pub const ROBUSTNESS_SEED: i64 = 90_000_042;
-/// The pre-registered evaluation seed (`corpora.evaluation_seed`). The driver
-/// refuses it with the perturbation.
-pub const EVALUATION_SEED: i64 = 50_000_043;
 
 /// Pre-registered calibration replicate seeds
 /// (`corpora.calibration_replicate_seeds`). These are used for D8 shard
@@ -115,29 +109,36 @@ impl Perturbation {
 }
 
 /// The perturbation for a financial run of `seed`, `on` when the driver was
-/// given `--robustness-perturbation`. The robustness seed is refused without
-/// it and the evaluation seed with it, so a corpus from either registered seed
-/// is the right corpus by construction; the scoring side cannot tell a
-/// perturbed corpus from its manifest, so this is what makes the robustness
-/// look safe.
-pub fn perturbation_for_seed(seed: i64, on: bool) -> Result<Perturbation, String> {
-    if seed == ROBUSTNESS_SEED && !on {
-        return Err(format!(
-            "--seed {seed} is the pre-registered robustness seed: it is generated only \
-             with --robustness-perturbation (corpora.robustness_perturbation)"
-        ));
-    }
-    if seed == EVALUATION_SEED && on {
-        return Err(format!(
-            "--seed {seed} is the pre-registered evaluation seed: it is never perturbed"
-        ));
+/// given `--robustness-perturbation`. The registered robustness seed is
+/// refused without it and the registered evaluation seed with it, so a corpus
+/// from either is the right corpus by construction; the scoring side cannot
+/// tell a perturbed corpus from its manifest, so this is what makes the
+/// robustness look safe. The registered seeds are known only by their salted
+/// hashes (`heldout`), and no refusal names the seed.
+pub fn perturbation_for_seed(seed: i64, on: bool, held: &HeldOut) -> Result<Perturbation, String> {
+    match held.role_of(seed)? {
+        Some(Role::Robustness) if !on => {
+            return Err(
+                "the given seed is the registered robustness seed: it is generated \
+                 only with --robustness-perturbation (corpora.robustness_perturbation)"
+                    .to_string(),
+            );
+        }
+        Some(Role::Evaluation) if on => {
+            return Err(
+                "the given seed is the registered evaluation seed: it is never perturbed"
+                    .to_string(),
+            );
+        }
+        _ => {}
     }
     if CALIBRATION_REPLICATE_SEEDS.contains(&seed) && on {
-        return Err(format!(
-            "--seed {seed} is a pre-registered calibration replicate seed \
+        return Err(
+            "the given seed is a pre-registered calibration replicate seed \
              (corpora.calibration_replicate_seeds): it is never perturbed. \
              A perturbed replicate would silently ship an s2 leg into D8."
-        ));
+                .to_string(),
+        );
     }
     Ok(if on {
         Perturbation::REGISTERED

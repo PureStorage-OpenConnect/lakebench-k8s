@@ -13,8 +13,22 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 const SCALE: &str = "0.005";
 
+/// The tracked held-out hash file the generator needs for the financial
+/// schema (`LB_HELDOUT_HASHES`; a ConfigMap on a pod).
+fn heldout_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/lakebench/spark/data/aml/heldout_hashes.json")
+}
+
+/// The generator binary with the hash file set, as a pod runs it.
+fn generate_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_generate"));
+    c.env("LB_HELDOUT_HASHES", heldout_file());
+    c
+}
+
 fn run(dir: &Path, extra: &[&str]) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         .args([
             "--bucket",
@@ -187,7 +201,7 @@ fn cycle_arguments_are_strict() {
         vec!["--cycles", "0"],
         vec!["--cycle=x"],
     ] {
-        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let st = generate_cmd()
             .env(
                 "DG_LOCAL_DIR",
                 std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-cycles-bad"),
@@ -206,7 +220,7 @@ fn cycle_arguments_are_strict() {
 /// party.parquet, account.parquet, watchlist.parquet).
 #[test]
 fn reference_mode_refuses_multi_writer() {
-    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let st = generate_cmd()
         .env(
             "DG_LOCAL_DIR",
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-race"),
@@ -243,7 +257,7 @@ fn reference_mode_refuses_multi_writer() {
 fn reference_mode_with_one_node_runs() {
     let d = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-ok");
     let _ = std::fs::remove_dir_all(&d);
-    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let st = generate_cmd()
         .env("DG_LOCAL_DIR", &d)
         .args([
             "--bucket",
@@ -291,7 +305,7 @@ fn financial_seed_is_required_strict_and_never_spent() {
         vec!["--seed", "9223372036854775808"],
         vec!["--seed"],
     ] {
-        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let st = generate_cmd()
             .env(
                 "DG_LOCAL_DIR",
                 std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-bad"),
@@ -319,7 +333,7 @@ fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
         let _ = std::fs::remove_dir_all(d);
     }
     run(&a, &[]);
-    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let st = generate_cmd()
         .env("DG_LOCAL_DIR", &b)
         .env("LB_DATAGEN_SEED", "7777")
         .args([
@@ -346,7 +360,7 @@ fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
         ("", vec![]),
         ("-7777", vec![]),
     ] {
-        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let st = generate_cmd()
             .env("DG_LOCAL_DIR", base.join("bad"))
             .env("LB_DATAGEN_SEED", env)
             .args(["--bucket", "b", "--scale", SCALE])
@@ -361,7 +375,7 @@ fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
 }
 
 fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // Large enough that 1 MB files outnumber the 64-file floor.
         .args([
@@ -434,7 +448,7 @@ fn c360_driver_digest(threads: &str) -> (u64, usize) {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("lb-c360-{}-{threads}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", &dir)
         .args([
             "--schema",
@@ -516,7 +530,7 @@ fn c360_driver_output_is_pinned() {
 // ---------------------------------------------------------------------------
 
 fn run_c360_mode(dir: &Path, delivery: &str) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // DG_ROW_GROUP forces multiple row-groups per file so continuous
         // mode actually flushes mid-file via MpuWriter (parquet default is
@@ -627,7 +641,7 @@ fn c360_row_identity_across_delivery_modes() {
 }
 
 fn run_aml_mode(dir: &Path, delivery: &str) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // See run_c360_mode: DG_ROW_GROUP forces multi-row-group per file so
         // continuous mode actually flushes to S3 multipart mid-file. 100 rows
@@ -704,7 +718,7 @@ fn aml_row_identity_across_delivery_modes() {
 const NODE_SCALE: &str = "0.02";
 
 fn run_at(dir: &Path, scale: &str, extra: &[&str]) {
-    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+    let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         .args([
             "--bucket", "b", "--seed", "7777", "--scale", scale, "--mode", "all",
@@ -1026,7 +1040,7 @@ fn financial_output_is_pinned_to_the_frozen_generator() {
         .join(format!("lb-fin-pin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for node in ["0", "1"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let out = generate_cmd()
             .env("DG_LOCAL_DIR", &dir)
             .args([
                 "--bucket",
@@ -1080,7 +1094,7 @@ fn pin_tree(tag: &str, runs: &[Vec<&str>]) -> (u64, usize) {
         .join(format!("lb-pin-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for argv in runs {
-        let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        let out = generate_cmd()
             .env("DG_LOCAL_DIR", &dir)
             .args(argv)
             .output()

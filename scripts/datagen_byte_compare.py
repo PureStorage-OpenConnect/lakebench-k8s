@@ -68,6 +68,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REF_DIR = ROOT / "tests" / "fixtures" / "datagen_reference"
 CYCLES_RS = ROOT / "datagen_rs" / "tests" / "cycles.rs"
+# The tracked held-out hash file, mounted into every generator container as a
+# pod gets it from its ConfigMap. A generator from v1.7 on refuses the
+# financial schema without it; an older image ignores it. It is a check input,
+# not a corpus input, so it is not part of a case's recorded env.
+HELDOUT_FILE = ROOT / "src" / "lakebench" / "spark" / "data" / "aml" / "heldout_hashes.json"
+HELDOUT_MOUNT = "/etc/lakebench/heldout/heldout_hashes.json"
+HELDOUT_ARGS = [
+    "-v",
+    f"{HELDOUT_FILE}:{HELDOUT_MOUNT}:ro,Z",
+    "-e",
+    f"LB_HELDOUT_HASHES={HELDOUT_MOUNT}",
+]
 MINIO_IMAGE = (
     "docker.io/bitnamilegacy/minio@sha256:"
     "8935e75fa5d11295c17171e4aa49efe390a1193cd7f12e4d21b92af9ffef09d7"
@@ -492,7 +504,9 @@ def run_generator(image: str, argv: list[str], node: int, minio: Minio, env: dic
     flags = [x for k, v in envs.items() for x in ("-e", f"{k}={v}")]
     name = f"lb-bytecmp-gen-{os.getpid()}-{minio.port}-{node}"
     stdout = _run_container(
-        name, ["--network", "host", *flags, image, *argv], f"generator node {node} ({argv})"
+        name,
+        ["--network", "host", *flags, *HELDOUT_ARGS, image, *argv],
+        f"generator node {node} ({argv})",
     )
     m = _THREADS.search(stdout)
     if m is None:
@@ -535,7 +549,7 @@ def prove_image(image: str, workdir: Path) -> dict:
                     _run_container(
                         f"lb-bytecmp-pin-{os.getpid()}-{name}-{i}-{j}".replace("_", "-"),
                         ["--entrypoint", BINARY, "-e", "DG_LOCAL_DIR=/out",
-                         "-v", f"{out}:/out:Z", image, *a],
+                         "-v", f"{out}:/out:Z", *HELDOUT_ARGS, image, *a],
                         f"pin {name}",
                     )  # fmt: skip
                 seen.append(c360_driver_digest(out) if kind == "c360" else tree_digest(out))

@@ -12,6 +12,7 @@ DG_LOCAL_DIR set: ``bronze/pacs008/part-*.parquet``, ``bronze/party.parquet``,
 
 Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
 
+    LB_HELDOUT_HASHES=src/lakebench/spark/data/aml/heldout_hashes.json \\
     DG_LOCAL_DIR=/scratch/c datagen_rs/target/release/generate \\
         --bucket bronze --prefix pacs008/ --seed 43 --scale 2
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json

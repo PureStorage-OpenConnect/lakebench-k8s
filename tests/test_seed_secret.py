@@ -315,7 +315,7 @@ def test_secret_written_after_the_old_pods_stop_and_before_the_job(monkeypatch, 
     d, _ = _deployer(_registered(), applied)
     r = d.deploy_cycle(0, 2) if cycles else d.deploy()
     assert r.status.value == "success", r.message
-    assert applied == ["stopped", "secret", "cleared", "Job"]
+    assert applied == ["stopped", "ConfigMap", "secret", "cleared", "Job"]
 
 
 def test_a_secret_failure_submits_no_job(monkeypatch, caplog):

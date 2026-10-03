@@ -147,7 +147,15 @@ DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
 ```
 
 This writes a single 64 MB file, enough to verify schema changes, column
-types, and corruption patterns. Inspect the output with PyArrow:
+types, and corruption patterns. The financial schema also needs the held-out
+hash file, which a pod gets from the `lakebench-heldout-hashes` ConfigMap;
+locally, point `LB_HELDOUT_HASHES` at the tracked copy, or the binary exits 2:
+
+```bash
+LB_HELDOUT_HASHES=../src/lakebench/spark/data/aml/heldout_hashes.json \
+DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
+  --bucket test-bronze --seed 43 --scale 0.01 --threads 1
+``` Inspect the output with PyArrow:
 
 ```python
 import pyarrow.parquet as pq

@@ -216,6 +216,10 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     # deletes do not wait; a claim still mounted by a terminating pod is held
     # by the pvc-protection finalizer until the pod is gone.
     *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-postgres"),
+    # The held-out hash ConfigMap a financial generate applies for its pods.
+    *_named(
+        "core_v1", "configmaps", CATEGORY1_STEP, "lakebench-heldout-hashes", owner="heldout-hashes"
+    ),
     # The registered-corpus seed Secrets (deploy/datagen.py ensure_seed_secret,
     # one per seed, named lakebench-datagen-seed-<seed_ref prefix>), written by
     # generate for an evaluation or robustness corpus only.
