@@ -1911,9 +1911,10 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   micro-batch (batch writes one per pair) and stores running balances in
   `silver.account_statements` in arrival order. IQ3's two-hop step reads raw
   edge rows and FQ4 reads the stored `bal_after`, so on one corpus their
-  answers can differ between the modes, and between two continuous runs
-  whose micro-batches or arrival order differ (the result check then reads
-  the pair as not comparable on those queries). Batch and continuous records
+  answers differ between the modes and, in practice, between almost any two
+  continuous runs (micro-batch boundaries and late arrivals depend on when
+  datagen files land), so two continuous AML runs on one corpus read not
+  comparable on results. Batch and continuous records
   are never compared: the mode is a workload identity key, so `compare`
   stops before any result and the perf gate refuses the pair. FQ3 sums the
   edges and is the same in both modes.
