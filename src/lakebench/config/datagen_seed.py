@@ -405,8 +405,11 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 # BEGIN HELDOUT FLOOR (written once, by the owner, when the file was created)
 _HELDOUT_FLOOR: dict = {
-    "salt": "",
-    "roles": {"evaluation": (), "robustness": ()},
+    "salt": "267910981b7370a7aaed163588284507373136289bfeec908df42ae15e1d75aa",
+    "roles": {
+        "evaluation": ("206064919eb86d06940ba8f4a66510605707e6cfe99bb2564f47dc859c2cba06",),
+        "robustness": ("9d730778dff8ae49bc2eb428a83016de00a9f227e6c0a9c43f84043fe2869562",),
+    },
 }
 # END HELDOUT FLOOR
 
