@@ -645,27 +645,30 @@ source, stage}`):
   multi-cycle run). With several gold jobs the keys are
   `gold_strategy[cycle=N]`.
 - `pipeline_mode`: the mode the command asked for against the pipeline
-  the record shows ran (`not recorded` when it stopped before any stage).
+  the record shows ran (`not recorded` when the record holds no stage, for
+  example a run that stopped before its first one).
 - `executors[<job>]` (cluster runs): the executor override, else the job
   profile's count at this scale under its cap, against the count observed:
-  for a batch job the most executor pods the operator listed (a replaced
-  executor counts again), for a stream the count submitted. The source
+  for a batch job the most executor pods the operator listed while it ran,
+  sampled every few seconds (a replaced executor counts again), for a
+  stream the count submitted. The source
   names the executor cap or a concurrent budget when one applied. Only an
   override that ran with fewer executors than it asked for is a mismatch.
 - `trickle` (continuous): `max_files_per_trigger` as configured, or `auto`,
   against the value the run resolved.
 
 The other Lakebench caps are in `experiment.limits` as configured and, when
-one bounds the run, in `limits.bound`. A request that was not met is listed
-in `experiment.requested_effective_mismatches`, as a verdict qualifier
-(`verdict.qualifiers.requested_effective`) and as a report warning such as
+one bounds the run, in `limits.bound`. A request that was not met is a
+verdict qualifier (`verdict.qualifiers.requested_effective`) and a report
+warning such as
 "gold_strategy: requested two_phase_agg, ran simple_agg (auto)" when a
 configured strategy did not reach the gold job. Incremental gold that a gold
 job reports it chose automatically would be labelled even though the
 request was `auto`, because it aggregates only part of silver (the gold
 jobs no longer make that choice); incremental gold for a multi-cycle cycle
 is by design and is not. Which entries are mismatches is decided when the
-record is read. A mismatch never fails a run and never enters the
+record is read; `experiment.requested_effective_mismatches` keeps the list
+as the run saw it. A mismatch never fails a run and never enters the
 experiment identity.
 
 ### Batch Mode

@@ -232,8 +232,8 @@ def is_mismatch(key: str, entry: Mapping[str, Any]) -> bool:
             and isinstance(effective, int)
             and effective < requested
         )
-    if requested in _AUTO:
-        return effective in LABEL_WHEN_AUTO.get(base, frozenset())
+    if requested is None or (isinstance(requested, str) and requested in _AUTO):
+        return isinstance(effective, str) and effective in LABEL_WHEN_AUTO.get(base, frozenset())
     return str(requested) != str(effective)
 
 
