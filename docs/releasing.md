@@ -226,17 +226,20 @@ deployments differ, both are successful AML runs of one corpus (seed,
 scale, generator image, time range, dirty-data ratio, role and
 perturbation), the batch record is a batch run, and the continuous record
 shows a drained corpus (`pipeline_benchmark.corpus_drained`,
-`continuous.drain.state` `drained`, no `continuous.gate_problems`) from a
-run with one datagen pod (`workload.datagen.parallelism: 1`): continuous
-mode numbers statement entries and running balances in arrival order,
-which equals the batch order only when bronze arrives in order.
+`continuous.drain.state` `drained`) from a run with one datagen pod
+(`workload.datagen.parallelism: 1`), and both configs query through Trino.
+Continuous mode numbers statement entries and running balances in arrival
+order, which equals the batch order only when bronze arrives in order; one
+pod still writes files concurrently, so a difference confined to those
+columns is labelled as possibly an ordering artefact, which a rerun with
+the silver stream's strict-parity switch settles.
 
 For each silver table it compares, through Trino, the row count and an
 order-insensitive `checksum` of one `xxhash64` per row over the row's
 business columns joined as text, so a value moved from one row to another
 is caught. The business columns are read from the silver DDL in
 `src/lakebench/deploy/financial_ddl.py`. Left out: the batch-version
-sentinels (`_batch_id`, `_stream_id`, `ingest_ts`) and
+sentinels (`_batch_id`, `_stream_id`, `ingest_ts`, `committed_at`) and
 `entity_profiles.profile_updated_ts` (batch stamps the data-clock date,
 continuous the latest merged transaction time). `counterparty_edges` is
 compared as one row per (source, target) with first and last times and

@@ -93,6 +93,7 @@ def test_the_row_hash_is_one_hash_per_row_over_every_hashed_column():
     sql = SP.table_sql("lakehouse.silver.transactions", spec)
     assert sql.startswith("SELECT count(*), to_hex(checksum(xxhash64(to_utf8(concat_ws(chr(30), ")
     assert sql.count("coalesce(") == len(spec.hashed)
+    assert "cardinality(correspondent_chain)" in sql
     assert "array_join(correspondent_chain, chr(31)" in sql
     assert "_batch_id" not in sql and "ingest_ts" not in sql
 
@@ -152,7 +153,6 @@ def test_drained_matching_records_can_be_compared():
             "drained corpus",
         ),
         (_record("sustained", NAMES[1], continuous__drain__state="timed_out"), "drain state"),
-        (_record("sustained", NAMES[1], continuous__gate_problems=["x"]), "gate problems"),
         (_record("sustained", NAMES[1], experiment__corpus__seed=44), "not of one corpus"),
         (
             _record("sustained", NAMES[1], experiment__corpus__generator_image="other"),
@@ -352,3 +352,50 @@ def test_cli_refuses_a_config_that_does_not_load(configs, creds, tmp_path):
     argv = _argv(configs)
     argv[0] = str(bad)
     assert SP.main(argv, query=_named_query()) == 2
+
+
+def test_gate_problems_alone_do_not_refuse():
+    cont = _record("sustained", NAMES[1], continuous__gate_problems=["data stopped arriving"])
+    assert SP.record_problems(_record("batch", NAMES[0]), cont, NAMES) == []
+
+
+def test_arrival_order_differences_are_labelled():
+    t = "lakehouse.silver.silver_account_statements"
+    spec = next(s for s in SP.table_specs() if s.key == "silver_account_statements")
+    idx = [c for c, _t in spec.hashed].index("entry_seq")
+    results, _ = _run(FakeQuery({"hash": [t], "columns": {t: idx}}))
+    bad = next(r for r in results if r.table == t)
+    assert not bad.equal and any("arrival-order" in n for n in bad.notes)
+
+
+def test_edge_rows_are_reported_beside_the_view():
+    results, _ = _run(FakeQuery())
+    edges = next(r for r in results if r.table.endswith("counterparty_edges"))
+    assert any("stored edge rows" in n for n in edges.notes)
+
+
+def test_a_non_trino_config_refuses(tmp_path, creds):
+    cfg = tmp_path / "d.yaml"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lakebench",
+            "init",
+            "-r",
+            "hive-iceberg-spark-duckdb",
+            "-w",
+            "financial",
+            "-n",
+            "rel17-sp-d",
+            "--endpoint",
+            "http://10.0.1.50:80",
+            "-o",
+            str(cfg),
+        ],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+    )
+    with pytest.raises(SP.Refused, match="needs Trino"):
+        SP.config_tables(cfg)

@@ -16,10 +16,14 @@ Refusals (exit 2), from the two run records and configs:
   perturbation all equal;
 * the batch record must be a batch run; the continuous record must show a
   drained corpus (``pipeline_benchmark.corpus_drained`` and
-  ``continuous.drain.state`` ``drained``) and no ``continuous.gate_problems``;
+  ``continuous.drain.state`` ``drained``); its other gate problems (window
+  timing, gold) do not concern silver and are not checked here;
 * the continuous run must have generated with one datagen pod: the
   continuous statement path numbers entries and running balances in arrival
-  order, which equals the batch order only when bronze arrives in order.
+  order, which equals the batch order only when bronze arrives in order (one
+  pod still writes files concurrently, so a difference confined to those
+  columns is reported as possibly an ordering artefact);
+* both configs must query through Trino.
 
 For each silver table the tool runs, on both deployments, ``lakebench query
 CFG --json --sql ...`` through Trino: the row count, and an order-insensitive
@@ -94,6 +98,14 @@ EDGE_AGG = {
     "last_seen_ts": "max",
     "cumulative_amount_usd": "sum",
     "txn_count": "sum",
+}
+#: Columns continuous mode derives in bronze arrival order: they equal batch's
+#: only when no statement arrived late (the silver stream's strict-parity
+#: switch aborts on a late arrival). A difference confined to them is
+#: reported as possibly an ordering artefact.
+ARRIVAL_ORDER = {
+    "silver_account_statements": frozenset({"entry_seq", "bal_before", "bal_after"}),
+    "silver_accounts": frozenset({"current_balance"}),
 }
 QUERY_TIMEOUT_S = 1500
 NULL = "\\N"
@@ -239,7 +251,9 @@ def table_specs(path: Path = DDL_FILE) -> list[TableSpec]:
 def text_of(col: str, ctype: str) -> str:
     """A Trino expression giving *col* as text, NULL as a marker."""
     if ctype.startswith("ARRAY"):
-        inner = f"array_join({col}, chr(31), '{NULL}')"
+        # the length first, so [] and [''] differ
+        joined = f"array_join({col}, chr(31), '{NULL}')"
+        inner = f"concat(CAST(cardinality({col}) AS VARCHAR), ':', {joined})"
     elif ctype.startswith("STRUCT") or ctype.startswith("MAP"):
         inner = f"json_format(CAST({col} AS JSON))"
     else:
@@ -389,8 +403,6 @@ def record_problems(
     drain = cblock.get("drain") or {}
     if drain.get("state") != "drained":
         problems.append(f"the continuous drain state is {drain.get('state')!r}, not 'drained'")
-    if cblock.get("gate_problems"):
-        problems.append(f"the continuous run has gate problems: {cblock['gate_problems']}")
     pods = ((cont.get("config_snapshot") or {}).get("datagen") or {}).get("parallelism")
     if pods != 1:
         problems.append(
@@ -467,6 +479,17 @@ def compare(
             notes.append(
                 "columns differing: " + (", ".join(cols) or "none alone (rows recombined)")
             )
+            order = ARRIVAL_ORDER.get(spec.key, frozenset())
+            if cols and set(cols) <= order:
+                notes.append(
+                    "only arrival-order columns differ: possibly late-arriving statements; "
+                    "rerun the continuous side with the silver stream's strict-parity switch "
+                    "(LB_SILVER_STATEMENTS_STRICT_PARITY=1) to tell"
+                )
+        if spec.key == EDGES_KEY:
+            raw = f"SELECT count(*) FROM {table}"
+            nb, nc = _one(query, batch_cfg, raw, 1)[0], _one(query, cont_cfg, raw, 1)[0]
+            notes.append(f"stored edge rows {nb} / {nc} (compared per source and target)")
         if spec.merged and not empty:
             merged = _merged_notes(query, batch_cfg, cont_cfg, table, spec)
             if merged:
@@ -492,6 +515,10 @@ def config_tables(config: Path) -> tuple[str, dict[str, str]]:
         cfg = load_config(config, purpose=LoadPurpose.READ, print_notes=False)
     except Exception as e:  # noqa: BLE001 -- a config that does not load refuses
         raise Refused(f"{config} does not load: {e}") from e
+    qe = cfg.architecture.query_engine.type
+    engine = getattr(qe, "value", qe)
+    if engine != "trino":
+        raise Refused(f"{config} queries through {engine}; the comparison needs Trino")
     catalog = cfg.architecture.query_engine.trino.catalog_name
     names = cfg.architecture.tables
     return cfg.name, {k: f"{catalog}.{getattr(names, k)}" for k in (*SILVER_KEYS, VERSIONS_KEY)}
