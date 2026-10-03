@@ -7,25 +7,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Breaking changes
-- **The Hive recipes default to Spark 4.1.1.** Each recipe's default
-  Spark image is now the Spark minor of its release-matrix row:
-  `hive-iceberg-spark-trino` (the default recipe), `hive-iceberg-spark-thrift`,
-  `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none` and
-  `hive-delta-spark-trino` take `apache/spark:4.1.1-python3`; the Polaris
-  recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` stay on
-  `4.0.2-python3`. A config with no recipe and no `images.spark` takes the
-  image of the recipe its components name (so a recipe-less Polaris config
-  stays on 4.0.2). With the format version at `auto`, Delta follows to 4.1.0
-  and Iceberg 1.11.0 uses its native Spark 4.1 runtime. A config that did
-  not set `images.spark` therefore runs a different Spark, jar set and
-  perf-gate fingerprint than under v1.6: pin `images.spark:
-  apache/spark:4.0.2-python3` to keep the old one. A deployment made from
-  such a config must be redeployed, since `run` refuses a dependency set
-  that no longer matches the config. A config that writes a table format
-  version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
-  so it still loads and tears down. The Hive examples now pin 4.1.1; the
-  perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
-  runs keep their own 4.0.2 image, and their record now names it.
 One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1.7.md says what to do about each. The entries after them give the detail.
 
 - Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another value is refused by the commands that change data.
@@ -82,7 +63,27 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
 - A new shared observability install gets a generated Grafana password; an existing install keeps `admin`/`lakebench`.
 - `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
+- The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 
+- **The Hive recipes default to Spark 4.1.1.** Each recipe's default
+  Spark image is now the Spark minor of its release-matrix row:
+  `hive-iceberg-spark-trino` (the default recipe), `hive-iceberg-spark-thrift`,
+  `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none` and
+  `hive-delta-spark-trino` take `apache/spark:4.1.1-python3`; the Polaris
+  recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` stay on
+  `4.0.2-python3`. A config with no recipe and no `images.spark` takes the
+  image of the recipe its components name (so a recipe-less Polaris config
+  stays on 4.0.2). With the format version at `auto`, Delta follows to 4.1.0
+  and Iceberg 1.11.0 uses its native Spark 4.1 runtime. A config that did
+  not set `images.spark` therefore runs a different Spark, jar set and
+  perf-gate fingerprint than under v1.6: pin `images.spark:
+  apache/spark:4.0.2-python3` to keep the old one. A deployment made from
+  such a config must be redeployed, since `run` refuses a dependency set
+  that no longer matches the config. A config that writes a table format
+  version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
+  so it still loads and tears down. The Hive examples now pin 4.1.1; the
+  perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
+  runs keep their own 4.0.2 image, and their record now names it.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -147,104 +148,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   and no longer appends it to the latest record. `MetricsStorage.save_run`
   refuses to replace an existing `metrics.json` unless called with
   `seal_update=True`.
-
-### Added
-- **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
-  deployment's name (OLD's, or the one 1.6 recorded in
-  `.lakebench/state.json` for a nameless config) and writes the bucket names
-  out; moves flat keys, `architecture.workload`, `processing` and
-  `sustained` to the current keys; writes the recipe the config resolves to;
-  drops removed keys and the `operator.install` keys with their fix text;
-  replaces plaintext credentials with `${VAR}` references without printing
-  them; and lists every change and what `run` still refuses. It never
-  expands a `${VAR}`, never writes over OLD, and writes nothing unless the
-  new file loads to the same settings as OLD. `config upgrade` and the
-  nameless-config refusals already pointed here. `scripts/upgrading.py`
-  also requires a breaking-changes entry for each config value 1.7 refuses
-  that 1.6 accepted (`config/refused_keys.py`).
-- **AML batch records attribute gold-finalize time and show stage headroom.**
-  `experiment.attribution` names gold-finalize's slowest rule, its heaviest
-  Spark stage and the TM share; `limits.headroom_pct` gives each stage's
-  headroom against the per-job timeout and the timed benchmark's headroom
-  against its per-query timeout, which the record now keeps as
-  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. Lakebench
-  now reads the whole driver log of a job that fails or times out, as it
-  did for a successful one, so the per-rule lines of a failed gold-finalize
-  reach its record. `scripts/aml_stage_attribution.py`
-  builds the same profile from a Spark event log when the driver could not
-  read its status store. Diagnostics only. See
-  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
-- **AML gold-finalize records where its time goes.** The gold-finalize
-  job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
-  rule), `stage_profile` (each rule's three heaviest Spark stages, read
-  from the driver's status store with every rule in its own job group,
-  flagged when the store may be missing stages), `stage_profile_unavailable`
-  and `stage_profile_cost_s`, and the TM operations summary gains
-  `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
-  score changes. Reading the profile can add up to 5 seconds per rule to
-  the gold-finalize job when the driver's status listener lags, and none
-  when it keeps up; continuous gold ticks do not profile. See
-  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
-- **Customer 360 results on the HTML report.** The report shows the C360
-  expected-results checks: passed out of total and the gate as the verdict
-  applies it (a gating check that failed, did not run or is absent reads
-  "fails the run"), the checks that did not pass first with observed, expected and
-  tolerance, then the passes by family (pipeline, benchmark shapes,
-  statistical). Before, the
-  34 checks a C360 run records were never shown.
-- **`--json` on the read verbs.** `plan`, `status`, `report`, `config
-  recipes`, `compare` and `query` write one `lb-cli/1` document to stdout
-  (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
-  output to stderr; the exit code and `exit_code` always agree, and a
-  failed command's document has `data: null` and the error, including an
-  unknown option. `plan --json` prints this document, its plans under
-  `data`.
-- **`docs/cli-reference.md` is generated from the CLI.** Each visible
-  command's usage line, arguments, options (type, default, help) and named
-  exit paths, `run`'s refused arguments and the table of renamed, refused
-  and deprecated names come from `scripts/gen_cli_reference.py`; a unit test
-  fails on drift. A second test parses every `lakebench ...` line in the
-  README, `docs/` and `examples/` with Click and fails on an unknown command
-  or flag, or on an alias or refused name.
-- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
-  config, reads `./lakebench.yaml` when no argument is given (and says
-  which deployment it shows), and prints the stage matrix with `--format
-  table|json|csv`. `results` is an alias of `report --format table`, with the
-  same argument and `--format` passing through. `report --list` shows each
-  record's kind.
-- **Each deployment gets a dependency server.** `deploy` runs a new
-  `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
-  and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
-  Spark image. Its init containers resolve the jars (plus the AML reference
-  wheels for the AML workload, and the DuckDB wheel and extensions for
-  DuckDB) once per request; the server re-hashes the set at every start and
-  serves it read-only. Deploy reads the served manifest, recomputes the set
-  hash from its file entries and jar order, checks it (every selected group
-  present, the one table-format runtime the jobs use, no unlisted jar
-  shadowing an image jar), and records it in the `lb-deps-manifest`
-  ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
-  The step removes the annotation before anything else and writes it last,
-  and removes it again when the step fails, so a failed `deps` step leaves
-  none. A cold resolve adds one to a few
-  minutes to the first deploy; an unchanged redeploy renders the same pod
-  template and does not restart the server. `destroy` removes the server's
-  objects and the annotation, also when `create_namespace: false`.
-- New optional config block `platform.deps`: `maven_repository`,
-  `pypi_index` and `duckdb_extension_repository` point the resolve at
-  mirrors for clusters without public egress, and `storage_class` picks the
-  PVC's StorageClass. Mirror URLs with credentials, a query or another
-  scheme are refused at load.
-- Two new entries on `docs/prerequisites.md`, both checked at deploy and
-  left out of the `run` preflight, so a deployed system never fails a run on
-  them: `deps-storage-class` reports the class of an existing `lb-deps-data`
-  PVC, and before the PVC exists fails when `platform.deps.storage_class`
-  names a missing StorageClass or is empty on a cluster with no default one
-  (the page recommends a replicated class); `egress-hosts` lists the hosts
-  this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
-  configured mirrors) without probing them, and the page describes the
-  mirror keys. `lakebench plan` prints both.
-
-### Breaking changes
 - **`compare` compares stored records and runs nothing.** `lakebench compare
   SIDE_A SIDE_B` takes, per side, run ids, run directories, `metrics.json`
   paths, `series:<id>` or a config (its latest run, or every member of that
@@ -538,6 +441,100 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   key to write. Both spellings set: the flat value still wins, with a note.
 
 ### Added
+- **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
+  deployment's name (OLD's, or the one 1.6 recorded in
+  `.lakebench/state.json` for a nameless config) and writes the bucket names
+  out; moves flat keys, `architecture.workload`, `processing` and
+  `sustained` to the current keys; writes the recipe the config resolves to;
+  drops removed keys and the `operator.install` keys with their fix text;
+  replaces plaintext credentials with `${VAR}` references without printing
+  them; and lists every change and what `run` still refuses. It never
+  expands a `${VAR}`, never writes over OLD, and writes nothing unless the
+  new file loads to the same settings as OLD. `config upgrade` and the
+  nameless-config refusals already pointed here. `scripts/upgrading.py`
+  also requires a breaking-changes entry for each config value 1.7 refuses
+  that 1.6 accepted (`config/refused_keys.py`).
+- **AML batch records attribute gold-finalize time and show stage headroom.**
+  `experiment.attribution` names gold-finalize's slowest rule, its heaviest
+  Spark stage and the TM share; `limits.headroom_pct` gives each stage's
+  headroom against the per-job timeout and the timed benchmark's headroom
+  against its per-query timeout, which the record now keeps as
+  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. Lakebench
+  now reads the whole driver log of a job that fails or times out, as it
+  did for a successful one, so the per-rule lines of a failed gold-finalize
+  reach its record. `scripts/aml_stage_attribution.py`
+  builds the same profile from a Spark event log when the driver could not
+  read its status store. Diagnostics only. See
+  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **AML gold-finalize records where its time goes.** The gold-finalize
+  job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
+  rule), `stage_profile` (each rule's three heaviest Spark stages, read
+  from the driver's status store with every rule in its own job group,
+  flagged when the store may be missing stages), `stage_profile_unavailable`
+  and `stage_profile_cost_s`, and the TM operations summary gains
+  `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
+  score changes. Reading the profile can add up to 5 seconds per rule to
+  the gold-finalize job when the driver's status listener lags, and none
+  when it keeps up; continuous gold ticks do not profile. See
+  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **Customer 360 results on the HTML report.** The report shows the C360
+  expected-results checks: passed out of total and the gate as the verdict
+  applies it (a gating check that failed, did not run or is absent reads
+  "fails the run"), the checks that did not pass first with observed, expected and
+  tolerance, then the passes by family (pipeline, benchmark shapes,
+  statistical). Before, the
+  34 checks a C360 run records were never shown.
+- **`--json` on the read verbs.** `plan`, `status`, `report`, `config
+  recipes`, `compare` and `query` write one `lb-cli/1` document to stdout
+  (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
+  output to stderr; the exit code and `exit_code` always agree, and a
+  failed command's document has `data: null` and the error, including an
+  unknown option. `plan --json` prints this document, its plans under
+  `data`.
+- **`docs/cli-reference.md` is generated from the CLI.** Each visible
+  command's usage line, arguments, options (type, default, help) and named
+  exit paths, `run`'s refused arguments and the table of renamed, refused
+  and deprecated names come from `scripts/gen_cli_reference.py`; a unit test
+  fails on drift. A second test parses every `lakebench ...` line in the
+  README, `docs/` and `examples/` with Click and fails on an unknown command
+  or flag, or on an alias or refused name.
+- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
+  config, reads `./lakebench.yaml` when no argument is given (and says
+  which deployment it shows), and prints the stage matrix with `--format
+  table|json|csv`. `results` is an alias of `report --format table`, with the
+  same argument and `--format` passing through. `report --list` shows each
+  record's kind.
+- **Each deployment gets a dependency server.** `deploy` runs a new
+  `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
+  and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
+  Spark image. Its init containers resolve the jars (plus the AML reference
+  wheels for the AML workload, and the DuckDB wheel and extensions for
+  DuckDB) once per request; the server re-hashes the set at every start and
+  serves it read-only. Deploy reads the served manifest, recomputes the set
+  hash from its file entries and jar order, checks it (every selected group
+  present, the one table-format runtime the jobs use, no unlisted jar
+  shadowing an image jar), and records it in the `lb-deps-manifest`
+  ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
+  The step removes the annotation before anything else and writes it last,
+  and removes it again when the step fails, so a failed `deps` step leaves
+  none. A cold resolve adds one to a few
+  minutes to the first deploy; an unchanged redeploy renders the same pod
+  template and does not restart the server. `destroy` removes the server's
+  objects and the annotation, also when `create_namespace: false`.
+- New optional config block `platform.deps`: `maven_repository`,
+  `pypi_index` and `duckdb_extension_repository` point the resolve at
+  mirrors for clusters without public egress, and `storage_class` picks the
+  PVC's StorageClass. Mirror URLs with credentials, a query or another
+  scheme are refused at load.
+- Two new entries on `docs/prerequisites.md`, both checked at deploy and
+  left out of the `run` preflight, so a deployed system never fails a run on
+  them: `deps-storage-class` reports the class of an existing `lb-deps-data`
+  PVC, and before the PVC exists fails when `platform.deps.storage_class`
+  names a missing StorageClass or is empty on a cluster with no default one
+  (the page recommends a replicated class); `egress-hosts` lists the hosts
+  this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
+  configured mirrors) without probing them, and the page describes the
+  mirror keys. `lakebench plan` prints both.
 - **BOUNDED BY trickle.** A continuous run whose trickle
   (`max_files_per_trigger`) held intake, meaning `ingest_ratio` (ingested
   over released rows) of at least 0.99 and a lag at window end of at most
@@ -616,7 +613,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   AML reference detector and the local AML gate. It pins numpy, scipy,
   pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
   job installs, so a local gate fits the same model as the cluster.
-
 - **A nameless config tears down or reads only a deployment it can prove
   is its own.** `destroy`, `stop`, `status` and `logs` take `--name` for
   a config that has no `name:`. With it, or as the only nameless config in
@@ -627,6 +623,29 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   refuses (exit 3) and points at `lakebench init --from`. Without `--name`
   a v1.6 directory is still refused at load (exit 2). Destroy then touches
   only the namespace incarnation it checked.
+- **Corpus id v2.** Every `run` (batch, continuous and `--local`)
+  now records its corpus observation (one listing of the datagen prefix
+  and a read of the generator's per-node markers and `series.json`, taken
+  just before the record is saved, in
+  `config_snapshot.experiment_inputs.corpus_observation`; Lakebench's own
+  bucket objects under `.lakebench/` are never counted; a prefix holding no
+  object records no listing digest and the corpus problem "no objects under
+  <prefix>", so such a run is not comparable) and gains in
+  `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
+  reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
+  (the config's corpus settings, for display), and, when markers exist,
+  `lineage`, `lineage_observed` and `lineage_notes`; `warnings` when the
+  config disagrees with the corpus it read. The id hashes the arguments the
+  generator resolved, the model version and the image lineage (the digest
+  in `series.json`, mapped through `src/lakebench/config/datagen_lineage.yaml`
+  and resolved when the run is observed), so a config edited after
+  generation does not change it. Markers that disagree, miss a node or
+  cycle, or come from different builds are corpus problems, which
+  `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
+  stored id or identity digest moves.
+- **`docs/prerequisites.md` is generated** from the prerequisite checks in
+  `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
+  checks cannot drift.
 
 ### Changed
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
@@ -1109,7 +1128,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
     1 and 2), for commit drift without `--allow-commit-drift` and for a run
     that does not follow the package (were 2), and 1 when its pipeline could
     not run (was 2).
-
 - **Errors are one line and markup-safe; machine output is plain.**
   `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
   is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
@@ -1121,7 +1139,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   retry lines and warnings are silenced. A config whose top level is not a
   YAML mapping is refused with one line naming the problem instead of an
   `AttributeError`.
-
 - `pydantic-settings` is no longer a dependency: nothing imported it, so
   every install pulled it in for nothing and the binary bundled it.
 - `botocore`, `pydantic-core` and `urllib3` are declared dependencies:
@@ -1221,6 +1238,139 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   a generated password in the Secret `lakebench-observability-grafana`, and
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
+- **Stale bronze on buckets this deployment did not create is refused.**
+  `generate`, `run --generate` and a multi-cycle run's first cycle
+  go through one gate. `--regenerate` now clears only the datagen prefix
+  (aborting its incomplete multipart uploads) instead of the whole bronze
+  bucket, and only on a bucket this deployment owns; on any other bucket it
+  exits 3 (refused), where 1.6 emptied the bucket whoever owned it. Datagen over a
+  non-empty prefix of such a bucket needs the new `--allow-stale-bronze`
+  flag on `generate` and `run`; the run records `datagen.stale_bronze` in
+  `metrics.json` and the report warns "bronze held N objects before
+  generate; rows may be over-counted". The deployer no longer skips such a
+  bucket silently before cycle 0. A user with a pre-provisioned bronze
+  bucket who relied on `--regenerate` clears the prefix, or claims the bucket
+  once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
+  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
+  an owned prefix before cycle 0, and a `run` after `generate
+  --allow-stale-bronze` still records the note. `run` refuses
+  `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
+  reads it: without `--generate`, `--generate-only` or a multi-cycle batch
+  run, and with `--local`, `--deploy-only` or a continuous run other than
+  `--generate-only`. A `run --repeat` series passes it to repetition 1
+  only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
+- **`destroy` clears the kept silver-state's data clock when it empties
+  bronze.** With `create_namespace: false`, `lakebench-silver-state`
+  survives destroy for its rebuild counters; its `bronze_data_clock` now
+  goes when destroy empties the bronze bucket, and when a generate replaces
+  bronze, so silver stages no longer read the old data's clock.
+- **Bucket ownership names the cluster.** Deploy stamps each bucket
+  it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
+  cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
+  the continuous reset keep, a bucket another cluster stamped, so the same
+  deployment name on two clusters sharing an object store can no longer
+  empty each other's data. A 1.6 bucket without the stamp is stamped on the
+  next deploy when this namespace's record shows it created or adopted it;
+  one it does not record (adopted by 1.6) is used but no longer emptied or
+  deleted, and `lakebench admin reclaim-bucket` can claim it. With no
+  fingerprint, destroy keeps every stamped bucket: "Destroy NOT completed:
+  this cluster has no fingerprint". On a backend without tagging
+  (FlashBlade), deploy adopts a pre-existing empty bucket, or a
+  pre-provisioned one with `create_buckets: false`, only with
+  `--force-legacy`; without it the bucket is used but destroy leaves its data.
+  A bucket 1.6 recorded as adopted while empty is no longer emptied on that
+  record (1.6 wrote it for another cluster's bucket too); claim it with
+  `admin reclaim-bucket`. Destroy stamps a recorded 1.6 bucket before it
+  empties it, and keeps the stamp on every bucket it keeps (`--keep-buckets`
+  included), so the bucket stays this deployment's.
+  There the stamp is an owner marker object, `.lakebench/owner.json`, written
+  with a conditional PUT where the backend enforces it. `.lakebench/` keys
+  are never counted as data, and `clean` and `--regenerate` keep them. The
+  `boto3` floor rises to 1.35.2, the first release whose botocore accepts
+  `IfNoneMatch` on PutObject.
+- **`destroy` removes what it used to leave in a surviving namespace.** With
+  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
+  `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with
+  observability on, the Pushgateway Deployment, Service and PVC, the
+  Prometheus ConfigMap and five PodMonitors. A new step, after the component
+  steps and before the namespace step, deletes them by name from the
+  Category-1 registry (`deploy/category1.py`). The registry lists every
+  object deploy and run create in the namespace and the step that deletes
+  it; a unit test runs deploy and the run-time creators against it, and
+  checks every template. The `lakebench-silver-state` ConfigMap is kept on
+  purpose (its rebuild counters must not reset while table data can outlive
+  destroy), and so are the deployment's identity annotations.
+- **`destroy` keeps a namespace an operator pod still watches.** After it
+  removes the namespace from the Spark Operator watch list and the operator
+  restarts, destroy waits inside the cluster lease (up to 120 s) until no
+  operator pod that is still running, and no operator Deployment template,
+  lists the namespace in `--namespaces=`. A stale pod nobody is replacing
+  gets one more restart of the shared operator's controller and webhook (as
+  the watch-list change itself does). If something still lists it, destroy keeps
+  the namespace and exits 1 with "operator pods [...] still watch it",
+  because the operator crash-loops on a watched namespace that no longer
+  exists.
+- **The legacy SecretClass cleanup in `destroy` runs under the cluster
+  lease.** The cluster-wide count of other lakebench namespaces and the
+  deletes of `lakebench-s3-credentials-class` and
+  `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
+  only when one of them exists; if it stays held for 600 s the cleanup is
+  skipped and they are kept.
+- **The cluster lease holder names the process.** The `holder`
+  field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
+  and release matches the lease's write nonce, so a process never deletes a
+  lease another run from the same host wrote in the same second. An acquire
+  that fails or is interrupted after its write landed (a lost reply, a 504,
+  a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
+  3600 s TTL, and an acquire whose own write comes back as a conflict adopts
+  it instead of waiting on itself.
+- **`destroy` deletes the PostgreSQL data PVC when the namespace
+  survives.** With `create_namespace: false`, `data-lakebench-postgres-<n>`
+  and the catalog metadata on it used to survive destroy, because the cleanup
+  selected on a label the claim never carried; the next deploy then started
+  on the old metastore. Destroy now deletes the claims by name. It no longer
+  selects on `app.kubernetes.io/component=postgres`, which could only ever
+  match another application's claim in a shared namespace.
+- **Spark scripts ship in one ConfigMap per role.** The single
+  `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
+  every AML addition, is replaced by six maps (`lakebench-scripts-common`,
+  `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
+  together at `/opt/spark/scripts`, so script paths and imports are unchanged.
+  Each map is refused above 80% of 1 MiB, measured on the bytes applied. A
+  script listed for shipping but missing from the installed package now stops
+  `run` before any job is submitted, where 1.6 skipped it and the driver
+  failed later with an ImportError. `run` will not change a scripts map that a
+  running SparkApplication mounts, and a job is not submitted if its maps
+  changed since its run applied them. The first 1.7 `run` deletes the 1.6 map
+  unless a running SparkApplication still mounts it; `destroy` deletes all
+  scripts maps, also when `create_namespace: false`.
+- **Interrupts wait for the cluster lease to be released.** A Ctrl-C,
+  SIGTERM or SIGHUP while a command holds the `lakebench-cluster-lock`
+  lease no longer stops it between a `helm upgrade` of the shared Spark
+  Operator and the operator restart. The command prints the hold budget
+  left (750 s, 1800 s for `admin` commands), finishes the shared change,
+  releases the lease, then stops; a third interrupt aborts at once and
+  still releases the lease. `kubectl`, `helm` and `oc` run under the lease
+  in their own session with a timeout from that budget, and are stopped
+  with SIGTERM rather than killed, so a terminal Ctrl-C or a timeout no
+  longer leaves the release `pending-upgrade`. A leased command that runs
+  out of time fails deploy or destroy closed (destroy keeps the namespace);
+  for helm the error names `helm rollback` and
+  `lakebench admin repair-operator`.
+
+### Removed
+- **`config upgrade` refuses.** It rewrote configs lossily, in place
+  by default, and wrote the S3 secret key into the result in plaintext. It
+  now exits 2 before opening any file and names the replacement,
+  `lakebench init --from OLD.yaml -o NEW.yaml`.
+- **Dead flags.** `generate --wait` / `-w` (generate always waited;
+  there was no `--no-wait`), `admin release-lock --expired-only` (always on;
+  `release-lock` releases only an expired lease unless `--force` is given)
+  and `deploy --include-observability` (set `observability.enabled: true`
+  in the config instead). Each is now an unknown option and exits 2.
+- `lbrun.py`, the run-from-a-checkout wrapper. Use
+  `PYTHONPATH=src python -m lakebench` instead.
+
 ### Fixed
 - **A redeploy refreshes the namespace's committed-sha stamp.** A
   namespace already stamped with this deployment's identity was left as
@@ -1333,7 +1483,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   replaces the corpus), and removes the sidecar; `run --local` is
   unchanged. A continuous run's fleet is read at window end, so the perf
   gate's `data_quality` refusal now applies to continuous records too.
-
 - **Delta continuous Customer 360 works again.** Its silver stream failed
   on the first micro-batch on every `hive-delta-*` recipe: it passed the
   three-part `spark_catalog.silver.customer_interactions_enriched` to
@@ -1489,8 +1638,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   deleted, is being deleted or was deleted and deployed again (or three
   reads in a row fail), it stops at that read, exits 1 and saves the record
   with `abort_reason`.
-### Fixed
-
 - **`run --generate` on a multi-cycle run is refused (exit 2).** It generated
   the whole corpus before the cycle loop, then cycle 0 again under the same
   file names. On a bucket the deployment owns, cycle 0 cleared the whole
@@ -1504,7 +1651,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   without `--generate` stopped with "cannot access local variable" (exit 1).
 - `run --continuous --skip-generate` no longer journals a "Datagen started"
   event for a datagen it did not start.
-
 - Trino compaction of the Customer 360 silver table no longer fails with
   "Exceeded limit of 100 open writers for partitions" when it rewrites files
   in more than 100 `interaction_date` partitions, as the silver of the one
@@ -1530,171 +1676,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   that started before the fix keeps 0.00 on the rows it already wrote. No detection
   rule, score or query reads these two columns, and `passthrough_ratio`
   was already equal.
-### Changed
-- **Stale bronze on buckets this deployment did not create is refused.**
-  `generate`, `run --generate` and a multi-cycle run's first cycle
-  go through one gate. `--regenerate` now clears only the datagen prefix
-  (aborting its incomplete multipart uploads) instead of the whole bronze
-  bucket, and only on a bucket this deployment owns; on any other bucket it
-  exits 3 (refused), where 1.6 emptied the bucket whoever owned it. Datagen over a
-  non-empty prefix of such a bucket needs the new `--allow-stale-bronze`
-  flag on `generate` and `run`; the run records `datagen.stale_bronze` in
-  `metrics.json` and the report warns "bronze held N objects before
-  generate; rows may be over-counted". The deployer no longer skips such a
-  bucket silently before cycle 0. A user with a pre-provisioned bronze
-  bucket who relied on `--regenerate` clears the prefix, or claims the bucket
-  once with `lakebench admin reclaim-bucket` and then uses `--regenerate`
-  (`--allow-stale-bronze` would over-count). A multi-cycle run still clears
-  an owned prefix before cycle 0, and a `run` after `generate
-  --allow-stale-bronze` still records the note. `run` refuses
-  `--allow-stale-bronze` (exit 2, before any cluster call) where no generate
-  reads it: without `--generate`, `--generate-only` or a multi-cycle batch
-  run, and with `--local`, `--deploy-only` or a continuous run other than
-  `--generate-only`. A `run --repeat` series passes it to repetition 1
-  only, and its manifest carries repetition 1's note (`corpus.stale_bronze`).
-- **`destroy` clears the kept silver-state's data clock when it empties
-  bronze.** With `create_namespace: false`, `lakebench-silver-state`
-  survives destroy for its rebuild counters; its `bronze_data_clock` now
-  goes when destroy empties the bronze bucket, and when a generate replaces
-  bronze, so silver stages no longer read the old data's clock.
-- **Bucket ownership names the cluster.** Deploy stamps each bucket
-  it owns with `lakebench.cluster=<API-server fingerprint>` and refuses when it
-  cannot compute the fingerprint. Deploy refuses, and destroy, `clean` and
-  the continuous reset keep, a bucket another cluster stamped, so the same
-  deployment name on two clusters sharing an object store can no longer
-  empty each other's data. A 1.6 bucket without the stamp is stamped on the
-  next deploy when this namespace's record shows it created or adopted it;
-  one it does not record (adopted by 1.6) is used but no longer emptied or
-  deleted, and `lakebench admin reclaim-bucket` can claim it. With no
-  fingerprint, destroy keeps every stamped bucket: "Destroy NOT completed:
-  this cluster has no fingerprint". On a backend without tagging
-  (FlashBlade), deploy adopts a pre-existing empty bucket, or a
-  pre-provisioned one with `create_buckets: false`, only with
-  `--force-legacy`; without it the bucket is used but destroy leaves its data.
-  A bucket 1.6 recorded as adopted while empty is no longer emptied on that
-  record (1.6 wrote it for another cluster's bucket too); claim it with
-  `admin reclaim-bucket`. Destroy stamps a recorded 1.6 bucket before it
-  empties it, and keeps the stamp on every bucket it keeps (`--keep-buckets`
-  included), so the bucket stays this deployment's.
-  There the stamp is an owner marker object, `.lakebench/owner.json`, written
-  with a conditional PUT where the backend enforces it. `.lakebench/` keys
-  are never counted as data, and `clean` and `--regenerate` keep them. The
-  `boto3` floor rises to 1.35.2, the first release whose botocore accepts
-  `IfNoneMatch` on PutObject.
-- **`destroy` removes what it used to leave in a surviving namespace.** With
-  `create_namespace: false`, destroy left the PostgreSQL ServiceAccount, the
-  `lakebench-ca-certificate` Secret (with `s3.ca_cert`) and, with
-  observability on, the Pushgateway Deployment, Service and PVC, the
-  Prometheus ConfigMap and five PodMonitors. A new step, after the component
-  steps and before the namespace step, deletes them by name from the
-  Category-1 registry (`deploy/category1.py`). The registry lists every
-  object deploy and run create in the namespace and the step that deletes
-  it; a unit test runs deploy and the run-time creators against it, and
-  checks every template. The `lakebench-silver-state` ConfigMap is kept on
-  purpose (its rebuild counters must not reset while table data can outlive
-  destroy), and so are the deployment's identity annotations.
-- **`destroy` keeps a namespace an operator pod still watches.** After it
-  removes the namespace from the Spark Operator watch list and the operator
-  restarts, destroy waits inside the cluster lease (up to 120 s) until no
-  operator pod that is still running, and no operator Deployment template,
-  lists the namespace in `--namespaces=`. A stale pod nobody is replacing
-  gets one more restart of the shared operator's controller and webhook (as
-  the watch-list change itself does). If something still lists it, destroy keeps
-  the namespace and exits 1 with "operator pods [...] still watch it",
-  because the operator crash-loops on a watched namespace that no longer
-  exists.
-- **The legacy SecretClass cleanup in `destroy` runs under the cluster
-  lease.** The cluster-wide count of other lakebench namespaces and the
-  deletes of `lakebench-s3-credentials-class` and
-  `lakebench-s3-ca-cert-class` used to run without it. The lease is taken
-  only when one of them exists; if it stays held for 600 s the cleanup is
-  skipped and they are kept.
-- **The cluster lease holder names the process.** The `holder`
-  field is now `<host>@<user>@<sha>#<pid>-<8 hex>`, unique to each acquire,
-  and release matches the lease's write nonce, so a process never deletes a
-  lease another run from the same host wrote in the same second. An acquire
-  that fails or is interrupted after its write landed (a lost reply, a 504,
-  a Ctrl-C, a SIGTERM) releases that lease instead of leaving it to the
-  3600 s TTL, and an acquire whose own write comes back as a conflict adopts
-  it instead of waiting on itself.
-- **`destroy` deletes the PostgreSQL data PVC when the namespace
-  survives.** With `create_namespace: false`, `data-lakebench-postgres-<n>`
-  and the catalog metadata on it used to survive destroy, because the cleanup
-  selected on a label the claim never carried; the next deploy then started
-  on the old metastore. Destroy now deletes the claims by name. It no longer
-  selects on `app.kubernetes.io/component=postgres`, which could only ever
-  match another application's claim in a shared namespace.
-- **Spark scripts ship in one ConfigMap per role.** The single
-  `lakebench-spark-scripts` ConfigMap, about 45 KB from the 1 MiB limit with
-  every AML addition, is replaced by six maps (`lakebench-scripts-common`,
-  `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
-  together at `/opt/spark/scripts`, so script paths and imports are unchanged.
-  Each map is refused above 80% of 1 MiB, measured on the bytes applied. A
-  script listed for shipping but missing from the installed package now stops
-  `run` before any job is submitted, where 1.6 skipped it and the driver
-  failed later with an ImportError. `run` will not change a scripts map that a
-  running SparkApplication mounts, and a job is not submitted if its maps
-  changed since its run applied them. The first 1.7 `run` deletes the 1.6 map
-  unless a running SparkApplication still mounts it; `destroy` deletes all
-  scripts maps, also when `create_namespace: false`.
-- **Interrupts wait for the cluster lease to be released.** A Ctrl-C,
-  SIGTERM or SIGHUP while a command holds the `lakebench-cluster-lock`
-  lease no longer stops it between a `helm upgrade` of the shared Spark
-  Operator and the operator restart. The command prints the hold budget
-  left (750 s, 1800 s for `admin` commands), finishes the shared change,
-  releases the lease, then stops; a third interrupt aborts at once and
-  still releases the lease. `kubectl`, `helm` and `oc` run under the lease
-  in their own session with a timeout from that budget, and are stopped
-  with SIGTERM rather than killed, so a terminal Ctrl-C or a timeout no
-  longer leaves the release `pending-upgrade`. A leased command that runs
-  out of time fails deploy or destroy closed (destroy keeps the namespace);
-  for helm the error names `helm rollback` and
-  `lakebench admin repair-operator`.
-### Fixed
 - **Spark Thrift on Spark 4.1 with Iceberg 1.11 loaded the 4.0 runtime.**
   Thrift picked the Iceberg runtime from the Spark version alone, so it loaded
   `iceberg-spark-runtime-4.0` while the pipeline jobs loaded the native
   `iceberg-spark-runtime-4.1`. Thrift now makes the same choice as the jobs.
   Thrift deployments on Spark 4.1 with Iceberg 1.11 change runtime jar on
   their next deploy; other combinations are unchanged.
-
-### Added
-- **Corpus id v2.** Every `run` (batch, continuous and `--local`)
-  now records its corpus observation (one listing of the datagen prefix
-  and a read of the generator's per-node markers and `series.json`, taken
-  just before the record is saved, in
-  `config_snapshot.experiment_inputs.corpus_observation`; Lakebench's own
-  bucket objects under `.lakebench/` are never counted; a prefix holding no
-  object records no listing digest and the corpus problem "no objects under
-  <prefix>", so such a run is not comparable) and gains in
-  `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
-  reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
-  (the config's corpus settings, for display), and, when markers exist,
-  `lineage`, `lineage_observed` and `lineage_notes`; `warnings` when the
-  config disagrees with the corpus it read. The id hashes the arguments the
-  generator resolved, the model version and the image lineage (the digest
-  in `series.json`, mapped through `src/lakebench/config/datagen_lineage.yaml`
-  and resolved when the run is observed), so a config edited after
-  generation does not change it. Markers that disagree, miss a node or
-  cycle, or come from different builds are corpus problems, which
-  `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
-  stored id or identity digest moves.
-- **`docs/prerequisites.md` is generated** from the prerequisite checks in
-  `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
-  checks cannot drift.
-
-### Removed
-- **`config upgrade` refuses.** It rewrote configs lossily, in place
-  by default, and wrote the S3 secret key into the result in plaintext. It
-  now exits 2 before opening any file and names the replacement,
-  `lakebench init --from OLD.yaml -o NEW.yaml`.
-- **Dead flags.** `generate --wait` / `-w` (generate always waited;
-  there was no `--no-wait`), `admin release-lock --expired-only` (always on;
-  `release-lock` releases only an expired lease unless `--force` is given)
-  and `deploy --include-observability` (set `observability.enabled: true`
-  in the config instead). Each is now an unknown option and exits 2.
-- `lbrun.py`, the run-from-a-checkout wrapper. Use
-  `PYTHONPATH=src python -m lakebench` instead.
 
 ### Known limitations
 - **The capacity preflight sums free capacity across nodes.** Ten nodes

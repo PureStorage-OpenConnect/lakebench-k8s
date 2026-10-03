@@ -224,6 +224,14 @@ The perf-gate fingerprint is version 2 and the baseline store schema 2; older ru
 
 **What to do:** Re-record perf-gate baselines under 1.7; pin the profile's executor counts in a pinned config.
 
+## Version bumps
+
+### The Hive recipes default to Spark 4.1.1
+
+The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
+
+**What to do:** Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version: 4.0.0` keeps Spark 4.0.2.
+
 ## Changed behaviour and defaults
 
 ### Removed keys are refused by commands that change data

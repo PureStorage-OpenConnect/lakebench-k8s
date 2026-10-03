@@ -534,3 +534,13 @@
     with `scratch.size_per_job`.'
   fix: Read executor counts from `jobs[]` and scratch from `scratch.size_per_job` in scripts that parse
     records.
+- id: the-hive-recipes-default-to-spark-411
+  title: The Hive recipes default to Spark 4.1.1
+  kind: version-bump
+  subject: images.spark apache/spark:4.1.1-python3
+  source: src/lakebench/config/schema.py:ImagesConfig
+  text: The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark
+    4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change,
+    and a deployment made from it must be redeployed before run.
+  fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
+    4.0.0` keeps Spark 4.0.2.'
