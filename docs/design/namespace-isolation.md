@@ -79,8 +79,10 @@ On `deploy`, `_deploy_namespace` writes these identity annotations to the namesp
 
 - `lakebench.deployment/name: <cfg.name>`
 - `lakebench.deployment/api-server: <sha256(cluster-CA-cert)>` -- workstation and in-cluster paths to the same cluster produce the same fingerprint because they read the same CA
-- `lakebench.deployment/committed-sha: <short commit of the lakebench checkout that first stamped the namespace>` (informational; `-dirty` when that checkout had uncommitted changes or its state could not be read; never the shell's working directory; absent when no checkout commit can be read, such as from a wheel; a later redeploy into the stamped namespace keeps the first value)
+- `lakebench.deployment/committed-sha: <short commit of the lakebench checkout that deployed last>` (informational; `-dirty` when that checkout had uncommitted changes or its state could not be read; never the shell's working directory; absent when no checkout commit can be read, such as from a wheel)
 - `lakebench.deployment/stamped-at: <ISO 8601 timestamp>`
+
+A redeploy by the same identity refreshes `committed-sha` to the code that deployed last, or removes it when that code cannot name its commit. It patches only that annotation, under the read's `resourceVersion`; the identity annotations and `stamped-at` stay as the first deploy wrote them, and a failed refresh never refuses the deploy.
 
 Deploy also writes three bookkeeping annotations to the same namespace:
 

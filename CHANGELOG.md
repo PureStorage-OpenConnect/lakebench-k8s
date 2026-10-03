@@ -1037,6 +1037,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `deploy` prints the command that reads it. An existing install keeps
   `admin`/`lakebench`.
 ### Fixed
+- **A redeploy refreshes the namespace's committed-sha stamp.** A
+  namespace already stamped with this deployment's identity was left as
+  it was, so `lakebench.deployment/committed-sha` kept naming the code of
+  the first deploy. A redeploy from other code now updates it (or removes
+  it when that code cannot name its commit). The identity annotations and
+  `stamped-at` are unchanged, a foreign or other-cluster stamp is never
+  refreshed, and a failed refresh never refuses the deploy.
+- **Owner markers record the Lakebench version.** `.lakebench/owner.json`
+  read the version of a distribution named `lakebench`, but the package is
+  `lakebench-k8s`, so every marker recorded `lakebench_version: "unknown"`.
+  It now records the package version.
 - **A fresh generate waits for an earlier datagen Job's pods to stop.**
   The previous Job is deleted in the background, so its pods kept running
   for their grace period and could land a `part-*` file in the datagen
@@ -1074,7 +1085,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now comes from the lakebench package's own checkout (the commit the run
   record's `provenance.git_sha` names), with `-dirty` for uncommitted
   changes, and is left off when no checkout commit can be read (a wheel
-  install). It is still written only when the namespace is first stamped.
+  install). A redeploy refreshes it (see the entry above).
 - **Destroy stops at a failed Spark Operator restart.** After removing the
   namespace from the watch list, a failed operator restart used to be
   ignored, leaving destroy's pod poll (one more restart, then keep the
