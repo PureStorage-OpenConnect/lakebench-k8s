@@ -118,6 +118,11 @@ Tests that import pyspark go under `tests/spark/`.
 6. Update `docs/`, `README.md` and `CHANGELOG.md` in the same pull request
    when the change alters behaviour, a CLI flag, a config key, a default or
    a number the docs quote.
+7. A change that can break a 1.6 config, command line or script also gets
+   an entry in `docs/upgrading/breaking-1.7.yaml`, its heading in
+   `UPGRADING-1.7.md` and its one-line bullet under "Breaking changes";
+   `python3.11 scripts/upgrading.py missing` prints a skeleton for each
+   one the code shows.
 
 CI runs on every push and pull request. The first signal is the Lint job
 (`make check-fast` under an 8-minute budget); the unit tests on Python 3.10
