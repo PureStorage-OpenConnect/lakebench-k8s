@@ -34,7 +34,14 @@ def table_fingerprint(
     from common import frame_fingerprint
 
     cols = sorted(c for c in df.columns if c not in excluded)
-    shared = [key] if key in cols and len(cols) > MAX_COLUMNS else []
+    shared: list[str] = []
+    if len(cols) > MAX_COLUMNS:
+        # Groups are tied to their rows only through a unique key.
+        if key not in cols:
+            raise ValueError(f"{len(cols)} columns and no {key!r} column to group them by")
+        if df.select(key).distinct().count() != df.count():
+            raise ValueError(f"{key!r} is not unique, so column groups would not pin rows")
+        shared = [key]
     rest = [c for c in cols if c not in shared]
     width = MAX_COLUMNS - len(shared)
     parts, rows = [], None
