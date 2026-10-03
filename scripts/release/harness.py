@@ -1239,10 +1239,12 @@ class ScenarioMixin:
             row = self.rows.get(rid)
             for step in row.extra_steps if row is not None else ():
                 if step not in done:
-                    lines.append(
-                        f"| {rid} {step} | {s.get('namespace', '?')} | MISSING | "
-                        "the step did not finish |"
+                    why = (
+                        "the step did not finish"
+                        if "extra_running" in s
+                        else f"not run (the row ended {s['status']})"
                     )
+                    lines.append(f"| {rid} {step} | {s.get('namespace', '?')} | MISSING | {why} |")
             for step, res in done.items():
                 problems = "; ".join(res.get("problems") or []) or "-"
                 ids = ", ".join(r.removeprefix("run-") for r in res.get("run_ids") or []) or "-"
@@ -1787,6 +1789,8 @@ RESET_DONE = "Continuous tables reset in"
 #: The reset job's per-table lines (spark/scripts/common.py reset_stream_tables).
 RESET_LINE = re.compile(r"Continuous reset: (.*)")
 RESET_LOCATION = re.compile(r"(?:deleted \d+ data entries under|deleted|kept) (\S+)")
+#: The CLI's own deletes before the reset job (checkpoints, raw data).
+CLI_CLEARED = re.compile(r"Cleared \d+ objects from (\S+?)/")
 
 
 def _judge_extra(record: dict[str, Any], sha: str) -> list[str]:
@@ -1898,6 +1902,9 @@ class ExtraStepsMixin:
             else:
                 owned = config_buckets(plan.config)
                 problems += reset_problems(logs.read_text(errors="replace"), owned)
+                for bucket in CLI_CLEARED.findall(text):
+                    if bucket not in owned:
+                        problems.append(f"the run cleared objects in {bucket}, not this row's")
         if len(runs) != 1:
             problems.append(f"expected one continuous record, found {len(runs)}")
         for rid in runs:

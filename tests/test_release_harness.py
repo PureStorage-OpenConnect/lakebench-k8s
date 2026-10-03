@@ -2503,3 +2503,20 @@ def test_results_extra_lists_a_missing_step(xenv):
     assert (
         "| M01 continuous-after-batch | n | MISSING |" in xenv.h.write_extra_results().read_text()
     )
+
+
+def test_the_step_fails_when_the_cli_cleared_another_bucket(xenv):
+    xenv.runner.continuous_output = (
+        "Cleared 4 objects from someone-else-bronze/checkpoints\nContinuous tables reset in 9s\n"
+    )
+    plan = xenv.h.plan_row(M01X, xenv.h.row_dir(M01X))
+    _go(xenv, plan)
+    step = _status(xenv)["extra"]["continuous-after-batch"]
+    assert any("cleared objects in someone-else-bronze" in p for p in step["problems"])
+
+
+def test_a_step_that_never_ran_says_why(xenv):
+    xenv.h.log("M01", "planned", namespace="n", config="c", peak=[1, 1])
+    xenv.h.log("M01", "not-deployed")
+    text = xenv.h.write_extra_results().read_text()
+    assert "MISSING | not run (the row ended not-deployed) |" in text

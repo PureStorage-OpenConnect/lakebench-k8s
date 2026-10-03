@@ -151,9 +151,10 @@ still the row's incarnation. `continuous-after-batch` (on M01, a Customer
 360 batch row only) runs `run --continuous --force-reset --skip-deploy
 --yes` on the same deployment: the reset of the batch's tables still needs
 the ownership proof, and the reset job's own lines (read with `lakebench
-logs ... bronze-verify`) must show at least one table dropped with PURGE, no
-table kept as foreign, and every deleted location inside the row's own
-buckets. The continuous record must pass on its verdict, rows per layer and
+logs ... bronze-verify`, the job's last attempt) must show at least one
+table dropped with PURGE, no table kept as foreign, and every deleted
+location inside the row's own buckets, and the objects the run itself
+cleared (checkpoints, raw data) must be in the row's buckets. The continuous record must pass on its verdict, rows per layer and
 commit. A row with that step is admitted at the larger of its batch and
 continuous peaks. Extra-step records go to `<out>/extra/runs/` and their
 results to `results-extra.md`, which also lists a step that did not finish
