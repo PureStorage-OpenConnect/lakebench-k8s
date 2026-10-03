@@ -353,7 +353,7 @@ empty bronze).
 lakebench init                                  # writes lakebench.yaml
 export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
-lakebench results lakebench.yaml                # print the scorecard
+lakebench report lakebench.yaml                 # print the scorecard
 lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
 ```
 
@@ -481,8 +481,8 @@ To list all recorded runs:
 lakebench report --list
 ```
 
-`lakebench results lakebench.yaml` prints the same scorecard in the terminal
-(`--format json` or `csv` for scripts).
+`lakebench report lakebench.yaml --format table` prints the stage matrix in
+the terminal (`--format json` or `csv` for scripts).
 
 ### 7. Compare two configurations
 
@@ -661,8 +661,8 @@ lakebench destroy lakebench.yaml --local
 
 `--generate` populates bronze on the first local run. Subsequent runs
 against the same `--workdir` reuse the existing bronze corpus, so
-`--generate` is only needed again after `destroy --remove-data`, after
-`clean bronze`, or when the scale factor changes. Without `--generate`
+`--generate` is only needed again after `destroy --remove-data`, or when
+the scale factor changes. Without `--generate`
 the pipeline runs against whatever bronze the workdir already holds; an
 empty workdir gives an empty pipeline.
 

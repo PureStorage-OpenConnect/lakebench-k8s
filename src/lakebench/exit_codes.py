@@ -157,7 +157,8 @@ class ExitPath:
     ``planned`` is True for a path no command produces yet; the test suite
     records which change is to produce it.
     ``v16_code`` is the code Lakebench 1.6 exited with on this path, when it
-    differs; the UPGRADING table of renumbered codes is built from it.
+    differs; ``scripts/upgrading.py`` requires an UPGRADING-1.7.md entry for
+    each such path.
     """
 
     name: str
@@ -277,8 +278,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "alias.refused",
         _C.USAGE,
-        "a removed command or flag; the message names the replacement",
-        planned=True,
+        "a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean "
+        "journal`); the message names the replacement, and no argument is echoed",
+        v16_code=0,
     ),
     ExitPath(
         "compare.equal_names",
@@ -536,10 +538,14 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=4,
     ),
     # 10 to 14
-    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict"),
-    ExitPath("compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict"),
-    ExitPath("compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict"),
-    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict"),
+    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", v16_code=1),
+    ExitPath(
+        "compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", v16_code=0
+    ),
+    ExitPath(
+        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", v16_code=0
+    ),
+    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", v16_code=0),
     ExitPath(
         "reproduce.drift",
         _C.REQUIREMENT_UNMET,
@@ -659,7 +665,7 @@ def render_markdown() -> str:
         "(the fix) and `Where` lines when they apply. An error Lakebench does",
         "not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`",
         "to get the traceback. Machine output (`--format json` and `--format csv`",
-        "on `query`, `results` and `compare`) goes to plain stdout, unwrapped, so",
+        "on `query`, `report` and `compare`) goes to plain stdout, unwrapped, so",
         "it can be piped to a parser.",
     ]
     if LEGACY_CODES:

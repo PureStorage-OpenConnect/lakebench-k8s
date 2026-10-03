@@ -27,6 +27,7 @@ from typing import Annotated, Any
 import typer
 
 from lakebench.cli._helpers import console, err_console, esc, print_error
+from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
 
 #: Prerequisites whose failure ends ``plan`` with exit 4: nothing can deploy
@@ -518,17 +519,14 @@ def plan(
         str | None,
         typer.Option("--name", help="The deployment name for a config that sets none"),
     ] = None,
-    as_json: Annotated[
-        bool,
-        typer.Option("--json", help="Print the plan as JSON (always offline)"),
-    ] = False,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Show what each config needs: components, sizing, prerequisites, egress.
 
     Read-only. Online it checks the cluster prerequisites and free capacity
     and exits 4 when a scratch StorageClass, the Spark Operator or Stackable
     is missing, naming the admin install command. --offline, --cores/--memory
-    and --json make no cluster call.
+    and --json (the plan as an lb-cli/1 document) make no cluster call.
     """
     from lakebench.config import ConfigError, LoadPurpose, load_config
     from lakebench.deploy.prereqs import ClusterUnreachable
@@ -570,7 +568,9 @@ def plan(
 
     diffs = _differences(configs) if len(configs) > 1 else []
     if as_json:
-        print(json.dumps({"plans": plans, "differences": diffs}, indent=2, default=str))
+        from lakebench.cli import _json
+
+        _json.set_data(json.loads(json.dumps({"plans": plans, "differences": diffs}, default=str)))
     else:
         for i, p in enumerate(plans):
             if i:

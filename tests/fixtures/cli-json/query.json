@@ -1,0 +1,18 @@
+{
+  "schema": "lb-cli/1",
+  "command": "query",
+  "exit_code": 0,
+  "data": {
+    "query_name": "custom",
+    "engine": "trino",
+    "count": 2,
+    "elapsed_seconds": 0.25,
+    "columns": null,
+    "row_format": "csv",
+    "rows": [
+      ["web", "40"],
+      ["store", "2"]
+    ]
+  },
+  "errors": []
+}

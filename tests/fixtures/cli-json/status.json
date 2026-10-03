@@ -1,0 +1,17 @@
+{
+  "schema": "lb-cli/1",
+  "command": "status",
+  "exit_code": 0,
+  "data": {
+    "namespace": "ops",
+    "verdict": "ok",
+    "components": [
+      {"name": "lakebench-postgres", "kind": "StatefulSet", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-hive-metastore-default", "kind": "StatefulSet", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-trino-coordinator", "kind": "Deployment", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-trino-worker", "kind": "StatefulSet", "state": "ok", "detail": "2/2 replicas"}
+    ],
+    "datagen": null
+  },
+  "errors": []
+}

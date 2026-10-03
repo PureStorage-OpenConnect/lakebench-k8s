@@ -44,9 +44,17 @@ def _write(tmp_path: Path, name="plan-t", **overrides) -> Path:
 
 
 def _plan_json(*args) -> dict:
+    """The plan's data from its lb-cli/1 document (``--json``)."""
     res = runner.invoke(app, ["plan", *map(str, args), "--json"])
     assert res.exit_code == 0, res.output
-    return json.loads(res.stdout)
+    doc = json.loads(res.stdout)
+    assert (doc["schema"], doc["command"], doc["exit_code"], doc["errors"]) == (
+        "lb-cli/1",
+        "plan",
+        0,
+        [],
+    )
+    return doc["data"]
 
 
 # -- plan, the preflight and the docs tables agree -------------------------------

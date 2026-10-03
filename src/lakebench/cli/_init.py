@@ -26,6 +26,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 import yaml
 
+from lakebench.cli._aliases import ALIASED_FLAGS, REFUSED_FLAGS
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
     console,
@@ -59,7 +60,7 @@ _SCALE_COMMENT = {
     "financial": "1 is about 8.4 GB of bronze",
 }
 
-_WIZARD_REMOVED = "the init wizard is removed; init writes a default config (see init --help)"
+_WIZARD_REMOVED = ALIASED_FLAGS["init"]["--interactive"].note
 
 
 def default_name(user: str | None = None, token: str | None = None) -> str:
@@ -386,10 +387,13 @@ def init(
             f"--credentials-env must be an environment variable prefix such as "
             f"{DEFAULT_CREDENTIALS_ENV}, not {credentials_env!r}"
         )
-    if access_key is not None:
-        _refuse(f"--access-key is no longer accepted: export {access_var}; init writes a reference")
-    if secret_key is not None:
-        _refuse(f"--secret-key is no longer accepted: export {secret_var}; init writes a reference")
+    for flag, value, var in (
+        ("--access-key", access_key, access_var),
+        ("--secret-key", secret_key, secret_var),
+    ):
+        if value is not None:
+            reason = REFUSED_FLAGS["init"][flag].reason
+            _refuse(f"{flag} is no longer accepted: {reason}; export {var}")
     if interactive or advanced:
         _say(_WIZARD_REMOVED)
 

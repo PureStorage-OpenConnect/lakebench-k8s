@@ -5,8 +5,14 @@ stage of the deployment and benchmarking lifecycle. The CLI is built with
 Typer and Rich.
 
 ```
-lakebench [COMMAND] [OPTIONS] [CONFIG_FILE]
+lakebench COMMAND [ARGUMENTS] [OPTIONS]
 ```
+
+Each command's usage line, arguments, options and named exit paths below
+are generated from the CLI by `scripts/gen_cli_reference.py` (the blocks
+between `BEGIN GENERATED` and `END GENERATED` markers); a unit test fails
+when they drift. Change a flag's description in its help text in the code,
+and the prose here outside the blocks.
 
 Most commands accept an optional config file argument. If omitted, the CLI
 looks for `./lakebench.yaml` in the current directory.
@@ -20,29 +26,66 @@ flag.
 
 Exit codes are listed in [Exit Codes](exit-codes.md).
 
+### Machine-readable output (`--json`)
+
+`plan`, `status`, `report`, `config recipes`, `compare` and `query` take
+`--json`. The command then writes exactly one JSON document to stdout and
+every human line to stderr:
+
+```json
+{"schema": "lb-cli/1", "command": "status", "exit_code": 1,
+ "data": {"namespace": "...", "verdict": "drift", "components": [...]},
+ "errors": [{"code": 1, "path": null, "what": "Drift: ...", "why": null,
+             "next": null, "where": null}]}
+```
+
+`exit_code` is always the process's exit code, including for an unknown
+option or a bad value (`--help` prints help only). `data` is the command's
+result, kept on a verdict exit such as `status` drift, and `null` when the
+command failed; `errors` holds each error the command reported, with its
+exit-code `path` when it has one (see [Exit Codes](exit-codes.md)). The
+shape of each command's `data` is a TypedDict in `lakebench/cli/_json.py`:
+`lb-cli/1` may gain keys, and never loses or retypes one. `query --json` names the engine and keeps
+its rows as it prints them: Trino's CSV has no header (`columns` null),
+Spark Thrift's tsv2 has one, and DuckDB returns up to 100 rows as Python
+reprs; `count` is the rows the engine returned. `report --json` gives the
+verdict and scores as stored, never recomputed. `compare --json`
+carries the `cmp2` document `--format json` writes; `--json` does not
+combine with `--format` on `report`, `compare` or `query`, nor with
+`status --local` or `query --interactive`. `plan --json` makes no cluster
+call, as before.
+
 ## Commands
 
 ### init
 
 Write a starter configuration file.
 
+<!-- BEGIN GENERATED: cli init (scripts/gen_cli_reference.py) -->
 ```
 lakebench init [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--output` | `-o` | `lakebench.yaml` | Output file path |
-| `--name` | `-n` | `lb-<user>-<4 hex>` | Deployment name; the default is new on every `init` |
-| `--scale` | `-s` | `1` (`0.1` with `--local`) | Scale factor (1 = ~10 GB, 100 = ~1 TB) |
-| `--endpoint` | | `""` | S3 endpoint URL |
-| `--credentials-env` | | `LAKEBENCH_S3` | Prefix of the two credential variables: the file references `${PREFIX_ACCESS_KEY}` and `${PREFIX_SECRET_KEY}` |
-| `--namespace` | | `""` | Kubernetes namespace (default: the name) |
-| `--recipe` | `-r` | `polaris-iceberg-spark-trino` | Architecture recipe (`lakebench config recipes`) |
-| `--workload` | `-w` | `customer360` | Workload schema: `customer360` or `financial` |
-| `--overwrite` | | `false` | Overwrite an existing file; keeps its name, and refuses (exit 3) a change of namespace, buckets, endpoint or recipe under that name |
-| `--force` | | `false` | Old spelling of `--overwrite` (`-f` is deprecated here) |
-| `--local` | | `false` | Generate a config for local mode (podman/docker, no Kubernetes) |
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--output` | `-o` | path | `lakebench.yaml` | Output file path for configuration |
+| `--name` | `-n` | text |  | Deployment name (default: lb-<user>-<4 hex>, unique per init) |
+| `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB for financial (default 1; 0.1 with --local) |
+| `--endpoint` |  | text |  | S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443) |
+| `--credentials-env` |  | text | `LAKEBENCH_S3` | Environment variable prefix for the S3 credentials: the config references ${PREFIX_ACCESS_KEY} and ${PREFIX_SECRET_KEY} |
+| `--namespace` |  | text |  | Kubernetes namespace (default: same as deployment name) |
+| `--recipe` | `-r` | text |  | Architecture recipe (default polaris-iceberg-spark-trino; see 'config recipes') |
+| `--workload` | `-w` | text |  | Workload schema (customer360 \| financial). Default is customer360. |
+| `--overwrite` |  | flag |  | Overwrite an existing file |
+| `--force` |  | flag |  | Old spelling of --overwrite |
+| `--local` |  | flag |  | Generate a config for local mode (podman/docker, no Kubernetes) |
+<!-- END GENERATED: cli init -->
+
+- `--overwrite` keeps the file's name, and refuses (exit 3) a change of
+  namespace, buckets, endpoint or recipe under that name. `--force` is its
+  old spelling (`-f` is deprecated here).
+- `--credentials-env PREFIX`: the file references `${PREFIX_ACCESS_KEY}` and
+  `${PREFIX_SECRET_KEY}`.
 
 The file has 12 lines of settings: the name, the recipe once, the workload
 and scale, the endpoint and the two S3 credentials as `${VAR}` references.
@@ -72,9 +115,42 @@ Compare two sides of stored run records. `compare` is read-only: it reads
 `metrics.json` files and series manifests, and deploys, runs, generates and
 destroys nothing.
 
+<!-- BEGIN GENERATED: cli compare (scripts/gen_cli_reference.py) -->
 ```
-lakebench compare SIDE_A SIDE_B [--runs-dir DIR]... [--format table|json|csv] [-o PATH]
+lakebench compare SIDE_A SIDE_B [OPTIONS]
 ```
+
+| Argument | Required | Description |
+|---|---|---|
+| `SIDE_A` | yes | Side A (the baseline): run ids, run directories, metrics.json files, series:<id> or a config, comma-separated |
+| `SIDE_B` | yes | Side B (the candidate), in the same forms |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--runs-dir` |  | path, repeatable |  | Directory of run-<id>/ records (repeatable; default lakebench-output/runs) |
+| `--format` |  | text | `table` | Output format: table, json, csv |
+| `--output` | `-o` | path |  | Write the comparison (json, or csv) to this file |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `0` `compare.like_for_like`: `compare` finds the sides like-for-like
+- `2` `compare.equal_names`: `compare` was given two configs with the same deployment name and different contents
+- `2` `compare.bad_ref`: a `compare` side names a run, record, series or config that resolves to no record
+- `2` `compare.same_runs`: the two `compare` sides resolve to the same runs, or share a run
+- `2` `compare.unreadable_record`: a `compare` record or series manifest cannot be read, or two files disagree about one run
+- `2` `compare.removed_flag`: a flag of the `compare` that ran both configs; the message names the replacement
+- `10` `compare.not_comparable`: `compare` verdict
+- `11` `compare.not_established`: `compare` verdict
+- `12` `compare.not_like_for_like`: `compare` verdict
+- `13` `compare.confounded`: `compare` verdict
+<!-- END GENERATED: cli compare -->
+
+- `--runs-dir` can be repeated to search several directories; series
+  manifests are read from each directory's sibling `series/`.
+- `--output` writes the comparison (JSON, or CSV with `--format csv`);
+  nothing is written without it. A path that is one of the inputs, is named
+  `metrics.json`, or lies inside a runs or series directory is refused.
 
 A side is one or more comma-separated refs. Each ref is tried in this order:
 
@@ -91,12 +167,6 @@ A side is one or more comma-separated refs. Each ref is tried in this order:
    that cannot be read is skipped with a warning naming it.
 
 Side A is the baseline and B the candidate; deltas are B relative to A.
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--runs-dir` | | `lakebench-output/runs` | Directory of `run-<id>/` records; repeat it to search several. Series manifests are read from each directory's sibling `series/` |
-| `--format` | | `table` | Output format: table, json, csv |
-| `--output` | `-o` | (none) | Write the comparison to this file (JSON, or CSV with `--format csv`). Nothing is written without it. A path that is one of the inputs, is named `metrics.json`, or lies inside a runs or series directory is refused |
 
 ```bash
 lakebench compare 20260929-212900-5105a0 20260929-214442-825153
@@ -223,13 +293,8 @@ Runs graded conformance checks against the configured S3 endpoint and reports
 what the backend does. Diagnostic only: it never gates `deploy` or `run`, so a
 store lakebench has not seen before is checked rather than refused.
 
-```
-lakebench config storage [CONFIG_FILE] [OPTIONS]
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `--full` / `--no-full` | `--full` | Create a temporary bucket for write and multipart checks. Use `--no-full` when the account cannot create buckets; write checks are then reported as skipped, not failed. |
+Use `--no-full` when the account cannot create buckets: the write and
+multipart checks are then reported as skipped, not failed.
 
 Exit code 0 means no required check failed. Exit code 1 means a required check
 failed; 2 means the config could not be loaded or names no S3 endpoint.
@@ -242,17 +307,111 @@ how lakebench configures Spark, not because they are defects.
 See [Storage Backends](storage-backends.md) for validated backends, what each
 check covers, and what it deliberately does not.
 
+#### config recommend
+
+`config recommend CONFIG` sizes the config with `lakebench.config.sizing`,
+the source the `run` capacity preflight also uses: each scale is decided by
+the check the preflight makes (batch: a `run --generate`). Continuous mode
+prints two answers: a plain `run`, whose datagen Job is counted beside the
+streams, and a corpus generated before the streams start (`generate`, then
+`run --skip-generate` within an hour). A scale above the workload's largest
+measured scale (300) is labelled unverified.
+
+#### Subcommand reference
+
+<!-- BEGIN GENERATED: cli config (scripts/gen_cli_reference.py) -->
+#### `config show`
+
+Show fully resolved configuration with source annotations.
+
+```
+lakebench config show [CONFIG_FILE]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Configuration file path |
+
+#### `config validate`
+
+Validate configuration and test connectivity.
+
+```
+lakebench config validate [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Configuration file path |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--local` |  | flag |  | Validate for local mode instead of Kubernetes |
+
+#### `config storage`
+
+Validate that the S3 backend supports the operations lakebench needs.
+
+```
+lakebench config storage [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Configuration file path |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--full` / `--no-full` |  | flag | `--full` | Create a temporary bucket for write and multipart checks. Use --no-full when the account cannot create buckets; those checks are then skipped rather than failed. |
+
+#### `config recommend`
+
+Show sizing guidance for your cluster, sized from this config.
+
+```
+lakebench config recommend [CONFIG_FILE]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Configuration file path (sized as written, at each scale) |
+
+#### `config recipes`
+
+List architecture recipes and what each one trades off.
+
+```
+lakebench config recipes [NAME] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `NAME` | no | Show full detail for one recipe |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--local` |  | flag |  | Show only recipes that run in local mode |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+<!-- END GENERATED: cli config -->
+
 ### validate
 
 Equivalent to `lakebench config validate`. Validate configuration and test connectivity to S3 and Kubernetes.
 
+<!-- BEGIN GENERATED: cli validate (scripts/gen_cli_reference.py) -->
 ```
 lakebench validate [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--verbose` | `-v` | `false` | Show detailed validation output |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--verbose` | `-v` | flag |  | Show detailed validation output |
+<!-- END GENERATED: cli validate -->
 
 Checks performed: YAML syntax, required fields, S3 endpoint reachability,
 S3 credential validity, Kubernetes context accessibility, namespace status,
@@ -266,17 +425,28 @@ namespace the Spark Operator does not watch yet is reported as advisory:
 
 Show what each config needs before anything is deployed. Read-only.
 
+<!-- BEGIN GENERATED: cli plan (scripts/gen_cli_reference.py) -->
 ```
-lakebench plan CONFIG... [OPTIONS]
+lakebench plan CONFIG_FILES [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--offline` | | `false` | Make no cluster call: size without a cluster |
-| `--cores` | | | Cluster CPU cores to size against (with `--memory`; implies offline) |
-| `--memory` | | | Cluster memory in GB to size against (with `--cores`) |
-| `--name` | | | The deployment name for a config that sets none |
-| `--json` | | `false` | Print the plan as JSON (always offline) |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILES` | yes | One or more configuration files |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--offline` |  | flag |  | Make no cluster call: size without a cluster |
+| `--cores` |  | integer, at least 1 |  | Cluster CPU cores to size against (implies offline) |
+| `--memory` |  | integer, at least 1 |  | Cluster memory in GB to size against (with --cores) |
+| `--name` |  | text |  | The deployment name for a config that sets none |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `0` `plan.ok`: `plan` finds every prerequisite and enough capacity
+- `4` `plan.missing_storage_class`: `plan` finds a prerequisite failing (the scratch StorageClass, the Spark Operator, Stackable or another check), cannot check one of those three, finds too little free capacity, or cannot read a config value the sizing needs
+<!-- END GENERATED: cli plan -->
 
 For each config `plan` prints the components and recipe with their support
 state; the minimum cluster from the same sizing function the `run` capacity
@@ -315,18 +485,31 @@ lakebench plan hive.yaml polaris.yaml --cores 434 --memory 4349
 
 Deploy lakehouse infrastructure to Kubernetes.
 
+<!-- BEGIN GENERATED: cli deploy (scripts/gen_cli_reference.py) -->
 ```
 lakebench deploy [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--dry-run` | | `false` | Show what would be deployed without making changes |
-| `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout); bounds the waits inside every step, see [deployment](deployment.md) |
-| `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
-| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
-| `--force-legacy` | | `false` | Claim ownership without tag proof: a pre-1.5 annotation-less namespace or untagged bucket, or a bucket on a backend without tagging that does not match the deployment-name prefix. Use only when you have confirmed the resources are yours |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--dry-run` |  | flag |  | Show what would be deployed without making changes |
+| `--yes` | `-y` | flag |  | Skip confirmation prompt |
+| `--timeout` | `-t` | integer | `3600` | Global deployment timeout in seconds (0 = no timeout); bounds the waits in every step |
+| `--local` |  | flag |  | Deploy locally with podman/docker instead of Kubernetes |
+| `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
+| `--force-legacy` |  | flag |  | Claim ownership without tag proof. Covers two cases: (1) a pre-1.5 annotation-less namespace or untagged bucket being migrated; (2) a bucket on a backend that does not implement bucket tagging AND does not match the deployment-name prefix. Use only when you have confirmed the resources are yours -- a mistake can silently take over another team's storage. |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `3` `deploy.state_copied`: `deploy` found a state written for another directory or host (a copied directory)
+- `3` `deploy.identity_foreign`: the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`)
+- `4` `deploy.state_unrecordable`: `deploy` could not read the namespace or write the nonce to the directory's state
+<!-- END GENERATED: cli deploy -->
 
 Before it creates anything, deploy runs `run`'s cluster capacity check
 (read-only, without datagen: deploy does not generate) and refuses with exit
@@ -365,16 +548,31 @@ testing a recipe without a cluster available.
 
 Generate synthetic data to the bronze S3 bucket.
 
+<!-- BEGIN GENERATED: cli generate (scripts/gen_cli_reference.py) -->
 ```
 lakebench generate [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
-| `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--regenerate` | | `false` | Clear the datagen prefix (not the whole bucket) before generating, when this deployment owns the bronze bucket (its stamp, or a bucket it created). Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Refused (exit 3) on a bucket this deployment cannot prove it owns (`lakebench admin reclaim-bucket` claims one). |
-| `--allow-stale-bronze` | | `false` | Generate over objects already in the datagen prefix of a bronze bucket this deployment cannot prove it owns. Rows may be over-counted; `run` records it in `metrics.json` (`datagen.stale_bronze`) and the report shows "bronze held N objects before generate". |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--timeout` | `-t` | integer | `0` | Timeout in seconds when waiting for completion. 0 (default) auto-computes from scale, parallelism and a conservative per-pod throughput; pass a positive int to override. |
+| `--yes` | `-y` | flag |  | Skip confirmation prompt |
+| `--regenerate` |  | flag |  | Clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment cannot prove it owns. |
+| `--allow-stale-bronze` |  | flag |  | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; the run records it. |
+<!-- END GENERATED: cli generate -->
+
+- `--regenerate` clears the datagen prefix, not the whole bucket, and only
+  on a bucket this deployment owns (its stamp, or a bucket it created). On
+  any other bucket it is refused (exit 3); `lakebench admin reclaim-bucket`
+  claims one.
+- `--allow-stale-bronze`: `run` records the over-count in `metrics.json`
+  (`datagen.stale_bronze`) and the report shows "bronze held N objects
+  before generate".
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
@@ -397,32 +595,98 @@ datagen inside a multi-cycle run reports its own timeout independently.
 
 Execute the data pipeline (batch or continuous).
 
+<!-- BEGIN GENERATED: cli run (scripts/gen_cli_reference.py) -->
 ```
 lakebench run [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
-| `--timeout` | `-t` | auto | Timeout per job in seconds. When omitted: `max(3600, scale * 120)`; the AML workload adds 900 s and never goes below its bronze-verify budget |
-| `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
-| `--skip-preflight` | | `false` | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says `capacity: skipped` and the verdict "capacity not checked" |
-| `--skip-deploy` | | `false` | Skip the deploy and the infrastructure readiness check (namespace and components); the read-only prerequisite checks, cluster capacity included, still run and fail the run with exit 4 |
-| `--skip-generate` | | `false` | Skip datagen (refused with `--generate`) |
-| `--regenerate` | | `false` | With `--generate`: clear the datagen prefix before generating, when this deployment owns the bronze bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without `--generate` or `--generate-only`, and in a local or continuous run. |
-| `--allow-stale-bronze` | | `false` | On a batch run with `--generate` or more than one cycle, or with `--generate-only`: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; `metrics.json` records it (`datagen.stale_bronze`). |
-| `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
-| `--force-rebuild` | | `false` | Silver batch only: opt in to a full rebuild that drops an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. On Delta the silver table's own log has the last word: the rebuild writes under an epoch above every one the table has used, even if the counter reads lower |
-| `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
-| `--deploy-only` | | `false` | Deploy infrastructure and exit |
-| `--generate-only` | | `false` | Deploy + generate data and exit |
-| `--continuous` | | `false` | Run the continuous pipeline instead of batch. `--sustained` is a deprecated hidden alias. |
-| `--duration` | | config value | Continuous run duration in seconds |
-| `--generate` | | `false` | Run datagen before pipeline (single-cycle batch only; a multi-cycle run generates in its cycles and refuses it) |
-| `--yes` | `-y` | `false` | Skip confirmation prompts |
-| `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
-| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
-| `--repeat` | | off | Run the batch pipeline N times (1 to 20) as one series over one corpus; see below |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--stage` | `-s` | text |  | Run specific stage only (bronze-verify, silver-build, gold-finalize) |
+| `--timeout` | `-t` | integer |  | Timeout per job in seconds (auto-scaled from data scale if omitted) |
+| `--skip-benchmark` |  | flag |  | Skip the query benchmark after pipeline completion |
+| `--continuous` |  | flag |  | Run in continuous mode: bronze-ingest -> silver-stream -> gold-refresh |
+| `--duration` |  | integer |  | Continuous run duration in seconds (default: from config, typically 1800) |
+| `--generate` |  | flag |  | Run datagen before pipeline stages (single-cycle batch only: a multi-cycle run generates in its cycles and refuses it; continuous always runs datagen) |
+| `--skip-preflight` |  | flag |  | Skip prerequisite checks (including the capacity check) and infrastructure validation; the record says capacity not checked |
+| `--skip-deploy` |  | flag |  | Skip the deploy and the infrastructure readiness check; the read-only prerequisite checks, cluster capacity included, still run |
+| `--skip-generate` |  | flag |  | Assume data already exists in bronze bucket |
+| `--regenerate` |  | flag |  | With --generate: clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment does not own. A multi-cycle run clears an owned prefix before cycle 0 without it. Refused without --generate or --generate-only. |
+| `--allow-stale-bronze` |  | flag |  | On a batch run with --generate or more than one cycle, or with --generate-only: generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; metrics.json records it (datagen.stale_bronze). |
+| `--skip-maintenance` |  | flag |  | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
+| `--force-rebuild` |  | flag |  | Silver batch only: opt in to a full rebuild that would drop an existing populated silver table. Atomically bumps the deployment's silver rebuild epoch so downstream Delta idempotency keys move to a new namespace. |
+| `--force-reset` |  | flag |  | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data before starting |
+| `--deploy-only` |  | flag |  | Deploy infrastructure and exit (do not generate or run pipeline) |
+| `--generate-only` |  | flag |  | Deploy + generate data and exit (do not run pipeline) |
+| `--yes` | `-y` | flag |  | Skip all confirmation prompts |
+| `--local` |  | flag |  | Run locally with podman/docker instead of Kubernetes |
+| `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
+| `--repeat` |  | integer, 1 to 20 |  | Run the batch pipeline N times as one series over one corpus: repetition 1 as asked, then N-1 rebuilds from the same bronze |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `0` `run.pass`: `run` finished and its verdict passed
+- `1` `run.verdict_failed`: `run` finished with a failing verdict
+- `1` `run.datagen_timeout`: datagen did not finish in time; the record says "datagen timed out" in verdict.reasons
+- `1` `run.namespace_gone`: the namespace was deleted, or deleted and deployed again, during a continuous `run`, or could not be read three times over a minute; the record names it in abort_reason
+- `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
+- `2` `run.args`: a `run` argument or combination is refused before any cluster call
+- `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
+- `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
+- `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
+- `4` `run.prereq_failed`: a `run` preflight check failed
+- `4` `capacity.shortfall`: free cluster capacity is below the run's floor, or its largest pod fits no node
+- `4` `capacity.unknown`: the run's capacity check could not read the nodes or pods (the check fails closed)
+- `4` `run.deps_missing`: the deployment has no dependency server (deployed by 1.6, or never deployed)
+- `4` `run.deps_stale`: the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod
+- `5` `run.namespace_missing_no_yes`: `run` would create a missing namespace and was not given --yes
+- `130` `run.interrupted`: `run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted and the run's unfinished jobs are stopped
+
+**Refused arguments.** `run` checks every option before it makes any
+cluster call, and exits 2 (usage) naming the first refused one:
+
+- `--stage` that is not `bronze-verify`, `silver-build` or `gold-finalize`;
+- `--stage` with a continuous run (flag or config);
+- `--deploy-only` with `--generate-only`;
+- `--deploy-only` with `--stage`, `--generate` or `--skip-generate`;
+- `--skip-deploy` with `--deploy-only` or `--generate-only`;
+- `--generate-only` with `--skip-generate`;
+- `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
+- `--regenerate` without `--generate` or `--generate-only`;
+- `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
+- `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` or a continuous run other than `--generate-only`);
+- `--skip-generate` with `--generate`;
+- `--generate` on a multi-cycle batch run (`cycles` above 1);
+- `--force-reset` on a batch run;
+- `--force-rebuild` on a continuous run;
+- `--duration` on a batch run;
+- `--duration` below 60;
+- `--timeout` below 1;
+- `--repeat` below 1 or above 20;
+- `--repeat` with a continuous run;
+- `--repeat` with `cycles` above 1;
+- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`.
+<!-- END GENERATED: cli run -->
+
+- `--timeout`, when omitted, is `max(3600, scale * 120)` seconds per job;
+  the AML workload adds 900 s and never goes below its bronze-verify budget.
+- `--skip-deploy` still runs the read-only prerequisite checks, cluster
+  capacity included, and a failed one fails the run with exit 4.
+- `--skip-generate` is refused with `--generate`.
+- `--force-rebuild`: on Delta the silver table's own log has the last word;
+  the rebuild writes under an epoch above every one the table has used, even
+  if the counter reads lower.
+- `--force-reset`: without it a continuous run over existing state refuses
+  and lists what it would delete. Raw data alone from `lakebench generate` on
+  a deployment with no tables or checkpoints is not refused: continuous runs
+  generate their own data, so a separate `generate` before `run --continuous`
+  is not needed.
+- `--repeat N` takes 1 to 20; see below.
 
 **Repeating a run.** `run --repeat N` runs the batch pipeline N times as one
 series. Repetition 1 runs as the other options ask and may generate;
@@ -451,30 +715,7 @@ the corpus changed, 130 on an interrupt. A repetition that stops before
 saving a record, and repetition 1 when it exits 2 to 5, stop the series
 with that repetition's own code.
 
-**Refused arguments.** `run` checks every option before it makes any
-cluster call, and exits 2 (usage) naming the first refused one:
-
-- `--stage` that is not `bronze-verify`, `silver-build` or `gold-finalize`;
-- `--stage` with a continuous run (flag or config);
-- `--deploy-only` with `--generate-only`;
-- `--deploy-only` with `--stage`, `--generate` or `--skip-generate`;
-- `--skip-deploy` with `--deploy-only` or `--generate-only`;
-- `--generate-only` with `--skip-generate`;
-- `--local` with `--deploy-only`, `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
-- `--regenerate` without `--generate` or `--generate-only`;
-- `--regenerate` with `--local`, or with a continuous run other than `--generate-only`;
-- `--allow-stale-bronze` on a run that does not generate into bronze (only `--generate`, `--generate-only` or a multi-cycle batch run take it; not `--local`, `--deploy-only` or a continuous run other than `--generate-only`);
-- `--skip-generate` with `--generate`;
-- `--generate` on a multi-cycle batch run (`cycles` above 1);
-- `--force-reset` on a batch run;
-- `--force-rebuild` on a continuous run;
-- `--duration` on a batch run;
-- `--duration` below 60;
-- `--timeout` below 1;
-- `--repeat` below 1 or above 20;
-- `--repeat` with a continuous run;
-- `--repeat` with `cycles` above 1;
-- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`.
+The refused arguments are listed with the flags above.
 
 `--local` with a continuous run, and any workload, recipe and mode `run`
 does not support, are refused just after these, also before any cluster
@@ -545,15 +786,25 @@ continuous mode.
 
 Stop every job Lakebench started in the deployment.
 
+<!-- BEGIN GENERATED: cli stop (scripts/gen_cli_reference.py) -->
 ```
 lakebench stop [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--file` | `-f` | `./lakebench.yaml` | Path to the config (alternative to the positional argument) |
-| `--dry-run` | | `false` | List what would be stopped without deleting anything |
-| `--name` | | | For a config with no name: the deployment name, as for `destroy`. See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
+| `--dry-run` |  | flag |  | List what would be stopped without deleting anything |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `1` `stop.api_error`: `stop` could not list or delete a job; it still tried every other deletion
+<!-- END GENERATED: cli stop -->
 
 Deletes every SparkApplication named `lakebench-*` in the deployment's
 namespace that has not finished (the continuous streams and any batch stage
@@ -572,17 +823,28 @@ refused deletion: the other targets are still stopped and the exit is 1.
 
 Run the query engine benchmark independently.
 
+<!-- BEGIN GENERATED: cli benchmark (scripts/gen_cli_reference.py) -->
 ```
 lakebench benchmark [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--mode` | `-m` | `power` | Benchmark mode: `power`, `throughput`, or `composite` |
-| `--streams` | `-s` | `4` | Concurrent query streams (throughput/composite modes) |
-| `--cold` | | `false` | Flush Iceberg metadata cache before each query |
-| `--iterations` | `-n` | config (`3`) | Timed runs per query, scored by the median. Overrides `architecture.benchmark.iterations` |
-| `--class` | `-c` | all | Run only one query class: `scan`, `filter_prune`, `aggregation`, `analytics`, `operational`, and for AML also `investigator`. A name that matches no query runs nothing |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--mode` | `-m` | text |  | Benchmark mode: power, throughput, or composite (overrides config) |
+| `--streams` | `-s` | integer |  | Number of concurrent query streams for throughput/composite (overrides config) |
+| `--cold` |  | flag |  | Flush Iceberg metadata cache before each query (cold run) |
+| `--iterations` | `-n` | integer, at least 1 |  | Timed runs per query, scored by the median (overrides architecture.benchmark.iterations, default 3) |
+| `--class` | `-c` | text |  | Run only queries of a specific class (scan, filter_prune, aggregation, analytics, operational; AML also investigator) |
+<!-- END GENERATED: cli benchmark -->
+
+- `--class` takes `scan`, `filter_prune`, `aggregation`, `analytics`,
+  `operational`, and for AML also `investigator`. A name that matches no
+  query runs nothing.
 
 Executes the workload's query set (8 queries for Customer 360, 12 for AML)
 against the silver and gold layers and reports Queries per Hour (QpH), the
@@ -590,26 +852,46 @@ median of `--iterations` timed samples per query. Each successful query is
 then run once more, untimed, to record its result fingerprint. Power mode runs queries sequentially. Throughput mode runs
 N concurrent streams. Composite mode runs both and reports the geometric mean.
 
+The result is saved as a record of its own under a new run id:
+`record_kind: "benchmark"`, `parent_run_id` the deployment's latest run (a
+copy of that run's record with the new benchmark as its QpH, scores and
+query stage, and `provenance.benchmark` naming the code and time of the
+benchmark; a continuous run's in-stream rounds and the run's maintenance
+QpH pair are not copied). The run's
+own record is never rewritten, and the perf gate never takes a benchmark
+record as a run. Nothing is recorded when the deployment has no run record,
+or when the query engine now runs another dependency set than that run
+recorded.
+
 ### query
 
 Execute SQL queries against the configured query engine.
 
+<!-- BEGIN GENERATED: cli query (scripts/gen_cli_reference.py) -->
 ```
 lakebench query [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--sql` | `-q` | | SQL query string to execute |
-| `--example` | `-e` | | Built-in query name (`count`, `revenue`, `channels`, `engagement`, `funnel`, `clv`) |
-| `--sql-file` | | | Read SQL from file (use `-` for stdin) |
-| `--interactive` | `-i` | `false` | Start interactive SQL shell (REPL) |
-| `--format` | `-o` | `table` | Output format: `table`, `json`, `csv` |
-| `--show-query` | | `false` | Print the SQL before executing |
-| `--timeout` | `-t` | `120` | Query timeout in seconds |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--sql` | `-q` | text |  | SQL query to execute |
+| `--example` | `-e` | text |  | Run a built-in example query (count, revenue, channels, engagement, funnel, clv) |
+| `--sql-file` |  | path |  | Read SQL from file (use '-' for stdin) |
+| `--interactive` | `-i` | flag |  | Start interactive SQL shell (REPL) |
+| `--format` | `-o` | text | `table` | Output format: table (default), json, csv |
+| `--show-query` |  | flag |  | Show the SQL query before executing |
+| `--timeout` | `-t` | integer | `120` | Query timeout in seconds |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+<!-- END GENERATED: cli query -->
 
 Specify exactly one of `--sql`, `--example`, `--sql-file`, or `--interactive`.
-(`--file` / `-f` is the config file, as on other commands.)
+(`--file` / `-f` is the config file, as on other commands.) The result is
+printed and journalled; no run record is written.
 
 ```bash
 lakebench query --example count
@@ -621,16 +903,30 @@ lakebench query --interactive
 
 Show deployment status of Lakebench components in the cluster.
 
+<!-- BEGIN GENERATED: cli status (scripts/gen_cli_reference.py) -->
 ```
 lakebench status [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--namespace` | `-n` | from config | Kubernetes namespace to check |
-| `--local` | | `false` | Show local mode status instead of Kubernetes |
-| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
-| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (optional) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--namespace` | `-n` | text |  | Kubernetes namespace to check |
+| `--local` |  | flag |  | Show local mode status instead of Kubernetes |
+| `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
+| `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `0` `status.ok`: `status` finds every listed component ready
+- `1` `status.drift`: `status` finds a component of the config not ready or not found (with only `--namespace`: one not ready, or none found)
+- `1` `status.namespace_missing`: `status` finds no namespace
+<!-- END GENERATED: cli status -->
 
 Displays a table of the deployment's components (PostgreSQL, the configured
 catalog and query engine) with their readiness and replica counts, and the
@@ -644,84 +940,27 @@ found (drift). With only `--namespace`, a component that is absent is not
 drift, but one that is not ready is, and so is a namespace with none of
 them. 4 when the cluster is unreachable or a read is refused.
 
-### info
-
-Deprecated and hidden; use `lakebench config show`, which carries the same
-peak-request figure. `info` still works.
-
-Show configuration summary with scale dimensions and peak requested resources.
-
-```
-lakebench info [CONFIG_FILE]
-```
-
-Displays deployment name, namespace, recipe, schema, scale factor, derived
-dimensions (customers, rows, data size), per-job executor counts (auto vs
-override), catalog type, table format, query engine, S3 endpoint, and bucket
-names, and the minimum CPU / memory / scratch the config requests: the
-Spark peak (`compute_peak_requirements()`) plus the query engine, catalog
-and Postgres, with batch datagen at its default parallelism shown beside it
-(`lakebench.config.sizing.plan_requirements`, the source `config show`,
-`config recommend` and the `run` capacity preflight also use). With a
-cluster it also prints the preflight's decision and any auto-sizing cuts.
-No additional flags.
-
-### recommend
-
-Deprecated and hidden; `lakebench config recommend [CONFIG_FILE]` runs the same
-logic on your config. It sizes the default recipe (`hive-iceberg-spark-trino`)
-of the workload and mode with `lakebench.config.sizing`: `--scale` and the
-reference table print the minimum without a cluster (datagen at its default
-parallelism), and with a cluster each scale is decided by the same check the
-`run` capacity preflight makes (batch: a `run --generate`). Continuous mode
-prints two answers: a plain `run`, whose datagen Job is counted beside the
-streams, and a corpus generated before the streams start (`generate`, then
-`run --skip-generate` within an hour). A scale above the workload's largest
-measured scale (300) is labelled unverified.
-
-Show cluster sizing guidance for lakebench workloads.
-
-```
-lakebench recommend [OPTIONS]
-```
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--cores` | `-c` | auto-detect | Total cluster CPU cores |
-| `--memory` | `-m` | auto-detect | Total cluster memory in GB |
-| `--scale` | `-s` | auto | Target scale factor to check requirements for |
-| `--slow-datagen` | | `false` | Ignored: datagen pods that do not fit queue, so datagen never limits the scale. `--extended` / `-e` is a deprecated alias |
-| `--mode` | | `batch` | Pipeline mode: `batch` or `continuous` |
-| `--schema` | | `customer360` | Workload schema: `customer360` or `financial` |
-
-Without arguments, auto-detects the connected cluster capacity and shows the
-largest scale at which every scale up to it fits, bounded by the workload's
-datagen ceiling (600 for Customer 360, 800 for AML). With `--cores` and
-`--memory` the node sizes are unknown, so the largest-pod check is skipped.
-Use `--scale` (1 or more) to see what one scale requests and what the figure
-is built from.
-
-```bash
-lakebench recommend                        # auto-detect cluster
-lakebench recommend --cores 64 --memory 256
-lakebench recommend --scale 100            # requirements for ~1 TB
-```
-
 ### clean
 
 Delete data without destroying infrastructure.
 
+<!-- BEGIN GENERATED: cli clean (scripts/gen_cli_reference.py) -->
 ```
 lakebench clean TARGET [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--metrics-dir` | `-m` | `./lakebench-output/runs` | Metrics directory (for `metrics` target) |
-| `--force-legacy` | | `false` | Clean a bucket that has no lakebench ownership tag. Foreign-tagged buckets are always refused |
-| `--allow-unverified-cluster` | | `false` | Proceed when the kubeconfig cannot prove which cluster it points at |
-| `--file` | | | Config file (alternative to the positional argument; no short form) |
+| Argument | Required | Description |
+|---|---|---|
+| `TARGET` | yes | What to clean: silver, gold |
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` |  | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--force` / `--yes` | `-y` | flag |  | Skip confirmation prompt |
+| `--force-legacy` |  | flag |  | Clean a bucket that has no lakebench ownership tag (legacy). Caution: another team's data may live in an untagged bucket. Refuses always on foreign-tagged buckets regardless of this flag. |
+| `--allow-unverified-cluster` |  | flag |  | Proceed when the kubeconfig cannot prove which cluster it points at (no CA data for the api-server fingerprint). Same meaning as on destroy. |
+<!-- END GENERATED: cli clean -->
 
 On a backend without bucket tagging, `clean` (like `destroy` and the
 continuous reset) empties a bucket only when the namespace records creating
@@ -740,33 +979,50 @@ Valid targets:
 
 | Target | Action |
 |---|---|
-| `bronze` | Empty the bronze S3 bucket |
 | `silver` | Empty the silver S3 bucket |
 | `gold` | Empty the gold S3 bucket |
-| `data` | Empty all three buckets |
-| `metrics` | Delete local metrics/runs directory |
-| `journal` | Delete all journal session files |
+
+`bronze` and `data` are refused (exit 2) and name `lakebench run CONFIG
+--generate --regenerate`, which clears the run's datagen prefix and
+generates afresh (`data` also names `clean silver` and `clean gold`; on a
+bucket the deployment did not create, `admin reclaim-bucket` comes first).
+`metrics` and `journal`, and the old `--metrics-dir`/`-m`, are refused: run
+records and journals are evidence, and the CLI does not delete them. A
+refusal echoes no argument.
 
 ### destroy
 
 Tear down the resources this deployment owns.
 
+<!-- BEGIN GENERATED: cli destroy (scripts/gen_cli_reference.py) -->
 ```
 lakebench destroy [CONFIG_FILE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--local` | | `false` | Tear down the local stack instead of Kubernetes |
-| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
-| `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
-| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 6 unless the namespace is already gone |
-| `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
-| `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
-| `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
-| `--file` | | | Config file (alternative to the positional argument; no short form) |
-| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` |  | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--force` / `--yes` | `-y` | flag |  | Skip confirmation prompt |
+| `--local` |  | flag |  | Tear down the local stack instead of Kubernetes |
+| `--workdir` |  | path |  | Host directory for local mode state (default: ~/.lakebench/local/<name>) |
+| `--remove-data` |  | flag |  | Local mode: also delete generated data and the Ivy cache |
+| `--allow-unverified-cluster` |  | flag |  | Bypass the api-server fingerprint match when it cannot be computed on one or both sides. Only use when you know the current kubectl context is correct (dev environment with a broken kubeconfig, etc). |
+| `--force-legacy` |  | flag |  | Destroy without tag / annotation proof of ownership. Covers two cases: (1) legacy pre-ownership namespace or bucket that carries no lakebench identity annotation / ownership tag; (2) a bucket on an S3 backend that does not implement tagging AND does not match the deployment-name prefix. Caution: another workload's data may live there. Prefer `lakebench admin migrate-deployment <namespace>` first (case 1) or rename the bucket to start with the deployment name (case 2). Refuses always on foreign-tagged buckets or namespaces regardless of this flag. |
+| `--namespace-timeout` |  | integer, at least 0 | `600` | Seconds to wait for the namespace to finish terminating after the delete is issued (PVC and pod finalizers can hold it for minutes). A namespace still terminating at the deadline is not reported as deleted and destroy exits 6. 0 skips the wait, so destroy exits 6 unless the namespace is already gone. |
+| `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
+| `--keep-buckets` |  | flag |  | Empty the S3 buckets but do not delete them. By default destroy deletes the emptied buckets this deployment created (listed in the namespace's created-buckets record) and provably owns (ownership tag, or name prefix on backends without tagging) when create_buckets is true. Without tagging, a bucket is emptied only if the namespace records creating it or adopting it empty. |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `3` `destroy.incarnation_mismatch`: `destroy` found the namespace is not the deployment incarnation it checked or was told to expect
+- `3` `destroy.redeployed`: "Destroy NOT completed": the namespace now belongs to a newer deployment
+- `3` `destroy.unverified_cluster`: "Destroy NOT completed": this cluster has no fingerprint, so buckets are kept
+- `6` `destroy.namespace_terminating`: `destroy` finished its steps but the namespace is still terminating
+<!-- END GENERATED: cli destroy -->
 
 Removes everything in this order: ownership check, Spark jobs, orphaned
 pods, datagen jobs, table removal from the catalog, S3 bucket contents
@@ -822,56 +1078,70 @@ Use `--render` to regenerate a fresh HTML report at
 `lakebench-output/reports/report-<run_id>-<ts>.html` without touching the
 delivered file.
 
+<!-- BEGIN GENERATED: cli report (scripts/gen_cli_reference.py) -->
 ```
-lakebench report [CONFIG_FILE] [OPTIONS]
-```
-
-The optional `CONFIG_FILE` scopes the default-summary lookup to that
-deployment. On a shared `lakebench-output` tree it prevents `report
-other.yaml` from picking up another deployment's latest run.
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--metrics` | `-m` | `./lakebench-output/runs` | Directory containing run subdirectories |
-| `--run` | `-r` | latest | Specific run ID to report on |
-| `--list` | `-l` | `false` | List available runs instead of reporting on one |
-| `--render` |  | `false` | Regenerate HTML to `lakebench-output/reports/report-<run_id>-<ts>.html`. Never rewrites the delivered `report.html` in the run directory. |
-| `--output` |  | (unset) | Explicit output path for `--render`. Refuses to overwrite an existing file unless `--force` is also given. |
-| `--force` |  | `false` | Allow `--render` to overwrite an existing file at `--output`. Requires both `--render` and `--output`. |
-| `--summary` | `-s` | `false` | With `--render`, also print the summary. Without `--render`, the summary is already printed. |
-
-### results
-
-Display pipeline benchmark results in the terminal.
-
-```
-lakebench results [CONFIG_FILE] [OPTIONS]
+lakebench report [RUN|CONFIG] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--metrics` | `-m` | `./lakebench-output/runs` | Directory containing run subdirectories |
-| `--run` | `-r` | latest | Specific run ID |
-| `--format` | `-o` | `table` | Output format: `table`, `json`, `csv` (`-f` is deprecated here) |
+| Argument | Required | Description |
+|---|---|---|
+| `RUN\|CONFIG` | no | A run id, or a configuration YAML file: its deployment's latest run record, so a parallel deployment's newer run is not reported by mistake. Default: ./lakebench.yaml when it exists, otherwise the latest run of any deployment. |
 
-Shows a stage-matrix view of pipeline performance with throughput, data
-volumes, executor counts, and timing for each stage.
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--metrics` | `-m` | path | `lakebench-output/runs` | Directory containing run subdirectories |
+| `--run` | `-r` | text |  | Specific run ID to report on (default: latest) |
+| `--list` | `-l` | flag |  | List available runs instead of reporting on one |
+| `--render` |  | flag |  | Regenerate HTML. Writes a fresh timestamped file at lakebench-output/reports/report-<run_id>-<ts>.html without touching the delivered run-<id>/report.html. |
+| `--output` |  | path |  | Explicit output path for --render. Refuses to overwrite an existing file at this path unless --force is also given. |
+| `--force` |  | flag |  | Allow --render to overwrite an existing file at --output. Requires both --render and --output. |
+| `--summary` | `-s` | flag |  | Also print the key scores when rendering (default action already prints them). |
+| `--format` | `-o` | text |  | Print the run's stage matrix instead of the summary: table, json or csv (json is the pipeline benchmark block) |
+| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
+<!-- END GENERATED: cli report -->
+
+- `--format` does not combine with `--render` or `--list`.
+
+The optional argument is a run id (a leading `run-` is dropped) or a config
+file. A config scopes the lookup to that deployment's latest run, so on a
+shared `lakebench-output` tree `report other.yaml` does not pick up another
+deployment's newer run. With no argument and no `--run`, `report` uses
+`./lakebench.yaml` when it exists and says so ("Showing the latest record of
+deployment NAME"); without one it reads the latest run of any deployment. A
+record written by `lakebench benchmark` (`record_kind: "benchmark"`) is
+never the latest run; read it by its run id. `--list` shows each record's
+kind.
 
 ### logs
 
 Show logs from a component of the deployment.
 
+<!-- BEGIN GENERATED: cli logs (scripts/gen_cli_reference.py) -->
 ```
-lakebench logs CONFIG_FILE COMPONENT [OPTIONS]
+lakebench logs [CONFIG] [COMPONENT] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--file` | | `./lakebench.yaml` | Path to the config (then give only `COMPONENT`) |
-| `--follow` | `-F` | `false` | Follow log output of the newest matching pod (like `tail -f`; `-f` is deprecated here) |
-| `--lines` | `-n` | `100` | Number of lines to show per pod |
-| `--name` | | | For a config with no name: the deployment name (several nameless configs in the directory, or a v1.6 directory). See [Deploy state and nameless teardown](configuration.md#deploy-state-and-nameless-teardown) |
-| `--previous` | | `false` | Read the previous container of each pod (after a crash or restart) |
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
+| `COMPONENT` | no | Component to read: datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, trino-worker, thrift, duckdb, hive, polaris, postgres |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` |  | path |  | Path to configuration YAML file (alternative to positional argument) |
+| `--follow` | `-F` | flag |  | Follow log output (the newest matching pod) |
+| `--lines` | `-n` | integer, at least 1 | `100` | Number of lines to show per pod |
+| `--name` |  | text |  | The deployment name, for a config with no name: in a directory with several nameless configs, or a v1.6 directory (only .lakebench/state.json). Must equal the config's own name when it has one. |
+| `--previous` |  | flag |  | Read the previous (crashed or restarted) container instead |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `1` `logs.no_pod`: `logs` found no pod for the component, or none with a log to read yet (a container still starting, no previous container for `--previous`)
+<!-- END GENERATED: cli logs -->
+
+- `--file` names the config; then give only `COMPONENT`.
+- `--follow` follows the newest matching pod, like `tail -f` (`-f` is
+  deprecated here).
 
 Components: `datagen` (the datagen Job pods); each pipeline stage's Spark
 driver (`bronze-verify`, `silver-build`, `gold-finalize`, `bronze-ingest`,
@@ -894,15 +1164,17 @@ API error (a refused read, a server error) or an unreachable cluster.
 
 View command and execution provenance journal.
 
+<!-- BEGIN GENERATED: cli journal (scripts/gen_cli_reference.py) -->
 ```
 lakebench journal [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--session` | `-s` | | Show events for a specific session |
-| `--last` | `-n` | `10` | Show last N sessions |
-| `--dir` | | `./lakebench-output/journal` | Journal directory |
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--session` | `-s` | text |  | Show events for a specific session |
+| `--last` | `-n` | integer | `10` | Show last N sessions |
+| `--dir` |  | path | `lakebench-output/journal` | Journal directory |
+<!-- END GENERATED: cli journal -->
 
 Displays the history of all lakebench operations including deploys, data
 generation, pipeline runs, and teardowns.
@@ -912,22 +1184,37 @@ generation, pipeline runs, and teardowns.
 Record a reproduction package from a saved run, or verify a later run
 against one. See [Reproduce](deep-dive/reproduce.md).
 
+<!-- BEGIN GENERATED: cli reproduce (scripts/gen_cli_reference.py) -->
 ```
-lakebench reproduce --record RUN_ID --write PACKAGE.yaml [--config-reference PATH]
-lakebench reproduce PACKAGE.yaml [OPTIONS]
+lakebench reproduce [PACKAGE] [OPTIONS]
 ```
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--record` | | | Record mode: build a package from this saved run id |
-| `--write` | | | Record mode: write the package to this path |
-| `--config-reference` | | | Record mode: store this relative config path in the package |
-| `--config` | `-c` | package's config | Verify mode: config to run instead of the package's `config_reference` |
-| `--timeout` | `-t` | auto | Verify mode: per-job timeout in seconds |
-| `--keep` | | `false` | Verify mode: keep the deployment after the run. reproduce never destroys before the run: it refuses an existing namespace or bucket |
-| `--allow-commit-drift` | | `false` | Verify mode: run even when HEAD differs from the recorded commit (refused with exit 14 otherwise) |
-| `--dry-run` | | `false` | Verify mode: parse the package and exit |
-| `--report` | | | Verify mode, registered looks only: the look's report; its sha256 is checked against the look record and nothing is run |
+| Argument | Required | Description |
+|---|---|---|
+| `PACKAGE` | no | Path to a reproduction package YAML (verify mode) |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--record` |  | text |  | Record mode: build a package from this saved run ID |
+| `--write` |  | path |  | Record mode: write the package to this path |
+| `--config-reference` |  | text |  | Record mode: store this relative config path in the package |
+| `--config` | `-c` | path |  | Verify mode: config YAML to run instead of the package's config_reference |
+| `--timeout` | `-t` | integer |  | Verify mode: per-job timeout in seconds |
+| `--keep` |  | flag |  | Verify mode: do not destroy the deployment after the run. reproduce never destroys before the run: it refuses an existing namespace or bucket, and destroys only what it created. |
+| `--allow-commit-drift` |  | flag |  | Verify mode: run even when HEAD differs from the recorded commit. Default is to refuse with exit 14 -- comparing numbers across code paths cannot claim to reproduce anything. |
+| `--dry-run` |  | flag |  | Verify mode: parse the package and exit without running the pipeline |
+| `--report` |  | path |  | Verify mode, registered looks only: the look's report; its sha256 is checked against the look record and nothing is run |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `2` `reproduce.report_required`: `reproduce` of a registered look's package without --report (a look is never rerun)
+- `3` `reproduce.existing_namespace`: `reproduce` would reuse a namespace or bucket that already exists
+- `3` `reproduce.nonce_changed`: the deployment `reproduce` created was replaced before its run or its destroy
+- `3` `reproduce.held_out`: `reproduce` would regenerate a held-out corpus (its look has not run, its seed or the look record cannot be read, or the config names one)
+- `14` `reproduce.drift`: `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol
+- `14` `reproduce.commit_drift`: `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift
+- `14` `reproduce.verify_out_of_band`: `reproduce --report` of a registered look: the report does not match the look record, or the record holds no report sha256
+<!-- END GENERATED: cli reproduce -->
 
 Exit codes: `0` pass; `14` (requirement unmet) for performance or
 correctness drift, commit drift without `--allow-commit-drift`, or a run that
@@ -949,14 +1236,94 @@ AML (financial workload) operator actions. Each submits a Spark job against
 the deployment in the config; `--wait/--no-wait` (default wait) controls
 whether the command waits for it.
 
-| Subcommand | Required arguments | Purpose |
-|---|---|---|
-| `financial score CONFIG` | `--manifest S3_URI --output S3_URI` | Compute rule recall from the datagen manifest and `gold.alerts` |
-| `financial reference-score CONFIG` | `--manifest S3_URI --output-prefix S3_URI` | Run the reference detector and leakage gate over silver and the manifest (`--leakage-threshold`, default 0.1) |
-| `financial replay CONFIG` | `--rule RULE_ID` | Rerun one detection rule against a historical Iceberg snapshot (`--depth-months`, default 60; `--threshold`; `--output-alerts`, default the gold alerts table with an `_replay` suffix) |
-| `financial reproduce CONFIG` | `--alert-id ID` | Reproduce one past alert via Iceberg time travel |
+| Subcommand | Purpose |
+|---|---|
+| `financial score` | Compute rule recall from the datagen manifest and `gold.alerts` |
+| `financial reference-score` | Run the reference detector and leakage gate over silver and the manifest |
+| `financial replay` | Rerun one detection rule against a historical Iceberg snapshot (the output defaults to the gold alerts table with an `_replay` suffix) |
+| `financial reproduce` | Reproduce one past alert via Iceberg time travel |
 
 See [AML Scoring](aml-scoring.md).
+
+<!-- BEGIN GENERATED: cli financial (scripts/gen_cli_reference.py) -->
+#### `financial replay`
+
+Rerun a detection rule against a historical Iceberg snapshot (W8).
+
+```
+lakebench financial replay CONFIG [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG` | yes | Lakebench config YAML |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--rule` |  | text |  | Rule id, e.g. W2_structuring |
+| `--depth-months` |  | integer | `60` | Snapshot depth in months |
+| `--threshold` |  | float |  | Rule-specific threshold override |
+| `--output-alerts` |  | text |  | Fully-qualified output alerts table (catalog.namespace.table). Defaults to the config's gold alerts table with an _replay suffix, so a replay never overwrites the batch run's alerts. Multiple rules can share the table: replay does DELETE WHERE rule_id=X before appending, so each rule owns its rows. |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+
+#### `financial reproduce`
+
+Reproduce a specific past alert via Iceberg time-travel (W10).
+
+```
+lakebench financial reproduce CONFIG [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG` | yes | Lakebench config YAML |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--alert-id` |  | text |  | Alert id to reproduce |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+
+#### `financial score`
+
+Compute recall from datagen manifest and gold.alerts.
+
+```
+lakebench financial score CONFIG [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG` | yes | Lakebench config YAML |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--manifest` |  | text |  | S3 URI to datagen manifest.parquet |
+| `--output` |  | text |  | S3 URI for recall.parquet output |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+
+#### `financial reference-score`
+
+Run the reference detector + leakage gate over silver + manifest.
+
+```
+lakebench financial reference-score CONFIG [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG` | yes | Lakebench config YAML |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--manifest` |  | text |  | S3 URI to datagen manifest.parquet |
+| `--output-prefix` |  | text |  | S3 URI prefix for leakage_report.parquet + reference_metrics.parquet |
+| `--leakage-threshold` |  | float | `0.1` | Min baseline/typology ratio in a structuring band to pass the gate |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+
+Exit paths of every `financial` subcommand:
+
+- `4` `financial.k8s_unreachable`: a `financial` command cannot reach the Kubernetes API
+<!-- END GENERATED: cli financial -->
 
 ### admin
 
@@ -968,8 +1335,6 @@ the cluster-wide `lakebench-cluster-lock` lease.
 | `admin status` | `--operator-namespace` (default `spark-operator`) | Installed operators, lease state, lakebench namespaces, controller `/tmp` size and storage evictions |
 | `admin doctor [CONFIG]` | `-f/--file` | Read-only report on the shared components (the prerequisite checks of [Prerequisites](prerequisites.md): scratch StorageClass, Spark Operator, Stackable, observability stack, OpenShift SCC role), the controller `/tmp` and the lease. Without a config, every component at its default name, with Stackable and the observability stack reported but not failing. Exits 1 when a check fails or cannot run |
 | `admin install [CONFIG]` | `--component/-c C` (repeatable: `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or `all` for what the config uses; `all` needs a config), `--version C=V` (repeatable, exact chart version), `--allow-version-change`, `--dry-run`, `-y/--yes`, `--controller-tmp-size` (spark-operator fresh install, default 8Gi, floor 4Gi), `-f/--file` | Install the shared components that are missing, under the cluster lease, at `--version`, else the config's pin, else the Lakebench default. An installed component is never changed: with everything installed and ready it exits 0 and changes nothing. A config pin that differs from the installed version is kept with a warning; a stale shared Grafana dashboard is re-applied. Chart repos are refreshed before the lease is taken. Exit 1: a status that cannot be read, a release not `deployed`, an install that failed, or a component not ready. Exit 2: a malformed request, a version change without `--allow-version-change`, or `--controller-tmp-size` for an installed operator. Exit 3: refused (a version change, which Lakebench does not automate because helm leaves a chart's `crds/` at the installed version; a second Spark Operator or kube-prometheus-stack; leftover CRDs; a partial Stackable install that is ambiguous or at another version; a StorageClass whose parameters differ from the config's) |
-| `admin install-scratch-storage-class [CONFIG]` | `-f/--file` | Alias of `admin install --component scratch-storage-class` (prints a notice on stderr). An existing class whose parameters differ from the config's now exits 3 |
-| `admin install-spark-operator [CONFIG]` | `--version`, `--operator-namespace`, `--controller-tmp-size`, `-f/--file` | Alias of `admin install --component spark-operator` (prints a notice on stderr). It no longer upgrades an installed operator: `--version` differing from the installed chart exits 2 |
 | `admin repair-operator [CONFIG]` | `--dry-run`, `--controller-tmp-size` (default 8Gi), `-f/--file` | Under the cluster lease: roll a `pending-upgrade` or `pending-rollback` release whose pending revision started at least 10 minutes ago (API server clock) back to the newest deployed revision that watches no deleted or Terminating namespace, and only to a watch-all revision when the operator watches every namespace (exit 3 otherwise, and for `pending-install`); set the watch list with one upgrade to the namespaces the Helm values, the controller or the webhook list that are still Active (exit 3 when some of them watch every namespace and others do not); raise a controller `/tmp` smaller than the given size. No release exits 4. `--dry-run` reads without the lease |
 | `admin migrate-deployment NAMESPACE [CONFIG]` | `--api-server-fingerprint`, `-f/--file` | Stamp identity annotations on a legacy pre-ownership namespace |
 | `admin reclaim-bucket BUCKET [CONFIG]` | `--force-nonempty`, `-f/--file` | Rewrite a bucket's ownership tag to this deployment and this cluster, or on a backend without tagging its owner marker (`.lakebench/owner.json`); refused (exit 3) when the bucket holds objects unless `--force-nonempty`, exit 4 when the cluster fingerprint cannot be computed |
@@ -979,15 +1344,171 @@ The Spark Operator runs spark-submit in its controller pod, which caches
 jars under `/tmp`; the chart default of 1Gi is too small and gets the
 controller evicted. See [Troubleshooting](troubleshooting.md).
 
+<!-- BEGIN GENERATED: cli admin (scripts/gen_cli_reference.py) -->
+#### `admin status`
+
+Show installed operators, lease state, and lakebench-annotated namespaces.
+
+```
+lakebench admin status [OPTIONS]
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--operator-namespace` |  | text | `spark-operator` | Namespace of the Spark Operator. |
+
+#### `admin doctor`
+
+Read-only report on the shared cluster components and the lease.
+
+```
+lakebench admin doctor [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Config file to check against (optional). |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Alternative to positional argument. |
+
+#### `admin release-lock`
+
+Force-release a stale cluster lease.
+
+```
+lakebench admin release-lock [OPTIONS]
+```
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--force` |  | flag |  | Release even a live lease. Use only when you are certain the prior holder crashed and cannot release itself. |
+
+#### `admin install`
+
+Install the shared cluster components a deployment needs.
+
+```
+lakebench admin install [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Config whose names and versions to use (optional). |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Alternative to positional argument. |
+| `--component` | `-c` | text, repeatable |  | scratch-storage-class, spark-operator, stackable, observability, or all (what the config uses). Repeatable. |
+| `--version` |  | text, repeatable |  | COMPONENT=VERSION, the exact chart version for a component that is not installed. Repeatable. An installed component keeps its version. |
+| `--allow-version-change` |  | flag |  | For an installed component at another version: list what a change needs. Lakebench refuses the change itself (exit 3). |
+| `--dry-run` |  | flag |  | Show what would be installed; change nothing. |
+| `--yes` | `-y` | flag |  | Do not ask before installing. |
+| `--controller-tmp-size` |  | text |  | spark-operator only, fresh install: sizeLimit of the controller's /tmp emptyDir (default 8Gi). An installed operator is resized with 'admin repair-operator --controller-tmp-size'. |
+
+#### `admin migrate-deployment`
+
+Stamp deployment-identity annotations on a legacy namespace.
+
+```
+lakebench admin migrate-deployment NAMESPACE [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `NAMESPACE` | yes | Namespace to migrate. |
+| `CONFIG_FILE` | no | Config for this deployment (optional but recommended). |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Alternative to positional argument. |
+| `--api-server-fingerprint` |  | text |  | Override the api-server fingerprint (advanced). |
+
+#### `admin repair-operator`
+
+Repair the shared Spark Operator: stale watch entries, a pending release, a small /tmp.
+
+```
+lakebench admin repair-operator [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `CONFIG_FILE` | no | Config providing operator namespace/version (optional). |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Alternative to positional argument. |
+| `--dry-run` |  | flag |  | Show the repairs without applying them. |
+| `--controller-tmp-size` |  | text | `8Gi` | Raise the controller's /tmp emptyDir sizeLimit to this when it is smaller. |
+
+#### `admin reclaim-bucket`
+
+Rewrite bucket ownership tag to the caller's deployment.
+
+```
+lakebench admin reclaim-bucket BUCKET [CONFIG_FILE] [OPTIONS]
+```
+
+| Argument | Required | Description |
+|---|---|---|
+| `BUCKET` | yes | Bucket to reclaim. |
+| `CONFIG_FILE` | no | Config providing S3 endpoint/credentials + target deployment name. |
+
+| Flag | Short | Type | Default | Description |
+|---|---|---|---|---|
+| `--file` | `-f` | path |  | Alternative to positional argument. |
+| `--force-nonempty` |  | flag |  | Rewrite the ownership tag even if the bucket has objects. Dangerous: another team's data may live there. Default is to refuse when objects are present. |
+<!-- END GENERATED: cli admin -->
+
 ### version
 
 Show version information.
 
+<!-- BEGIN GENERATED: cli version (scripts/gen_cli_reference.py) -->
 ```
 lakebench version
 ```
 
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `0` `version.ok`: `lakebench version` prints the version
+<!-- END GENERATED: cli version -->
+
 No flags. Prints the installed lakebench version.
+
+### Renamed, refused and deprecated commands
+
+Old names still parse so that a 1.6 command line gets an answer instead of
+a usage error: an alias prints one line on stderr and runs the new command,
+a refusal exits 2 and names what to run instead, without echoing anything
+you passed. None of them appears in `--help` or in the reference above. The
+list is `lakebench.cli._aliases`.
+
+<!-- BEGIN GENERATED: cli aliases (scripts/gen_cli_reference.py) -->
+| Old | What happens | Use instead |
+|---|---|---|
+| `results` | alias: one line on stderr, then runs the new command; removed in v1.8 | `report --format table` |
+| `admin install-spark-operator` | alias: one line on stderr, then runs the new command; removed in v1.8 | `admin install --component spark-operator` |
+| `admin install-scratch-storage-class` | alias: one line on stderr, then runs the new command; removed in v1.8 | `admin install --component scratch-storage-class` |
+| `info` | hidden and deprecated since 1.3; still runs | `config show` |
+| `recommend` | hidden and deprecated since 1.3; still runs | `config recommend` |
+| `init --interactive` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `init -i` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `init --advanced` | accepted: the init wizard is removed; init writes a default config (see init --help) | nothing (drop it) |
+| `run --sustained` | accepted: a deprecated alias; prints a warning | `--continuous` |
+| `recommend --extended` | accepted: a deprecated alias; prints a warning | `--slow-datagen` |
+| `recommend -e` | accepted: a deprecated alias; prints a warning | `--slow-datagen` |
+| `config upgrade` | refused (exit 2): it rewrote configs lossily and wrote secrets in plaintext | lakebench init --from OLD.yaml -o NEW.yaml |
+| `clean bronze` | refused (exit 2): a run regenerates its own corpus, so the corpus a record names is the one it read | lakebench run CONFIG --generate --regenerate; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first (an owner action) |
+| `clean data` | refused (exit 2): a run regenerates its own corpus, so the corpus a record names is the one it read | lakebench clean silver CONFIG and lakebench clean gold CONFIG, then lakebench run CONFIG --generate --regenerate; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first (an owner action) |
+| `clean metrics` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
+| `clean journal` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
+| `compare --keep`, `compare --generate`, `compare --local`, `compare --skip-benchmark`, `compare --timeout`, `compare --scale`, `compare --yes`, `compare -y` | refused (exit 2): compare reads stored records and no longer runs configs | lakebench run A.yaml and lakebench run B.yaml (add --repeat 3), then lakebench compare A.yaml B.yaml |
+| `init --access-key`, `init --secret-key` | refused (exit 2): init writes a reference to the variable, never the key | export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY (or the names --credentials-env PREFIX gives) |
+| `clean --metrics-dir`, `clean -m` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
+<!-- END GENERATED: cli aliases -->
 
 ## Common Patterns
 
@@ -1007,9 +1528,7 @@ lakebench destroy --force             # tear down everything
 ### Re-running the Pipeline
 
 ```bash
-lakebench clean data --force          # empty S3 buckets
-lakebench generate --timeout 14400    # regenerate data
-lakebench run                         # re-run pipeline
+lakebench run --generate --regenerate # clear the datagen prefix, regenerate, re-run
 ```
 
 ### Running a Single Stage

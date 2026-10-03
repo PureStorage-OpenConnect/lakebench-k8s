@@ -25,6 +25,7 @@ from lakebench.cli._helpers import (
     print_warning,
     resolve_config_path,
 )
+from lakebench.cli._json import json_option
 from lakebench.config import (
     ConfigError,
     LoadPurpose,
@@ -227,6 +228,44 @@ def _run_query_repl(
     console.print(f"\n[dim]Executed {esc(query_count)} queries. Goodbye![/dim]")
 
 
+def _rows_as_dicts(rows: list[str]) -> list[dict[str, str]]:
+    """Tab-separated result lines as dicts: the first line names the
+    columns; one line alone is keyed by position."""
+    parsed = [row.split("\t") for row in rows if row.strip()]
+    if len(parsed) > 1:
+        headers = [h.strip().strip('"') for h in parsed[0]]
+        return [
+            dict(zip(headers, [v.strip().strip('"') for v in r], strict=False)) for r in parsed[1:]
+        ]
+    return [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
+
+
+def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list[str]], str]:
+    """``(columns, rows, row_format)`` of a result as each executor prints
+    it. Trino: CSV, no header (columns None). Spark Thrift: tsv2, a header
+    line then a line per row. DuckDB: a JSON payload whose ``data`` holds up
+    to 100 rows as Python reprs (one cell each, columns None)."""
+    import csv
+    import io
+
+    if engine == "duckdb":
+        from lakebench.benchmark.fingerprint import last_json_line
+
+        payload = last_json_line((raw or "").strip()) or {}
+        return None, [[str(d)] for d in payload.get("data") or []], "python-repr"
+    if engine == "spark-thrift":
+        # raw_output is already trimmed of beeline's terminal newline
+        # (executor._drop_terminal_newline); nothing more goes, so an empty
+        # last cell, or a row holding one empty string, stays data.
+        text = raw or ""
+        if not text:
+            return None, [], "tsv2"
+        lines = text.split("\n")
+        return lines[0].split("\t"), [ln.split("\t") for ln in lines[1:]], "tsv2"
+    text = (raw or "").strip()
+    return None, [list(r) for r in csv.reader(io.StringIO(text))], "csv"
+
+
 def query(
     config_file: Annotated[
         Path | None,
@@ -296,6 +335,7 @@ def query(
             help="Query timeout in seconds",
         ),
     ] = 120,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Execute SQL queries against the configured query engine.
 
@@ -318,14 +358,16 @@ def query(
     """
     import sys
 
-    from lakebench.metrics import QueryMetrics
-
     config_file = resolve_config_path(config_file, file_option)
 
     # Validate mutually exclusive options
     sources = sum(1 for x in [sql, example, sql_file, interactive] if x)
     if sources > 1:
         print_error("Specify only one of: --sql, --example, --sql-file, --interactive")
+        raise typer.Exit(ExitCode.USAGE)
+
+    if as_json and (output_format != "table" or interactive):
+        print_error("--json does not combine with --format or --interactive")
         raise typer.Exit(ExitCode.USAGE)
 
     # Handle interactive mode early
@@ -442,19 +484,27 @@ def query(
     rows = output.split("\n") if output else []
     row_count = result.rows_returned
 
-    if rows:
+    if as_json:
+        from lakebench.cli import _json
+
+        engine = cfg.architecture.query_engine.type.value
+        columns, cells, row_format = _query_json_rows(engine, output)
+        _json.set_data(
+            {
+                "query_name": query_name,
+                "engine": engine,
+                "count": row_count,
+                "elapsed_seconds": round(elapsed, 3),
+                "columns": columns,
+                "row_format": row_format,
+                "rows": cells,
+            }
+        )
+    elif rows:
         if output_format == "json":
             import json
 
-            parsed = [row.split("\t") for row in rows if row.strip()]
-            if len(parsed) > 1:
-                headers = [h.strip().strip('"') for h in parsed[0]]
-                data = [
-                    dict(zip(headers, [v.strip().strip('"') for v in r], strict=False))
-                    for r in parsed[1:]
-                ]
-            else:
-                data = [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
+            data = _rows_as_dicts(rows)
             emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
@@ -487,38 +537,9 @@ def query(
             "success": True,
         },
     )
+    # The query's numbers are printed above and journalled, never written
+    # into a run record: a record is written once, by the run that owns it.
     _journal_safe(j.end_command, success=True)
-
-    # Record query metrics
-    query_metrics = QueryMetrics(
-        query_name=query_name,
-        query_text=sql,
-        elapsed_seconds=elapsed,
-        rows_returned=row_count,
-        success=True,
-    )
-
-    # Try to append to latest run's metrics.
-    # Scope by deployment name so a parallel deployment's newer run cannot
-    # be mistaken for this deployment's latest and rewritten with our
-    # queries (SP-2 owns deployment_id; this is the interim name-scoped
-    # lookup).
-    from lakebench.metrics import MetricsStorage
-
-    storage = MetricsStorage()
-    # writable=True: this is the rewrite path; never fall back to a legacy
-    # record (which could belong to another deployment) and rewrite it.
-    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
-    from lakebench.deps import runtime as deps_runtime
-
-    refusal = deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
-    if refusal:
-        print_warning(f"Query metrics not appended: {refusal}")
-        latest_run = None
-    if latest_run:
-        latest_run.queries.append(query_metrics)
-        storage.save_run(latest_run)
-        print_info(f"Query metrics appended to run {latest_run.run_id}")
 
 
 def _display_power_results(result: Any) -> None:
@@ -562,6 +583,8 @@ def _latest_tm_run_id(cfg) -> str | None:
         for info in storage.list_runs():
             if info.get("deployment_name") not in (None, cfg.name):
                 continue
+            if info.get("record_kind", "run") != "run":
+                continue  # a benchmark record copies its run's TM status
             run = storage.load_run(info["run_id"])
             if run is None or run.deployment_name != cfg.name:
                 continue
@@ -570,6 +593,114 @@ def _latest_tm_run_id(cfg) -> str | None:
     except Exception:  # noqa: BLE001 -- no history: no investigator queries
         return None
     return None
+
+
+def _save_benchmark_record(
+    storage: Any, parent: Any, result: Any, *, started_at: str | None = None
+) -> Path:
+    """Save ``lakebench benchmark``'s record and return its path.
+
+    *parent* is the deployment's latest run record as loaded (a copy in
+    memory; its file is never opened for writing). The new record is that
+    copy with *result* as its benchmark everywhere a reader takes a QpH
+    from: ``benchmark``, the pipeline benchmark's ``query_benchmark`` and
+    query stage (so its scores, ``compare`` and the HTML card show this
+    benchmark), and the experiment block's benchmark half. A continuous
+    parent's in-stream rounds are dropped from the copy, with the aggregates
+    taken from them and the experiment block's round counts: they are the
+    run's measurement, and the scores would prefer them. The parent's
+    maintenance QpH pair (before and after compaction) is dropped too. ``provenance.benchmark``
+    names the code that ran this benchmark and when. The record gets a new
+    run id, ``record_kind`` "benchmark" and ``parent_run_id``; its series
+    stamp is dropped (a benchmark is not a repetition). The save is a
+    create; a run id already on disk is never overwritten (a second id is
+    tried once)."""
+    import uuid
+    from datetime import datetime
+
+    from lakebench._clock import utc_now
+    from lakebench.metrics import BenchmarkMetrics
+    from lakebench.metrics.collector import StageMetrics
+    from lakebench.metrics.experiment import refresh_benchmark
+    from lakebench.metrics.provenance import run_provenance
+    from lakebench.metrics.storage import RecordExistsError
+
+    record = parent
+    parent_run_id = parent.run_id
+    bench = BenchmarkMetrics(
+        mode=result.mode,
+        cache=result.cache,
+        scale=result.scale,
+        qph=result.qph,
+        total_seconds=result.total_seconds,
+        queries=[q.to_dict() for q in result.queries],
+        iterations=result.iterations,
+        streams=result.streams,
+        stream_results=[s.to_dict() for s in result.stream_results],
+        engine=result.engine,
+    )
+    record.benchmark = bench
+    record.benchmark_rounds = []
+    pb = record.pipeline_benchmark
+    if pb is not None:
+        pb.query_benchmark = bench
+        pb.benchmark_rounds = []
+        pb.stages = [s for s in pb.stages if s.stage_type != "query"]
+        pb.stages.append(
+            StageMetrics(
+                stage_name="query",
+                stage_type="query",
+                engine=result.engine or "trino",
+                elapsed_seconds=result.total_seconds,
+                success=True,
+                input_size_gb=record.gold_size_gb,
+                queries_executed=len(result.queries),
+                queries_per_hour=result.qph,
+            )
+        )
+        # Aggregates of the parent's benchmark that the copy would otherwise
+        # carry next to its own QpH: the in-stream QpH trend and event age,
+        # and the maintenance pair (QpH before and after compaction and the
+        # value between them), measured by the run's own benchmark rounds.
+        pb.qph_degradation_pct = None
+        pb.query_time_event_age_seconds = 0.0
+        pb.pre_compaction_qph = 0.0
+        pb.post_compaction_qph = 0.0
+        pb.maintenance_value_pct = None
+        pb.maintenance_value_reason = ""
+        pb.maintenance_paired_queries = 0
+        pb.pre_compaction_benchmark = None
+        if pb.pipeline_mode != "sustained":
+            # Batch elapsed is the stage-time sum, which held the parent's
+            # query stage. Continuous elapsed is the stream window's wall
+            # clock (the stages overlap) and does not include the benchmark.
+            pb.total_elapsed_seconds = sum(s.elapsed_seconds for s in pb.stages)
+    # The stored experiment block is never rebuilt; bring its benchmark half
+    # (results, iterations, mode) in line with the benchmark it now holds.
+    refresh_benchmark(record)
+    record.provenance = dict(record.provenance or {})
+    record.provenance["benchmark"] = {
+        **run_provenance(),
+        "started_at": started_at,
+        "ended_at": utc_now().isoformat(),
+    }
+    record.record_kind = "benchmark"
+    record.parent_run_id = parent_run_id
+    record.series = None
+
+    def _new_id() -> str:
+        return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+    record.run_id = _new_id()
+    if pb is not None:
+        pb.run_id = record.run_id
+    try:
+        return Path(storage.save_run(record))
+    except RecordExistsError:
+        record.run_id = _new_id()
+        if pb is not None:
+            pb.run_id = record.run_id
+        return Path(storage.save_run(record))
 
 
 def benchmark(
@@ -663,7 +794,7 @@ def benchmark(
         lakebench benchmark test-config.yaml --class scan
     """
     from lakebench.benchmark import BenchmarkRunner
-    from lakebench.metrics import BenchmarkMetrics, MetricsStorage
+    from lakebench.metrics import MetricsStorage
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -698,14 +829,15 @@ def benchmark(
     )
 
     # Before the benchmark runs: say now, not after an hour of queries, that
-    # its results will not be added to the latest run (another dependency set).
+    # its results will not be recorded against the latest run (another
+    # dependency set).
     from lakebench.deps import runtime as deps_runtime
     from lakebench.metrics import MetricsStorage as _Storage
 
     _latest = _Storage().get_latest_run_for_deployment(cfg.name, writable=True)
     early_refusal = deps_runtime.attach_refusal(cfg, _latest) if _latest else None
     if early_refusal and _latest is not None:
-        print_warning(f"Results may not be added to run {_latest.run_id}: {early_refusal}")
+        print_warning(f"Results may not be recorded against run {_latest.run_id}: {early_refusal}")
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -727,6 +859,9 @@ def benchmark(
         details={"mode": effective_mode, "cache": effective_cache, "scale": scale},
     )
 
+    from lakebench._clock import utc_now
+
+    benchmark_started_at = utc_now().isoformat()
     try:
         runner = BenchmarkRunner(cfg, tm_run_id=_latest_tm_run_id(cfg))
         if query_class == "investigator" and runner.tm_run_id is None:
@@ -807,41 +942,34 @@ def benchmark(
         )
         raise typer.Exit(ExitCode.FAILED)
 
-    # Save to latest metrics if available. Scope by deployment name so a
-    # parallel deployment's newer run cannot be rewritten with this
-    # benchmark's metrics (SP-2 owns deployment_id; this is the interim
-    # name-scoped lookup).
+    # Record the benchmark in a record of its own: a copy of the deployment's
+    # latest run record (read, never written) with this benchmark, under a new
+    # run id, record_kind "benchmark" and parent_run_id. Scoped by deployment
+    # name, with no fallback to a legacy record of unknown deployment, so a
+    # parallel deployment's run is never the parent.
     storage = MetricsStorage()
-    # writable=True: this is the rewrite path; never fall back to a legacy
-    # record (which could belong to another deployment) and rewrite it.
-    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
+    parent = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     from lakebench.deps import runtime as deps_runtime
 
-    refusal = deps_runtime.attach_refusal(cfg, latest_run) if latest_run else None
+    refusal = deps_runtime.attach_refusal(cfg, parent) if parent else None
     if refusal:
-        print_warning(f"Benchmark metrics not appended: {refusal}")
-        latest_run = None
-    if latest_run:
-        bench_metrics = BenchmarkMetrics(
-            mode=primary_result.mode,
-            cache=primary_result.cache,
-            scale=primary_result.scale,
-            qph=primary_result.qph,
-            total_seconds=primary_result.total_seconds,
-            queries=[q.to_dict() for q in primary_result.queries],
-            iterations=primary_result.iterations,
-            streams=primary_result.streams,
-            stream_results=[s.to_dict() for s in primary_result.stream_results],
-            engine=primary_result.engine,
+        print_warning(f"Benchmark not recorded: {refusal}")
+        parent = None
+    elif parent is None:
+        print_warning(
+            f"Benchmark not recorded: deployment {cfg.name} has no run record to measure "
+            "against; `lakebench run` records one"
         )
-        latest_run.benchmark = bench_metrics
-        # The stored experiment block is never rebuilt; bring its benchmark
-        # half (results, iterations, mode) in line with what replaced it.
-        from lakebench.metrics.experiment import refresh_benchmark
-
-        refresh_benchmark(latest_run)
-        storage.save_run(latest_run)
-        print_info(f"Benchmark metrics appended to run {latest_run.run_id}")
+    if parent is not None:
+        parent_id = parent.run_id
+        record_path = _save_benchmark_record(
+            storage, parent, primary_result, started_at=benchmark_started_at
+        )
+        record_id = record_path.parent.name.removeprefix("run-")
+        print_info(
+            f"Benchmark recorded as run {record_id} (a benchmark record of run "
+            f"{parent_id}, which is unchanged); lakebench report {record_id}"
+        )
 
     _journal_safe(
         j.record,

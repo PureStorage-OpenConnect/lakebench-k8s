@@ -145,7 +145,6 @@ def test_every_exit_code_has_a_meaning():
 PLANNED_BY = {
     "admin.version_change_in_use": "SD-10",
     "admin.version_change_needs_flag": "SD-10",
-    "alias.refused": "CC-28",
     "financial.reproduce.mismatch": "AM-18",
     "financial.reproduce.snapshot_gone": "AM-18",
     "run.protected_corpus": "AM-22",
@@ -962,7 +961,11 @@ def _scenario_series_corpus_changed(monkeypatch, tmp_path):
 
 def _scenario_confirm_declined(monkeypatch, tmp_path):
     cfg = _init_config(tmp_path)
-    return _runner().invoke(app, ["clean", "metrics", str(cfg)], input="n\n")
+    return _runner().invoke(app, ["clean", "silver", str(cfg)], input="n\n")
+
+
+def _scenario_alias_refused(monkeypatch, tmp_path):
+    return _runner().invoke(app, ["clean", "bronze", str(tmp_path / "secret-name.yaml")])
 
 
 # -- compare over stored records -------------------------------------------------
@@ -1500,6 +1503,7 @@ def _scenario_destroy_incarnation_mismatch(monkeypatch, tmp_path):
 
 SCENARIOS = {
     "config.upgrade_refused": _scenario_config_upgrade_refused,
+    "alias.refused": _scenario_alias_refused,
     "deploy.state_copied": _scenario_deploy_state_copied,
     "destroy.incarnation_mismatch": _scenario_destroy_incarnation_mismatch,
     "deploy.state_unrecordable": _scenario_deploy_state_unrecordable,
@@ -1577,7 +1581,8 @@ SCENARIOS = {
 
 # The line each path must print on stderr, where it prints one.
 EXPECTED_STDERR = {
-    "config.upgrade_refused": "ERROR  `config upgrade` is removed",
+    "config.upgrade_refused": "ERROR  `lakebench config upgrade` is removed",
+    "alias.refused": "ERROR  `lakebench clean bronze` is removed",
     "unhandled_exception": "ERROR  RuntimeError: unexpected [/tmp] failure",
     "confirm.non_tty": "ERROR  Not confirmed",
     "sigint": "ERROR  Interrupted.",

@@ -1,0 +1,93 @@
+{
+  "schema": "lb-cli/1",
+  "command": "report",
+  "exit_code": 0,
+  "data": {
+    "run_id": "20260929-212900-5105a0",
+    "record_kind": "run",
+    "parent_run_id": null,
+    "deployment_name": "pipe-c360-b10",
+    "start_time": "2026-09-30T03:29:00.802293+00:00",
+    "verdict": "PASSED",
+    "pipeline_mode": "batch",
+    "scores": {
+      "time_to_value_seconds": 365.38,
+      "total_elapsed_seconds": 448.56,
+      "total_data_processed_gb": 295.693,
+      "pipeline_throughput_gb_per_second": 0.8093,
+      "total_core_hours": 2.23,
+      "compute_efficiency_gb_per_core_hour": 132.4355,
+      "composite_qph": 855.6,
+      "scale_ratio": 0.991,
+      "benchmark_samples_per_query": 3,
+      "qph_spread": {
+        "low": 820.5,
+        "high": 891.1,
+        "relative_range": 0.0826
+      },
+      "maintenance_elapsed_seconds": 253.98,
+      "maintenance_pct_of_pipeline": 56.62,
+      "pre_compaction_file_count": 1200,
+      "post_compaction_file_count": 1098,
+      "compaction_ratio": 1.09,
+      "pre_compaction_qph": 816.4,
+      "post_compaction_qph": 855.6,
+      "maintenance_value_pct": null,
+      "maintenance_paired_queries": 8,
+      "maintenance_value_reason": "within noise: +4.8% is inside the within-round spread (pre 12.1%, post 8.3% of median seconds)",
+      "maintenance_settle_seconds": 133.4,
+      "maintenance_settled": true,
+      "maintenance_settle_capped": false,
+      "maintenance_settle_verified": true
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "elapsed_seconds": 60.446769,
+        "input_size_gb": 0.0,
+        "output_size_gb": 99.11894891876727,
+        "throughput_gb_per_second": 0.0,
+        "executor_count": 0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "elapsed_seconds": 85.529105,
+        "input_size_gb": 99.119,
+        "output_size_gb": 99.11894891876727,
+        "throughput_gb_per_second": 2.776442577030812,
+        "executor_count": 4
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "elapsed_seconds": 190.676524,
+        "input_size_gb": 99.119,
+        "output_size_gb": 97.45500855147839,
+        "throughput_gb_per_second": 0.6568522200132538,
+        "executor_count": 8
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "batch",
+        "elapsed_seconds": 78.24714,
+        "input_size_gb": 97.45500855147839,
+        "output_size_gb": 6.895419210195541e-05,
+        "throughput_gb_per_second": 1.2454769407735335,
+        "executor_count": 4
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "elapsed_seconds": 33.66209121007705,
+        "input_size_gb": 6.895419210195541e-05,
+        "output_size_gb": 0.0,
+        "throughput_gb_per_second": 0.0,
+        "executor_count": 0
+      }
+    ],
+    "delivered_report": null
+  },
+  "errors": []
+}

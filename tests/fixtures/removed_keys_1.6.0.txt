@@ -1,0 +1,11 @@
+# Removed config keys at v1.6.0, dotted from the root (scripts/upgrading.py snapshot).
+# commit: b774dad1
+architecture.pipeline.medallion.silver.strategy
+architecture.table_format.hudi
+architecture.workload.customer360.channels
+architecture.workload.customer360.event_types
+architecture.workload.customer360.quality_distribution
+architecture.workload.datagen.checkpoint
+architecture.workload.datagen.uploaders
+images.pull_secrets
+platform.storage.scratch.create_storage_class

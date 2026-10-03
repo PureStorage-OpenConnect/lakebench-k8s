@@ -15,7 +15,17 @@ Lakebench produces two distinct measurements:
 
 The scorecard includes QpH as one of its scores (`composite_qph`), but they
 are separate operations. `lakebench run` produces both automatically.
-`lakebench benchmark` runs only the query engine benchmark.
+`lakebench benchmark` runs only the query engine benchmark. It saves its
+result as a record of its own, `record_kind: "benchmark"` with
+`parent_run_id` naming the run it measured: a copy of that run's record with
+the new benchmark, under a new run id. The run's own record is never
+rewritten, and a benchmark record is never a deployment's "latest run" for
+`report` or `compare`, nor a candidate or baseline for the perf gate. Its
+QpH, scores and query stage are the new benchmark's; its pipeline stages,
+sizes and timings are the run's, and `provenance.benchmark` names the code
+that ran the benchmark and when. A continuous run's in-stream rounds and the
+run's maintenance QpH pair (before and after compaction) are not copied. `lakebench query` prints its result and writes no
+record.
 
 ---
 
@@ -889,7 +899,7 @@ rounds for trend analysis.
 | `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
 | `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
 | `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
-| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Empty bronze (`lakebench clean bronze`) and rerun; the report warns above 1.05 and the perf gate refuses the run |
+| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun without `--skip-generate`: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts (a Customer 360 rerun over existing tables also needs `--force-reset`); the report warns above 1.05 and the perf gate refuses the run |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
 | Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
@@ -1012,10 +1022,14 @@ observed none, is not a difference). The rest is provenance only:
 Every `lakebench run` delivers `lakebench-output/runs/run-<id>/report.html`
 once, at the end of the run. That file is the shareable artifact.
 
-Print the summary of the latest run (does not modify `report.html`):
+Print the summary of the latest run (does not modify `report.html`). With
+no argument, `report` reads `./lakebench.yaml` when it exists and shows the
+latest run of that deployment; otherwise the latest run of any deployment:
 
 ```bash
 lakebench report
+lakebench report other.yaml              # the latest run of other.yaml's deployment
+lakebench report 20260201-143052-a1b2c3  # one run, by id
 ```
 
 List all available runs:
@@ -1045,12 +1059,13 @@ breakdown of the query engine benchmark, and the configuration snapshot.
 
 ### Viewing Results on the Command Line
 
-Use `lakebench results` to display the stage-matrix view in the terminal:
+Use `lakebench report --format` to display the stage-matrix view in the
+terminal:
 
 ```bash
-lakebench results                      # latest run, table format
-lakebench results --format json        # JSON output
-lakebench results --run <id>           # specific run
+lakebench report --format table          # latest run, table format
+lakebench report --format json           # the pipeline benchmark block as JSON
+lakebench report --run <id> --format csv # specific run, CSV
 ```
 
 Use `lakebench report` (no flags) to print key scores directly in the terminal

@@ -63,7 +63,7 @@ pip install lakebench-k8s
 lakebench init                                 # writes lakebench.yaml; export the two S3 key variables it names
 lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
-lakebench results lakebench.yaml               # view scorecard
+lakebench report lakebench.yaml                # view scorecard
 lakebench destroy lakebench.yaml               # tear down what this deployment owns
 ```
 
@@ -213,9 +213,13 @@ maintenance that actually ran, the Lakebench-imposed limits that applied
 and whether they bound, the support state, and a fingerprint of each
 query's result.
 
-Upgrading from 1.5: most earlier numbers are not comparable with 1.6 (for
-example, no Iceberg snapshot expiry or Delta VACUUM ever ran before 1.6.0).
-See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
+Upgrading from 1.6: every change that can break a 1.6 config, command line
+or script, with what to do, is in
+[UPGRADING-1.7.md](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/UPGRADING-1.7.md);
+redeploy each deployment once after upgrading. Upgrading from 1.5: most
+earlier numbers are not comparable with 1.6 (for example, no Iceberg
+snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
+[CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
 
 ## How It Works
 
@@ -296,8 +300,7 @@ See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blo
 | `benchmark` | Run the workload's query benchmark standalone |
 | `query` | Execute ad-hoc SQL against the active engine |
 | `status` | Show deployment status |
-| `results` | Show the latest run's scorecard in the terminal |
-| `report` | Generate HTML scorecard report |
+| `report` | Show a run's scorecard in the terminal (`--format` for the stage matrix, `--render` for HTML) |
 | `compare` | Compare stored runs; show performance only when their results match |
 | `config recommend` | Recommend a scale factor for the connected cluster |
 | `config recipes` | List recipes and their support state per workload and mode |

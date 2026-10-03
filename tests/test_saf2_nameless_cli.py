@@ -131,7 +131,7 @@ def test_destroy_refuses_a_v16_name_two_nameless_configs_share(tmp_path, monkeyp
 
 @pytest.mark.parametrize(
     "argv",
-    [["stop", "CFG"], ["clean", "bronze", "CFG", "--force"]],
+    [["stop", "CFG"], ["clean", "silver", "CFG", "--force"]],
     ids=["stop", "clean"],
 )
 def test_nameless_config_refused_by_stop_and_clean(argv, tmp_path, monkeypatch):

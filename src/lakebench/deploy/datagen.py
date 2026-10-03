@@ -57,8 +57,8 @@ def clear_bronze_data_clock(namespace: str) -> None:
     """Set ``lakebench-silver-state``'s ``bronze_data_clock`` to "".
 
     The clock is bronze-verify's max(event_ts) of the bronze data; once that
-    data is gone or replaced (destroy emptied bronze, ``clean bronze``, a
-    fresh generate) it is stale, and silver's LB_DATA_CLOCK ladder must fall
+    data is gone or replaced (destroy emptied bronze, a fresh generate or
+    regenerate) it is stale, and silver's LB_DATA_CLOCK ladder must fall
     through instead. Conditional on the resourceVersion read. A missing
     ConfigMap or namespace raises a 404 ApiException for the caller to
     ignore; the rebuild-epoch counters are never touched.

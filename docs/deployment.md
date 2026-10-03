@@ -339,22 +339,22 @@ If you want to delete data without destroying infrastructure (for example,
 to re-run data generation), use the `clean` command:
 
 ```bash
-# Empty all S3 buckets (bronze + silver + gold)
-lakebench clean data my-config.yaml
-
-# Empty a single layer
-lakebench clean bronze my-config.yaml
+# Empty the silver or the gold layer
 lakebench clean silver my-config.yaml
 lakebench clean gold my-config.yaml
 
-# Delete local metrics and reports
-lakebench clean metrics my-config.yaml
-
-# Delete journal session files
-lakebench clean journal my-config.yaml
+# Regenerate bronze: the run clears its datagen prefix, then generates
+lakebench run my-config.yaml --generate --regenerate
 ```
 
-All `clean` targets prompt for confirmation unless `--force` is passed.
+`clean bronze` and `clean data` are refused (exit 2) and name that `run`
+command (for `data`, after `clean silver` and `clean gold`): a run
+regenerates its own corpus, so the corpus a record names is the one it read.
+On a bucket the deployment did not create, `--regenerate` refuses too; an
+owner runs `lakebench admin reclaim-bucket` first. `clean metrics` and `clean journal` are refused too: run
+records and journals are evidence, and the CLI does not delete them.
+
+`clean` prompts for confirmation unless `--force` is passed.
 Kubernetes resources are not affected by `clean`. Before it empties a
 layer's bucket, `clean` removes that layer's workload tables from the
 catalog, so the next run creates them afresh instead of failing on entries

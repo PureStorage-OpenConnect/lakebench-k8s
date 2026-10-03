@@ -38,6 +38,7 @@ from lakebench.cli._helpers import (
 from lakebench.cli._helpers import (
     get_journal as get_journal,
 )
+from lakebench.cli._json import json_option
 from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
     ConfigError,
@@ -142,6 +143,10 @@ app.command(name="benchmark")(_benchmark_fn)
 app.command(name="reproduce")(_reproduce_fn)
 app.command(name="plan")(_plan_fn)
 
+from lakebench.cli import _aliases  # noqa: E402
+
+_aliases.register(app)
+
 
 # Re-exports for backward compatibility (tests import these from lakebench.cli)
 from lakebench.cli._deploy import _preflight_check as _preflight_check  # noqa: E402
@@ -163,8 +168,20 @@ from lakebench.cli._sustained import (  # noqa: E402
 
 
 # Re-export for backward compatibility (report command references this)
+def _note_benchmark_record(metrics) -> None:
+    """One stderr line when *metrics* is a ``lakebench benchmark`` record: its
+    pipeline numbers are its parent run's, its benchmark is its own."""
+    if getattr(metrics, "record_kind", "run") == "benchmark":
+        print_info(
+            f"Run {metrics.run_id} is a benchmark record of run "
+            f"{metrics.parent_run_id or 'unknown'}: the benchmark is its own, the "
+            "pipeline numbers are that run's"
+        )
+
+
 def _print_report_summary(metrics) -> None:
     """Print key scores from saved metrics to the terminal."""
+    _note_benchmark_record(metrics)
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("No pipeline benchmark data in this run.")
@@ -843,6 +860,7 @@ def status(
         str | None,
         typer.Option("--name", help=NAME_OPTION_HELP),
     ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Show deployment status.
 
@@ -867,6 +885,9 @@ def status(
     if local:
         from lakebench.cli._local import print_local_status, status_local
 
+        if as_json:
+            print_error("--json covers cluster status; it does not combine with --local")
+            raise typer.Exit(ExitCode.USAGE)
         if cfg is None:
             print_error("Local status needs a config file")
             raise typer.Exit(ExitCode.USAGE)
@@ -978,6 +999,7 @@ def status(
     console.print(table)
 
     # Datagen job progress, while it runs (informational, never drift)
+    datagen: dict[str, int] | None = None
     try:
         batch_v1 = k8s_client.BatchV1Api()
         job = batch_v1.read_namespaced_job(
@@ -987,6 +1009,7 @@ def status(
         succeeded = job.status.succeeded or 0
         completions = job.spec.completions or 1
         if active > 0 or succeeded < completions:
+            datagen = {"succeeded": succeeded, "completions": completions, "active": active}
             console.print()
             console.print(
                 f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
@@ -999,6 +1022,18 @@ def status(
         logger.debug("Could not check datagen job: %s", e)
 
     verdict, names = ops.status_exit(rows, config_known=cfg is not None)
+    from lakebench.cli import _json
+
+    _json.set_data(
+        {
+            "namespace": ns,
+            "verdict": verdict,
+            "components": [
+                {"name": r.name, "kind": r.kind, "state": r.state, "detail": r.detail} for r in rows
+            ],
+            "datagen": datagen,
+        }
+    )
     if verdict == "drift":
         print_error(f"Drift: {', '.join(names)} not ready or not found")
         log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
@@ -1409,325 +1444,47 @@ def info(
         logger.debug("Could not check cluster feasibility: %s", e)
 
 
-@app.command()
-def report(
-    config_file: Annotated[
-        Path | None,
-        typer.Argument(
-            help=(
-                "Path to configuration YAML file. When given, the "
-                "'latest run' lookup is scoped to this deployment so a "
-                "parallel deployment's newer run is not reported by mistake."
-            ),
-        ),
-    ] = None,
-    metrics_dir: Annotated[
-        Path,
-        typer.Option(
-            "--metrics",
-            "-m",
-            help="Directory containing run subdirectories",
-        ),
-    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
-    run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--run",
-            "-r",
-            help="Specific run ID to report on (default: latest)",
-        ),
-    ] = None,
-    list_runs: Annotated[
-        bool,
-        typer.Option(
-            "--list",
-            "-l",
-            help="List available runs instead of reporting on one",
-        ),
-    ] = False,
-    render: Annotated[
-        bool,
-        typer.Option(
-            "--render",
-            help=(
-                "Regenerate HTML. Writes a fresh timestamped file at "
-                "lakebench-output/reports/report-<run_id>-<ts>.html without "
-                "touching the delivered run-<id>/report.html."
-            ),
-        ),
-    ] = False,
-    output_path: Annotated[
-        Path | None,
-        typer.Option(
-            "--output",
-            help=(
-                "Explicit output path for --render. Refuses to overwrite an "
-                "existing file at this path unless --force is also given."
-            ),
-        ),
-    ] = None,
-    force: Annotated[
-        bool,
-        typer.Option(
-            "--force",
-            help=(
-                "Allow --render to overwrite an existing file at --output. "
-                "Requires both --render and --output."
-            ),
-        ),
-    ] = False,
-    summary: Annotated[
-        bool,
-        typer.Option(
-            "--summary",
-            "-s",
-            help="Also print the key scores when rendering (default action already prints them).",
-        ),
-    ] = False,
-) -> None:
-    """Report on a saved benchmark run.
-
-    Default behaviour is to print the summary of the requested run (or the
-    latest one) and point at the delivered ``run-<id>/report.html`` without
-    modifying it. Pass ``--render`` to regenerate a fresh HTML file; the
-    output goes to ``lakebench-output/reports/report-<run_id>-<ts>.html`` so
-    the delivered artifact is never rewritten silently. Pass ``--list`` to
-    show all saved runs.
-    """
-    from lakebench.metrics import MetricsStorage
-    from lakebench.reports import ReportGenerator
-
-    storage = MetricsStorage(metrics_dir)
-
-    # Scope the "latest run" lookup to a specific deployment when a config
-    # file is given. Under parallel deployments the shared runs/ tree can
-    # have another deployment's newer record on top; without scoping,
-    # `report` would display it (SP-2 owns the durable deployment_id fix).
-    deployment_name: str | None = None
-    if config_file is not None:
-        try:
-            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
-        except ConfigError as e:
-            print_error(f"Config error: {e}")
-            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-
-    # List runs mode
-    if list_runs:
-        runs = storage.list_runs()
-        if not runs:
-            print_warning(f"No runs found in {metrics_dir}")
-            return
-
-        console.print(Panel(f"Available runs in [bold]{esc(metrics_dir)}[/bold]", expand=False))
-
-        table = Table()
-        table.add_column("Run ID", style="cyan")
-        table.add_column("Deployment")
-        table.add_column("Date")
-        table.add_column("Status")
-        table.add_column("Duration")
-
-        from lakebench.metrics.verdict import passed as _record_passed
-        from lakebench.metrics.verdict import verdict_status as _verdict_status
-
-        for r in runs:
-            # Prefer the persisted verdict (OD-6: v1.6 records) and fall
-            # back to raw ``success`` for legacy v1.5 records.
-            if _record_passed(r):
-                status = "[green]Passed[/green]"
-            elif (_verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
-                status = "[yellow]Interrupted[/yellow]"
-            else:
-                status = "[red]Failed[/red]"
-            elapsed = f"{r.get('total_elapsed_seconds', 0):.1f}s"
-            date = r.get("start_time", "")[:10] if r.get("start_time") else ""
-            table.add_row(
-                r.get("run_id", ""),
-                r.get("deployment_name", ""),
-                date,
-                status,
-                elapsed,
-            )
-
-        console.print(table)
-        return
-
-    # Guard rails on the option combinations. --force and --output only
-    # make sense with --render: they are opt-ins to a regenerate action.
-    if force and not render:
-        print_error("--force requires --render")
-        raise typer.Exit(ExitCode.USAGE)
-    if output_path is not None and not render:
-        print_error("--output requires --render")
-        raise typer.Exit(ExitCode.USAGE)
-    # --force only makes sense with --output: the default timestamped path
-    # is collision-free in practice, so --force there is a no-op that only
-    # confuses the caller. Matches the help text.
-    if force and output_path is None:
-        print_error("--force requires --output (the default timestamped path is collision-free)")
-        raise typer.Exit(ExitCode.USAGE)
-
-    if render:
-        try:
-            generator = ReportGenerator(metrics_dir)
-            report_path = generator.generate_report(
-                run_id,
-                output_path=output_path,
-                force=force,
-                deployment_name=deployment_name,
-            )
-        except FileExistsError as e:
-            print_error(str(e))
-            # Only mention --output in the hint when the user actually set it;
-            # the default timestamped path never collides in practice.
-            if output_path is not None:
-                print_info("Pass --force to overwrite the file at --output.")
-            else:
-                print_info("Retry in a moment; the timestamp will differ.")
-            # An existing --output file is a usage error; a default-path
-            # collision is a transient failure.
-            code = ExitCode.USAGE if output_path is not None else ExitCode.FAILED
-            raise typer.Exit(code)  # noqa: B904
-        except ValueError as e:
-            print_error(str(e))
-            print_info("Use 'lakebench report --list' to see available runs")
-            # An unknown run id is a bad argument; no runs at all is a failed lookup.
-            raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
-
-        # Also print the summary when asked; keep the default quiet so
-        # scripts that watch stdout for the path have a clean output.
-        if summary:
-            resolved = (
-                storage.load_run(run_id)
-                if run_id
-                else storage.get_latest_run_for_deployment(deployment_name)
-            )
-            if resolved:
-                _print_report_summary(resolved)
-
-        console.print(
-            Panel(
-                f"[green]Report rendered[/green]\n\n"
-                f"Output: {esc(report_path)}\n\n"
-                f"The delivered run directory report.html is unchanged.",
-                title="Report Rendered",
-                expand=False,
-            )
-        )
-        return
-
-    # Default action: print the summary; do not regenerate the HTML.
-    metrics = (
-        storage.load_run(run_id)
-        if run_id
-        else storage.get_latest_run_for_deployment(deployment_name)
-    )
-    if metrics is None:
-        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
-        print_info("Use 'lakebench report --list' to see available runs")
-        # An unknown run id is a bad argument; no runs at all is a failed lookup.
-        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
-
-    _print_report_summary(metrics)
-
-    # Not run_dir(): that creates the directory, and report only reads here.
-    delivered = storage.metrics_dir / f"run-{metrics.run_id}" / "report.html"
-    if delivered.exists():
-        console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
-        console.print(
-            "[dim]Run 'lakebench report --render' to write a fresh HTML "
-            "at lakebench-output/reports/.[/dim]"
-        )
-    else:
-        console.print(
-            f"[dim]No delivered report at {esc(delivered)}. "
-            "Run 'lakebench report --render' to generate one.[/dim]"
-        )
+_REPORT_FORMATS = ("table", "json", "csv")
 
 
-@app.command()
-def results(
-    config_file: Annotated[
-        Path | None,
-        typer.Argument(
-            help="Path to configuration YAML file (used for deployment name; optional)",
-        ),
-    ] = None,
-    metrics_dir: Annotated[
-        Path,
-        typer.Option(
-            "--metrics",
-            "-m",
-            help="Directory containing run subdirectories",
-        ),
-    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
-    run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--run",
-            "-r",
-            help="Specific run ID (default: latest)",
-        ),
-    ] = None,
-    output_format: Annotated[
-        str | None,
-        typer.Option(
-            "--format",
-            "-o",
-            help="Output format: table, json, csv (default: table)",
-        ),
-    ] = None,
-    format_short_f: Annotated[
-        str | None,
-        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
-    ] = None,
-) -> None:
-    """Display pipeline benchmark results.
+def _report_target(
+    target: str | None, run_option: str | None, *, use_default: bool
+) -> tuple[Path | None, str | None]:
+    """``report``'s positional as ``(config, run id)``.
 
-    Shows the stage-matrix view of pipeline performance -- each stage
-    as a column with consistent metrics as rows. Use --format json or
-    --format csv for machine-readable output.
-
-    Accepts an optional config file argument. When provided, scopes the
-    default-summary lookup to that deployment (so ``results other.yaml``
-    on a shared lakebench-output tree does not read another deployment's
-    latest run).
-    """
-    if format_short_f is not None:
-        warn_deprecated_short_f("--format / -o")
-        if output_format is not None and output_format != format_short_f:
-            print_error(f"both --format {output_format} and -f {format_short_f} given")
+    An existing file, or a name ending in .yaml or .yml, is a config; any
+    other value is a run id (a leading ``run-`` is dropped); a run directory
+    stands for its run id. With no
+    positional and no ``--run``, ``./lakebench.yaml`` is the config when it
+    exists and *use_default* is set (not for ``--list``, which lists every
+    deployment)."""
+    if target is None:
+        default = Path(DEFAULT_CONFIG)
+        if run_option is None and use_default and default.is_file():
+            return default, None
+        return None, None
+    path = Path(target)
+    if path.is_dir() and (path / "metrics.json").is_file():
+        target = path.resolve().name  # a run directory: its id
+    elif path.is_file() or path.suffix in (".yaml", ".yml"):
+        if not path.is_file():
+            print_error(f"Config file not found: {target}")
             raise typer.Exit(ExitCode.USAGE)
-        output_format = format_short_f
-    if output_format is None:
-        output_format = "table"
+        return path, None
+    run = target.removeprefix("run-")
+    if run_option is not None and run_option != run:
+        print_error(f"Two runs given: {run} and --run {run_option}; pass one")
+        raise typer.Exit(ExitCode.USAGE)
+    return None, run
+
+
+def _print_stage_matrix(metrics, output_format: str) -> None:
+    """The stage matrix of *metrics*: a table, the pipeline benchmark block
+    as JSON, or the matrix as CSV. Exits 1 when the run has no pipeline
+    benchmark."""
     import json as _json
 
-    from lakebench.metrics import MetricsStorage
-
-    storage = MetricsStorage(metrics_dir)
-
-    # Scope the "latest run" lookup to a specific deployment when the
-    # optional config file was given (see ``report`` for the same pattern).
-    deployment_name: str | None = None
-    if config_file is not None:
-        try:
-            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
-        except ConfigError as e:
-            print_error(f"Config error: {e}")
-            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-
-    if run_id:
-        metrics = storage.load_run(run_id)
-    else:
-        metrics = storage.get_latest_run_for_deployment(deployment_name)
-
-    if metrics is None:
-        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
-        print_info("Use 'lakebench report --list' to see available runs")
-        # An unknown run id is a bad argument; no runs at all is a failed lookup.
-        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
-
+    _note_benchmark_record(metrics)
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("This run does not have pipeline benchmark data.")
@@ -1817,6 +1574,352 @@ def results(
         f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s"
     )
     console.print()
+
+
+def _report_list_row(r: dict) -> dict:
+    """A ``report --list`` row for ``--json`` (cli/_json.ReportListRow)."""
+    from lakebench.metrics.verdict import verdict_status
+
+    return {
+        "run_id": r.get("run_id"),
+        "record_kind": r.get("record_kind") or "run",
+        "parent_run_id": r.get("parent_run_id"),
+        "deployment_name": r.get("deployment_name"),
+        "start_time": r.get("start_time"),
+        "verdict": verdict_status(r) or r.get("verdict_status"),
+        "total_elapsed_seconds": r.get("total_elapsed_seconds"),
+    }
+
+
+def _report_run_data(
+    metrics, runs_dir: Path, delivered: Path | None, requested: str | None = None
+) -> dict:
+    """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
+    the record as stored (the per-run file, else the legacy flat one, as
+    ``load_run`` reads them): its verdict and scores are never recomputed;
+    a record that cannot be read as stored gives null for both."""
+    import json as _json_mod
+
+    record: dict = {}
+    rid = requested or metrics.run_id  # the id load_run was given, when one was
+    for path in (runs_dir / f"run-{rid}" / "metrics.json", runs_dir / f"run-{rid}.json"):
+        try:
+            record = _json_mod.loads(path.read_text())
+            break
+        except (OSError, ValueError):
+            continue
+    pbd = record.get("pipeline_benchmark") or {}
+    return {
+        "run_id": metrics.run_id,
+        "record_kind": record.get("record_kind") or metrics.record_kind,
+        "parent_run_id": record.get("parent_run_id", metrics.parent_run_id),
+        "deployment_name": record.get("deployment_name", metrics.deployment_name),
+        "start_time": record.get("start_time"),
+        "verdict": (record.get("verdict") or {}).get("status"),
+        "pipeline_mode": pbd.get("pipeline_mode"),
+        "scores": pbd.get("scores") if record else None,
+        "stages": [
+            {
+                "stage_name": st.get("stage_name"),
+                "stage_type": st.get("stage_type"),
+                "elapsed_seconds": st.get("elapsed_seconds"),
+                "input_size_gb": st.get("input_size_gb"),
+                "output_size_gb": st.get("output_size_gb"),
+                "throughput_gb_per_second": st.get("throughput_gb_per_second"),
+                "executor_count": st.get("executor_count"),
+            }
+            for st in pbd.get("stages") or []
+        ],
+        "delivered_report": str(delivered) if delivered is not None else None,
+    }
+
+
+@app.command()
+def report(
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[RUN|CONFIG]",
+            help=(
+                "A run id, or a configuration YAML file: its deployment's latest "
+                "run record, so a parallel deployment's newer run is not reported "
+                "by mistake. Default: ./lakebench.yaml when it exists, otherwise "
+                "the latest run of any deployment."
+            ),
+            show_default=False,
+        ),
+    ] = None,
+    metrics_dir: Annotated[
+        Path,
+        typer.Option(
+            "--metrics",
+            "-m",
+            help="Directory containing run subdirectories",
+        ),
+    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
+    run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--run",
+            "-r",
+            help="Specific run ID to report on (default: latest)",
+        ),
+    ] = None,
+    list_runs: Annotated[
+        bool,
+        typer.Option(
+            "--list",
+            "-l",
+            help="List available runs instead of reporting on one",
+        ),
+    ] = False,
+    render: Annotated[
+        bool,
+        typer.Option(
+            "--render",
+            help=(
+                "Regenerate HTML. Writes a fresh timestamped file at "
+                "lakebench-output/reports/report-<run_id>-<ts>.html without "
+                "touching the delivered run-<id>/report.html."
+            ),
+        ),
+    ] = False,
+    output_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--output",
+            help=(
+                "Explicit output path for --render. Refuses to overwrite an "
+                "existing file at this path unless --force is also given."
+            ),
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Allow --render to overwrite an existing file at --output. "
+                "Requires both --render and --output."
+            ),
+        ),
+    ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            "-s",
+            help="Also print the key scores when rendering (default action already prints them).",
+        ),
+    ] = False,
+    output_format: Annotated[
+        str | None,
+        typer.Option(
+            "--format",
+            "-o",
+            help=(
+                "Print the run's stage matrix instead of the summary: table, json "
+                "or csv (json is the pipeline benchmark block)"
+            ),
+        ),
+    ] = None,
+    as_json: Annotated[bool, json_option()] = False,
+) -> None:
+    """Report on a saved benchmark run.
+
+    Default behaviour is to print the summary of the requested run (or the
+    latest one) and point at the delivered ``run-<id>/report.html`` without
+    modifying it. Pass ``--render`` to regenerate a fresh HTML file; the
+    output goes to ``lakebench-output/reports/report-<run_id>-<ts>.html`` so
+    the delivered artifact is never rewritten silently. Pass ``--list`` to
+    show all saved runs, and ``--format`` for the stage matrix (what
+    ``results`` printed).
+    """
+    from lakebench.cli import _json
+    from lakebench.metrics import MetricsStorage
+    from lakebench.reports import ReportGenerator
+
+    storage = MetricsStorage(metrics_dir)
+
+    # Scope the "latest run" lookup to a specific deployment when a config
+    # file is given. Under parallel deployments the shared runs/ tree can
+    # have another deployment's newer record on top; without scoping,
+    # `report` would display it (SP-2 owns the durable deployment_id fix).
+    if output_format is not None and output_format not in _REPORT_FORMATS:
+        print_error(f"--format must be one of {', '.join(_REPORT_FORMATS)}, not {output_format}")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_format is not None and as_json:
+        print_error("--json and --format are two outputs; pass one")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_format is not None and (render or list_runs):
+        print_error("--format prints a stage matrix; it does not combine with --render or --list")
+        raise typer.Exit(ExitCode.USAGE)
+    config_file, target_run = _report_target(target, run_id, use_default=not list_runs)
+    run_id = target_run or run_id
+    deployment_name: str | None = None
+    if config_file is not None:
+        try:
+            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
+        except ConfigError as e:
+            print_error(f"Config error: {e}")
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+        if target is None and run_id is None:
+            print_info(
+                f"Showing the latest record of deployment {deployment_name} "
+                f"(./{DEFAULT_CONFIG}); pass a run id or another config to choose"
+            )
+
+    # List runs mode
+    if list_runs:
+        runs = storage.list_runs()
+        _json.set_data({"runs": [_report_list_row(r) for r in runs]})
+        if not runs:
+            print_warning(f"No runs found in {metrics_dir}")
+            return
+
+        console.print(Panel(f"Available runs in [bold]{esc(metrics_dir)}[/bold]", expand=False))
+
+        table = Table()
+        table.add_column("Run ID", style="cyan")
+        table.add_column("Kind")
+        table.add_column("Deployment")
+        table.add_column("Date")
+        table.add_column("Status")
+        table.add_column("Duration")
+
+        from lakebench.metrics.verdict import passed as _record_passed
+        from lakebench.metrics.verdict import verdict_status as _verdict_status
+
+        for r in runs:
+            # Prefer the persisted verdict (OD-6: v1.6 records) and fall
+            # back to raw ``success`` for legacy v1.5 records.
+            if _record_passed(r):
+                status = "[green]Passed[/green]"
+            elif (_verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
+                status = "[yellow]Interrupted[/yellow]"
+            else:
+                status = "[red]Failed[/red]"
+            elapsed = f"{r.get('total_elapsed_seconds', 0):.1f}s"
+            date = r.get("start_time", "")[:10] if r.get("start_time") else ""
+            kind = r.get("record_kind") or "run"
+            if kind == "benchmark" and r.get("parent_run_id"):
+                kind = f"benchmark of {r['parent_run_id']}"
+            table.add_row(
+                r.get("run_id", ""),
+                kind,
+                r.get("deployment_name", ""),
+                date,
+                status,
+                elapsed,
+            )
+
+        console.print(table)
+        return
+
+    # Guard rails on the option combinations. --force and --output only
+    # make sense with --render: they are opt-ins to a regenerate action.
+    if force and not render:
+        print_error("--force requires --render")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_path is not None and not render:
+        print_error("--output requires --render")
+        raise typer.Exit(ExitCode.USAGE)
+    # --force only makes sense with --output: the default timestamped path
+    # is collision-free in practice, so --force there is a no-op that only
+    # confuses the caller. Matches the help text.
+    if force and output_path is None:
+        print_error("--force requires --output (the default timestamped path is collision-free)")
+        raise typer.Exit(ExitCode.USAGE)
+
+    if render:
+        try:
+            generator = ReportGenerator(metrics_dir)
+            report_path = generator.generate_report(
+                run_id,
+                output_path=output_path,
+                force=force,
+                deployment_name=deployment_name,
+            )
+        except FileExistsError as e:
+            print_error(str(e))
+            # Only mention --output in the hint when the user actually set it;
+            # the default timestamped path never collides in practice.
+            if output_path is not None:
+                print_info("Pass --force to overwrite the file at --output.")
+            else:
+                print_info("Retry in a moment; the timestamp will differ.")
+            # An existing --output file is a usage error; a default-path
+            # collision is a transient failure.
+            code = ExitCode.USAGE if output_path is not None else ExitCode.FAILED
+            raise typer.Exit(code)  # noqa: B904
+        except ValueError as e:
+            print_error(str(e))
+            print_info("Use 'lakebench report --list' to see available runs")
+            # An unknown run id is a bad argument; no runs at all is a failed lookup.
+            raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
+
+        _json.set_data({"run_id": run_id, "report": str(report_path)})
+        # Also print the summary when asked; keep the default quiet so
+        # scripts that watch stdout for the path have a clean output.
+        if summary:
+            resolved = (
+                storage.load_run(run_id)
+                if run_id
+                else storage.get_latest_run_for_deployment(deployment_name)
+            )
+            if resolved:
+                _print_report_summary(resolved)
+
+        console.print(
+            Panel(
+                f"[green]Report rendered[/green]\n\n"
+                f"Output: {esc(report_path)}\n\n"
+                f"The delivered run directory report.html is unchanged.",
+                title="Report Rendered",
+                expand=False,
+            )
+        )
+        return
+
+    # Default action: print the summary; do not regenerate the HTML.
+    metrics = (
+        storage.load_run(run_id)
+        if run_id
+        else storage.get_latest_run_for_deployment(deployment_name)
+    )
+    if metrics is None:
+        if target_run is not None:
+            print_error(f"No run {run_id} in {metrics_dir}, and no file {target}")
+        else:
+            print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
+        print_info("Use 'lakebench report --list' to see available runs")
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
+
+    if output_format is not None:
+        _print_stage_matrix(metrics, output_format)
+        return
+
+    _print_report_summary(metrics)
+
+    # Not run_dir(): that creates the directory, and report only reads here.
+    delivered = storage.metrics_dir / f"run-{run_id or metrics.run_id}" / "report.html"
+    _json.set_data(
+        _report_run_data(
+            metrics, storage.metrics_dir, delivered if delivered.exists() else None, run_id
+        )
+    )
+    if delivered.exists():
+        console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
+        console.print(
+            "[dim]Run 'lakebench report --render' to write a fresh HTML "
+            "at lakebench-output/reports/.[/dim]"
+        )
+    else:
+        console.print(
+            f"[dim]No delivered report at {esc(delivered)}. "
+            "Run 'lakebench report --render' to generate one.[/dim]"
+        )
 
 
 _LOGS_HELP_COMPONENTS = (

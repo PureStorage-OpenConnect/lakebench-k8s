@@ -1,0 +1,509 @@
+# Breaking changes from 1.6 to 1.7: the checked list.
+#
+# One entry per change. `id` is the slug of `title`, the heading of the entry in
+# UPGRADING-1.7.md; `text` is its bullet under 1.7.0 "Breaking changes" in
+# CHANGELOG.md; `source` is `path:symbol` of the code it describes. `kind` is one of
+# removed-key, refused-command, alias, exit-code, identity, version-bump,
+# default-change. tests/test_breaking_changes.py checks both directions;
+# `python3.11 scripts/upgrading.py missing` prints a skeleton for each gap.
+
+- id: config-fields-nothing-read-are-removed
+  title: Config fields nothing read are removed
+  kind: removed-key
+  subject:
+  - images.hive
+  - images.prometheus
+  - images.grafana
+  - platform.storage.s3.secret_ref
+  - secret_ref
+  - architecture.catalog.hive.thrift
+  - architecture.catalog.polaris.version
+  - architecture.catalog.unity.version
+  - architecture.table_format.iceberg.file_format
+  - architecture.table_format.iceberg.properties
+  - architecture.table_format.delta.properties
+  - architecture.pipeline.medallion
+  - architecture.workload.customer360.date_range_days
+  - observability.reports
+  - observability.storage_class
+  - observability.prometheus_stack_enabled
+  - observability.s3_metrics_enabled
+  - observability.spark_metrics_enabled
+  - version
+  - description
+  source: src/lakebench/config/schema.py:_removed_keys
+  text: 'Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another
+    value is refused by the commands that change data.'
+  fix: Delete the key. Each refusal names it and what to do instead; docs/configuration.md lists them.
+- id: sizing-settings-that-sized-nothing-are-removed
+  title: Sizing settings that sized nothing are removed
+  kind: removed-key
+  subject:
+  - platform.compute.spark.driver
+  - platform.compute.spark.executor
+  - platform.storage.scratch.size
+  source: src/lakebench/config/schema.py:_removed_keys
+  text: '`platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing:
+    set to other than their 1.6 default, they are refused.'
+  fix: Delete them; set counts with `<job>_executors` and the driver with `driver_memory` and `driver_cores`.
+- id: removed-keys-are-refused-by-commands-that-change-data
+  title: Removed keys are refused by commands that change data
+  kind: default-change
+  subject: removed keys at load
+  source: src/lakebench/config/schema.py:_drop_removed_keys
+  text: A removed config key is refused by the commands that change data; read and teardown commands drop
+    it with a note.
+  fix: Delete the keys the refusal names; `destroy`, `status` and `report` still load the old config.
+- id: results-is-an-alias-of-report
+  title: results is an alias of report
+  kind: alias
+  subject: results
+  source: src/lakebench/cli/_aliases.py:ALIASES
+  text: '`lakebench results` is an alias of `report --format table` that prints one line on stderr; it
+    is removed in v1.8.'
+  fix: Use `lakebench report --format table` (or `--format json` / `csv`).
+- id: admin-install-spark-operator-and-install-scratch-storage-class-are-aliases
+  title: admin install-spark-operator and install-scratch-storage-class are aliases
+  kind: alias
+  subject:
+  - admin install-spark-operator
+  - admin install-scratch-storage-class
+  source: src/lakebench/cli/_aliases.py:ALIASES
+  text: '`admin install-spark-operator` and `admin install-scratch-storage-class` are aliases of `admin
+    install --component`, removed in v1.8.'
+  fix: Use `lakebench admin install --component spark-operator` or `--component scratch-storage-class`.
+- id: init-has-no-wizard
+  title: init has no wizard
+  kind: alias
+  subject:
+  - init --interactive
+  - init -i
+  - init --advanced
+  source: src/lakebench/cli/_aliases.py:ALIASED_FLAGS
+  text: '`init --interactive`, `-i` and `--advanced` print one line and write the default config: the
+    wizard is removed.'
+  fix: Drop the flag; pass `--recipe`, `--name`, `--scale` or `--credentials-env` to `init`.
+- id: run---sustained-is-a-deprecated-alias
+  title: run --sustained is a deprecated alias
+  kind: alias
+  subject: run --sustained
+  source: src/lakebench/cli/_aliases.py:ALIASED_FLAGS
+  text: '`run --sustained` is a hidden, deprecated alias of `--continuous` and prints a warning.'
+  fix: Use `lakebench run --continuous`.
+- id: recommend---extended-is-a-deprecated-alias
+  title: recommend --extended is a deprecated alias
+  kind: alias
+  subject:
+  - recommend --extended
+  - recommend -e
+  source: src/lakebench/cli/_aliases.py:ALIASED_FLAGS
+  text: '`recommend --extended` / `-e` is a deprecated alias of `--slow-datagen`, which is now ignored.'
+  fix: Drop the flag; use `lakebench config recommend CONFIG`.
+- id: config-upgrade-is-refused
+  title: config upgrade is refused
+  kind: refused-command
+  subject: config upgrade
+  source: src/lakebench/cli/_aliases.py:REFUSED
+  text: '`lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote
+    secrets in plaintext.'
+  fix: Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml` once that flag ships, or edit
+    it by hand.
+- id: clean-bronze-and-clean-data-are-refused
+  title: clean bronze and clean data are refused
+  kind: refused-command
+  subject:
+  - clean bronze
+  - clean data
+  source: src/lakebench/cli/_aliases.py:REFUSED
+  text: '`clean bronze` and `clean data` are refused (exit 2): a run regenerates its own corpus.'
+  fix: Run `lakebench run CONFIG --generate --regenerate`; for `data`, `clean silver` and `clean gold`
+    first.
+- id: clean-metrics-and-clean-journal-are-refused
+  title: clean metrics and clean journal are refused
+  kind: refused-command
+  subject:
+  - clean metrics
+  - clean journal
+  - clean --metrics-dir
+  - clean -m
+  source: src/lakebench/cli/_aliases.py:REFUSED
+  text: '`clean metrics`, `clean journal` and `clean --metrics-dir` are refused (exit 2): records and
+    journals are evidence.'
+  fix: Delete run records or journals by hand if you must; the CLI does not.
+- id: compare-runs-nothing
+  title: compare runs nothing
+  kind: refused-command
+  subject:
+  - compare --keep
+  - compare --generate
+  - compare --local
+  - compare --skip-benchmark
+  - compare --timeout
+  - compare --scale
+  - compare --yes
+  - compare -y
+  source: src/lakebench/cli/_aliases.py:REFUSED_FLAGS
+  text: '`compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`,
+    ...) exit 2.'
+  fix: Run each side with `lakebench run` (add `--repeat 3`), then `lakebench compare A.yaml B.yaml`.
+- id: init-refuses-credential-values
+  title: init refuses credential values
+  kind: refused-command
+  subject:
+  - init --access-key
+  - init --secret-key
+  source: src/lakebench/cli/_aliases.py:REFUSED_FLAGS
+  text: '`init --access-key` and `--secret-key` exit 2 without echoing the value; init writes `${VAR}`
+    references.'
+  fix: Export `LAKEBENCH_S3_ACCESS_KEY` and `LAKEBENCH_S3_SECRET_KEY`, or name your own with `--credentials-env
+    PREFIX`.
+- id: dead-flags-are-removed
+  title: Dead flags are removed
+  kind: refused-command
+  subject:
+  - generate --wait
+  - generate -w
+  - admin release-lock --expired-only
+  - deploy --include-observability
+  source: src/lakebench/cli/_generate.py:generate
+  text: '`generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability`
+    are unknown options (exit 2).'
+  fix: 'Drop `--wait` and `--expired-only`; set `observability.enabled: true` in the config.'
+- id: lbrunpy-is-removed
+  title: lbrun.py is removed
+  kind: refused-command
+  subject: lbrun.py
+  source: pyproject.toml:lakebench
+  text: The run-from-a-checkout wrapper `lbrun.py` is removed.
+  fix: Use `PYTHONPATH=src python -m lakebench`.
+- id: status-stop-and-logs-exit-non-zero-when-something-is-wrong
+  title: status stop and logs exit non-zero when something is wrong
+  kind: exit-code
+  subject:
+  - status.drift
+  - status.namespace_missing
+  - stop.api_error
+  - logs.no_pod
+  - k8s.api_error
+  source: src/lakebench/exit_codes.py:PATHS
+  text: '`status` exits 1 on drift or a missing namespace, `stop` and `logs` exit 1 on a failure, and
+    API errors exit 4 (all were 0).'
+  fix: Scripts that treated these commands' exit 0 as information should read the code; docs/exit-codes.md
+    has the table.
+- id: usage-and-config-errors-exit-2
+  title: Usage and config errors exit 2
+  kind: exit-code
+  subject:
+  - config.validation
+  - config.unsupported
+  - cli.bad_argument
+  - config.name_required
+  - alias.refused
+  source: src/lakebench/exit_codes.py:PATHS
+  text: A config that does not load, an unsupported combination, a bad argument or a nameless config exits
+    2 (was 1 or 0).
+  fix: Treat 2 as "nothing ran, fix the command or config".
+- id: safety-refusals-exit-3
+  title: Safety refusals exit 3
+  kind: exit-code
+  subject:
+  - reproduce.existing_namespace
+  - destroy.redeployed
+  - deploy.identity_foreign
+  - run.bronze_nonempty
+  - lease.held
+  source: src/lakebench/exit_codes.py:PATHS
+  text: Ownership, redeploy, non-empty bronze and held-lease refusals exit 3 (was 1 or 2).
+  fix: Treat 3 as "refused by the safety model"; the message names what to check.
+- id: missing-prerequisites-exit-4
+  title: Missing prerequisites exit 4
+  kind: exit-code
+  subject:
+  - run.prereq_failed
+  - k8s.unreachable
+  - s3.unreachable
+  - financial.k8s_unreachable
+  source: src/lakebench/exit_codes.py:PATHS
+  text: A failed preflight check and an unreachable Kubernetes API or S3 bucket exit 4 (was 1 or 2).
+  fix: Treat 4 as "a prerequisite is missing, nothing ran".
+- id: declined-confirmations-exit-5
+  title: Declined confirmations exit 5
+  kind: exit-code
+  subject:
+  - confirm.non_tty
+  - confirm.declined
+  - run.namespace_missing_no_yes
+  source: src/lakebench/exit_codes.py:PATHS
+  text: A declined or unanswerable confirmation exits 5 (was 1 or 3).
+  fix: Pass `--yes` in scripts, or treat 5 as "not confirmed".
+- id: a-namespace-still-terminating-exits-6
+  title: A namespace still terminating exits 6
+  kind: exit-code
+  subject: destroy.namespace_terminating
+  source: src/lakebench/exit_codes.py:PATHS
+  text: '`destroy` exits 6 (was 4) when its steps finished but the namespace is still terminating.'
+  fix: Treat 6 as "safe to re-run"; check `kubectl get ns` before redeploying the name.
+- id: reproduce-drift-exits-14
+  title: reproduce drift exits 14
+  kind: exit-code
+  subject:
+  - reproduce.drift
+  - reproduce.commit_drift
+  source: src/lakebench/exit_codes.py:PATHS
+  text: '`reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.'
+  fix: Treat 14 as "requirement unmet".
+- id: a-datagen-timeout-exits-1
+  title: A datagen timeout exits 1
+  kind: exit-code
+  subject: run.datagen_timeout
+  source: src/lakebench/exit_codes.py:PATHS
+  text: A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
+  fix: Read `verdict.reasons` in `metrics.json` instead of the exit code.
+- id: compare-exits-with-its-verdict
+  title: compare exits with its verdict
+  kind: exit-code
+  subject:
+  - compare.not_comparable
+  - compare.not_established
+  - compare.not_like_for_like
+  - compare.confounded
+  source: src/lakebench/exit_codes.py:PATHS
+  text: '`compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like
+    and 13 confounded (all were 0).'
+  fix: Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the
+    `cmp2` document.
+- id: customer-360-records-are-workload-version-c360-2
+  title: Customer 360 records are workload version c360-2
+  kind: identity
+  subject: workload customer360 c360-2
+  source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
+  text: Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do
+    not compare with `c360-1`.
+  fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
+    is refused.
+- id: aml-records-are-workload-version-aml-2
+  title: AML records are workload version aml-2
+  kind: identity
+  subject: workload financial aml-2
+  source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
+  text: AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version
+    `aml-2` and do not compare with `aml-1`.
+  fix: Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+- id: system-and-access-path-are-not-execution-conditions
+  title: System and access path are not execution conditions
+  kind: identity
+  subject: comparability-system-access-path
+  source: src/lakebench/metrics/comparability.py:access_paths
+  text: 'Experiment identity v2: the system and the query access path are architecture and system groups,
+    no longer conditions that make a pair not like-for-like.'
+  fix: Re-read stored pairs with `lakebench compare`; a pair whose architecture and system both differ
+    is confounded.
+- id: continuous-pairs-with-different-round-counts-are-not-like-for-like
+  title: Continuous pairs with different round counts are not like-for-like
+  kind: identity
+  subject: continuous rounds count
+  source: src/lakebench/metrics/comparability.py:_benchmark_rounds
+  text: A continuous record without a stored round count reads it from its rounds; the stored C360 Trino
+    vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
+  fix: Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
+- id: perf-gate-fingerprint-version-2
+  title: Perf-gate fingerprint version 2
+  kind: identity
+  subject: perf-gate fingerprint
+  source: src/lakebench/metrics/perf_gate.py:FINGERPRINT_VERSION
+  text: The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines
+    are refused until re-recorded.
+  fix: Re-record perf-gate baselines under 1.7; pin the profile's executor counts in a pinned config.
+- id: deploy-generates-the-polaris-client-secret
+  title: Deploy generates the Polaris client secret
+  kind: default-change
+  subject: polaris-default-client-secret
+  source: src/lakebench/config/schema.py:client_secret
+  text: A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed
+    values for every install.
+  fix: Leave `architecture.catalog.polaris.client_secret` unset; an existing deployment keeps its stored
+    secret.
+- id: run-needs-a-17-deploy
+  title: run needs a 1.7 deploy
+  kind: default-change
+  subject: dependency server
+  source: src/lakebench/deps/runtime.py:attach_refusal
+  text: Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made
+    by 1.6 exits 4.
+  fix: Run `lakebench deploy CONFIG` once after upgrading.
+- id: executor-overrides-are-bounded-and-counted
+  title: Executor overrides are bounded and counted
+  kind: default-change
+  subject: executor overrides
+  source: src/lakebench/modules/pipeline_engines/spark/job.py:executor_override
+  text: Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep
+    a run out of release evidence.
+  fix: Lower overrides above 28; leave counts unset for evidence runs.
+- id: benchmark-writes-its-own-record
+  title: benchmark writes its own record
+  kind: default-change
+  subject: benchmark record
+  source: src/lakebench/cli/_query.py:_save_benchmark_record
+  text: '`benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run''s;
+    `query` writes no record.'
+  fix: 'Read a benchmark by the run id it prints: `lakebench report RUN_ID`.'
+- id: run-refuses-arguments-it-used-to-ignore
+  title: run refuses arguments it used to ignore
+  kind: default-change
+  subject: run arguments
+  source: src/lakebench/cli/_run_args.py:RUN_RULES
+  text: '`run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run`
+    in docs/cli-reference.md).'
+  fix: Drop the flag the mode does not use.
+- id: reproduce-never-destroys-before-its-run
+  title: reproduce never destroys before its run
+  kind: default-change
+  subject: reproduce destroy
+  source: src/lakebench/cli/_reproduce.py:_record
+  text: '`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys
+    only what it created.'
+  fix: Run `lakebench destroy CONFIG` first to reuse a deployment's name.
+- id: init-writes-a-first-day-config
+  title: init writes a first-day config
+  kind: default-change
+  subject: init output
+  source: src/lakebench/cli/_init.py:first_day_dict
+  text: '`init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was
+    Hive), scale 1 (was 10), `${VAR}` credentials.'
+  fix: Set `--scale`, `--recipe` or `--name` on `init`; `--overwrite` is the new spelling of `--force`.
+- id: a-component-that-contradicts-its-recipe-is-refused
+  title: A component that contradicts its recipe is refused
+  kind: default-change
+  subject: recipe components
+  source: src/lakebench/config/schema.py:apply_recipe_defaults
+  text: A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that
+    change data; 1.6 let it win silently.
+  fix: Remove the component keys, or change `recipe:` to the components you mean.
+- id: var-is-substituted-per-value
+  title: VAR is substituted per value
+  kind: default-change
+  subject: variable substitution
+  source: src/lakebench/config/loader.py:_substitute_env_vars
+  text: '`${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed
+    as YAML.'
+  fix: Quote references inside flow syntax (`["${A}", "${B}"]`) and close every `${VAR:-default}`.
+- id: a-config-with-no-recipe-is-deprecated
+  title: A config with no recipe is deprecated
+  kind: default-change
+  subject: recipe required
+  source: src/lakebench/config/schema.py:_is_recipe_shaped
+  text: 'A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.'
+  fix: Add the recipe the note names.
+- id: flat-top-level-keys-are-deprecated
+  title: Flat top-level keys are deprecated
+  kind: default-change
+  subject: flat keys
+  source: src/lakebench/config/loader.py:_apply_flat_fields
+  text: Flat top-level keys (`endpoint:`, `scale:` and the rest) load with a note naming the nested key.
+  fix: Write the nested key the note names.
+- id: deploy-never-installs-a-shared-component
+  title: Deploy never installs a shared component
+  kind: default-change
+  subject: shared components
+  source: src/lakebench/cli/_admin.py:install
+  text: '`deploy` only checks the scratch StorageClass, Spark Operator, Stackable and observability stack;
+    `operator.install: true` is refused.'
+  fix: A cluster admin runs `lakebench admin install --component all CONFIG` once per cluster.
+- id: admin-install-never-changes-an-installed-component
+  title: admin install never changes an installed component
+  kind: default-change
+  subject: admin install
+  source: src/lakebench/cli/_admin.py:install
+  text: '`admin install` installs only what is missing and refuses a version change (exit 2, or 3 with
+    `--allow-version-change`).'
+  fix: Change a shared component's version by hand, after reading what `--allow-version-change` lists.
+- id: watch-list-edits-pin-the-installed-chart
+  title: Watch-list edits pin the installed chart
+  kind: default-change
+  subject: watch list
+  source: src/lakebench/deploy/cluster_lock.py:cluster_lock
+  text: '`deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart, or refuse
+    when it cannot be read.'
+  fix: Re-run once `helm list` answers; a refused removal keeps the namespace.
+- id: admin-doctor-exits-1-on-a-failed-check
+  title: admin doctor exits 1 on a failed check
+  kind: default-change
+  subject: admin doctor
+  source: src/lakebench/cli/_admin.py:doctor
+  text: '`admin doctor` runs the prerequisite checks and exits 1 when one fails or cannot run.'
+  fix: Fix what it names, or ignore its code where you only wanted the report.
+- id: a-config-needs-a-name-to-change-data
+  title: A config needs a name to change data
+  kind: default-change
+  subject: config name
+  source: src/lakebench/cli/_nameless.py:guard_nameless
+  text: A config with no `name:` is refused by the commands that change data, and reads or tears down
+    only a deployment it can prove is its own.
+  fix: Add `name:` with the deployment's name; the refusal names it.
+- id: counts-are-bounded-at-load
+  title: Counts are bounded at load
+  kind: default-change
+  subject: count bounds
+  source: src/lakebench/config/schema.py:replicas
+  text: A zero, negative or out-of-range count (Trino workers, generators, ports, cores), which 1.6 accepted,
+    is refused.
+  fix: Set the count inside its range (docs/configuration.md).
+- id: sparkconf-merges-over-the-job-defaults
+  title: spark.conf merges over the job defaults
+  kind: default-change
+  subject: spark.conf
+  source: src/lakebench/modules/pipeline_engines/spark/conf_keys.py:LAKEBENCH_OWNED_SPARK_KEYS
+  text: '`spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst`
+    and `spark.kubernetes.*`) are refused.'
+  fix: Keep only your own tuning keys in `spark.conf`; the refusal names what controls each reserved key.
+- id: run-refuses-benchmark-settings-it-does-not-run
+  title: run refuses benchmark settings it does not run
+  kind: default-change
+  subject: run benchmark settings
+  source: src/lakebench/config/schema.py:BenchmarkConfig
+  text: '`run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams`
+    above 1.'
+  fix: Use `lakebench benchmark --mode`, `--cold` or `--streams` for those passes.
+- id: buckets-are-stamped-with-their-cluster
+  title: Buckets are stamped with their cluster
+  kind: default-change
+  subject: bucket cluster stamp
+  source: src/lakebench/deploy/ownership.py:TAG_CLUSTER
+  text: Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied
+    or deleted by `destroy`.
+  fix: Claim it with `lakebench admin reclaim-bucket BUCKET CONFIG --force-nonempty` (an owner action;
+    it holds the 1.6 data) before relying on `destroy`.
+- id: the-capacity-preflight-counts-free-capacity-and-fails-closed
+  title: The capacity preflight counts free capacity and fails closed
+  kind: default-change
+  subject: capacity preflight
+  source: src/lakebench/cli/_prerequisites.py:_check_cluster_capacity
+  text: '`run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes
+    or pods cannot be read.'
+  fix: Run on a cluster with room, or pass `--skip-preflight` (the record then says capacity not checked).
+- id: customer-360-batch-verdicts-gate-on-sixteen-checks
+  title: Customer 360 batch verdicts gate on sixteen checks
+  kind: default-change
+  subject: c360 verdict
+  source: src/lakebench/metrics/c360_correctness.py:GATING_CHECKS
+  text: A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be
+    evaluated; others are listed, not gating.
+  fix: Re-read a 1.6 PASS or FAIL under 1.7 rules; `verdict.qualifiers.c360_failed_not_gating` lists the
+    rest.
+- id: grafana-gets-a-generated-password
+  title: Grafana gets a generated password
+  kind: default-change
+  subject: grafana password
+  source: src/lakebench/cli/_deploy.py:lakebench-observability-grafana
+  text: A new shared observability install gets a generated Grafana password; an existing install keeps
+    `admin`/`lakebench`.
+  fix: Read it with the command `deploy` prints (Secret `lakebench-observability-grafana`).
+- id: config_snapshot-drops-the-unused-sizing-blocks
+  title: config_snapshot drops the unused sizing blocks
+  kind: default-change
+  subject: config_snapshot
+  source: src/lakebench/metrics/collector.py:build_config_snapshot
+  text: '`metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size`
+    with `scratch.size_per_job`.'
+  fix: Read executor counts from `jobs[]` and scratch from `scratch.size_per_job` in scripts that parse
+    records.

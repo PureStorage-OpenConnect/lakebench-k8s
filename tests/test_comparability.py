@@ -530,13 +530,13 @@ def test_optional_key_table_rows_name_a_group_and_owner():
 
 
 def test_benchmark_path_refreshes_the_stored_block():
-    """``lakebench benchmark`` replaces the record's benchmark and must
-    refresh the stored block's benchmark half before saving (a stored block
-    is never rebuilt); CC-25 later gives it its own record."""
+    """``lakebench benchmark`` puts its benchmark in its own record (a copy
+    of the run it measured) and must refresh the copied block's benchmark
+    half before saving (a stored block is never rebuilt)."""
     src = (ROOT / "src/lakebench/cli/_query.py").read_text()
-    replace = src.index("latest_run.benchmark = bench_metrics")
-    save = src.index("storage.save_run(latest_run)", replace)
-    assert "refresh_benchmark(latest_run)" in src[replace:save]
+    replace = src.index("record.benchmark = bench\n")
+    save = src.index("storage.save_run(record)", replace)
+    assert "refresh_benchmark(record)" in src[replace:save]
 
 
 def test_records_json_drift_list_is_empty():

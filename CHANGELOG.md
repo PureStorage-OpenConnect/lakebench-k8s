@@ -26,6 +26,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so it still loads and tears down. The Hive examples now pin 4.1.1; the
   perf-gate pinned configs keep 4.0.2 until their re-baseline. `--local`
   runs keep their own 4.0.2 image, and their record now names it.
+One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1.7.md says what to do about each. The entries after them give the detail.
+
+- Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another value is refused by the commands that change data.
+- `platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing: set to other than their 1.6 default, they are refused.
+- A removed config key is refused by the commands that change data; read and teardown commands drop it with a note.
+- `lakebench results` is an alias of `report --format table` that prints one line on stderr; it is removed in v1.8.
+- `admin install-spark-operator` and `admin install-scratch-storage-class` are aliases of `admin install --component`, removed in v1.8.
+- `init --interactive`, `-i` and `--advanced` print one line and write the default config: the wizard is removed.
+- `run --sustained` is a hidden, deprecated alias of `--continuous` and prints a warning.
+- `recommend --extended` / `-e` is a deprecated alias of `--slow-datagen`, which is now ignored.
+- `lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote secrets in plaintext.
+- `clean bronze` and `clean data` are refused (exit 2): a run regenerates its own corpus.
+- `clean metrics`, `clean journal` and `clean --metrics-dir` are refused (exit 2): records and journals are evidence.
+- `compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`, ...) exit 2.
+- `init --access-key` and `--secret-key` exit 2 without echoing the value; init writes `${VAR}` references.
+- `generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
+- The run-from-a-checkout wrapper `lbrun.py` is removed.
+- `status` exits 1 on drift or a missing namespace, `stop` and `logs` exit 1 on a failure, and API errors exit 4 (all were 0).
+- A config that does not load, an unsupported combination, a bad argument or a nameless config exits 2 (was 1 or 0).
+- Ownership, redeploy, non-empty bronze and held-lease refusals exit 3 (was 1 or 2).
+- A failed preflight check and an unreachable Kubernetes API or S3 bucket exit 4 (was 1 or 2).
+- A declined or unanswerable confirmation exits 5 (was 1 or 3).
+- `destroy` exits 6 (was 4) when its steps finished but the namespace is still terminating.
+- `reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.
+- A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
+- `compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like and 13 confounded (all were 0).
+- Customer 360 gold is never silently incremental; records carry workload version `c360-2` and do not compare with `c360-1`.
+- AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
+- Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
+- A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
+- The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines are refused until re-recorded.
+- A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
+- Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
+- Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
+- `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
+- `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
+- `reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys only what it created.
+- `init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
+- A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that change data; 1.6 let it win silently.
+- `${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed as YAML.
+- A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.
+- Flat top-level keys (`endpoint:`, `scale:` and the rest) load with a note naming the nested key.
+- `deploy` only checks the scratch StorageClass, Spark Operator, Stackable and observability stack; `operator.install: true` is refused.
+- `admin install` installs only what is missing and refuses a version change (exit 2, or 3 with `--allow-version-change`).
+- `deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart, or refuse when it cannot be read.
+- `admin doctor` runs the prerequisite checks and exits 1 when one fails or cannot run.
+- A config with no `name:` is refused by the commands that change data, and reads or tears down only a deployment it can prove is its own.
+- A zero, negative or out-of-range count (Trino workers, generators, ports, cores), which 1.6 accepted, is refused.
+- `spark.conf` merges over seven job defaults, and keys Lakebench sets (including `userClassPathFirst` and `spark.kubernetes.*`) are refused.
+- `run` refuses a config whose benchmark sets `mode: throughput|composite`, `cache: cold` or `streams` above 1.
+- Deploy stamps owned buckets with the cluster; a bucket 1.6 adopted is used but no longer emptied or deleted by `destroy`.
+- `run` compares its request with free capacity, not allocatable, and refuses (exit 4) when nodes or pods cannot be read.
+- A Customer 360 batch verdict fails on sixteen exact checks only, including when they cannot be evaluated; others are listed, not gating.
+- A new shared observability install gets a generated Grafana password; an existing install keeps `admin`/`lakebench`.
+- `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
+
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6
@@ -60,6 +116,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   order, from the verified set, and these keys would change which copy of a
   class wins. Refused at load by the commands that change data (exit 2), as
   for every key Lakebench owns.
+- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are
+  refused** (exit 2, `alias.refused`), without echoing any argument.
+  `bronze` names `lakebench run CONFIG --generate --regenerate`, which
+  clears the run's datagen prefix and generates afresh, and `data` names
+  `clean silver` and `clean gold` before it (on a bucket the deployment did
+  not create, `admin reclaim-bucket` first). `metrics` and `journal` are
+  refused because run records and journals are evidence the CLI does not
+  delete, and so is `clean --metrics-dir`/`-m`. `clean silver` and `clean
+  gold` are unchanged.
+- **Renamed commands print one line and are removed in v1.8.** `results`
+  (now `report --format table`), `admin install-spark-operator` and `admin
+  install-scratch-storage-class` (now `admin install --component ...`) are
+  hidden aliases that print "`lakebench OLD` is now `lakebench NEW`; the old
+  name is removed in v1.8" on stderr, then run the new command. The list of
+  aliased, refused and deprecated commands and flags is
+  `lakebench.cli._aliases`; `init` and `compare` word their flag refusals
+  from it.
+- **`benchmark` and `query` no longer write into a run's record.**
+  `lakebench benchmark` saves its result as a record of its own under a new
+  run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
+  a copy of that run's record with the new benchmark); 1.6 replaced the
+  benchmark inside the run's own `metrics.json`. The copy's QpH, scores and
+  query stage are the new benchmark's, `provenance.benchmark` names the code
+  and time of the benchmark, and a continuous run's in-stream rounds and the
+  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`
+  or `compare`, nor a perf-gate candidate or baseline: read it by its run id
+  (`benchmark` prints it). `lakebench query` prints and journals its result
+  and no longer appends it to the latest record. `MetricsStorage.save_run`
+  refuses to replace an existing `metrics.json` unless called with
+  `seal_update=True`.
 
 ### Added
 - **AML batch records attribute gold-finalize time and show stage headroom.**
@@ -92,6 +178,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tolerance, then the passes by family (pipeline, benchmark shapes,
   statistical). Before, the
   34 checks a C360 run records were never shown.
+- **`--json` on the read verbs.** `plan`, `status`, `report`, `config
+  recipes`, `compare` and `query` write one `lb-cli/1` document to stdout
+  (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
+  output to stderr; the exit code and `exit_code` always agree, and a
+  failed command's document has `data: null` and the error, including an
+  unknown option. `plan --json` prints this document, its plans under
+  `data`.
+- **`docs/cli-reference.md` is generated from the CLI.** Each visible
+  command's usage line, arguments, options (type, default, help) and named
+  exit paths, `run`'s refused arguments and the table of renamed, refused
+  and deprecated names come from `scripts/gen_cli_reference.py`; a unit test
+  fails on drift. A second test parses every `lakebench ...` line in the
+  README, `docs/` and `examples/` with Click and fails on an unknown command
+  or flag, or on an alias or refused name.
+- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
+  config, reads `./lakebench.yaml` when no argument is given (and says
+  which deployment it shows), and prints the stage matrix with `--format
+  table|json|csv`. `results` is an alias of `report --format table`, with the
+  same argument and `--format` passing through. `report --list` shows each
+  record's kind.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock

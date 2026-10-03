@@ -498,6 +498,14 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
     if metrics is None:
         print_error(f"Run {run_id!r} not found in {storage.metrics_dir}")
         raise typer.Exit(ExitCode.USAGE)
+    kind = getattr(metrics, "record_kind", "run")
+    if kind != "run":
+        print_error(
+            f"Run {run_id!r} is a {kind} record of run "
+            f"{metrics.parent_run_id}, not a run; a package reproduces a run: "
+            f"lakebench reproduce --record {metrics.parent_run_id} --write {write}"
+        )
+        raise typer.Exit(ExitCode.USAGE)
 
     try:
         package = _build_package(
@@ -881,6 +889,8 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     candidates: list[tuple[str, str]] = []
     for row in storage.list_runs():
         if row.get("deployment_name") != deployment_name:
+            continue
+        if row.get("record_kind", "run") != "run":
             continue
         start_time = row.get("start_time")
         if not start_time:

@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lakebench.cli._helpers import esc, print_error
+from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
 
 logger = logging.getLogger(__name__)
@@ -428,6 +429,7 @@ def config_recipes(
         str | None,
         typer.Argument(help="Show full detail for one recipe"),
     ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """List architecture recipes and what each one trades off.
 
@@ -435,6 +437,7 @@ def config_recipes(
     costs and what it cannot do, so an architecture can be picked without
     first running it and finding out.
     """
+    from lakebench.cli import _json
     from lakebench.config.recipes import (
         RECIPE_DESCRIPTIONS,
         RECIPES,
@@ -452,16 +455,30 @@ def config_recipes(
             print_error(f"Unknown recipe: {name}. Available: {available}")
             raise typer.Exit(ExitCode.USAGE)
         _print_recipe_detail(name)
-        return
-
-    if not names:
-        console.print("[yellow]No recipes match.[/yellow]")
+        _json.set_data(_recipe_detail_data(name))
         return
 
     from lakebench.config.support import MODES, support_matrix, workloads
 
     states = {(r["recipe"], r["workload"], r["mode"]): r["state"] for r in support_matrix()}
     cols = [(wl, m) for wl in workloads() for m in MODES]
+    _json.set_data(
+        {
+            "recipes": [
+                {
+                    "recipe": n,
+                    "when": (note.when if note else RECIPE_DESCRIPTIONS.get(n, "")),
+                    "local": bool(note and note.runs_locally),
+                    "support": {f"{wl} {m}": states[(n, wl, m)] for wl, m in cols},
+                }
+                for n in names
+                for note in (get_recipe_note(n),)
+            ]
+        }
+    )
+    if not names:
+        console.print("[yellow]No recipes match.[/yellow]")
+        return
     short = {"customer360": "C360", "financial": "AML"}
 
     table = Table(show_header=True, header_style="bold", box=None)
@@ -491,6 +508,35 @@ def config_recipes(
     console.print("[dim]lakebench config recipes <name> for caveats and detail.[/dim]")
     if not local:
         console.print("[dim]lakebench config recipes --local for what runs on a laptop.[/dim]")
+
+
+def _recipe_detail_data(name: str) -> dict:
+    """One recipe for ``config recipes NAME --json`` (cli/_json.RecipeDetailData)."""
+    from lakebench.config.recipes import RECIPES, get_recipe_note
+    from lakebench.config.support import support_matrix
+
+    arch = RECIPES[name].get("architecture", {})
+    note = get_recipe_note(name)
+    real = name if name != "default" else "hive-iceberg-spark-trino"
+    return {
+        "recipe": name,
+        "catalog": arch.get("catalog", {}).get("type", "-"),
+        "table_format": arch.get("table_format", {}).get("type", "-"),
+        "query_engine": arch.get("query_engine", {}).get("type", "-"),
+        "when": note.when if note else None,
+        "local": bool(note and note.runs_locally),
+        "support": [
+            {
+                "workload": row["workload"],
+                "mode": row["mode"],
+                "state": row["state"],
+                "basis": row["basis"],
+            }
+            for row in support_matrix()
+            if row["recipe"] == real
+        ],
+        "caveats": list(note.caveats) if note and note.caveats else [],
+    }
 
 
 def _state_markup(state: str) -> str:
@@ -569,13 +615,9 @@ def config_upgrade(
     old invocations get this refusal rather than a usage error; neither is
     read or printed.
     """
-    from lakebench.cli._exit import UsageError
+    from lakebench.cli._aliases import refusal
 
-    raise UsageError(
-        "`config upgrade` is removed: it rewrote configs lossily and wrote secrets in plaintext.",
-        next="lakebench init --from OLD.yaml -o NEW.yaml",
-        path="config.upgrade_refused",
-    )
+    raise refusal("config upgrade", path="config.upgrade_refused")
 
 
 # -- Helpers -----------------------------------------------------------------

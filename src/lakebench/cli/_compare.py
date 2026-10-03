@@ -18,6 +18,7 @@ from rich.table import Table
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import emit_data, err_console, esc, print_error, print_warning
+from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
 
 console = Console()
@@ -72,6 +73,7 @@ def compare(
     local: Annotated[bool, typer.Option("--local", hidden=True)] = False,
     generate: Annotated[bool, typer.Option("--generate", hidden=True)] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", hidden=True)] = False,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Compare two sides of stored run records.
 
@@ -93,6 +95,9 @@ def compare(
         print_error(removed_flag_message(side_a, side_b))
         raise typer.Exit(ExitCode.USAGE)
     fmt = output_format.lower()
+    if as_json and fmt != "table":
+        print_error("--json and --format are two outputs; pass one")
+        raise typer.Exit(ExitCode.USAGE)
     if fmt == "html":
         print_error(
             "--format html is not supported by `compare`. Use `lakebench report --render` "
@@ -125,7 +130,14 @@ def compare(
     for w in doc["warnings"]:
         print_warning(w)
 
-    if fmt == "table":
+    if as_json:
+        import json
+
+        from lakebench.cli import _json
+
+        _json.set_data(json.loads(cmpmod.to_json(doc)))
+        _print_table(doc)  # to stderr under --json
+    elif fmt == "table":
         _print_table(doc)
     elif output is None:
         emit_data(cmpmod.to_csv(doc) if fmt == "csv" else cmpmod.to_json(doc))
