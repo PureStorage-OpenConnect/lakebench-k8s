@@ -41,11 +41,24 @@ class ScaleDimensions:
     date_range_days: int
     approx_rows: int
     approx_bronze_gb: float
+    #: The size the datagen Job passes as ``--target-tb``, when it is not
+    #: ``approx_bronze_gb`` (``datagen_target_gb``).
+    generator_target_gb: float | None = None
 
     @property
     def approx_bronze_tb(self) -> float:
         """Approximate bronze size in TB."""
         return self.approx_bronze_gb / 1024
+
+    @property
+    def datagen_target_gb(self) -> float:
+        """The size the datagen Job's ``--target-tb`` carries. Customer 360's
+        generator sizes its file count from it; the AML generator sizes from
+        ``--scale`` and ignores it, and AML keeps the value it always had so
+        the Job's arguments do not move."""
+        if self.generator_target_gb is not None:
+            return self.generator_target_gb
+        return self.approx_bronze_gb
 
 
 @dataclass(frozen=True)
@@ -226,6 +239,9 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
         date_range_days=1826,
         approx_rows=approx_rows,
         approx_bronze_gb=scale * financial_gb_per_scale_unit(scale),
+        # The Job's --target-tb as before (8.4 GB per unit): the AML generator
+        # ignores it, and the argument list is pinned (byte-compare reference).
+        generator_target_gb=scale * 8.4,
     )
 
 
