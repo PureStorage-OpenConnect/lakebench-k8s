@@ -116,8 +116,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
   dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
   records the stage (`stage_only`), is judged on that stage's layer, and is
-  refused as a perf baseline. `lakebench benchmark`'s re-save of a run
-  sets its success from the re-saved verdict.
+  refused as a perf baseline. A stored scale or ingest ratio just under
+  0.95 is rounded down, never up to 0.95.
 - **Executor overrides are bounded, counted and kept out of evidence.**
   `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
   16; a larger value is refused by the commands that change data (a v1.6

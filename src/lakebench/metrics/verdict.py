@@ -565,9 +565,10 @@ def _last_by_type(items: list[Any]) -> dict[str, Any]:
 
 
 def _aml_continuous_alerts(gold: Any) -> int | None:
-    """The alerts an AML gold refresh wrote in the window (matched to an
-    arrival or not). None when not logged, or when none were counted while
-    a cycle could not measure its alerts (0 would then prove nothing)."""
+    """The alerts the AML gold refresh's time-to-detect lines counted over
+    the run's ticks (matched to an arrival or not). None when not logged, or
+    when none were counted while a cycle could not measure its alerts (0
+    would then prove nothing)."""
     if gold is None or gold.ttd_alerts is None:
         return None
     total = int(gold.ttd_alerts) + int(gold.ttd_unmatched or 0)
@@ -586,8 +587,8 @@ def _layer_rows_gate(metrics: PipelineMetrics) -> _GateResult:
     ``bronze-ingest.output_rows``; ``silver-stream.output_rows`` (rows after
     the transforms), else its ``committed_rows`` (the rows of the batches
     that committed, which is all the AML silver stream logs); and
-    ``gold-refresh.output_rows``. AML gold refresh logs no row count: its
-    alerts in the window (``ttd_alerts`` plus ``ttd_unmatched``) stand for
+    ``gold-refresh.output_rows``. AML gold refresh logs no row count: the
+    alerts it counted (``ttd_alerts`` plus ``ttd_unmatched``) stand for
     gold's rows, so 0 alerts fails unless a cycle could not count them. A
     continuous layer with no row figure falls back to its bytes: > 0 passes
     with the layer listed in ``LAYER_ROWS_UNMEASURED`` and a warning, 0
@@ -695,7 +696,7 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
         streams = _last_by_type(metrics.streaming)
         alerts = _aml_continuous_alerts(streams.get("gold-refresh"))
         if alerts == 0:
-            res.reasons.append("AML continuous run produced zero alerts in the window")
+            res.reasons.append("AML continuous run produced zero alerts")
     if mode == "batch":
         scoring = getattr(metrics, "financial_scoring", None)
         total = scoring.get("total_alerts") if isinstance(scoring, Mapping) else None
