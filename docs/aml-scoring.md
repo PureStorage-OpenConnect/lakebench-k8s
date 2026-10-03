@@ -610,9 +610,11 @@ The gold-finalize job's entry in `metrics.json` (`jobs[]`, job type
 - `alert_set_seconds`: the seconds the alert-set fingerprint took (next
   section). It runs last in the gold-finalize pod, after the TM pass. It is
   Lakebench's work, not the pipeline's, so the CLI takes it off the stage's
-  `elapsed_seconds` and end time, and so off CPU-seconds and time to value,
-  as it does for the Customer 360 check; the report prints it beside the
-  stage time ("excludes 1.2s of Lakebench's alert-set fingerprint").
+  `elapsed_seconds` and end time, and so off CPU-seconds, as it does for the
+  Customer 360 check; the report prints it beside the stage time ("excludes
+  1.2s of Lakebench's alert-set fingerprint"). Time to value loses it in a
+  single-cycle run; with `cycles` above 1 the earlier cycles' fingerprints
+  stay inside time to value, as the Customer 360 check's do.
 
 The run's record derives two diagnostic blocks from the fields above (neither
 enters identity, a verdict or a comparison):

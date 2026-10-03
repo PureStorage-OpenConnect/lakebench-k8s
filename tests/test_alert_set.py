@@ -457,3 +457,14 @@ def test_gold_finalize_prints_the_line_after_detection():
         "run_tm_operations",
         "alert_set_line",
     ]
+
+
+def test_run_takes_the_fingerprint_off_after_parsing():
+    """The cluster path subtracts the alert-set seconds right after it
+    applies the parsed driver log, before resources and the journal use
+    the stage's time."""
+    src = (Path(__file__).resolve().parents[1] / "src/lakebench/cli/_run.py").read_text()
+    applied = src.index("_apply_parsed_job_metrics(job_metrics, parsed)")
+    excluded = src.index("_exclude_alert_set_time(job_metrics)", applied)
+    resources = src.index("_profile = get_job_profile(stage_name, _schema)", applied)
+    assert applied < excluded < resources

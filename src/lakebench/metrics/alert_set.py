@@ -136,6 +136,10 @@ def alert_set_expected(exp: Mapping[str, Any] | None) -> bool:
     failed fingerprint there must not pass as a 1.6 record's absence."""
     from lakebench.metrics.comparability import written_by_v17
 
+    # The block alone suffices: build_experiment stamps exp2 or
+    # v2_unavailable on every block whose run-start inputs carry identity
+    # version 2, so the record's snapshot adds nothing here.
+
     exp = exp or {}
     return (
         (exp.get("workload") or {}).get("name") == "financial"

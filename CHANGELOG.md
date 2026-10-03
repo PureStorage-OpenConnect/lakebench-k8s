@@ -479,8 +479,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   1.7 without one is NOT ESTABLISHED (exit 11), and the perf gate,
   `reproduce` and the release record refuse it. The fingerprint runs last in
   the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
-  off the stage's time, as the Customer 360 check's are, and the report
-  shows them beside it. The covered continuous score uses the same
+  off the stage's time, as the Customer 360 check's are (time to value of a
+  multi-cycle run keeps the earlier cycles'), and the report shows them
+  beside it. The covered continuous score uses the same
   definition. See
   [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
 - **Requested and effective values.** Each run records what it asked for
