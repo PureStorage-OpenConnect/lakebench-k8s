@@ -428,9 +428,9 @@ Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain
 
 ### Datagen pods honour path style, TLS and CA settings
 
-Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
 
-**What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.
+**What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA; leave `ca_cert` unset for an endpoint a public CA signs.
 
 ### Multi-cycle runs and reused corpora check a corpus series marker
 

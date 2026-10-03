@@ -602,8 +602,8 @@
   kind: default-change
   subject: datagen S3 transport settings
   source: datagen_rs/src/s3sink.rs:S3_PATH_STYLE
-  text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
-  fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.'
+  text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.'
+  fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA; leave `ca_cert` unset for an endpoint a public CA signs.'
 - id: multi-cycle-runs-and-reused-corpora-check-a-corpus-series-marker
   title: Multi-cycle runs and reused corpora check a corpus series marker
   kind: default-change
