@@ -235,8 +235,10 @@ class TestDeployWritesTheMarker:
 
 
 def test_regenerate_and_clean_keep_owner_marker():
-    """Only destroy's release passes keep_prefixes; clean and --regenerate keep
-    the marker, so the next deploy still reads the bucket as owned."""
+    """Only destroy's release drops the marker from keep_prefixes; clean and
+    --regenerate keep it (clean bronze also keeps the corpus series marker
+    until the bucket is empty), so the next deploy still reads the bucket as
+    owned."""
     tree = {p: ast.parse(p.read_text()) for p in SRC.rglob("*.py") if "spark/scripts" not in str(p)}
     bad = []
     for path, t in tree.items():
@@ -245,11 +247,21 @@ def test_regenerate_and_clean_keep_owner_marker():
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "empty_bucket"
-                and any(k.arg == "keep_prefixes" for k in node.keywords)
+                and any(
+                    k.arg == "keep_prefixes" and not _keeps_owner_marker(k.value)
+                    for k in node.keywords
+                )
                 and path.name != "destroy.py"
             ):
                 bad.append(f"{path.relative_to(SRC)}:{node.lineno}")
     assert bad == []
+
+
+def _keeps_owner_marker(value: ast.expr) -> bool:
+    """A literal tuple of keep prefixes that names LAKEBENCH_KEY_PREFIX."""
+    return isinstance(value, ast.Tuple) and any(
+        isinstance(e, ast.Name) and e.id == "LAKEBENCH_KEY_PREFIX" for e in value.elts
+    )
 
 
 def test_no_raw_listing():
