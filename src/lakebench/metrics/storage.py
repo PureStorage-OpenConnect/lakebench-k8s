@@ -319,6 +319,8 @@ def _deserialize_cycles(
                 datagen_elapsed_seconds=c.get("datagen_elapsed_seconds", 0.0),
                 datagen_output_gb=c.get("datagen_output_gb", 0.0),
                 datagen_skipped=bool(c.get("datagen_skipped", False)),
+                datagen_start=c.get("datagen_start", "") or "",
+                datagen_end=c.get("datagen_end", "") or "",
                 jobs=jobs,
                 benchmark=bench,
                 table_health=c.get("table_health", {}),
