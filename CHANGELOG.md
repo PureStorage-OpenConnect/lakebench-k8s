@@ -75,6 +75,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `attempted` (and `submitting` once the Job may exist). The ledger, the
   datagen sidecar and the journal name the seed by its salted hash only.
   Generating the corpus is not a look and spends nothing.
+- **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
+  scored run it can find on this host: stored run records, the configs the
+  journals name and the held-out tokens in them, the bronze manifests and
+  gold scoring files of the deployments-ledger rows' own buckets only (a
+  scoped client refuses any other bucket), and the local look and corpus
+  ledgers, with every path searched or skipped. It is read-only and prints
+  no seed or key.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
