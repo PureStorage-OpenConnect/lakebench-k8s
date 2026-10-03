@@ -275,9 +275,10 @@ deployment on hive-iceberg-spark-trino:
    apply to it, because 1.6 generated the corpus and writes no corpus
    markers.
 5. `destroy NEW --yes --expect-incarnation <uid>#<nonce>`. A bystander's
-   namespace incarnation, its buckets and its generated objects are read
-   before the 1.7 deploy and checked after the destroy (its silver and gold
-   change while it runs; its own harness judges its record).
+   namespace incarnation and buckets are read before the 1.7 deploy and its
+   generated objects just before the destroy, and all are checked after the
+   destroy (its silver and gold change while it runs; its own harness judges
+   its record). The bystander must outlive the upgrade.
 
 A failed step is never retried. The deployment is destroyed by an
 incarnation this row made: this tree's confirmed nonce, else the nonce 1.6
@@ -285,9 +286,11 @@ stamped, or a nonce of this tree's deploy that did not finish on the
 namespace 1.6 created. Otherwise it is left for a person. Ctrl-C stops the
 routine before its next deploy or run. The result goes to
 `results-extra.md`. `resume` cleans up a stopped upgrade with this tree's
-CLI only and never re-runs it. This routine does not exercise destroying a
-1.6 deployment that this tree never deployed (a 1.6 directory with no
-recorded nonce); that path has its own tests.
+CLI only and never re-runs it. Its normal path does not destroy a 1.6
+deployment through a nameless 1.6 directory with no recorded nonce; that
+path has its own tests. The 1.6 run's record is copied to
+`<out>/extra/v16-runs/` before the 1.6 count queries append their metrics
+to it.
 
 ### UAT results
 

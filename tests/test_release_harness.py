@@ -2293,3 +2293,38 @@ def test_counts_parse_from_16_json_with_its_trailing_line_and_from_the_17_envelo
     assert H.parse_count(v17) == 366
     with pytest.raises(ValueError):
         H.parse_count("\n0 rows in 0.1s\n")
+
+
+def test_counts_parse_through_colour_codes():
+    v16 = "\x1b[1m" + json.dumps({"rows": [{"0": '"7"'}], "count": 1}) + "\x1b[0m\n1 rows in 0.2s\n"
+    assert H.parse_count(v16) == 7
+
+
+def test_collect_upgrade_names_a_missing_experiment_block(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        H, "_scrub_module", lambda: SimpleNamespace(scrub_record=lambda r: (r, []), dump=json.dumps)
+    )
+    plan = H.RowPlan(H.UPGRADE_ROW, "ns", tmp_path / "c" / "c.yaml", C.Peak(1, 1))
+    run_dir = plan.config.parent / "lakebench-output" / "runs" / "run-x"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metrics.json").write_text(json.dumps({"verdict": {"status": "PASSED"}}))
+    assert any("no experiment block" in p for p in env.h.collect_upgrade(plan, "run-x"))
+
+
+def test_upgrade_keeps_a_copy_of_the_16_record_before_querying(uenv):
+    uenv.h.upgrade()
+    copies = list((uenv.out / "extra" / "v16-runs").glob("*/metrics.json"))
+    assert len(copies) == 1 and json.loads(copies[0].read_text())["verdict"]["status"] == "PASSED"
+
+
+def test_a_namespace_appearing_while_waiting_for_admission_is_not_deployed(uenv, monkeypatch):
+    real = uenv.h.admit_together
+
+    def admit(label, plans):
+        real(label, plans)
+        uenv.core.add_ns(plans[0].namespace, "zz", "other")
+
+    monkeypatch.setattr(uenv.h, "admit_together", admit)
+    assert uenv.h.upgrade() == 1
+    assert "deploy" not in [c[0] for c in uenv.v16.calls]
+    assert _up(uenv)["status"] == "not-deployed"
