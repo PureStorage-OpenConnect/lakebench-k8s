@@ -51,7 +51,11 @@ nothing measured under this one):
   exclusive end of the range its cycles cover (``data_clock_source``
   ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
   ``customer_recency_score`` is anchored to one day across cycles.
-  Single-cycle results do not change (2026-10-03).
+  Single-cycle results do not change. With it, multi-cycle time to value
+  leaves the cycles' datagen out. A ``.devN`` version orders after its
+  ``-N`` (``metrics.compare``); the release takes ``c360-3``, never ``c360-2``
+  again, so no release record shares an identity with a pre-``dev1`` one
+  (2026-10-03).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is

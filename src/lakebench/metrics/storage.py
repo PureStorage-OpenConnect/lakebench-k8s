@@ -828,6 +828,9 @@ class MetricsStorage:
                     "pipeline_throughput_gb_per_second", 0.0
                 ),
                 time_to_value_seconds=scores.get("time_to_value_seconds", 0.0),
+                time_to_value_datagen_excluded_seconds=scores.get(
+                    "time_to_value_datagen_excluded_seconds"
+                ),
                 # Both modes
                 total_core_hours=scores.get("total_core_hours", 0.0),
                 compute_efficiency_gb_per_core_hour=scores.get(
