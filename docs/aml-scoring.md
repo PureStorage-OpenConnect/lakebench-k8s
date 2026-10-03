@@ -990,9 +990,10 @@ in when fewer are open): IQ1, IQ2 and IQ3 bound to that case and IQ4
 unchanged, once each. The round is not a benchmark round, so in-stream QpH
 and the round count do not move; it takes window time, so the round count
 can be lower than without it. It runs only when at least twice the baseline
-round's time is left, and each session query's timeout is at most 300 s and
-a quarter of the time left, so the round never stretches the window
-(`status: no_time` otherwise). `continuous.investigators` records
+round's time is left; the case pick's timeout is at most 120 s and a fifth of
+the time left, and each session query's timeout, taken from what is left after
+the pick, is at most 300 s and a quarter of it less a 10 s cleanup margin, so
+the round ends inside the window (`status: no_time` when that is under 30 s). `continuous.investigators` records
 `sessions_requested`, `sessions_run` (the sessions started: fewer when the
 run has fewer cases, with `lowered_reason`; a session whose queries failed
 still counts, and shows in `failed` and `status`), the `case_ids`,
@@ -1019,9 +1020,9 @@ beside the verdict: time to detect and continuous throughput keep their
 values and include those ticks. `experiment.investigators` holds
 `{requested, run}`; the identity key `investigator sessions` is the number
 that ran, an outcome condition: two runs that ran different numbers compare
-as not like-for-like, and the perf gate does not refuse on the number, but it
-refuses a run with the sessions configured against a baseline without them,
-and the other way round.
+as not like-for-like, and the perf gate does not refuse on the number (8
+against 3), but it refuses load against no load: sessions that ran against a
+baseline with none configured or none run, and the other way round.
 
 ## What the AML workload deliberately does not measure
 

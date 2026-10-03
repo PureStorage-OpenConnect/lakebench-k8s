@@ -74,12 +74,26 @@ MEMORY_BOUNDS = {
 }
 
 
+#: Seconds an engine client may take past a query's timeout to clean it up
+#: (the Trino executor kills a timed-out query by its source, up to 10 s).
+CLEANUP_MARGIN_S = 10
+
+#: The case pick's timeout is at most this, and a fifth of the time left.
+MAX_CASE_QUERY_TIMEOUT_S = 120
+
+
 def query_timeout(remaining_s: float) -> int:
     """The per-query timeout for the sessions: at most
-    ``MAX_QUERY_TIMEOUT_S``, and small enough that a stream's four queries
-    end inside the window's *remaining_s* even if each runs to the limit, so
-    the round never stretches the window."""
-    return int(min(MAX_QUERY_TIMEOUT_S, max(0.0, remaining_s) // len(INVESTIGATOR_QUERIES)))
+    ``MAX_QUERY_TIMEOUT_S``, and small enough that a stream's four queries,
+    each with the client's cleanup margin, end inside the window's
+    *remaining_s* even if each runs to the limit, so the round does not
+    stretch the window."""
+    per_query = max(0.0, remaining_s) / len(INVESTIGATOR_QUERIES) - CLEANUP_MARGIN_S
+    return int(min(MAX_QUERY_TIMEOUT_S, max(0.0, per_query)))
+
+
+def case_query_timeout(remaining_s: float) -> int:
+    return int(min(MAX_CASE_QUERY_TIMEOUT_S, max(0.0, remaining_s) / 5))
 
 
 def timeout_bound(timeout_s: int) -> str:
@@ -121,11 +135,11 @@ def case_query(runner: Any, n: int) -> str:
     return runner.executor.adapt_query(sql)
 
 
-def select_cases(runner: Any, n: int) -> list[str]:
+def select_cases(runner: Any, n: int, timeout: int = MAX_CASE_QUERY_TIMEOUT_S) -> list[str]:
     """Up to *n* distinct case ids, in order. Raises RuntimeError when the
     query fails. The ids are read by their fixed shape from the engine's
     output, so no engine-specific parser is needed."""
-    result = runner.executor.execute_query(case_query(runner, n), timeout=120)
+    result = runner.executor.execute_query(case_query(runner, n), timeout=max(1, timeout))
     if not result.success:
         raise RuntimeError(result.error or "case query failed")
     ids = list(dict.fromkeys(CASE_ID_RE.findall(result.raw_output or "")))
@@ -179,19 +193,29 @@ def run_sessions(
     (``continuous.investigators``). The per-query timeout keeps the round
     inside the *remaining_s* of the window. Never raises for a query or case
     failure: those are the record's ``status``."""
-    timeout = query_timeout(remaining_s)
-    if timeout < MIN_QUERY_TIMEOUT_S:
+    import time
+
+    def too_little(left: float) -> dict[str, Any]:
         return skipped(
             requested,
             "no_time",
-            f"{remaining_s:.0f}s left in the window: under {MIN_QUERY_TIMEOUT_S}s per query",
+            f"{left:.0f}s left in the window: under {MIN_QUERY_TIMEOUT_S}s per query",
         )
+
+    if query_timeout(remaining_s) < MIN_QUERY_TIMEOUT_S:
+        return too_little(remaining_s)
+    picked = time.monotonic()
     try:
-        cases = select_cases(runner, requested)
+        cases = select_cases(runner, requested, timeout=case_query_timeout(remaining_s))
     except Exception as e:  # noqa: BLE001 -- recorded, never fails the run
         return skipped(requested, "case_query_failed", f"case query failed: {e}")
     if not cases:
         return skipped(requested, "no_cases", "the run has no case")
+    # The case pick spent part of the time left.
+    left = remaining_s - (time.monotonic() - picked)
+    timeout = query_timeout(left)
+    if timeout < MIN_QUERY_TIMEOUT_S:
+        return too_little(left)
     start = now()
     result = runner.run_throughput(
         cache="hot",
@@ -239,7 +263,10 @@ def session_record(
             else:
                 err = str(qr.error_message or "")
                 memory = memory or _memory_error(err)
-                timed_out = timed_out or "timed out" in err.lower()
+                # The client's own timeout, or Trino's query_max_run_time,
+                # which its executor sets just under the timeout.
+                low = err.lower()
+                timed_out = timed_out or "timed out" in low or "exceeded maximum time" in low
                 failed_n[name] = failed_n.get(name, 0) + 1
                 failed.append({"case_id": case, "query": name, "error": err[:300]})
     empty = [

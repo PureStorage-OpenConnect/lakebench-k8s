@@ -145,18 +145,24 @@ def _gate(base, run):
 
 
 def test_the_perf_gate_does_not_refuse_on_the_sessions_that_ran():
-    """An outcome condition: a regression that costs sessions (8 to 3, or to
-    0 when the round was skipped) reads as a regression, not as a different
-    experiment. On exp2 records, whose identity carries the key."""
+    """An outcome condition: a regression that costs sessions (8 to 3) reads
+    as a regression, not as a different experiment. On exp2 records, whose
+    identity carries the key."""
     assert ex.identity(_exp2(8))["investigator sessions"] == 8
-    for ran in (3, 0):
-        assert _gate(_exp2(8), _exp2(ran)) == [], ran
+    assert _gate(_exp2(8), _exp2(3)) == []
+    assert _gate(_exp2(3), _exp2(8)) == []
 
 
 def test_the_perf_gate_refuses_load_against_no_load():
-    """A run with the sessions configured is never matched to a baseline
-    without them, nor the other way round."""
-    for base, run in ((_exp2(None), _exp2(8)), (_exp2(8), _exp2(None)), (_exp2(None), _exp2(0))):
+    """Load is never matched to no load: none configured, or configured but
+    no session ran (a skipped round), against sessions that ran."""
+    for base, run in (
+        (_exp2(None), _exp2(8)),
+        (_exp2(8), _exp2(None)),
+        (_exp2(8), _exp2(0)),
+        (_exp2(0), _exp2(8)),
+    ):
         refusals = _gate(base, run)
-        assert any("investigator load differs" in r for r in refusals), refusals
+        assert any("investigator load differs" in r for r in refusals), (base, run, refusals)
     assert _gate(_exp2(None), _exp2(None)) == []
+    assert _gate(_exp2(None), _exp2(0)) == []

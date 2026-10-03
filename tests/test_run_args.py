@@ -241,6 +241,29 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
     assert called == [] and no_cluster == []
 
 
+def test_reproduce_refuses_batch_investigator_sessions_before_it_deploys(
+    tmp_path, monkeypatch, no_cluster
+):
+    """A batch AML config with investigator sessions loads, and run would
+    refuse it only after reproduce had deployed and generated: reproduce
+    checks run's rules first."""
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.cli._reproduce import _run_pipeline
+
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "runargs.yaml"
+    cfg.write_text(
+        CONFIG.replace("schema: customer360", "schema: financial").replace(
+            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
+        )
+    )
+    called: list[str] = []
+    monkeypatch.setattr(deploy_mod, "_deploy_impl", lambda *a, **k: called.append("deploy"))
+    with pytest.raises(UsageError, match="investigator_sessions runs only on an AML continuous"):
+        _run_pipeline(cfg, None, keep=True)
+    assert called == [] and no_cluster == []
+
+
 @pytest.mark.parametrize(
     ("kw", "mode", "cycles", "refused"),
     [

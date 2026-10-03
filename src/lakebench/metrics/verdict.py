@@ -947,6 +947,10 @@ def apply_save_gate(metrics: PipelineMetrics, ok: bool, report: Callable[[str], 
     return True
 
 
+def _as_list(value: Any) -> list:
+    return list(value) if isinstance(value, list | tuple) else []
+
+
 def investigators_qualifier(sessions: Mapping[str, Any]) -> str:
     """One line for ``continuous.investigators``: the investigators check's
     status (never a run FAIL) and, when the sessions ran, the load label that
@@ -956,8 +960,8 @@ def investigators_qualifier(sessions: Mapping[str, Any]) -> str:
     if status == "pass":
         text = f"investigators check: pass ({ran} of {req} sessions)"
     elif status == "fail":
-        failed = len(sessions.get("failed") or [])
-        empty = len(sessions.get("empty") or [])
+        failed = len(_as_list(sessions.get("failed")))
+        empty = len(_as_list(sessions.get("empty")))
         text = (
             f"investigators check: FAIL ({ran} of {req} sessions; {failed} failed and "
             f"{empty} empty IQ1/IQ3 queries; not a run FAIL)"
@@ -967,7 +971,7 @@ def investigators_qualifier(sessions: Mapping[str, Any]) -> str:
     label = sessions.get("load_label")
     if label:
         text += f"; {label}: time to detect and continuous throughput include these ticks"
-    bounds = [b for b in sessions.get("labels") or [] if str(b).startswith("BOUNDED BY")]
+    bounds = [b for b in _as_list(sessions.get("labels")) if str(b).startswith("BOUNDED BY")]
     if bounds:
         text += "; " + "; ".join(bounds)
     return text

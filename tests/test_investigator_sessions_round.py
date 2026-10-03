@@ -189,7 +189,7 @@ def _clock():
 
 def test_sessions_record_on_success():
     runner = _runner(_Exec(cases=CASES))
-    rec = inv.run_sessions(runner, 3, {"IQ1_customer_360": 1.5}, now=_clock(), remaining_s=1200)
+    rec = inv.run_sessions(runner, 3, {"IQ1_customer_360": 1.5}, now=_clock(), remaining_s=10_000)
     assert rec["status"] == "pass" and rec["sessions_run"] == 3
     assert rec["lowered_reason"] is None and rec["case_ids"] == CASES
     assert set(rec["rows_per_session"]) == set(CASES)
@@ -406,9 +406,39 @@ def test_the_query_timeout_keeps_the_round_inside_the_window():
     """Four queries per stream, each at most the timeout: they end inside
     the time left, and too little time skips the round."""
     assert inv.query_timeout(10_000) == 300
-    assert inv.query_timeout(400) == 100
-    rec = inv.run_sessions(_runner(_Exec(cases=CASES)), 3, {}, now=_clock(), remaining_s=100)
+    assert inv.query_timeout(400) == 90  # 400 / 4 less the 10 s cleanup margin
+    assert inv.query_timeout(-5) == 0
+    assert inv.case_query_timeout(10_000) == 120 and inv.case_query_timeout(200) == 40
+    rec = inv.run_sessions(_runner(_Exec(cases=CASES)), 3, {}, now=_clock(), remaining_s=150)
     assert rec["status"] == "no_time" and rec["sessions_run"] == 0
+
+
+def test_the_case_pick_spends_from_the_same_budget(monkeypatch):
+    """A slow case pick leaves less for the sessions: their timeout is taken
+    from what is left after it, and too little left skips them."""
+    import time as _time
+
+    runner = _runner(_Exec(cases=CASES))
+    real = runner.executor.execute_query
+    seen = {}
+    clock = [1000.0]
+    monkeypatch.setattr(_time, "monotonic", lambda: clock[0])
+
+    def slow_pick(sql, timeout=300):
+        if sql.startswith("SELECT case_id"):
+            seen["case_timeout"] = timeout
+            clock[0] += 60  # the pick took a minute
+        else:
+            seen.setdefault("query_timeouts", set()).add(timeout)
+        return real(sql, timeout)
+
+    runner.executor.execute_query = slow_pick
+    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=400)
+    assert seen["case_timeout"] == 80  # a fifth of 400
+    assert rec["query_timeout_s"] == 75 and seen["query_timeouts"] == {75}  # (400-60)/4-10
+    clock[0] = 1000.0
+    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=200)
+    assert rec["status"] == "no_time"  # 40 s per query before the pick, (200-60)/4-10 = 25 after
 
 
 def test_a_timed_out_query_names_the_lakebench_timeout():
@@ -423,8 +453,26 @@ def test_a_timed_out_query_names_the_lakebench_timeout():
         return real(sql, timeout)
 
     runner.executor.execute_query = slow
-    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=480)
+    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=522)
     assert rec["query_timeout_s"] == 120
+    assert "BOUNDED BY Lakebench per-query timeout (120s)" in rec["labels"]
+
+
+def test_trinos_own_run_time_limit_is_the_lakebench_timeout():
+    """The Trino executor sets query_max_run_time just under the timeout,
+    so the server fails the query first, with its own message."""
+    runner = _runner(_Exec(cases=CASES))
+    real = runner.executor.execute_query
+
+    def limited(sql, timeout=300):
+        if "hop2 AS" in sql:
+            return QueryExecutorResult(
+                sql, "trino", timeout, 0, "", error="Query exceeded maximum time limit of 1.92m"
+            )
+        return real(sql, timeout)
+
+    runner.executor.execute_query = limited
+    rec = inv.run_sessions(runner, 3, {}, now=_clock(), remaining_s=522)
     assert "BOUNDED BY Lakebench per-query timeout (120s)" in rec["labels"]
 
 
