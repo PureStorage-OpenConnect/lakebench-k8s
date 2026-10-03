@@ -93,16 +93,13 @@ def test_config_upgrade_hidden_from_help():
     assert group.commands["upgrade"].hidden
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="`init --from` arrives with CC-16; CC-16 removes this marker, so the "
-    "refusal's Next line cannot name a command that does not exist",
-)
 def test_config_upgrade_next_command_exists(tmp_path, monkeypatch):
+    """The refusal's Next line names a command that runs (CC-16)."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "OLD.yaml").write_text("name: x\n")
     result = CliRunner().invoke(app, ["init", "--from", "OLD.yaml", "-o", "NEW.yaml"])
-    assert result.exit_code != 2 or "No such option" not in result.output
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "NEW.yaml").is_file()
 
 
 @pytest.mark.parametrize(

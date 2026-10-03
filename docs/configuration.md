@@ -1240,6 +1240,50 @@ two credentials as `${LAKEBENCH_S3_ACCESS_KEY}` and
 Every other key keeps its default and is described on this page. See
 [cli-reference.md](cli-reference.md#init) for the flags.
 
+### Converting an older config
+
+`lakebench init --from OLD.yaml -o NEW.yaml` rewrites a config written for
+an earlier Lakebench in the current format. It reads OLD as text, so a
+`${VAR}` reference is copied as written (quoted or not) and never expanded,
+and it never writes over OLD (`-o` naming OLD, or a hard link to it, exits
+2). It:
+
+- keeps the deployment's name: OLD's `name:`, or for a nameless config the
+  name 1.6 recorded in `.lakebench/state.json` beside it. When other
+  nameless configs share that directory, 1.6 gave all of them that name,
+  so it exits 3 until `--name` says which deployment this file made. With
+  neither, the new file gets a new name and the output says that no
+  deployment was recorded for the config;
+- writes out the bucket names a load derives from the name
+  (`<name>-bronze` and so on), so a later rename cannot move them;
+- moves the old spellings to the current keys: flat top-level keys
+  (`endpoint:`, `scale:` and the rest), `architecture.workload` to
+  `workload`, `architecture.processing` to `architecture.pipeline`,
+  `pipeline.sustained` to `pipeline.continuous` and `mode: sustained` to
+  `continuous`. A recipe that contradicts the components written becomes
+  the recipe of those components, which is what 1.6 deployed;
+- drops every removed key, both `operator.install` keys and the
+  `spark.conf` keys at the 1.6 defaults Lakebench overwrote anyway, each
+  with what to do instead, and drops `benchmark.streams` when it holds the
+  default 4 (1.6 saved configs wrote it, and `run` refuses it written out);
+- replaces a plaintext credential (`access_key`, `secret_key`,
+  `client_secret`, or a `spark.conf` secret) with a `${VAR}` reference,
+  `${LAKEBENCH_S3_ACCESS_KEY}` and `${LAKEBENCH_S3_SECRET_KEY}` for the S3
+  keys (`--credentials-env` renames them) and
+  `${LAKEBENCH_POLARIS_CLIENT_SECRET}` for Polaris. The value is never
+  printed.
+
+Before writing, it loads OLD and the new file the way `status` would, with
+every referenced variable at a placeholder, and writes nothing (exit 3)
+unless the two give the same settings and the same planned experiment,
+apart from the moved secrets. It prints every moved, dropped or derived
+key, and then anything `deploy` and `run` still refuse in the new file
+(an executor override above 28, `benchmark.mode: throughput`), which it
+leaves for you to change. `--overwrite` replaces an existing NEW, and
+refuses (exit 3) when that file names the same deployment in another
+namespace, bucket, endpoint or recipe. Comments in OLD are not carried
+over.
+
 ### Recipes and components
 
 A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,

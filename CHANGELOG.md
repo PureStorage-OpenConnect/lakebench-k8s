@@ -129,6 +129,18 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `seal_update=True`.
 
 ### Added
+- **`init --from OLD -o NEW` converts an older config.** It keeps the
+  deployment's name (OLD's, or the one 1.6 recorded in
+  `.lakebench/state.json` for a nameless config) and writes the bucket names
+  out; moves flat keys, `architecture.workload`, `processing` and
+  `sustained` to the current keys; drops removed keys and the
+  `operator.install` keys with their fix text; replaces plaintext
+  credentials with `${VAR}` references without printing them; and lists
+  every change. It never expands a `${VAR}`, never writes over OLD, and
+  writes nothing unless the new file loads to the same settings as OLD.
+  `config upgrade` and the nameless-config refusals already pointed here.
+  `scripts/upgrading.py` also requires a breaking-changes entry for each
+  config value 1.7 refuses that 1.6 accepted (`config/refused_keys.py`).
 - **AML batch records attribute gold-finalize time and show stage headroom.**
   `experiment.attribution` names gold-finalize's slowest rule, its heaviest
   Spark stage and the TM share; `limits.headroom_pct` gives each stage's

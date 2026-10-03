@@ -147,6 +147,24 @@ def test_a_new_removed_key_is_missing(up, monkeypatch):
     ]
 
 
+def test_a_new_refused_key_is_missing(up, monkeypatch):
+    from lakebench.config import refused_keys
+
+    row = refused_keys.RefusedKey(
+        key="platform.storage.s3.region",
+        when="empty",
+        example="",
+        refused_by="deploy and run",
+        fix="set a region",
+        init_from="keep",
+    )
+    monkeypatch.setattr(refused_keys, "REFUSED_KEYS", (*refused_keys.REFUSED_KEYS, row))
+    missing = up.missing_entries(LIST)
+    assert [(m["kind"], m["subject"]) for m in missing] == [
+        ("default-change", "platform.storage.s3.region empty")
+    ]
+
+
 def test_image_default_bumps_listed(up, monkeypatch):
     real = up.image_defaults
     monkeypatch.setattr(up, "image_defaults", lambda: {**real(), "trino": "trinodb/trino:999"})

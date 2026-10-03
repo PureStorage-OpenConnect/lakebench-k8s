@@ -6,6 +6,9 @@ the code shows that has no entry in the list:
 
 - a removed config key (any model's ``_removed_keys``) not in the 1.6.0
   snapshot ``tests/fixtures/removed_keys_1.6.0.txt``;
+- a config value 1.7 refuses that 1.6 accepted (``REFUSED_KEYS`` in
+  ``lakebench.config.refused_keys``), as a ``default-change`` with the
+  subject ``<key> <when>``;
 - an alias, refused command or flag, or aliased flag in
   ``lakebench.cli._aliases``;
 - an exit path whose code differs from 1.6 (``ExitPath.v16_code``);
@@ -179,6 +182,7 @@ def load_list(path: Path = LIST) -> list[dict[str, Any]]:
 def code_items() -> list[dict[str, str]]:
     """Every breaking change the code shows, as ``{kind, subject, hint}``."""
     from lakebench.cli import _aliases as al
+    from lakebench.config.refused_keys import REFUSED_KEYS
     from lakebench.exit_codes import PATHS
     from lakebench.metrics.experiment import WORKLOAD_VERSIONS
 
@@ -187,6 +191,14 @@ def code_items() -> list[dict[str, str]]:
     for key in removed_keys():
         if key not in old:
             items.append({"kind": "removed-key", "subject": key, "hint": "removed config key"})
+    for row in REFUSED_KEYS:
+        items.append(
+            {
+                "kind": "default-change",
+                "subject": row.subject,
+                "hint": f"refused by {row.refused_by}: {row.fix}",
+            }
+        )
     for name, a in al.ALIASES.items():
         items.append({"kind": "alias", "subject": name, "hint": f"now `{a.target}`"})
     for command, flags in al.ALIASED_FLAGS.items():

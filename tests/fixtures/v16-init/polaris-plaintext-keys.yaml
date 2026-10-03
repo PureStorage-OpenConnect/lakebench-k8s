@@ -1,0 +1,335 @@
+# Lakebench 1.6.0 `lakebench init --no-interactive --endpoint http://10.0.1.50:80 --access-key plaintext-access --secret-key plaintext-secret --recipe polaris-iceberg-spark-trino` output (tests/test_init_from.py).
+# Lakebench Configuration
+# ========================
+# This file defines your lakehouse deployment configuration.
+#
+# LEGEND:
+#   Uncommented fields  = REQUIRED or explicitly set values
+#   # field: value      = Available option with its DEFAULT value.
+#                         When commented out, this default is still ACTIVE.
+#   ## Section Header   = Section label (not a config field)
+#
+# Key behavior: commenting out an optional section does NOT disable it --
+# Pydantic fills in defaults. To truly disable something, set its 'enabled'
+# or 'install' field to false explicitly.
+#
+# Full reference: docs/configuration.md
+# Recipe guide:   docs/recipes.md
+#
+# MINIMUM VIABLE CONFIG (3 fields):
+#   name: my-lakehouse
+recipe: polaris-iceberg-spark-trino
+#   platform.storage.s3.endpoint: http://your-s3:80
+#   platform.storage.s3.access_key / secret_key: your-credentials
+# Everything else has sensible defaults.
+
+# REQUIRED: Unique name for this deployment (also used as K8s namespace)
+name: my-lakehouse
+recipe: polaris-iceberg-spark-trino
+
+# Optional description
+# description: "My Lakebench lakehouse deployment"
+
+# Recipe shorthand -- sets catalog + table_format + engine + query_engine in one line.
+# Valid recipes: default, hive-iceberg-spark-trino, hive-iceberg-spark-thrift,
+#   hive-iceberg-spark-duckdb, hive-iceberg-spark-none,
+#   polaris-iceberg-spark-trino, polaris-iceberg-spark-thrift,
+#   polaris-iceberg-spark-duckdb, polaris-iceberg-spark-none
+# See docs/recipes.md for details.
+# recipe: hive-iceberg-spark-trino
+
+# Config schema version (always 1)
+# version: 1
+
+# ============================================================================
+# IMAGES
+# ============================================================================
+# Container images for all components. Override for private registries.
+# See docs/datagen-custom-images.md for building custom datagen images.
+# images:
+#   datagen: docker.io/sillidata/lb-datagen:1.6.0 # Customizable (see docs/datagen-custom-images.md)
+#   spark: apache/spark:4.0.2-python3
+#   postgres: postgres:17
+#   hive: apache/hive:3.1.3
+#   trino: trinodb/trino:483
+#   polaris: apache/polaris:1.6.0
+#   duckdb: python:3.11-slim
+#   jmx_exporter: bitnami/jmx-exporter:latest
+#   pull_policy: Always               # Always | IfNotPresent | Never
+
+# ============================================================================
+# LAYER 1: PLATFORM
+# ============================================================================
+platform:
+  kubernetes:
+    # context: ""                    # Empty = use current kubectl context
+    namespace: ""                    # Empty = use deployment name
+    # create_namespace: true
+
+  storage:
+    s3:
+      # REQUIRED: S3-compatible endpoint URL
+      # Examples:
+      #   FlashBlade: http://your-s3-endpoint:80
+      #   MinIO: http://minio:9000
+      #   AWS S3: https://s3.us-east-1.amazonaws.com
+      endpoint: "http://10.0.1.50:80"
+
+      # REQUIRED: S3 credentials (either inline or secret_ref)
+      access_key: "plaintext-access"
+      secret_key: "plaintext-secret"
+      # secret_ref: ""               # OR: name of existing K8s Secret
+
+      # region: us-east-1
+      # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
+      # buckets:                     # default: <name>-bronze, <name>-silver, <name>-gold
+      #   bronze: <name>-bronze        # bucket names are global on most stores; keep them unique
+      #   silver: <name>-silver
+      #   gold: <name>-gold
+      # create_buckets: true
+
+    ## Scratch storage for Spark shuffle PVCs
+    ## When enabled, Spark shuffle data uses PVCs instead of emptyDir.
+    ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
+    # scratch:
+    #   enabled: false
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. Must exist
+    #                                    # before `deploy` runs -- a cluster admin
+    #                                    # installs it once with
+    #                                    # `lakebench admin install-scratch-storage-class`.
+    #   size: 100Gi
+    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
+    #                                    # `admin install-scratch-storage-class`. Examples:
+    #                                    #   pxd.portworx.com (Portworx)
+    #                                    #   rancher.io/local-path (local-path)
+    #                                    #   ebs.csi.aws.com (AWS EBS)
+    #   parameters:                      # Provider-specific StorageClass parameters
+    #     repl: "1"
+    #     io_profile: auto
+    #     priority_io: high
+
+  # compute:
+  #   spark:
+  #     operator:
+  #       install: false             # Set true to auto-install Spark Operator.
+  #                                  # Default is false -- install the operator
+  #                                  # manually or set true for auto-install.
+  #       namespace: spark-operator
+  #       version: "2.5.1"           # v2.x uses webhook for volume injection
+  #
+  #     driver:
+  #       cores: 4
+  #       memory: 8g
+  #
+  #     # Default executor sizing (proven at 1 TB+ scale)
+  #     executor:
+  #       instances: 8
+  #       cores: 4
+  #       memory: 48g
+  #       memory_overhead: 12g       # Critical for stability
+  #
+  #     ## Per-job executor count overrides (null = auto from scale factor).
+  #     ## Per-executor sizing (cores, memory, PVC) stays fixed from proven profiles.
+  #     # bronze_executors: null
+  #     # silver_executors: null
+  #     # gold_executors: null
+  #     ## Streaming job executor overrides (continuous mode)
+  #     # bronze_ingest_executors: null
+  #     # silver_stream_executors: null
+  #     # gold_refresh_executors: null
+  #     ## Global driver resource overrides
+  #     # driver_memory: "8g"
+  #     # driver_cores: 4
+  #
+  #   postgres:
+  #     storage: 10Gi
+  #     # storage_class: ""           # Empty = cluster default
+
+# ============================================================================
+# LAYER 2: DATA ARCHITECTURE
+# ============================================================================
+# See docs/recipes.md for supported (catalog, table_format, engine, query_engine)
+# combinations and guidance on choosing a recipe.
+architecture:
+  # pipeline_engine: spark           # Pipeline engine (spark only today)
+  catalog:
+    type: hive                     # hive | polaris | none
+    ## Hive Metastore tuning (uncomment to override defaults)
+    # hive:
+    #   operator:
+    #     install: false             # Set true to auto-install Stackable operators.
+    #                                # Requires cluster-admin. Installs commons,
+    #                                # listener, secret, and hive operators.
+    #     namespace: stackable
+    #     version: "25.7.0"
+    #   thrift:
+    #     min_threads: 10
+    #     max_threads: 50
+    #     client_timeout: 300s
+    #   resources:
+    #     cpu_min: 500m
+    #     cpu_max: "2"
+    #     memory: 4Gi
+    ## Polaris REST catalog settings (used when type: polaris)
+    # polaris:
+    #   version: 1.6.0                # Min 1.3.0 for FlashBlade/MinIO
+    #   port: 8181
+    #   resources:
+    #     cpu: "1"
+    #     memory: 2Gi
+
+  # table_format:
+  #   type: iceberg                  # iceberg (only fully supported format)
+  #   iceberg:
+  #     version: "1.11.0"
+
+  # query_engine:
+  #   type: trino                    # trino | spark-thrift | duckdb | none
+  #   trino:
+  #     coordinator:
+  #       cpu: "2"
+  #       memory: 8Gi
+  #     worker:
+  #       replicas: 2
+  #       cpu: "4"
+  #       memory: 16Gi
+  #       spill_enabled: true
+  #       spill_max_per_node: 40Gi
+  #       storage: 50Gi
+  #       storage_class: ""          # Empty = emptyDir (ephemeral). Set a class name for PVC-backed storage.
+  #     catalog_name: lakehouse      # Trino catalog name for Iceberg
+  #   # spark_thrift:                 # Spark Thrift Server (alternative to Trino)
+  #   #   cores: 2
+  #   #   memory: 4g
+  #   # duckdb:                        # DuckDB (lightweight in-process engine)
+  #   #   cores: 2
+  #   #   memory: 4g
+  #   #   catalog_name: lakehouse
+
+  pipeline:
+    mode: batch                    # batch | continuous
+  #   ## Medallion layer configuration
+  #   medallion:
+  #     bronze:
+  #       format: parquet
+  #       path_template: customer/interactions
+  #     silver:
+  #       format: iceberg
+  #       table_name: customer_interactions_enriched
+  #       partition_by:
+  #         - date
+  #       transforms:
+  #         - normalize_email
+  #         - normalize_phone
+  #         - geo_enrichment
+  #         - customer_segmentation
+  #         - quality_flags
+  #     gold:
+  #       format: iceberg
+  #       tables:
+  #         - name: customer_executive_dashboard
+  #           partition_by: [date]
+  #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
+  #   ## Continuous pipeline settings (used when mode: continuous)
+  #   continuous:
+  #     bronze_trigger_interval: "30 seconds"
+  #     silver_trigger_interval: "60 seconds"
+  #     gold_refresh_interval: "5 minutes"
+  #     run_duration: 1800           # Streaming run duration in seconds
+  #     checkpoint_base: checkpoints # S3 prefix for checkpoint data
+  #     ## Throughput tuning
+  #     max_files_per_trigger: 10    # Files per micro-batch; unset = auto (data arrives all window)
+  #     bronze_target_file_size_mb: 512
+  #     silver_target_file_size_mb: 512
+  #     gold_target_file_size_mb: 128
+  #     ## In-stream benchmark rounds (runs Trino queries while streaming)
+  #     benchmark_interval: 300      # Seconds between rounds (300-3600)
+  #     benchmark_warmup: 300        # Seconds before first round (300-1800)
+
+  ## Benchmark configuration
+  ## Runs analytical SQL queries against silver/gold tables via the configured
+  ## query engine (Trino, Spark Thrift, or DuckDB). See docs/benchmarking.md.
+  # benchmark:
+  #   mode: power                    # power: single sequential stream (per-query latency)
+  #                                  # throughput: N concurrent streams (aggregate QpH)
+  #                                  # composite: geometric mean of power + throughput
+  #   streams: 4                     # Concurrent streams (throughput/composite only;
+  #                                  # ignored in power mode)
+  #   cache: hot                     # hot: caches stay populated between queries
+  #                                  # cold: metadata cache flushed before each run
+  #   iterations: 1                  # Runs per query. 1 = raw timing, 3+ = median
+
+  ## Table name overrides (namespace.table format)
+  # tables:
+  #   bronze: default.bronze_raw
+  #   silver: silver.customer_interactions_enriched
+  #   gold: gold.customer_executive_dashboard
+
+# ============================================================================
+# WORKLOAD
+# ============================================================================
+# What runs through the architecture: the generated corpus and its scale.
+workload:
+  # schema: customer360            # customer360 | financial
+  datagen:
+    # Image: configured via images.datagen (see docs/datagen-custom-images.md)
+    ## Scale is per-schema:
+    ##   customer360: ~10 GB bronze / unit (~100,000 customers)
+    ##   financial:   ~8.4 GB bronze / unit (~111,111 entities and their
+    ##                accounts + 60 months of pacs.008 transactions)
+    scale: 10.0                    # Interpreted per-schema; see above
+    # mode: auto                    # S3 delivery pattern: auto | batch | continuous
+    ##   batch:      one PUT per Parquet file (bursty upload, higher peak RSS)
+    ##   continuous: S3 multipart upload as row-groups close
+    ##   auto:       continuous at every scale (owner D18, 2026-09-28)
+    ## Row content is byte-identical across modes at fixed seed. CPU/memory
+    ## are sized by scale via the autosizer independently of mode, and any
+    ## cpu/memory you set are honoured.
+    # parallelism: 8                # Number of datagen pods. Left commented so
+                                    # the autosizer picks a value from cluster
+                                    # capacity (scale > 50 scales up beyond the
+                                    # default; small scales cap down). Set an
+                                    # explicit integer to pin it.
+    # file_size: 64mb
+    # dirty_data_ratio: 0.08         # customer360 only; financial ignores it
+    # generators: 0                # Per-pod generator threads (0 = auto: follow pod CPU)
+    # timestamp_start: "2024-01-01"
+    # timestamp_end: "2025-01-01"    # exclusive
+  ## Customer360 workload overrides
+  # customer360:
+  #   unique_customers: null       # Override: derived from scale if null
+  #   date_range_days: null        # Override: defaults to 365 if null
+
+# ============================================================================
+# LAYER 3: OBSERVABILITY
+# ============================================================================
+# Flat schema -- use top-level keys directly under observability:
+# observability:
+#   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
+#   prometheus_stack_enabled: true   # Prometheus collection
+#   dashboards_enabled: true         # Grafana dashboards
+#   retention: 7d                    # Prometheus data retention
+#   storage: 10Gi                    # Prometheus PVC size
+#   storage_class: ""                # PVC storage class (empty = default)
+
+# ============================================================================
+# SPARK CONFIGURATION OVERRIDES
+# ============================================================================
+# Proven defaults for S3A and shuffle. Override as needed.
+# spark:
+#   conf:
+#     # S3A performance settings
+#     spark.hadoop.fs.s3a.connection.maximum: "500"
+#     spark.hadoop.fs.s3a.threads.max: "200"
+#     spark.hadoop.fs.s3a.fast.upload: "true"
+#     spark.hadoop.fs.s3a.multipart.size: "268435456"
+#     spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
+#     spark.hadoop.fs.s3a.attempts.maximum: "20"
+#     spark.hadoop.fs.s3a.retry.limit: "10"
+#     spark.hadoop.fs.s3a.retry.interval: "500ms"
+#     # Shuffle settings
+#     spark.sql.shuffle.partitions: "200"
+#     spark.default.parallelism: "200"
+#     # Memory settings
+#     spark.memory.fraction: "0.8"
+#     spark.memory.storageFraction: "0.3"

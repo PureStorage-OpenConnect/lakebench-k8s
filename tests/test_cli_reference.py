@@ -131,9 +131,9 @@ INLINE = "\x00inline"
 #: Placeholder words that stand for "the rest of the line".
 _PLACEHOLDERS = {"...", "[OPTIONS]", "[options]"}
 
-#: Flags a doc may name before the work item that adds them merges (the
-#: refusals of `config upgrade` and of a nameless config already point there).
-PLANNED_FLAGS = {("init", "--from"): "CC-16"}
+#: Flags a doc may name before the work item that adds them merges, mapped to
+#: that work item (``init --from`` left with CC-16).
+PLANNED_FLAGS: dict[tuple[str, str], str] = {}
 
 
 def _placeholder(word: str) -> bool:

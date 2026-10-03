@@ -9,7 +9,12 @@ renamed and refused commands are listed in
 
 Before anything else: redeploy each deployment once with `lakebench deploy
 CONFIG` (see [run needs a 1.7 deploy](#run-needs-a-17-deploy)), and give
-every config a `name:` and a `recipe:`.
+every config a `name:` and a `recipe:`. `lakebench init --from OLD.yaml -o
+NEW.yaml` rewrites a 1.6 config for 1.7: it keeps the deployment's name
+(from the config, or the one 1.6 recorded in `.lakebench/state.json`) and
+its bucket names, drops the removed keys with their fix text, moves
+plaintext secrets to `${VAR}` references, and writes nothing unless the new
+file loads to the same settings as the old one.
 
 ## Removed config keys
 
@@ -60,7 +65,7 @@ The keys:
 
 `lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote secrets in plaintext.
 
-**What to do:** Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml` once that flag ships, or edit it by hand.
+**What to do:** Rewrite the config with `lakebench init --from OLD.yaml -o NEW.yaml`, which keeps its name and buckets and lists every key it moves or drops, or edit it by hand.
 
 ### clean bronze and clean data are refused
 

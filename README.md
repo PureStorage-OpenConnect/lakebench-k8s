@@ -290,7 +290,7 @@ snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
 
 | Command | Description |
 |---------|-------------|
-| `init` | Generate a starter config file |
+| `init` | Generate a starter config file; `--from OLD` converts an older one |
 | `config validate` | Check config and cluster connectivity |
 | `config storage` | Check the S3 backend supports what lakebench needs |
 | `config show` | Show the resolved configuration and its peak requested resources |
