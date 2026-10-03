@@ -201,16 +201,18 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
     per scale unit, 4 transactions per entity per month, over a 60-month
     corpus (the entrypoint's ``--corpus-months`` default).
 
-    Scale 1   -> 111K entities, ~26.7M txns, ~8.4 GB pacs.008
-    Scale 10  -> 1.1M entities, ~267M txns,  ~84 GB
-    Scale 100 -> 11M entities,  ~2.7B txns,  ~840 GB
+    Scale 1   -> 111K entities, ~26.7M txns, ~8.5 GB pacs.008
+    Scale 10  -> 1.1M entities, ~267M txns,  ~94 GB
+    Scale 100 -> 11M entities,  ~2.7B txns,  ~939 GB
 
-    ``approx_bronze_gb`` is measured, not estimated: scale 1 with the default
-    64 MB files wrote 26,666,639 rows in 8.37 GB of pacs.008 Parquet
-    (2026-09-24). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
-    every complete AML run read as 84% "incomplete". The reference tables
-    (party, account) and the manifest are excluded, as bronze-verify
-    measures only the pacs.008 tree.
+    ``approx_bronze_gb`` is measured, not estimated: ``scale *
+    financial_gb_per_scale_unit(scale)``, from the pacs.008 bytes
+    bronze-verify read at scales 1, 10 and 100 (docs/data-generation.md has
+    the runs). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
+    every complete AML run read as 84% "incomplete", and the flat 8.4 GB of
+    scale 1 made complete scale-10 and scale-100 runs read 111% to 112%. The
+    reference tables (party, account) and the manifest are excluded, as
+    bronze-verify measures only the pacs.008 tree.
     """
     entities = _entity_count(scale, 111_111)
     txns_per_entity_per_month = 4
@@ -223,8 +225,40 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
         events_per_customer=txns_per_entity_per_month * months,
         date_range_days=1826,
         approx_rows=approx_rows,
-        approx_bronze_gb=scale * 8.4,
+        approx_bronze_gb=scale * financial_gb_per_scale_unit(scale),
     )
+
+
+#: pacs.008 Parquet GB per AML scale unit (64 MB files), measured: what
+#: bronze-verify read at scale 1 (8.47 GB, 26.7M rows), 10 (93.6 GB, 267M
+#: rows) and 100 (939.5 GB, 2.67B rows). Rows are linear in scale; bytes per
+#: row grow from about 318 to 351 between scale 1 and 10 (a larger entity
+#: population repeats less within a file, so Parquet encodes it less tightly)
+#: and are flat by scale 100.
+FINANCIAL_GB_PER_SCALE_UNIT: tuple[tuple[float, float], ...] = (
+    (1.0, 8.47),
+    (10.0, 9.36),
+    (100.0, 9.39),
+)
+
+
+def financial_gb_per_scale_unit(scale: float) -> float:
+    """GB per scale unit at *scale*: the measured value at a measured scale,
+    interpolated linearly in log10(scale) between two, and the nearest
+    measurement outside them (below scale 1 the scale-1 value, above scale
+    100 the scale-100 value)."""
+    import math
+
+    points = FINANCIAL_GB_PER_SCALE_UNIT
+    if scale <= points[0][0]:
+        return points[0][1]
+    if scale >= points[-1][0]:
+        return points[-1][1]
+    for (s0, g0), (s1, g1) in zip(points, points[1:], strict=False):
+        if s0 <= scale <= s1:
+            t = (math.log10(scale) - math.log10(s0)) / (math.log10(s1) - math.log10(s0))
+            return g0 + t * (g1 - g0)
+    return points[-1][1]  # not reached: the points cover every scale above
 
 
 # Registry of schema type -> dimension function

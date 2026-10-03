@@ -16,11 +16,9 @@ its run id.
 
 - **Scale.** Datagen `scale` factor. Per scale unit the generator writes
   111,111 entities * 4 txns/month * 60 months = 26.7M transactions.
-  Lakebench's size estimate (`src/lakebench/config/scale.py`) is about
-  8.4 GB of pacs.008 per scale unit, linear in scale (scale 100 is about
-  840 GB). That figure was measured on the pre-freeze generator and is
-  superseded; v1.6 has no size measurements on the frozen generator
-  (deferred to v1.7). AML has been run end to end up to scale 100
+  The pacs.008 size (`src/lakebench/config/scale.py`) is measured: 8.47 GB
+  at scale 1, 93.6 GB at scale 10 and 939.5 GB at scale 100, so about
+  9.4 GB per unit from scale 10 (see data-generation.md). AML has been run end to end up to scale 100
   (pre-freeze). Datagen is supported up to scale 300, unverified up to 800
   and refused above 800.
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock

@@ -2533,7 +2533,7 @@ def build_config_snapshot(
     snapshot: dict[str, Any] = {
         "name": cfg.name,
         "scale": datagen.get_effective_scale(),
-        "approx_bronze_gb": round(cfg.get_scale_dimensions().approx_bronze_gb, 1),
+        "approx_bronze_gb": round(cfg.get_scale_dimensions().approx_bronze_gb, 2),
         "processing_pattern": pipeline.pattern.value,
         "s3": {
             "endpoint": s3.endpoint,
