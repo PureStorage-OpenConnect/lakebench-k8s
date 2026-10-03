@@ -54,10 +54,10 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PLAIN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 # Bronze per scale unit (docs/data-generation.md): customer360 about 10 GB,
-# financial about 8.4 GB of pacs.008.
+# financial about 8.5 GB of pacs.008 (9.4 GB per unit from scale 10).
 _SCALE_COMMENT = {
     "customer360": "1 is about 10 GB of bronze",
-    "financial": "1 is about 8.4 GB of bronze",
+    "financial": "1 is about 8.5 GB of bronze",
 }
 
 _WIZARD_REMOVED = ALIASED_FLAGS["init"]["--interactive"].note
@@ -281,8 +281,8 @@ def init(
             "--scale",
             "-s",
             help=(
-                "Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB "
-                "for financial (default 1; 0.1 with --local)"
+                "Scale factor: 1 is about 10 GB of bronze for customer360, 8.5 GB "
+                "for financial, 9.4 GB per unit from scale 10 (default 1; 0.1 with --local)"
             ),
         ),
     ] = None,

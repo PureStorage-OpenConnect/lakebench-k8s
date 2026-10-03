@@ -74,7 +74,7 @@ lakebench init [OPTIONS]
 |---|---|---|---|---|
 | `--output` | `-o` | path | `lakebench.yaml` | Output file path for configuration |
 | `--name` | `-n` | text |  | Deployment name (default: lb-<user>-<4 hex>, unique per init) |
-| `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB for financial (default 1; 0.1 with --local) |
+| `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.5 GB for financial, 9.4 GB per unit from scale 10 (default 1; 0.1 with --local) |
 | `--endpoint` |  | text |  | S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443) |
 | `--credentials-env` |  | text | `LAKEBENCH_S3` | Environment variable prefix for the S3 credentials: the config references ${PREFIX_ACCESS_KEY} and ${PREFIX_SECRET_KEY} |
 | `--namespace` |  | text |  | Kubernetes namespace (default: same as deployment name) |

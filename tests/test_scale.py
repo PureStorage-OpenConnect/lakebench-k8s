@@ -87,7 +87,32 @@ class TestFinancialDimensions:
         assert dims.customers == 111_111  # entities, as datagen_rs writes them
         assert dims.date_range_days == 1826
         assert dims.approx_rows == 111_111 * 4 * 60
-        assert dims.approx_bronze_gb == 8.4
+        assert dims.approx_bronze_gb == pytest.approx(8.47)
+
+    #: pacs.008 bytes bronze-verify read on the recorded AML batch runs (GB):
+    #: scale 1 (run-20260928-103055-de1772, run-20260929-221146-9d5345),
+    #: scale 10 (run-20260929-214442-825153), scale 100
+    #: (run-20260929-000406-85b404). LB-262: against the flat 8.4 GB of
+    #: scale 1, scales 10 and 100 read 1.114 and 1.118.
+    MEASURED = ((1, 8.475), (1, 8.471), (10, 93.596), (100, 939.45))
+
+    def test_the_model_reads_the_recorded_runs_as_complete(self):
+        from lakebench.metrics.perf_gate import MAX_SCALE_RATIO, MIN_SCALE_RATIO
+
+        for scale, gb in self.MEASURED:
+            ratio = gb / financial_dimensions(scale).approx_bronze_gb
+            assert ratio == pytest.approx(1.0, abs=0.002), (scale, ratio)
+            assert MIN_SCALE_RATIO <= ratio <= MAX_SCALE_RATIO
+
+    def test_per_unit_bytes_between_and_beyond_the_measurements(self):
+        from lakebench.config.scale import financial_gb_per_scale_unit as per_unit
+
+        assert per_unit(0.1) == per_unit(1) == 8.47
+        assert per_unit(1000) == per_unit(100) == 9.39
+        values = [per_unit(s) for s in (1, 2, 3, 5, 10, 20, 50, 100)]
+        assert values == sorted(values)
+        # Halfway in log10 between 1 and 10 is halfway between their values.
+        assert per_unit(10**0.5) == pytest.approx((8.47 + 9.36) / 2)
 
 
 class TestGetDimensions:
@@ -110,7 +135,8 @@ class TestGetDimensions:
         d10 = get_dimensions("financial", 10)
         assert d10.customers == d1.customers * 10
         assert d10.approx_rows == d1.approx_rows * 10
-        assert d10.approx_bronze_gb == pytest.approx(d1.approx_bronze_gb * 10)
+        # Bytes are not linear: per-row size grows with the entity population.
+        assert d10.approx_bronze_gb == pytest.approx(93.6)
 
     def test_financial_via_workload_schema_enum(self):
         from lakebench.config.schema import WorkloadSchema
