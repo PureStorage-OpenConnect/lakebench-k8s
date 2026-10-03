@@ -454,18 +454,44 @@ def _mark_exclusions(side: Side) -> None:
             m.excluded = f"{status or 'did not pass'}" + (f": {reason}" if reason else "")
 
 
+def equal_name_problem(*sides: Side) -> str | None:
+    """Why the config refs cannot all be used, or None. A
+    deployment name is one deployment, so two configs whose contents differ
+    and that resolve to one name are refused, on two sides or within one
+    (where the second config adds nothing: both resolve to the same
+    deployment's records). The same config given twice, or two
+    copies with equal bytes, is a repeat and passes. Run-id, run-dir and
+    series refs are exempt: one deployment changes config over time. Each
+    side is checked on its own first, so the message names the side that
+    holds the conflict."""
+    for side in sides:
+        first: dict[str, tuple[Path, str]] = {}
+        for path, name, sha in side.configs:
+            prior = first.setdefault(name, (path, sha))
+            if prior[1] != sha:
+                return (
+                    f"{side.label} lists {prior[0]} and {path}, which both resolve to {name}; "
+                    "a name is one deployment (pass one config, or its run ids)"
+                )
+    seen: dict[str, tuple[str, Path, str]] = {}
+    for side in sides:
+        for path, name, sha in side.configs:
+            prior3 = seen.setdefault(name, (side.label, path, sha))
+            if prior3[2] != sha:
+                return (
+                    f"{prior3[0]} and {side.label} both resolve to {name}; a name is one "
+                    f"deployment ({prior3[1]} and {path} differ; pass run ids instead)"
+                )
+    return None
+
+
 def resolve(side_a: str, side_b: str, runs_dirs: Sequence[Path]) -> tuple[Side, Side]:
     """Both sides, refused (``CompareError``) when they cannot be a pair."""
     a = resolve_side("A", side_a, runs_dirs)
     b = resolve_side("B", side_b, runs_dirs)
-    for pa, na, sa in a.configs:
-        for pb, nb, sb in b.configs:
-            if na == nb and sa != sb:
-                raise CompareError(
-                    "compare.equal_names",
-                    f"A and B both resolve to {na}; a name is one deployment "
-                    f"({pa} and {pb} differ)",
-                )
+    problem = equal_name_problem(a, b)
+    if problem:
+        raise CompareError("compare.equal_names", problem)
     ids_a = {m.run_id for m in a.members}
     ids_b = {m.run_id for m in b.members}
     if ids_a == ids_b:

@@ -467,6 +467,73 @@ def test_equal_names_with_different_configs_refused(tmp_path: Path, monkeypatch)
     assert f"A and B both resolve to {base['deployment_name']}" in _stderr(result)
 
 
+def test_two_configs_with_one_name_on_one_side_refused(tmp_path: Path, monkeypatch) -> None:
+    # Both configs resolve to deployment X's records, so the side was
+    # silently X's latest run alone, while the user meant two deployments.
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    other = _with_id(base, "20260102-000000-000002", deployment_name="other")
+    runs = _runs(tmp_path, _with_id(base, "20260101-000000-000001"), other)
+    (tmp_path / "a.yaml").write_text(f"name: {base['deployment_name']}\n")
+    (tmp_path / "b.yaml").write_text(f"name: {base['deployment_name']}\n# changed\n")
+    result = _invoke("a.yaml,b.yaml", other["run_id"], "--runs-dir", str(runs))
+    assert result.exit_code == 2, _stderr(result)
+    err = " ".join(_stderr(result).split())
+    assert f"A lists a.yaml and b.yaml, which both resolve to {base['deployment_name']}" in err
+
+
+def test_equal_names_from_a_v16_state_refused(tmp_path: Path, monkeypatch) -> None:
+    # The nameless case: v1.6 gave every nameless config in a directory the
+    # one name in .lakebench/state.json, so two nameless configs that differ
+    # are one deployment name, not two deployments.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    name = "lb-20260915-101530"
+    base = _with_id(sr.load_record("5105a0"), "20260101-000000-000001", deployment_name=name)
+    runs = _runs(tmp_path, base)
+    (tmp_path / ".lakebench").mkdir()
+    (tmp_path / ".lakebench" / "state.json").write_text(json.dumps({"name": name}))
+    nameless = "endpoint: http://127.0.0.1:9\naccess_key: k\nsecret_key: s\nscale: {}\n"
+    (tmp_path / "a.yaml").write_text(nameless.format(1))
+    (tmp_path / "b.yaml").write_text(nameless.format(2))
+    before = sorted(str(p) for p in tmp_path.rglob("*"))
+    result = _invoke("a.yaml", "b.yaml", "--runs-dir", str(runs))
+    assert result.exit_code == 2, _stderr(result)
+    assert f"A and B both resolve to {name}" in " ".join(_stderr(result).split())
+    assert sorted(str(p) for p in tmp_path.rglob("*")) == before  # no state written
+
+
+def test_the_side_that_holds_the_conflict_is_named(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    runs = _runs(tmp_path, _with_id(base, "20260101-000000-000001"))
+    name = base["deployment_name"]
+    (tmp_path / "a.yaml").write_text(f"name: {name}\n")
+    (tmp_path / "c.yaml").write_text(f"name: {name}\n")
+    (tmp_path / "d.yaml").write_text(f"name: {name}\n# changed\n")
+    a = cm.resolve_side("A", "a.yaml", [runs])
+    b = cm.resolve_side("B", "c.yaml,d.yaml", [runs])
+    problem = cm.equal_name_problem(a, b)
+    assert problem is not None and problem.startswith("B lists c.yaml and d.yaml")
+
+
+def test_one_config_twice_or_byte_equal_copies_are_not_an_equal_name(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    base = sr.load_record("5105a0")
+    runs = _runs(tmp_path, _with_id(base, "20260101-000000-000001"))
+    (tmp_path / "a.yaml").write_text(f"name: {base['deployment_name']}\n")
+    (tmp_path / "copy.yaml").write_text(f"name: {base['deployment_name']}\n")
+    a = cm.resolve_side("A", "a.yaml,copy.yaml", [runs])
+    b = cm.resolve_side("B", "a.yaml", [runs])
+    assert cm.equal_name_problem(a, b) is None
+    # Through the CLI the pair is still refused, as the same runs.
+    result = _invoke("a.yaml", "copy.yaml", "--runs-dir", str(runs))
+    assert result.exit_code == 2
+    assert "resolve to the same runs" in _stderr(result)
+
+
 def test_config_with_an_unset_variable_still_resolves_its_name(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("LB_TEST_UNSET_KEY", raising=False)
