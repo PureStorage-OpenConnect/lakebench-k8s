@@ -254,12 +254,22 @@ def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+_FRACTION = re.compile(r"^(?P<head>[^.]+)(?:\.(?P<frac>\d+))?$")
+
+
 def _parse_utc(text: Any) -> datetime | None:
-    """A recorded UTC time (``...Z`` or naive ISO) as a naive datetime."""
+    """A recorded UTC time (``...Z`` or naive ISO) as a naive datetime. A
+    fraction of any length is read (Python 3.10's ``fromisoformat`` takes
+    only 3 or 6 digits)."""
     if not text:
         return None
+    m = _FRACTION.match(str(text).rstrip("Z"))
+    if not m:
+        return None
+    frac = m["frac"]
+    value = m["head"] + ("." + (frac + "000000")[:6] if frac else "")
     try:
-        return datetime.fromisoformat(str(text).rstrip("Z"))
+        return datetime.fromisoformat(value)
     except ValueError:
         return None
 

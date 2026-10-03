@@ -289,6 +289,16 @@ def test_overlap_classifier_at_49_50_and_0_percent():
     assert inside["load_label"].endswith(": 2 of 3 ticks overlap")
 
 
+def test_recorded_times_with_any_fraction_parse():
+    """Python 3.10's fromisoformat takes only 3 or 6 fraction digits."""
+    from lakebench.metrics.tick_records import _parse_utc
+
+    assert _parse_utc("2026-10-03T12:00:04.9Z").microsecond == 900_000
+    assert _parse_utc("2026-10-03T12:00:04.123456789").microsecond == 123_456
+    assert _parse_utc("2026-10-03T12:00:04Z").second == 4
+    assert _parse_utc("not a time") is None and _parse_utc(None) is None
+
+
 def test_overlap_shifts_ticks_to_the_cli_clock():
     """A cluster clock 30 s ahead: a tick that ended at 12:00:35 cluster
     time ended at 12:00:05 on the CLI clock."""
