@@ -26,6 +26,7 @@ from lakebench.cli._helpers import (
     record_deps_pods,
     record_deps_provenance,
     resolve_config_path,
+    stop_previous_datagen_or_exit,
     write_run_report,
 )
 from lakebench.cli._interrupt import restores_handlers
@@ -2266,6 +2267,9 @@ def _run_once(
                 # gate, which may empty part of bronze and then fail.
                 from lakebench.metrics.datagen_aggregator import drop_sidecar
 
+                # An earlier datagen Job's pods could still land files after
+                # the gate looked or cleared: stop them first (bounded wait).
+                stop_previous_datagen_or_exit(cfg)
                 if regenerate:
                     drop_sidecar(cfg.get_namespace())
                 # Refuse a non-empty bronze prefix unless --regenerate
@@ -2278,13 +2282,25 @@ def _run_once(
                     drop_sidecar(cfg.get_namespace())
 
                 dg_engine = DeploymentEngine(cfg)
-                datagen_deployer = DatagenDeployer(dg_engine, allow_stale_bronze=allow_stale_bronze)
+                # The gate's decision, not the flag: objects that appear after
+                # the gate saw an empty prefix are refused, not written over.
+                datagen_deployer = DatagenDeployer(
+                    dg_engine, allow_stale_bronze=_gate.stale_allowed
+                )
                 _interrupt.creating("Job", "lakebench-datagen")
                 _dg_deploy = datagen_deployer.deploy()
                 if _dg_deploy.status == DeploymentStatus.SUCCESS:
                     _interrupt.datagen_created()
                 else:
                     _interrupt.not_created("Job", "lakebench-datagen")
+                    # A refusal (stale bronze, live datagen pods) created no
+                    # Job: stop here with 3 instead of polling for progress.
+                    from lakebench.cli._exit import refused_result_code
+
+                    _refused = refused_result_code([_dg_deploy])
+                    if _refused is not None:
+                        print_error(f"Datagen refused: {_dg_deploy.message}")
+                        raise typer.Exit(_refused)
 
                 # Progress bar (same as standalone generate command)
                 _dg_start = _time.time()
@@ -2477,6 +2493,7 @@ def _run_once(
             _generated_here = True
             _run_fleet = None
         if total_cycles > 1 and not (include_datagen and not skip_generate):
+            stop_previous_datagen_or_exit(cfg)
             _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze, clear_owned=True)
             if collector.current_run is not None:
                 collector.current_run.datagen_stale_bronze = _gate.record()
@@ -2527,6 +2544,12 @@ def _run_once(
                             f"Datagen cycle {cycle_idx + 1} failed: {datagen_result.message}"
                         )
                         pipeline_success = False
+                        # A refusal (stale bronze, live datagen pods) exits 3.
+                        from lakebench.cli._exit import refused_result_code
+
+                        _pipeline_exit_code = (
+                            refused_result_code([datagen_result]) or _pipeline_exit_code
+                        )
                         break
                     else:
                         ts_start = datagen_result.details.get("timestamp_start", "")

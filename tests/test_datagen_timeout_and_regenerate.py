@@ -262,6 +262,8 @@ def _stub_run_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         434_000, 8 * 432 * 1024**3, 8, 54_000, 432 * 1024**3
     )
     monkeypatch.setattr("lakebench.cli._generate.get_k8s_client", lambda **kw: k8s_stub)
+    # No earlier datagen Job to stop (tests/test_datagen_old_pods.py covers it).
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
     return {"k8s": k8s_stub}
 
 
@@ -368,6 +370,8 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     monkeypatch.setattr(
         "lakebench.deploy.DeploymentEngine", lambda cfg, **kw: MagicMock(config=cfg)
     )
+    # No earlier datagen Job to stop (tests/test_datagen_old_pods.py covers it).
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
     return {"k8s": k8s_stub, "op": op, "job_manager": job_manager}
 
 

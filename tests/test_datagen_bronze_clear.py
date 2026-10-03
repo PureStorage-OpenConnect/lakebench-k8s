@@ -153,7 +153,7 @@ def test_continuous_refusal_names_the_continuous_remedy(monkeypatch, schema, pre
     assert f"/{prefix} holds objects" in msg
     assert "continuous reset cleared the prefix" in msg
     ns = d.config.get_namespace()
-    assert f"kubectl get pods -n {ns} -l job-name=lakebench-datagen` lists none" in msg
+    assert f"kubectl get pods -n {ns} -l app=lakebench-datagen` lists none" in msg
     assert "cannot prove it may empty" in msg
     assert "clean bronze" not in msg  # empties the whole bucket; the re-run suffices
     assert "own datagen does not take --allow-stale-bronze" in msg

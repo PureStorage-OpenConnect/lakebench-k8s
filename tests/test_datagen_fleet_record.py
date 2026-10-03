@@ -257,7 +257,7 @@ def test_multi_cycle_run_never_borrows_an_older_sidecar(argv, tmp_path, monkeypa
 
     def gate(*_a, **_k):
         seen.append(_sidecar(tmp_path).exists())
-        return SimpleNamespace(record=lambda: None)
+        return SimpleNamespace(record=lambda: None, stale_allowed=False)
 
     monkeypatch.setattr("lakebench.cli._run.enforce_bronze_gate", gate)
     config = harness.base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}})

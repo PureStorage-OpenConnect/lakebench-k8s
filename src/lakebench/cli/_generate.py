@@ -34,6 +34,7 @@ from ._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    stop_previous_datagen_or_exit,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,17 +235,22 @@ def generate(
         # bronze and then fail.
         from lakebench.metrics.datagen_aggregator import drop_sidecar
 
+        # An earlier datagen Job's pods could still land files after the
+        # gate looked or cleared: stop them first (bounded wait).
+        stop_previous_datagen_or_exit(cfg)
         if regenerate:
             drop_sidecar(cfg.get_namespace())
         # Refuse to write over an existing bronze prefix unless
         # --regenerate (owned bucket: clear the datagen prefix) or
         # --allow-stale-bronze (any other bucket).
-        enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+        _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
         if not regenerate:
             drop_sidecar(cfg.get_namespace())
 
         engine = DeploymentEngine(cfg)
-        datagen = DatagenDeployer(engine, allow_stale_bronze=allow_stale_bronze)
+        # The gate's decision, not the flag: objects that appear after the
+        # gate saw an empty prefix are refused, never written over unrecorded.
+        datagen = DatagenDeployer(engine, allow_stale_bronze=_gate.stale_allowed)
 
         # Submit job
         print_info("Submitting datagen job...")
@@ -253,7 +259,10 @@ def generate(
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
             _journal_safe(j.end_command, success=False, message=result.message)
-            raise typer.Exit(ExitCode.FAILED)
+            # A refusal (stale bronze, live datagen pods) exits 3.
+            from lakebench.cli._exit import refused_result_code
+
+            raise typer.Exit(refused_result_code([result]) or ExitCode.FAILED)
 
         print_success("Datagen job submitted")
         console.print(f"  Parallelism: {esc(result.details.get('parallelism', '?'))} pods")

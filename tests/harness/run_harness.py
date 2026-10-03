@@ -2024,6 +2024,19 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     monkeypatch.setattr(
         lakebench.deploy, "DatagenDeployer", lambda *a, **k: FakeDatagenDeployer(rec, *a, **k)
     )
+    # Before a gate or a continuous reset: no earlier datagen Job or pod is left.
+    import lakebench.deploy.datagen
+
+    _real_stop = lakebench.deploy.datagen.stop_previous_datagen
+
+    def stop_previous_datagen(*args, **kwargs) -> None:
+        try:
+            inspect.signature(_real_stop).bind(*args, **kwargs)
+        except TypeError as e:
+            raise rec.refuse(f"call the real stop_previous_datagen would refuse: {e}") from None
+        rec.add("Datagen", "stop_previous_datagen")
+
+    monkeypatch.setattr(lakebench.deploy.datagen, "stop_previous_datagen", stop_previous_datagen)
     # The datagen pods' fleet (a run that generates reads it from its pods).
     import lakebench.metrics.datagen_aggregator
 
