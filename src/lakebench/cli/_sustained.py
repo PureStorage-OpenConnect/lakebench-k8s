@@ -4379,6 +4379,11 @@ def _run_sustained(
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
             write_run_report(metrics_storage, run_id)
+            # The same front matter the report opens with, read back from
+            # the saved record.
+            from lakebench.reports.front_matter import print_front_matter
+
+            print_front_matter(run_metrics, console, storage=metrics_storage, run_id=run_id)
 
         _journal_safe(
             j.end_command,

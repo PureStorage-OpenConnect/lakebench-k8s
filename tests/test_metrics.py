@@ -1396,7 +1396,7 @@ class TestSustainedReport:
     def test_sustained_run_context_banner(self):
         """Context banner should show mode and scale."""
         html = self._render()
-        assert "Sustained" in html
+        assert "Continuous" in html
         assert "scale 50" in html
         assert "hive-iceberg-spark-trino" in html
 
@@ -1465,7 +1465,7 @@ class TestSustainedReport:
         assert "Time to Value" in html
         # Should NOT show streaming summary cards
         assert "Data Throughput" not in html
-        assert "Sustained Throughput" not in html
+        assert "Continuous Throughput" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -3728,7 +3728,7 @@ class TestSustainedPipelineScoring:
         html = generator._generate_sustained_summary(storage.load_run("cont-test"))
 
         assert "Data Freshness" in html
-        assert "Sustained Throughput" in html
+        assert "Continuous Throughput" in html
         assert "Stage inputs processed" in html
         assert "CPU-hours" in html
         assert "worst-case gold staleness" in html

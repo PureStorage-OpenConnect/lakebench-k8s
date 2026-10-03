@@ -390,6 +390,15 @@ def compute_badge_status(
             warnings.append(
                 f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
             )
+        elif (
+            not is_sustained
+            and getattr(metrics, "stage_only", None) in (None, "bronze-verify")
+            and float(pb.scale_ratio or 0.0) > 1.05
+        ):
+            # More data than the scale asks for: a warning, never a FAIL (K20).
+            warnings.append(
+                f"Scale ratio {pb.scale_ratio:.1%} > 105% (more data than the scale asks for)"
+            )
 
     # Freshness -- sustained mode only
     if is_sustained and pb is not None and pb.data_freshness_seconds is not None:

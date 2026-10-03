@@ -167,6 +167,13 @@ from lakebench.cli._sustained import (  # noqa: E402
 )
 
 
+def _print_front_matter(metrics) -> None:
+    """The report's front matter (reports/front_matter.py), before any metric."""
+    from lakebench.reports.front_matter import print_front_matter
+
+    print_front_matter(metrics, console)
+
+
 # Re-export for backward compatibility (report command references this)
 def _note_benchmark_record(metrics) -> None:
     """One stderr line when *metrics* is a ``lakebench benchmark`` record: its
@@ -192,6 +199,7 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
     headline (the strictest of the stored and the recomputed verdict, as
     every reader takes it), naming both when they differ."""
     _note_benchmark_record(metrics)
+    _print_front_matter(metrics)
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("No pipeline benchmark data in this run.")
@@ -208,9 +216,11 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
             status += f" (stored {judged['stored']}; recomputed {judged['recomputed']})"
     else:
         status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
+    from lakebench.reports import copy as _words
+
     header = (
         f"[bold]{pb.deployment_name}[/bold]  run {pb.run_id}\n"
-        f"Mode: {pb.pipeline_mode} | Status: {status}"
+        f"Mode: {_words.mode_label(pb.pipeline_mode)} | Status: {status}"
     )
 
     # Stage table
@@ -280,7 +290,13 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
             )
         if pb.scale_ratio > 0:
             pct = pb.scale_ratio * 100
-            label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
+            label = (
+                "[yellow]incomplete[/yellow]"
+                if pct < 95
+                else "[yellow]above the scale[/yellow]"
+                if pb.scale_ratio > 1.05
+                else "[green]verified[/green]"
+            )
             scores.append(f"Scale:           {pct:>7.1f}% {label}")
 
     if pb.query_benchmark:

@@ -201,36 +201,28 @@
 </head>
 <body>
     <div class="container">
-        <div class="provenance-label" style="font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem;">
-            internal benchmark, single-owner recorded
-        </div>
         <header>
             <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
                 Deployment: <strong>pipe-aml-b10</strong> |
                 Run ID: <code class="mono">20260929-204947-be2b70</code> |
-                <span class="status status-failed" title="Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize">
+                <span class="status status-failed" title="Process exit intent was not OK; Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize; Gate &#x27;pipeline&#x27; FAILED">
                     FAILED
                 </span>
                 <span class="confidence-chip" title="run-count qualifier" style="display: inline-block; margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 9999px; background: rgba(148,163,184,0.15); color: var(--warning); font-size: 0.65em; font-weight: 600; text-transform: none;">single_run</span>
             </div>
-            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--danger);">Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize</div>
+            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--danger);">Process exit intent was not OK; Pipeline crashed or was interrupted; Batch jobs failed: lakebench-gold-finalize; Gate &#x27;pipeline&#x27; FAILED</div>
         </header>
 
         
-        <section class="read-first" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--danger);">
+        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--danger);">
             <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
                 Read this first
             </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
-                <div><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style="color: var(--danger);">FAILED</strong></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Pipeline crashed or was interrupted</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> <code class="mono">none (id a80d75bfa8f3, scale 10.0)</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Limits present:</span> 0</div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Record digest:</span> <code class="mono">2dafd7ef2b492636</code></div>
-                <div><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--danger);'>FAILED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Pipeline crashed or was interrupted</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id a80d75bfa8f3, scale 10.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> none</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">2dafd7ef2b492636</code></div>
             </div>
+            <div class="fm-qualifiers" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>Qualifiers and warnings:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>Scale ratio 111.4% &gt; 105% (more data than the scale asks for)</li></ul></div>
             <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
         </section>
         

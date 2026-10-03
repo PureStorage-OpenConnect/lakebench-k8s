@@ -426,7 +426,7 @@ def test_report_labels_intake_cards_only():
     gen = ReportGenerator(output_dir="/nonexistent")
     html = gen._generate_sustained_summary(m)
     by_label = _cards(html)
-    assert "BOUNDED BY" in by_label["Sustained Throughput"]
+    assert "BOUNDED BY" in by_label["Continuous Throughput"]
     assert "BOUNDED BY" in by_label["Compute Efficiency"]
     assert "BOUNDED BY" not in by_label["In-Stream QpH"]
     assert "BOUNDED BY" not in by_label["Data Freshness"]

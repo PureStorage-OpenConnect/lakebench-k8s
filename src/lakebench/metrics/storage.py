@@ -708,6 +708,7 @@ class MetricsStorage:
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
+            stored_verdict=data.get("verdict") if isinstance(data.get("verdict"), dict) else None,
         )
 
         if data.get("end_time"):
