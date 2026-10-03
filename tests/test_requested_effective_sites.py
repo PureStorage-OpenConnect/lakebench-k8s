@@ -1,8 +1,10 @@
-"""EVD-3 static test: every function that chooses a strategy, trickle,
-executor count, cap or mode is listed in
+"""EVD-3 static test: every function named as choosing a strategy,
+trickle, executor count, cap or mode (``select_``/``determine_``/
+``resolve_``/``choose_`` names) is listed in
 ``requested_effective.KNOWN_SITES`` with where its decision reaches the
-record, and the listed carrier is really there. A new choosing site that
-nobody listed fails this test."""
+record, and the listed carrier is there: the function that calls the site
+puts its result in the record. A new site so named that nobody listed fails
+this test."""
 
 from __future__ import annotations
 
@@ -19,8 +21,8 @@ SITE = re.compile(
     r"^(select|determine|resolve|choose)_\w*(strategy|trickle|executors?|cap|mode)\w*$"
 )
 
-#: For each "record:" carrier, text the site's file must contain: the line
-#: that puts the decision in the record.
+#: For each "record:" carrier, the text a function calling the site must
+#: contain: the line that puts the site's result in the record.
 RECORD_TOKENS: dict[tuple[str, str], tuple[str, ...]] = {
     ("cli/_sustained.py", "resolve_trickle"): ('"trickle": ',),
     ("spark/scripts/gold_finalize.py", "determine_gold_strategy"): (
@@ -77,8 +79,12 @@ def test_every_carrier_is_real() -> None:
         if kind == "record":
             tokens = RECORD_TOKENS[(rel, name)]
             src = path.read_text()
-            for token in tokens:
-                assert token in src, (rel, name, token)
+            callers = [
+                ast.get_source_segment(src, fn) or ""
+                for fn in ast.walk(ast.parse(src))
+                if isinstance(fn, ast.FunctionDef) and name in _calls(fn) and fn.name != name
+            ]
+            assert any(all(t in body for t in tokens) for body in callers), (rel, name, tokens)
         elif kind == "returns into":
             assert (rel, what) in KNOWN_SITES, (rel, name, what)
             assert name in _calls(_function(path, what)), (rel, name, what)
