@@ -2049,7 +2049,7 @@ def investigator_sessions_after_round(
             f"{baseline_round_s:.0f}s baseline round",
         )
     else:
-        console.print(f"  Investigator sessions: {requested} requested...")
+        print_info(f"Investigator sessions: {requested} requested...")
         record = inv.run_sessions(
             bench_runner,
             requested,
@@ -2061,8 +2061,8 @@ def investigator_sessions_after_round(
         if run.continuous is None:
             run.continuous = {}
         run.continuous["investigators"] = record
-    console.print(
-        f"  Investigator sessions: {record['status']} ({record['sessions_run']} of {requested} ran)"
+    print_info(
+        f"Investigator sessions: {record['status']} ({record['sessions_run']} of {requested} ran)"
     )
     _journal_safe(
         j.record,
