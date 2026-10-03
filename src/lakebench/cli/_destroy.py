@@ -537,6 +537,7 @@ def _destroy_impl(
                 expand=False,
             )
         )
+        note_exit_paths(["destroy.namespace_terminating"])
         raise typer.Exit(ExitCode.INCOMPLETE)
     elif failed == 0:
         console.print(

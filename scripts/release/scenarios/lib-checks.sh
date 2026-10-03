@@ -14,6 +14,25 @@
 : "${LB_KUBE_CONTEXT:?LB_KUBE_CONTEXT must name the kube context of the configs}"
 : "${LB_EXIT_REFUSED:?LB_EXIT_* must come from the harness (release tree exit codes)}"
 
+# A script that exits early must not leave a background deploy, generate or
+# run behind. Background jobs of a non-interactive shell ignore SIGINT, so
+# they get SIGTERM, then SIGKILL after 60 s (the harness also waits for the
+# script's whole process group before it cleans up).
+_lb_reap() {
+  local rc=$? pids i
+  pids=$(jobs -p)
+  if [ -n "$pids" ]; then
+    kill -TERM $pids 2>/dev/null || true
+    for i in $(seq 1 60); do
+      kill -0 $pids 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL $pids 2>/dev/null || true
+  fi
+  return $rc
+}
+trap _lb_reap EXIT
+
 kc() { kubectl --context "$LB_KUBE_CONTEXT" "$@"; }
 hm() { helm --kube-context "$LB_KUBE_CONTEXT" "$@"; }
 
@@ -99,16 +118,64 @@ print(n)
 " "$2"
 }
 
-# bucket_owner CFG BUCKET -> the lakebench deployment-name tag, or "-" when untagged
+# bucket_owner CFG BUCKET -> the deployment that owns BUCKET: its
+# lakebench.deployment tag, or on a backend without bucket tagging
+# (FlashBlade) the deployment in its .lakebench/owner.json marker; "-" when
+# neither names one.
 bucket_owner() {
   _s3_py "$1" "
+import json
+owner = None
 try:
     tags = s3.get_bucket_tagging(Bucket=argv[0]).get('TagSet', [])
+    owner = next((t['Value'] for t in tags if t['Key'] == 'lakebench.deployment'), None)
 except ClientError:
-    tags = []
-owner = [t['Value'] for t in tags if t['Key'] == 'lakebench.deployment']
-print(owner[0] if owner else '-')
+    pass
+if owner is None:
+    try:
+        body = s3.get_object(Bucket=argv[0], Key='.lakebench/owner.json')['Body'].read()
+        owner = json.loads(body).get('deployment')
+    except (ClientError, ValueError, AttributeError):
+        owner = None
+print(owner or '-')
 " "$2"
+}
+
+# datagen_keys CFG -> every object key under the config's bronze datagen
+# prefix (the release tree's bronze_datagen_prefix), sorted
+datagen_keys() {
+  local prefix bronze
+  prefix=$(python3.11 -c "
+import os, sys
+os.environ.setdefault('LAKEBENCH_S3_ACCESS_KEY', 'x'); os.environ.setdefault('LAKEBENCH_S3_SECRET_KEY', 'x')
+from lakebench.config import load_config
+from lakebench.config._load_context import LoadPurpose
+from lakebench.deploy.datagen import bronze_datagen_prefix
+cfg = load_config(sys.argv[1], purpose=LoadPurpose.INSPECT, print_notes=False)
+print(cfg.platform.storage.s3.buckets.bronze, bronze_datagen_prefix(cfg).strip('/'))
+" "$1")
+  read -r bronze prefix <<<"$prefix"
+  _s3_py "$1" "
+keys = []
+for page in s3.get_paginator('list_objects_v2').paginate(Bucket=argv[0], Prefix=argv[1]):
+    keys += [o['Key'] for o in page.get('Contents', [])]
+print('\\n'.join(sorted(keys)))
+" "$bronze" "${prefix:+$prefix/}"
+}
+
+# assert_keys_kept CFG SNAPSHOT_FILE: every key in the snapshot still exists
+# under the config's datagen prefix (a bystander's data was not deleted)
+assert_keys_kept() {
+  local now missing
+  now=$(mktemp "${LB_UAT_LOG_DIR:-.}/keys.XXXXXX")
+  datagen_keys "$1" >"$now"
+  missing=$(comm -23 "$2" "$now" | wc -l)
+  rm -f "$now"
+  if [ "$missing" -ne 0 ] || [ ! -s "$2" ]; then
+    echo "FAIL: $missing of the bystander's $(wc -l <"$2") datagen objects are gone (or none were recorded)"
+    return 1
+  fi
+  echo "  bystander data kept: $(wc -l <"$2") objects"
 }
 
 watch_list() {

@@ -476,11 +476,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   lakebench imported from outside the tree, writes the deployments-ledger
   row before each deploy, admits rows against the cluster's load, judges
   each row by its record and destroys only the incarnation it deployed
-  (`destroy --expect-incarnation`). The six parallel-safety scenarios moved
-  into `scripts/release/scenarios/`, updated to the current CLI (exit codes
-  and exit paths instead of message text, a context-pinned `kubectl`), and
-  run through `harness.py scenario S-Pn`, which cleans up by incarnation
-  afterwards. See docs/releasing.md.
+  (`destroy --expect-incarnation`), closing a ledger row only when the
+  namespace and its buckets are gone. The six parallel-safety scenarios
+  moved into `scripts/release/scenarios/`, updated to the current CLI
+  (refusals checked by exit code and exit path, a context-pinned `kubectl`,
+  owners read from the bucket tag or the owner marker), and run through
+  `harness.py scenario S-Pn`, which cleans up by incarnation afterwards.
+  See docs/releasing.md.
 - **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
   to that file as it exits, so scripts can tell refusals that share exit 3
   apart without reading message text (docs/exit-codes.md).

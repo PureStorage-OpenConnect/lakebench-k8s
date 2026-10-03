@@ -2,9 +2,10 @@
 # S-P1-DestroyRunning
 #
 # Invariant: destroying deployment A does not affect deployment B running
-# in parallel. Deploy both, start B's pipeline, destroy A while B runs, and
-# prove B still ships a record with pipeline_benchmark.success true and
-# scale_ratio above 0.95. Run by `harness.py scenario S-P1`.
+# in parallel. Deploy both, start B's pipeline, destroy A once B has a Spark
+# application, and prove B still ships a record with
+# pipeline_benchmark.success true and scale_ratio between 0.95 and 1.10, and
+# that none of B's generated objects went. Run by `harness.py scenario S-P1`.
 
 set -euo pipefail
 
@@ -31,8 +32,15 @@ echo "S-P1: launching B pipeline in background..."
 lakebench run --yes "$CFG_B" --timeout 1800 >"$LOG_DIR/s-p1-b-run.log" 2>&1 &
 RUN_B=$!
 
-# Give B time to reach its silver build, then destroy A.
-sleep 60
+# Destroy A only once B has a Spark application running (at most 15 min).
+NS_B=$(cfg_name "$CFG_B")
+for _ in $(seq 1 90); do
+  if kc get sparkapplications -n "$NS_B" -o name 2>/dev/null | grep -q .; then break; fi
+  kill -0 $RUN_B 2>/dev/null || break
+  sleep 10
+done
+kc get sparkapplications -n "$NS_B" -o name 2>/dev/null | grep -q . || { echo "FAIL: B never started a Spark application"; exit 1; }
+datagen_keys "$CFG_B" >"$LOG_DIR/s-p1-b-keys.before"
 
 echo "S-P1: destroying A while B is running..."
 lb_run "$LOG_DIR/s-p1-a-destroy.log" destroy "$CFG_A" --yes
@@ -50,14 +58,15 @@ VERDICT=$(python3.11 -c "
 import json, sys
 pb = json.load(open(sys.argv[1])).get('pipeline_benchmark') or {}
 ratio = (pb.get('scores') or {}).get('scale_ratio')
-ok = pb.get('success') is True and isinstance(ratio, (int, float)) and ratio >= 0.95
+ok = pb.get('success') is True and isinstance(ratio, (int, float)) and 0.95 <= ratio <= 1.10
 print(('ok' if ok else 'bad'), pb.get('success'), ratio)
 " "lakebench-output/runs/$METRICS_B/metrics.json")
 read -r OK SUCCESS SCALE_RATIO <<<"$VERDICT"
 if [[ "$OK" != "ok" ]]; then
-  echo "FAIL: B record success=$SUCCESS scale_ratio=$SCALE_RATIO (want success and >= 0.95)"
+  echo "FAIL: B record success=$SUCCESS scale_ratio=$SCALE_RATIO (want success, 0.95 to 1.10)"
   exit 1
 fi
 assert_buckets "$CFG_B" present
+assert_keys_kept "$CFG_B" "$LOG_DIR/s-p1-b-keys.before"
 
 echo "PASS: S-P1 -- B finished with success=$SUCCESS scale_ratio=$SCALE_RATIO after A destroyed mid-run"

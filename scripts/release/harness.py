@@ -3,39 +3,44 @@
 
 Usage::
 
-    python3.11 scripts/release/harness.py plan   --matrix scripts/release/matrix-1.7.yaml --freeze SHA
-    python3.11 scripts/release/harness.py run    --matrix ... --freeze SHA --context CTX \\
-        --out /root/lakebench-release/1.7.0 --deployments-ledger PATH \\
+    python3.11 scripts/release/harness.py plan     --matrix scripts/release/matrix-1.7.yaml --freeze SHA
+    python3.11 scripts/release/harness.py run      --matrix ... --freeze SHA --context CTX \\
+        --out /root/lakebench-release/1.7.0 --deployments-ledger PATH [--ledger-lock PATH] \\
         [--rows M01,M02] [--slots 3] [--rehearsal]
-    python3.11 scripts/release/harness.py resume --out DIR --context CTX --deployments-ledger PATH
+    python3.11 scripts/release/harness.py scenario S-P1 --freeze SHA --context CTX --out DIR \\
+        --deployments-ledger PATH [--ledger-lock PATH]
+    python3.11 scripts/release/harness.py resume   --out DIR --context CTX --deployments-ledger PATH
 
 It ships outside the wheel (``scripts/`` is not packaged). It runs lakebench
 only as ``env PYTHONPATH=<worktree>/src python3.11 -m lakebench ...`` and
 imports the same tree in-process for sizing, state and verdict helpers.
 
 Refusals, checked before any cluster call (each prints and exits 2): HEAD on
-a branch (the release worktree is detached); HEAD not the ``--freeze``
-commit (``--rehearsal`` waives only this); a tracked change, or an
-untracked or ignored file under ``src/`` or ``scripts/`` other than
-``__pycache__``; lakebench imported from outside ``<worktree>/src``, in a
-child process or in this one; ``--context`` not in the kubeconfig; no
-``--deployments-ledger`` for ``run``/``resume``; ``--out`` inside the
-worktree or under ``/tmp``.
+a branch (the release worktree is detached); ``--freeze`` not a commit, or
+HEAD not that commit (``--rehearsal`` waives only the second); a tracked
+change, or an untracked or ignored file under ``src/`` or ``scripts/``
+other than ``__pycache__``; lakebench imported from outside
+``<worktree>/src``, in a child process or in this one; ``--context`` not in
+the kubeconfig (or a kubeconfig with no contexts); no ledger file or
+credential variable for a live command; ``--out`` inside the worktree or
+under ``/tmp``.
 
 Per row: write the config (``lakebench init`` plus the row's keys, the
 context pinned), refuse a config whose Spark minor and table format version
-differ from the release matrix's, admit (``cluster.admit``), write the
-ledger row, ``deploy --yes --require-new``, read the incarnation through the
-release tree's ``read_state`` and ``current_incarnation`` (the namespace
-must carry the state's newest, confirmed nonce), ``run --generate --yes``
-(the default per-job timeout, at least 3,600 s), ``report``, scrub the
-record into ``<out>/uat/runs/``, then ``destroy --yes --expect-incarnation
-<uid>#<nonce>``. The row's verdict is ``release_record.record_problems``
-on its record; an exit code is never enough on its own. Destroy is never
-passed ``--force`` and is never re-invoked: exit 6 is polled read-only, any
-refusal stops admission. A deploy that fails is never retried: the row's
-namespace is destroyed by incarnation only when it carries the row's
-confirmed nonce, otherwise it is left and reported.
+differ from the release matrix's, admit (``cluster.admit``) and write the
+ledger row under one ledger lock, ``deploy --yes --require-new``, read the
+incarnation through the release tree's ``read_state`` and
+``current_incarnation`` (the namespace must carry the state's newest,
+confirmed nonce), ``run --generate --yes`` (the default per-job timeout,
+at least 3,600 s), ``report``, scrub the record into ``<out>/uat/runs/``,
+then ``destroy --yes --expect-incarnation <uid>#<nonce>``. The row's
+verdict is ``release_record.record_problems`` on its scrubbed record; an
+exit code is never enough on its own. Destroy is never passed ``--force``
+and never re-invoked: exit 6 is polled read-only, any refusal stops
+admission. A ledger row is closed only when the namespace and the row's
+buckets are gone. A deploy that fails is never retried: the row's namespace
+is destroyed by incarnation only when it carries the row's confirmed nonce,
+otherwise it is left and reported.
 """
 
 from __future__ import annotations
@@ -97,7 +102,7 @@ utc_now = _ledger.utc_now
 
 WORKLOADS = ("customer360", "financial")
 MODES = ("batch", "continuous")
-#: Seeds by workload: C360 42; AML 43, the development seed (42 is spent).
+#: Seeds by workload: C360 42; AML 43, the development (calibration) seed.
 SEEDS = {"customer360": 42, "financial": 43}
 CREDENTIAL_VARS = ("LAKEBENCH_S3_ACCESS_KEY", "LAKEBENCH_S3_SECRET_KEY")
 PLACEHOLDER_ENDPOINT = "http://10.0.1.50:80"
@@ -105,6 +110,21 @@ DESTROY_POLL_S = 30
 DESTROY_POLL_LIMIT_S = 20 * 60
 ADMIT_POLL_S = 60
 BLOCKING_REPORT_S = 10 * 60
+#: Wall-clock limits per lakebench verb; on expiry the child gets SIGINT,
+#: then SIGTERM, and the step counts as failed (exit 124).
+TIMEOUTS_S = {
+    "init": 300,
+    "deploy": 2 * 3600,
+    "run": 12 * 3600,
+    "report": 1800,
+    "destroy": 2 * 3600,
+}
+SCRIPT_TIMEOUT_S = 6 * 3600
+#: After a scenario script exits, how long its background children may run on.
+SCRIPT_REAP_S = 30 * 60
+TIMED_OUT = 124
+#: The status a row is in while the given lakebench verb runs.
+STEP_STATUS = {"deploy": "deploying", "run": "running", "destroy": "destroying"}
 
 
 class Refused(Exception):
@@ -209,6 +229,18 @@ def missing_matrix_rows(rows: Sequence[Row]) -> list[tuple[str, str, str, float]
     return [k for k in ((w, m, r, float(s)) for w, m, r, s in RELEASE_MATRIX) if k not in have]
 
 
+def aml_seed_problem(seed: int) -> str | None:
+    """An AML row must run the calibration seed and never a protected one
+    (the message never names a seed value)."""
+    from lakebench.config.datagen_seed import calibration_seed, protected_seeds
+
+    if seed in protected_seeds():
+        return "the AML seed is a protected (held-out) seed"
+    if seed != calibration_seed():
+        return "the AML seed is not the pre-registered calibration seed"
+    return None
+
+
 # -- refusals ----------------------------------------------------------------
 
 
@@ -217,6 +249,12 @@ def _git(tree: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(tree), *args], capture_output=True, text=True, env=env, check=False
     )
+
+
+def resolve_commit(tree: Path, ref: str) -> str | None:
+    """The 40-hex sha *ref* names, or None when it is not a commit."""
+    out = _git(tree, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}").stdout.strip()
+    return out if len(out) == 40 else None
 
 
 def child_env(tree: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -273,9 +311,11 @@ def refuse_reasons(
     if _git(tree, "symbolic-ref", "-q", "HEAD").returncode == 0:
         reasons.append("HEAD is on a branch; the release worktree must be detached at --freeze")
     head = _git(tree, "rev-parse", "HEAD").stdout.strip()
-    want = _git(tree, "rev-parse", "--verify", "-q", f"{freeze}^{{commit}}").stdout.strip()
-    if not rehearsal and (not want or head != want):
-        reasons.append(f"HEAD {head[:12]} is not the freeze commit {freeze[:12]}")
+    want = resolve_commit(tree, freeze)
+    if want is None:
+        reasons.append(f"--freeze {freeze!r} is not a commit")
+    elif not rehearsal and head != want:
+        reasons.append(f"HEAD {head[:12]} is not the freeze commit {want[:12]}")
     status = _git(tree, "status", "--porcelain", "--ignored", "--untracked-files=all")
     if status.returncode != 0:
         reasons.append(f"git status failed: {status.stderr.strip()}")
@@ -314,7 +354,9 @@ def refuse_reasons(
             except Exception as e:  # noqa: BLE001 -- unreadable kubeconfig refuses
                 names = []
                 reasons.append(f"cannot read the kubeconfig contexts: {e}")
-            if names and context not in names:
+            if not names:
+                reasons.append("the kubeconfig lists no contexts")
+            elif context not in names:
                 reasons.append(f"--context {context} is not in the kubeconfig")
         missing = [v for v in CREDENTIAL_VARS if not os.environ.get(v)]
         if missing:
@@ -339,10 +381,14 @@ class ChildResult:
     code: int
     paths: list[str]
     log: Path
+    #: Where this invocation's output starts in *log* (logs are appended).
+    offset: int = 0
 
     def text(self) -> str:
         try:
-            return self.log.read_text(errors="replace")
+            with open(self.log, "rb") as fh:
+                fh.seek(self.offset)
+                return fh.read().decode(errors="replace")
         except OSError:
             return ""
 
@@ -375,14 +421,61 @@ def child_alive(pid: Any, start: Any) -> bool:
     return _start_time(pid) == str(start)
 
 
-class ProcessRunner:
-    """Runs ``python -m lakebench ...`` from the release tree."""
+def _signal_group(pid: int, sig: int = signal.SIGINT) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, sig)
 
-    def __init__(self, tree: Path) -> None:
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_or_stop(
+    proc: subprocess.Popen[bytes], limit: float, graces: tuple[float, ...] = (600, 60, 60)
+) -> int:
+    """Wait up to *limit* seconds; then SIGINT the group, SIGTERM after 10
+    minutes and SIGKILL after one more; a stopped child gives TIMED_OUT."""
+    try:
+        return proc.wait(timeout=limit)
+    except subprocess.TimeoutExpired:
+        pass
+    sigs = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
+    for sig, grace in zip(sigs, graces, strict=True):
+        _signal_group(proc.pid, sig)
+        try:
+            proc.wait(timeout=grace)
+            return TIMED_OUT
+        except subprocess.TimeoutExpired:
+            continue
+    return TIMED_OUT
+
+
+class ProcessRunner:
+    """Runs ``python -m lakebench ...`` (and scenario scripts) from the
+    release tree, each child in its own session."""
+
+    def __init__(self, tree: Path, timeouts: dict[str, int] | None = None) -> None:
         self.tree = tree
+        self.timeouts = dict(TIMEOUTS_S, **(timeouts or {}))
         self._lock = threading.Lock()
         self._children: dict[int, bool] = {}
-        self._interrupted = False
+        self._level = 0
+
+    def _register(self, pid: int, interruptible: bool) -> None:
+        with self._lock:
+            self._children[pid] = interruptible
+            if self._level >= 2 or (interruptible and self._level >= 1):
+                _signal_group(pid)
+
+    def _forget(self, pid: int) -> None:
+        with self._lock:
+            self._children.pop(pid, None)
 
     def __call__(
         self,
@@ -400,6 +493,7 @@ class ProcessRunner:
         with open(log, "ab") as out:
             out.write(f"$ lakebench {' '.join(args)}\n".encode())
             out.flush()
+            offset = out.tell()
             proc = subprocess.Popen(  # noqa: S603 -- fixed argv, our own interpreter
                 [sys.executable, "-m", "lakebench", *args],
                 cwd=str(cwd),
@@ -409,34 +503,82 @@ class ProcessRunner:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-            with self._lock:
-                self._children[proc.pid] = interruptible
-                if interruptible and self._interrupted:
-                    _signal_group(proc.pid)
-            if on_spawn is not None:
-                on_spawn(proc.pid, _start_time(proc.pid))
-            code = proc.wait()
-            with self._lock:
-                self._children.pop(proc.pid, None)
+            self._register(proc.pid, interruptible)
+            try:
+                if on_spawn is not None:
+                    try:
+                        on_spawn(proc.pid, _start_time(proc.pid))
+                    except Exception as e:  # noqa: BLE001 -- never orphan the child
+                        out.write(f"[harness] could not record the child: {e}\n".encode())
+                code = _wait_or_stop(proc, self.timeouts.get(args[0], 12 * 3600))
+            finally:
+                self._forget(proc.pid)
         paths = _read_paths(Path(path_file))
         with contextlib.suppress(OSError):
             os.unlink(path_file)
-        return ChildResult(code, paths, log)
+        return ChildResult(code, paths, log, offset)
 
-    def interrupt(self) -> None:
-        """Forward one SIGINT to each interruptible child; the others finish."""
+    def script(
+        self,
+        argv: Sequence[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+        log: Path,
+        on_spawn: Callable[[int, str], None] | None = None,
+    ) -> int:
+        """Run a scenario script; then wait for its whole process group
+        (background deploys or runs it left) before returning."""
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "ab") as out:
+            proc = subprocess.Popen(  # noqa: S603 -- our own scenario script
+                list(argv),
+                cwd=str(cwd),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            self._register(proc.pid, True)
+            try:
+                if on_spawn is not None:
+                    with contextlib.suppress(Exception):
+                        on_spawn(proc.pid, _start_time(proc.pid))
+                code = _wait_or_stop(proc, SCRIPT_TIMEOUT_S)
+                reap_group(proc.pid, out)
+            finally:
+                self._forget(proc.pid)
+        return code
+
+    def interrupt(self, level: int = 1) -> None:
+        """Level 1: one SIGINT to each run and scenario script (deploys and
+        destroys finish). Level 2: one SIGINT to every child."""
         with self._lock:
-            if self._interrupted:
+            if level <= self._level:
                 return
-            self._interrupted = True
             for pid, interruptible in self._children.items():
-                if interruptible:
+                if level >= 2 and (interruptible and self._level >= 1):
+                    continue  # already signalled at level 1
+                if level >= 2 or interruptible:
                     _signal_group(pid)
+            self._level = level
 
 
-def _signal_group(pid: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, signal.SIGINT)
+def reap_group(pgid: int, out: Any, limit: float | None = None, poll: float = 5) -> None:
+    """Wait for every process of *pgid* to exit; SIGINT, then SIGTERM, those
+    still running after *limit* seconds (default ``SCRIPT_REAP_S``)."""
+    deadline = time.monotonic() + (SCRIPT_REAP_S if limit is None else limit)
+    while _group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(poll)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        if not _group_alive(pgid):
+            return
+        out.write(f"[harness] stopping leftover processes of the script ({sig.name})\n".encode())
+        _signal_group(pgid, sig)
+        end = time.monotonic() + 60 * poll
+        while _group_alive(pgid) and time.monotonic() < end:
+            time.sleep(poll)
 
 
 def _read_paths(path: Path) -> list[str]:
@@ -486,6 +628,19 @@ def config_peak(cfg: Any) -> Peak:
     return Peak(float(plan.full.cpu_cores), float(plan.full.memory_gb))
 
 
+def worst_case_peak(scale: float) -> Peak:
+    """The largest default-recipe peak of any workload and mode at *scale*:
+    what a ledger deployment whose config cannot be read is counted at."""
+    from lakebench.config.sizing import default_sizing_config, plan_requirements
+
+    peak = Peak(0.0, 0.0)
+    for workload in WORKLOADS:
+        for mode in MODES:
+            plan = plan_requirements(default_sizing_config(workload, mode, scale))
+            peak = peak.max(Peak(float(plan.full.cpu_cores), float(plan.full.memory_gb)))
+    return peak
+
+
 def versions_problem(row: Row, cfg: Any) -> str | None:
     from lakebench.config.support import config_versions, matrix_versions_problem
 
@@ -530,6 +685,13 @@ def deploy_state_present(config: Path) -> bool:
         return True  # unreadable: assume something was written
 
 
+def config_buckets(config: Path) -> list[str]:
+    """The bronze, silver and gold bucket names the config resolves to."""
+    cfg = load_row_config(config)
+    b = cfg.platform.storage.s3.buckets
+    return list(dict.fromkeys([b.bronze, b.silver, b.gold]))
+
+
 def _scrub_module() -> Any:
     path = TREE / "tests" / "fixtures" / "scrub.py"
     spec = importlib.util.spec_from_file_location("lb_release_scrub", path)
@@ -549,6 +711,37 @@ def record_verdict(record: dict[str, Any], freeze: str, version: str) -> list[st
     return record_problems(record, freeze, expected, root=TREE)
 
 
+def default_s3(config: Path) -> Any:
+    """The release tree's S3 client for *config* (credentials from the env)."""
+    from lakebench.config import load_config
+    from lakebench.config._load_context import LoadPurpose
+    from lakebench.s3 import S3Client
+
+    cfg = load_config(config, purpose=LoadPurpose.INSPECT, print_notes=False)
+    s3 = cfg.platform.storage.s3
+    return S3Client(
+        endpoint=s3.endpoint,
+        access_key=s3.access_key,
+        secret_key=s3.secret_key,
+        region=s3.region,
+        path_style=s3.path_style,
+        ca_cert=s3.ca_cert,
+        verify_ssl=s3.verify_ssl,
+    )
+
+
+def ledger_config_path(cell: str) -> Path | None:
+    """A ledger row's config: the file, or the one yaml in the directory named."""
+    p = Path(cell)
+    if p.is_file():
+        return p
+    if p.is_dir():
+        yamls = sorted(p.glob("*.yaml")) + sorted(p.glob("*.yml"))
+        if len(yamls) == 1:
+            return yamls[0]
+    return None
+
+
 # -- parallel-safety scenarios -------------------------------------------------
 
 
@@ -561,8 +754,8 @@ class ScenarioSpec:
     exit-3 paths the harness's own destroy of a leftover may meet by design
     (a legacy or foreign bucket refused and left); the namespace must still
     be gone. ``legacy_bucket``: the harness creates an untagged bronze bucket
-    for A with one object and deletes it afterwards. ``shared_bucket``: A
-    and B name one bronze bucket, which A creates.
+    for A, named outside A's prefix, with one object, and deletes it
+    afterwards. ``shared_bucket``: B names A's bronze bucket.
     """
 
     id: str
@@ -646,52 +839,25 @@ def exit_code_env() -> dict[str, str]:
     return {f"LB_EXIT_{c.name}": str(int(c)) for c in ExitCode}
 
 
-def default_s3(config: Path) -> Any:
-    """The release tree's S3 client for *config* (credentials from the env)."""
-    from lakebench.config import load_config
-    from lakebench.config._load_context import LoadPurpose
-    from lakebench.s3 import S3Client
-
-    cfg = load_config(config, purpose=LoadPurpose.INSPECT, print_notes=False)
-    s3 = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3.endpoint,
-        access_key=s3.access_key,
-        secret_key=s3.secret_key,
-        region=s3.region,
-        path_style=s3.path_style,
-        ca_cert=s3.ca_cert,
-        verify_ssl=s3.verify_ssl,
-    )
-
-
-def run_script(argv: Sequence[str], *, env: dict[str, str], cwd: Path, log: Path) -> int:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "ab") as out:
-        proc = subprocess.Popen(  # noqa: S603 -- our own scenario script
-            list(argv),
-            cwd=str(cwd),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        try:
-            return proc.wait()
-        except KeyboardInterrupt:
-            _signal_group(proc.pid)
-            return proc.wait()
-
-
 @dataclass
 class ScenarioRun:
     spec: ScenarioSpec
     plans: dict[str, RowPlan]
     buckets: dict[str, list[str]]
     legacy: str | None = None
+    legacy_created: bool = False
     legacy_keys: list[str] = field(default_factory=list)
     shared: str | None = None
+    #: The config whose S3 settings reach the legacy bucket (A's).
+    s3_config: Path | None = None
+
+
+@dataclass
+class RowPlan:
+    row: Row
+    namespace: str
+    config: Path
+    peak: Peak
 
 
 class ScenarioMixin:
@@ -735,14 +901,16 @@ class ScenarioMixin:
         run = ScenarioRun(spec, plans, {})
         a = plans["A"]
         if spec.legacy_bucket:
-            run.legacy = f"{a.namespace}-legacy"
+            # Outside A's name prefix, so no backend can read it as A's.
+            run.legacy = f"rel17-{spec.id.lower()}-legacy-{secrets.token_hex(3)}"
         if spec.shared_bucket:
-            run.shared = f"rel17-{spec.id.lower()}-shared-{secrets.token_hex(3)}"
+            run.shared = f"{a.namespace}-bronze"
         for c, plan in plans.items():
-            bronze = run.legacy if c == "A" and run.legacy else run.shared
+            if c == "A":
+                bronze = run.legacy
+            else:
+                bronze = run.shared
             run.buckets[c] = self._set_buckets(plan, bronze)
-            if run.shared and c == "A":
-                run.buckets[c].append(run.shared)
             self.log(
                 plan.row.id,
                 "planned",
@@ -753,9 +921,6 @@ class ScenarioMixin:
                 owned_buckets=run.buckets[c],
             )
         self._admit_group(spec, plans)
-        for plan in plans.values():
-            self.ledger_add(plan)
-            self.log(plan.row.id, "ledgered")
         problems: list[str] = []
         try:
             if run.legacy:
@@ -778,6 +943,8 @@ class ScenarioMixin:
         return 0 if verdict == "PASS" else 1
 
     def _admit_group(self: Any, spec: ScenarioSpec, plans: dict[str, RowPlan]) -> None:
+        """Wait until every deployment of the scenario fits at once, then
+        write their ledger rows under the same lock as the decision."""
         peak = Peak(0.0, 0.0)
         for p in plans.values():
             peak = peak + p.peak
@@ -787,15 +954,18 @@ class ScenarioMixin:
             plans["A"].config,
             peak,
         )
+        namespaces = tuple(p.namespace for p in plans.values())
         last = -BLOCKING_REPORT_S
         while True:
-            decision = self.decide(
-                group, peak, size=len(plans), namespaces=tuple(p.namespace for p in plans.values())
-            )
-            if not isinstance(decision, Unknown) and decision.admit:
-                return
-            if self.stopping:
-                raise Refused(f"{spec.id}: stopped before admission")
+            if self.admitting_stopped:
+                raise Refused(f"{spec.id}: admission stopped before the scenario was admitted")
+            with self.ledger.transaction():
+                obs = self.observe()
+                decision = self.decide(group, obs, peak, size=len(plans), namespaces=namespaces)
+                if not isinstance(decision, Unknown) and decision.admit:
+                    for plan in plans.values():
+                        self.ledger_add_logged(plan)
+                    return
             reasons = [decision.reason] if isinstance(decision, Unknown) else decision.reasons
             if self.monotonic() - last >= BLOCKING_REPORT_S:
                 self.say(f"{spec.id} waits: {'; '.join(reasons)}")
@@ -808,11 +978,13 @@ class ScenarioMixin:
         if s3.bucket_exists(run.legacy):
             return [f"legacy bucket {run.legacy} already exists; not touched"]
         if not s3.create_bucket(run.legacy):
-            return [f"could not create the legacy bucket {run.legacy}"]
+            return [f"could not create the legacy bucket {run.legacy}; not touched"]
+        run.legacy_created = True
+        self.log(f"{run.spec.id}-A", "ledgered", legacy_bucket=run.legacy)
         key = "harness-legacy/object.txt"
         s3.raw_client.put_object(Bucket=run.legacy, Key=key, Body=b"legacy\n")
         run.legacy_keys = [key]
-        self.log(f"{run.spec.id}-A", "ledgered", legacy_bucket=run.legacy, legacy_keys=[key])
+        self.log(f"{run.spec.id}-A", "ledgered", legacy_keys=[key])
         return []
 
     def _run_scenario_script(self: Any, run: ScenarioRun) -> list[str]:
@@ -836,20 +1008,27 @@ class ScenarioMixin:
             return [f"the scenario shim imports lakebench from {seen}, not the release tree"]
         script = self.tree / "scripts" / "release" / "scenarios" / spec.script
         log = sdir / "script.log"
-        runner = self.script_runner or run_script
-        rc = runner(["bash", str(script)], env=env, cwd=sdir, log=log)
+        offset = log.stat().st_size if log.exists() else 0
+        rid = f"{spec.id}-A"
+
+        def on_spawn(pid: int, start: str) -> None:
+            self.log(rid, "ledgered", script_pid=pid, script_start=start)
+
+        rc = self.script_runner(
+            ["bash", str(script)], env=env, cwd=sdir, log=log, on_spawn=on_spawn
+        )
+        self.log(rid, "ledgered", script_rc=rc, script_pid=None)
         problems = []
-        text = log.read_text(errors="replace") if log.exists() else ""
+        text = log.read_bytes()[offset:].decode(errors="replace") if log.exists() else ""
         if rc != 0:
             problems.append(f"script exited {rc}")
         elif f"PASS: {spec.id}" not in text:
             problems.append("script exited 0 without its PASS line")
-        self.log(f"{spec.id}-A", "ledgered", script_rc=rc)
         return problems
 
     def _scenario_incarnation(self: Any, config: Path) -> tuple[str | None, str]:
-        """``uid#nonce`` when the namespace carries any confirmed nonce the
-        config's state kept (a script may deploy the same config twice)."""
+        """``uid#nonce`` when the namespace carries a confirmed nonce the
+        config's own state kept (a script may deploy the same config twice)."""
         from lakebench.config.deploy_state import StateError, current_incarnation, read_state
 
         try:
@@ -869,19 +1048,29 @@ class ScenarioMixin:
             return None, "the namespace's nonce is still pending"
         return inc, ""
 
-    def _scenario_cleanup(self: Any, run: ScenarioRun, check_kept: bool = True) -> list[str]:
+    def _scenario_cleanup(
+        self: Any, run: ScenarioRun, check_kept: bool = True, polls: frozenset[str] = frozenset()
+    ) -> list[str]:
         """Check what the script left, then destroy every leftover by
-        incarnation (B before A); never by name, never forced."""
+        incarnation (B before A); never by name, never forced. Configs in
+        *polls* had a destroy running when the harness stopped: they are
+        polled, never destroyed again."""
+        from lakebench.exit_codes import ExitCode
+
         spec = run.spec
         problems: list[str] = []
-        order = [c for c in reversed(spec.configs) if c in run.plans]
-        for c in order:
+        for c in [c for c in reversed(spec.configs) if c in run.plans]:
             plan = run.plans[c]
+            if c in polls:
+                self.poll_gone(plan, "harness stopped during a scenario destroy")
+                if self.rowlog.latest()[plan.row.id]["status"] != "destroyed":
+                    problems.append(f"{c}: not destroyed after the stopped destroy")
+                continue
             try:
                 present = self.cluster.namespace_exists(plan.namespace)
             except Exception as e:  # noqa: BLE001
                 problems.append(f"{c}: namespace unreadable ({e}); not destroyed")
-                self.log(plan.row.id, "failed", detail=f"namespace unreadable: {e}")
+                self.stop_admission(f"{plan.row.id}: namespace unreadable")
                 continue
             inc, why = self._scenario_incarnation(plan.config) if present else (None, "absent")
             if check_kept and c in spec.kept and inc is None:
@@ -889,69 +1078,45 @@ class ScenarioMixin:
                     f"{c}: expected present with its incarnation after the script ({why})"
                 )
             if not present:
-                problems += self._close_if_buckets_gone(run, c, "gone after the script")
+                problems += self.finalize_gone(plan, "gone after the script", run.buckets[c])
                 continue
             if inc is None:
                 problems.append(f"{c}: present without a confirmed incarnation ({why}); left")
                 self.log(plan.row.id, "left", detail=f"present after the script: {why}")
+                self.stop_admission(f"{plan.row.id}: left for a human")
                 continue
-            self.log(plan.row.id, "deployed", incarnation=inc)
-            res = self.runner(
-                ["destroy", str(plan.config), "--yes", "--expect-incarnation", inc],
-                cwd=plan.config.parent,
-                log=self.log_path(plan.row, "destroy"),
-                on_spawn=self._spawn_logger(plan, "destroying"),
-            )
-            from lakebench.exit_codes import ExitCode
-
+            self.log(plan.row.id, "recorded", incarnation=inc)
+            res = self.spawn_destroy(plan, inc)
             allowed = spec.allowed(c)
-            refused_by_design = (
-                res.code == ExitCode.REFUSED and res.paths and set(res.paths) <= allowed
-            )
-            if res.code == ExitCode.OK or refused_by_design:
+            by_design = res.code == ExitCode.REFUSED and res.paths and set(res.paths) <= allowed
+            if res.code == ExitCode.OK or by_design:
                 try:
                     gone = not self.cluster.namespace_exists(plan.namespace)
                 except Exception:  # noqa: BLE001
                     gone = False
                 if gone:
-                    problems += self._close_if_buckets_gone(
-                        run,
-                        c,
+                    problems += self.finalize_gone(
+                        plan,
                         f"destroyed by the harness (exit {res.code} {res.paths or ''})".strip(),
+                        run.buckets[c],
                     )
                     continue
             if res.code == ExitCode.INCOMPLETE:
-                self.poll_gone(plan, "scenario cleanup destroy exited 6")
+                self.poll_gone(plan, "scenario cleanup destroy exited 6", run.buckets[c])
                 if self.rowlog.latest()[plan.row.id]["status"] != "destroyed":
-                    problems.append(f"{c}: namespace still terminating after cleanup")
+                    problems.append(f"{c}: not destroyed after the cleanup destroy")
                 continue
-            self.classify_destroy(plan, res)
+            self.classify_destroy(plan, res, run.buckets[c])
             problems.append(f"{c}: cleanup destroy exited {res.code} ({', '.join(res.paths)})")
-        if run.legacy and "A" in run.plans:
+        if run.legacy and run.legacy_created:
             problems += self._remove_legacy_bucket(run)
         return problems
 
-    def _close_if_buckets_gone(self: Any, run: ScenarioRun, c: str, why: str) -> list[str]:
-        plan = run.plans[c]
-        try:
-            s3 = self.s3_factory(plan.config)
-            left = [b for b in run.buckets[c] if s3.bucket_exists(b)]
-        except Exception as e:  # noqa: BLE001
-            self.log(plan.row.id, "left", detail=f"{why}; buckets unreadable ({e})")
-            return [f"{c}: buckets unreadable after the namespace went ({e})"]
-        if left:
-            self.log(plan.row.id, "left", detail=f"{why}; buckets remain: {', '.join(left)}")
-            return [f"{c}: buckets remain after the namespace went: {', '.join(left)}"]
-        self.log(plan.row.id, "destroyed", detail=why)
-        self.ledger_close(plan)
-        return []
-
     def _remove_legacy_bucket(self: Any, run: ScenarioRun) -> list[str]:
-        """The legacy bucket is the harness's own: check it was left as it
-        was made, then empty and delete it."""
+        """The legacy bucket is the harness's own: when it is exactly as the
+        harness made it, empty and delete it; otherwise leave it for a person."""
         assert run.legacy is not None
-        problems: list[str] = []
-        s3 = self.s3_factory(run.plans["A"].config)
+        s3 = self.s3_factory(run.s3_config or run.plans["A"].config)
         if not s3.bucket_exists(run.legacy):
             return [f"legacy bucket {run.legacy} is gone: something deleted it"]
         listing = sorted(
@@ -959,17 +1124,17 @@ class ScenarioMixin:
             for page in s3.raw_client.get_paginator("list_objects_v2").paginate(Bucket=run.legacy)
             for o in page.get("Contents", [])
         )
+        rid = f"{run.spec.id}-A"
         if listing != sorted(run.legacy_keys):
-            problems.append(f"legacy bucket {run.legacy} changed: {listing}")
+            self.log(rid, self.rowlog.latest()[rid]["status"], legacy_bucket_removed=False)
+            return [
+                f"legacy bucket {run.legacy} changed ({listing}); left in place for a person, "
+                "with the ledger row of A"
+            ]
         s3.empty_bucket(run.legacy, keep_prefixes=())
-        if not s3.delete_bucket(run.legacy):
-            problems.append(f"could not delete the harness's legacy bucket {run.legacy}")
-        self.log(
-            f"{run.spec.id}-A",
-            self.rowlog.latest()[f"{run.spec.id}-A"]["status"],
-            legacy_bucket_removed=not problems,
-        )
-        return problems
+        ok = bool(s3.delete_bucket(run.legacy))
+        self.log(rid, self.rowlog.latest()[rid]["status"], legacy_bucket_removed=ok)
+        return [] if ok else [f"could not delete the harness's legacy bucket {run.legacy}"]
 
     def write_extra_results(self: Any) -> Path:
         """``results-extra.md``: scenario (and upgrade) runs, which are not
@@ -1000,12 +1165,11 @@ class ScenarioMixin:
 # -- the harness -------------------------------------------------------------
 
 
-@dataclass
-class RowPlan:
-    row: Row
-    namespace: str
-    config: Path
-    peak: Peak
+@dataclass(frozen=True)
+class Observation:
+    live_rows: list[Any]
+    managed: set[str]
+    snapshot: Any
 
 
 @dataclass
@@ -1028,10 +1192,15 @@ class Harness(ScenarioMixin):
     rows: dict[str, Row] = field(default_factory=dict)
     script_runner: Callable[..., int] | None = None
     s3_factory: Callable[[Path], Any] | None = None
+    #: The commit records are judged against: --freeze, or HEAD in a rehearsal.
+    judge_sha: str = ""
     _log_lock: threading.Lock = field(default_factory=threading.Lock)
-    _stop: threading.Event = field(default_factory=threading.Event)
+    _admission: threading.Event = field(default_factory=threading.Event)
+    _interrupt: threading.Event = field(default_factory=threading.Event)
+    _active_lock: threading.Lock = field(default_factory=threading.Lock)
     _active: dict[str, RowPlan] = field(default_factory=dict)
     _ledger_peaks: dict[str, Peak | None] = field(default_factory=dict)
+    _worst: dict[float, Peak] = field(default_factory=dict)
 
     # -- bookkeeping --
 
@@ -1041,20 +1210,45 @@ class Harness(ScenarioMixin):
                 row, status, freeze_sha=self.freeze, rehearsal=self.rehearsal, **fields
             )
 
+    def status_of(self, row: str) -> str:
+        return str(self.rowlog.latest().get(row, {}).get("status", "planned"))
+
     def stop_admission(self, why: str) -> None:
-        if not self._stop.is_set():
+        """No new rows are admitted; rows in flight finish and destroy."""
+        if not self._admission.is_set():
             self.say(f"admission stopped: {why}")
-        self._stop.set()
+        self._admission.set()
+
+    def interrupt(self) -> None:
+        """SIGINT: stop admission, and rows in flight stop before their
+        next step (no new run, no destroy); resume continues them."""
+        self.stop_admission("interrupted (SIGINT)")
+        self._interrupt.set()
 
     @property
-    def stopping(self) -> bool:
-        return self._stop.is_set()
+    def admitting_stopped(self) -> bool:
+        return self._admission.is_set()
+
+    @property
+    def interrupted(self) -> bool:
+        return self._interrupt.is_set()
 
     def row_dir(self, row: Row) -> Path:
         return self.out / "configs" / row.id
 
     def log_path(self, row: Row, step: str) -> Path:
         return self.out / "logs" / row.id / f"{step}.log"
+
+    def _set_active(self, rid: str, plan: RowPlan | None) -> None:
+        with self._active_lock:
+            if plan is None:
+                self._active.pop(rid, None)
+            else:
+                self._active[rid] = plan
+
+    def _active_rows(self) -> list[RowPlan]:
+        with self._active_lock:
+            return list(self._active.values())
 
     # -- config --
 
@@ -1095,6 +1289,10 @@ class Harness(ScenarioMixin):
         return cfg
 
     def plan_row(self, row: Row, row_dir: Path, name: str | None = None) -> RowPlan:
+        if row.workload == "financial":
+            problem = aml_seed_problem(row.seed)
+            if problem:
+                raise Refused(f"{row.id}: {problem}")
         cfg_path = self.write_config(row, row_dir, name)
         cfg = load_row_config(cfg_path)
         problem = versions_problem(row, cfg)
@@ -1104,111 +1302,154 @@ class Harness(ScenarioMixin):
 
     # -- admission --
 
-    def _ledger_peak(self, row: LedgerRow) -> Peak | None:
+    def _worst_case(self, scale: float) -> Peak:
+        if scale not in self._worst:
+            self._worst[scale] = worst_case_peak(scale)
+        return self._worst[scale]
+
+    def _ledger_peak(self, row: Any) -> Peak:
+        """A ledger deployment's plan peak; the worst default-recipe peak at
+        its scale when its config cannot be read."""
         if row.namespace not in self._ledger_peaks:
             peak: Peak | None = None
-            path = Path(row.config)
-            if path.is_file():
+            path = ledger_config_path(row.config)
+            if path is not None:
                 try:
                     peak = config_peak(load_row_config(path))
-                except Exception:  # noqa: BLE001 -- unloadable: the fallback peak counts
+                except Exception:  # noqa: BLE001 -- unloadable: the worst case counts
                     peak = None
             self._ledger_peaks[row.namespace] = peak
-        return self._ledger_peaks[row.namespace]
+        found = self._ledger_peaks[row.namespace]
+        if found is not None:
+            return found
+        try:
+            scale = float(row.scale)
+        except ValueError:
+            scale = 1.0
+        return self._worst_case(scale)
+
+    def observe(self) -> Observation | Any:
+        """One read of the ledger, the lakebench namespaces and the cluster's
+        load; Unknown when any of them cannot be read (fail closed)."""
+        try:
+            live_rows = self.ledger.live_rows()
+        except Exception as e:  # noqa: BLE001
+            return Unknown(f"ledger unreadable: {e}")
+        try:
+            managed = set(self.cluster.managed_namespaces())
+        except Exception as e:  # noqa: BLE001
+            return Unknown(f"namespace list failed: {e}")
+        try:
+            snapshot = self.cluster.snapshot()
+        except Exception as e:  # noqa: BLE001
+            return Unknown(f"capacity read failed: {e}")
+        return Observation(live_rows, managed, snapshot)
 
     def decide(
         self,
         plan: RowPlan,
+        obs: Any,
         fallback: Peak,
         *,
         size: int = 1,
         namespaces: tuple[str, ...] = (),
     ) -> Any:
+        if isinstance(obs, Unknown):
+            return obs
         try:
-            live_rows = self.ledger.live_rows()
-        except (OSError, LedgerError) as e:
-            return Unknown(f"ledger unreadable: {e}")
-        try:
-            managed = self.cluster.managed_namespaces()
+            own = [
+                ActiveRow(p.namespace, p.peak, p.row.alone, p.row.aml_continuous)
+                for p in self._active_rows()
+            ]
+            live = obs.live_rows
+            return admit(
+                Candidate(
+                    plan.row.id,
+                    plan.namespace,
+                    plan.peak,
+                    plan.row.alone,
+                    plan.row.aml_continuous,
+                    size=size,
+                    namespaces=namespaces,
+                ),
+                obs.snapshot,
+                managed=obs.managed,
+                ledger_live={r.namespace for r in live},
+                own_active=own,
+                ledger_peaks={r.namespace: self._ledger_peak(r) for r in live},
+                ledger_alone={r.namespace for r in live if " alone" in r.session},
+                fallback_peak=fallback,
+                slots=self.slots,
+            )
         except Exception as e:  # noqa: BLE001 -- fail closed
-            return Unknown(f"namespace list failed: {e}")
-        snapshot: Snapshot | Unknown = self.cluster.snapshot()
-        own = [
-            ActiveRow(p.namespace, p.peak, p.row.alone, p.row.aml_continuous)
-            for p in self._active.values()
-        ]
-        return admit(
-            Candidate(
-                plan.row.id,
-                plan.namespace,
-                plan.peak,
-                plan.row.alone,
-                plan.row.aml_continuous,
-                size=size,
-                namespaces=namespaces,
-            ),
-            snapshot,
-            managed=managed,
-            ledger_live={r.namespace for r in live_rows},
-            own_active=own,
-            ledger_peaks={r.namespace: self._ledger_peak(r) for r in live_rows},
-            fallback_peak=fallback,
-            slots=self.slots,
-        )
+            return Unknown(f"admission check failed: {type(e).__name__}: {e}")
 
     # -- the row lifecycle --
 
-    def ledger_add(self, plan: RowPlan) -> None:
+    def ledger_add_logged(self, plan: RowPlan) -> None:
+        """Ledger row first (with the intent logged before it), then 'ledgered'."""
+        self.log(plan.row.id, "planned", ledger_intent=True)
         self.ledger.add(
             LedgerRow(
                 plan.namespace,
                 str(plan.config),
-                f"release-harness {self.freeze[:8]} row {plan.row.id}",
+                f"release-harness {self.freeze[:8]} row {plan.row.id}"
+                + (" alone" if plan.row.alone else ""),
                 f"{plan.row.scale:g}",
                 utc_now(),
             )
         )
+        self.log(plan.row.id, "ledgered", namespace=plan.namespace, config=str(plan.config))
 
-    def ledger_close(self, plan: RowPlan) -> None:
+    def ledger_close(self, plan: RowPlan, required: bool = True) -> None:
+        if not required and not self.ledger.has_row(plan.namespace):
+            return  # the harness stopped before the row was written
         try:
             self.ledger.close(plan.namespace)
         except (OSError, LedgerError) as e:
             self.say(f"{plan.row.id}: could not close the ledger row for {plan.namespace}: {e}")
+            self.stop_admission(f"{plan.row.id}: ledger close failed")
 
-    def _spawn_logger(
-        self, plan: RowPlan, status: str, **fields: Any
-    ) -> Callable[[int, str], None]:
+    def _spawn(
+        self,
+        plan: RowPlan,
+        verb: str,
+        args: list[str],
+        *,
+        interruptible: bool = False,
+        **fields: Any,
+    ) -> ChildResult:
+        """Log the step's status before the child exists (resume treats it
+        as started), then its pid once it does."""
+        status = STEP_STATUS[verb]
+        self.log(plan.row.id, status, child_pid=None, child_start=None, **fields)
+
         def on_spawn(pid: int, start: str) -> None:
-            self.log(plan.row.id, status, child_pid=pid, child_start=start, **fields)
+            self.log(plan.row.id, status, child_pid=pid, child_start=start)
 
-        return on_spawn
+        return self.runner(
+            [verb, *args],
+            cwd=plan.config.parent,
+            log=self.log_path(plan.row, verb),
+            interruptible=interruptible,
+            on_spawn=on_spawn,
+        )
 
     def deploy(self, plan: RowPlan) -> None:
-        """Ledger row, deploy, incarnation; then the run and the destroy."""
+        """Deploy (the ledger row is written), incarnation, run, destroy."""
         row = plan.row
-        try:
-            self.ledger_add(plan)
-        except (OSError, LedgerError) as e:
-            self.log(row.id, "not-deployed", detail=f"ledger row not written: {e}")
-            self.stop_admission(f"{row.id}: ledger write failed")
-            return
-        self.log(row.id, "ledgered", namespace=plan.namespace, config=str(plan.config))
-        res = self.runner(
-            ["deploy", str(plan.config), "--yes", "--require-new"],
-            cwd=plan.config.parent,
-            log=self.log_path(row, "deploy"),
-            on_spawn=self._spawn_logger(plan, "deploying"),
-        )
+        res = self._spawn(plan, "deploy", [str(plan.config), "--yes", "--require-new"])
         if res.code != 0:
             self.resolve_failed_deploy(plan, f"deploy exited {res.code} {res.paths or ''}".strip())
             return
         inc, why = confirmed_incarnation(plan.config, self.cluster.core_v1)
         if inc is None:
-            self.log(row.id, "failed", detail=f"deployed, but no confirmed incarnation: {why}")
+            self.log(row.id, "left", detail=f"deployed, but no confirmed incarnation: {why}")
             self.say(f"{row.id}: {plan.namespace} left for a human: {why}")
+            self.stop_admission(f"{row.id}: left for a human")
             return
         self.log(row.id, "deployed", incarnation=inc)
-        if self.stopping:
+        if self.interrupted:
             return
         self.run_and_destroy(plan, inc)
 
@@ -1218,19 +1459,28 @@ class Harness(ScenarioMixin):
         try:
             exists = self.cluster.namespace_exists(plan.namespace)
         except Exception as e:  # noqa: BLE001
-            self.log(row.id, "failed", detail=f"{why}; namespace unreadable ({e}); not destroyed")
+            self.log(row.id, self.status_of(row.id), detail=f"{why}; namespace unreadable ({e})")
             self.stop_admission(f"{row.id}: namespace unreadable")
             return
-        if not exists and not deploy_state_present(plan.config):
-            self.log(row.id, "not-deployed", detail=f"{why}; nothing was created")
-            self.ledger_close(plan)
+        if not exists:
+            # The namespace comes before the buckets in a deploy; with no
+            # namespace and none of the row's buckets, nothing was created.
+            left = self.buckets_left(plan, None)
+            if left == []:
+                self.log(row.id, "not-deployed", detail=f"{why}; nothing was created")
+                self.ledger_close(plan, required=False)
+                return
+            self.log(row.id, "left", detail=f"{why}; no namespace, buckets: {left}")
+            self.stop_admission(f"{row.id}: left for a human")
             return
         inc, reason = confirmed_incarnation(plan.config, self.cluster.core_v1)
         if inc is None:
             self.log(row.id, "left", detail=f"{why}; not destroyed by the harness: {reason}")
             self.say(f"{row.id}: {plan.namespace} left for a human: {reason}")
+            self.stop_admission(f"{row.id}: left for a human")
             return
-        self.log(row.id, "deployed", incarnation=inc, detail=why, verdict="FAIL")
+        # 'recorded' sends a resumed row straight to destroy, never to a run.
+        self.log(row.id, "recorded", incarnation=inc, detail=why, verdict="FAIL", run_ids=[])
         self.destroy(plan, inc)
 
     def run_dirs(self, plan: RowPlan) -> set[str]:
@@ -1238,14 +1488,13 @@ class Harness(ScenarioMixin):
         return {p.name for p in runs.iterdir() if p.is_dir()} if runs.is_dir() else set()
 
     def run_and_destroy(self, plan: RowPlan, inc: str) -> None:
-        row = plan.row
         before = sorted(self.run_dirs(plan))
-        res = self.runner(
-            ["run", str(plan.config), "--generate", "--yes"],
-            cwd=plan.config.parent,
-            log=self.log_path(row, "run"),
+        res = self._spawn(
+            plan,
+            "run",
+            [str(plan.config), "--generate", "--yes"],
             interruptible=True,
-            on_spawn=self._spawn_logger(plan, "running", runs_before=before),
+            runs_before=before,
         )
         self.finish_run(plan, inc, set(before), res.code)
 
@@ -1268,29 +1517,36 @@ class Harness(ScenarioMixin):
             problems.append(f"report exited {rep.code}")
         verdict = "PASS" if not problems else "FAIL"
         self.log(row.id, "recorded", run_ids=run_ids, verdict=verdict, problems=problems)
-        if self.stopping:
+        if self.interrupted:
             return
         self.destroy(plan, inc)
 
     def collect(self, plan: RowPlan, run_id: str) -> list[str]:
-        """Scrub the record into ``<out>/uat/runs/``; its release problems."""
+        """Scrub the record into ``<out>/uat/runs/`` and judge the scrubbed
+        copy (what the release gate reads); its release problems."""
         src = plan.config.parent / "lakebench-output" / "runs" / run_id / "metrics.json"
         try:
             record = json.loads(src.read_text())
         except (OSError, ValueError) as e:
             return [f"{run_id}: record unreadable: {e}"]
-        problems = [f"{run_id}: {p}" for p in record_verdict(record, self.freeze, self.version)]
         try:
             scrub = _scrub_module()
-            clean, refusals = scrub.scrub_record(record)
-        except Exception as e:  # noqa: BLE001 -- a scrub failure keeps the record out
-            return [*problems, f"{run_id}: scrub failed: {e}"]
-        if refusals:
-            return [*problems, *(f"{run_id}: scrub refused: {r}" for r in refusals)]
-        dest_root = self.out / ("rehearsal" if self.rehearsal else "uat") / "runs" / run_id
-        dest_root.mkdir(parents=True, exist_ok=True)
-        (dest_root / "metrics.json").write_text(scrub.dump(clean))
-        return problems
+            clean, _rewritten = scrub.scrub_record(record)
+        except Exception as e:  # noqa: BLE001 -- a refused scrub keeps the record out
+            return [f"{run_id}: scrub refused: {e}"]
+        try:
+            problems = record_verdict(clean, self.judge_sha or self.freeze, self.version)
+        except Exception as e:  # noqa: BLE001 -- a record that cannot be judged fails
+            problems = [f"the record could not be judged: {type(e).__name__}: {e}"]
+        dest = self.out / ("rehearsal" if self.rehearsal else "uat") / "runs" / run_id
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "metrics.json").write_text(scrub.dump(clean))
+        return [f"{run_id}: {p}" for p in problems]
+
+    def spawn_destroy(self, plan: RowPlan, inc: str) -> ChildResult:
+        return self._spawn(
+            plan, "destroy", [str(plan.config), "--yes", "--expect-incarnation", inc]
+        )
 
     def destroy(self, plan: RowPlan, inc: str) -> None:
         """Destroy by incarnation; never ``--force``, never re-invoked."""
@@ -1298,25 +1554,50 @@ class Harness(ScenarioMixin):
         try:
             exists = self.cluster.namespace_exists(plan.namespace)
         except Exception as e:  # noqa: BLE001
-            self.log(row.id, "failed", detail=f"namespace unreadable before destroy: {e}")
-            self.stop_admission(f"{row.id}: namespace unreadable")
+            self.log(row.id, self.status_of(row.id), detail=f"namespace unreadable: {e}")
+            self.stop_admission(f"{row.id}: namespace unreadable before destroy")
             return
         if not exists:
             self.log(
                 row.id,
                 "left",
-                detail="namespace gone; buckets may remain; not destroyed by the harness",
+                detail="namespace gone before destroy; buckets may remain; not destroyed "
+                "by the harness",
             )
+            self.stop_admission(f"{row.id}: left for a human")
             return
-        res = self.runner(
-            ["destroy", str(plan.config), "--yes", "--expect-incarnation", inc],
-            cwd=plan.config.parent,
-            log=self.log_path(row, "destroy"),
-            on_spawn=self._spawn_logger(plan, "destroying"),
-        )
-        self.classify_destroy(plan, res)
+        self.classify_destroy(plan, self.spawn_destroy(plan, inc))
 
-    def classify_destroy(self, plan: RowPlan, res: ChildResult) -> None:
+    def buckets_left(self, plan: RowPlan, owned: list[str] | None) -> list[str] | None:
+        """The row's buckets that still exist; None when they cannot be read."""
+        if self.s3_factory is None:
+            return None
+        try:
+            names = owned if owned is not None else config_buckets(plan.config)
+            s3 = self.s3_factory(plan.config)
+            return [b for b in names if s3.bucket_exists(b)]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def finalize_gone(self, plan: RowPlan, why: str, owned: list[str] | None = None) -> list[str]:
+        """The namespace is gone: close the ledger row only when the row's
+        buckets are gone too; otherwise leave the row for a person."""
+        left = self.buckets_left(plan, owned)
+        if left is None:
+            self.log(plan.row.id, "left", detail=f"{why}; buckets unreadable")
+            self.stop_admission(f"{plan.row.id}: buckets unreadable after destroy")
+            return [f"{plan.row.id}: buckets unreadable after the namespace went"]
+        if left:
+            self.log(plan.row.id, "left", detail=f"{why}; buckets remain: {', '.join(left)}")
+            self.stop_admission(f"{plan.row.id}: buckets remain after destroy")
+            return [f"{plan.row.id}: buckets remain after the namespace went: {', '.join(left)}"]
+        self.log(plan.row.id, "destroyed", detail=why)
+        self.ledger_close(plan)
+        return []
+
+    def classify_destroy(
+        self, plan: RowPlan, res: ChildResult, owned: list[str] | None = None
+    ) -> None:
         from lakebench.exit_codes import ExitCode
 
         row = plan.row
@@ -1327,14 +1608,13 @@ class Harness(ScenarioMixin):
             except Exception:  # noqa: BLE001
                 gone = False
             if gone:
-                self.log(row.id, "destroyed", destroy_paths=res.paths)
-                self.ledger_close(plan)
+                self.finalize_gone(plan, f"destroy exited 0 {res.paths or ''}".strip(), owned)
                 return
             self.log(row.id, "failed", detail="destroy exited 0 but the namespace is present")
             self.stop_admission(f"{row.id}: destroy exited 0 with the namespace present")
             return
         if res.code == ExitCode.INCOMPLETE:
-            self.poll_gone(plan, "destroy exited 6 (incomplete, still terminating)")
+            self.poll_gone(plan, "destroy exited 6 (incomplete, still terminating)", owned)
             return
         if res.code == ExitCode.REFUSED and "destroy.incarnation_mismatch" in res.paths:
             try:
@@ -1343,6 +1623,7 @@ class Harness(ScenarioMixin):
                 gone = False
             if gone:
                 self.log(row.id, "left", detail="namespace gone before destroy; buckets may remain")
+                self.stop_admission(f"{row.id}: left for a human")
                 return
             self.log(
                 row.id,
@@ -1360,7 +1641,7 @@ class Harness(ScenarioMixin):
         self.log(row.id, "failed", detail=detail, destroy_paths=res.paths)
         self.stop_admission(f"{row.id}: {detail}")
 
-    def poll_gone(self, plan: RowPlan, why: str) -> None:
+    def poll_gone(self, plan: RowPlan, why: str, owned: list[str] | None = None) -> None:
         """Read-only polls until the namespace is gone; never re-invokes destroy."""
         row = plan.row
         self.log(row.id, "destroying", detail=why)
@@ -1368,8 +1649,7 @@ class Harness(ScenarioMixin):
         while True:
             try:
                 if not self.cluster.namespace_exists(plan.namespace):
-                    self.log(row.id, "destroyed", detail=f"{why}; namespace gone on a later read")
-                    self.ledger_close(plan)
+                    self.finalize_gone(plan, f"{why}; namespace gone on a later read", owned)
                     return
             except Exception:  # noqa: BLE001 -- keep polling until the deadline
                 pass
@@ -1382,64 +1662,96 @@ class Harness(ScenarioMixin):
     # -- scheduling --
 
     def schedule(self, pending: list[RowPlan], continuing: list[Callable[[], None]]) -> None:
-        """Admit *pending* rows as capacity allows; run *continuing* steps
-        (resumed rows already deployed) at once. Returns when every thread
-        has finished or admission stopped with nothing in flight."""
+        """Admit *pending* rows as capacity allows (decision and ledger row
+        under one ledger lock); run *continuing* steps (resumed rows) at once.
+        Returns when every thread has finished; never leaves one running."""
         threads: dict[str, threading.Thread] = {}
         fallback = Peak(0.0, 0.0)
         for p in pending:
             fallback = fallback.max(p.peak)
-        for i, fn in enumerate(continuing):
-            t = threading.Thread(target=fn, name=f"resume-{i}", daemon=False)
-            t.start()
-            threads[f"resume-{i}"] = t
-        last_report = -BLOCKING_REPORT_S
-        queue = list(pending)
-        while True:
-            for key in [k for k, t in threads.items() if not t.is_alive()]:
-                threads.pop(key).join()
-                self._active.pop(key, None)
-            if self.stopping:
-                queue.clear()
-            if not queue and not threads:
-                return
-            admitted_any = False
+        try:
+            for i, fn in enumerate(continuing):
+                t = threading.Thread(target=fn, name=f"resume-{i}", daemon=False)
+                t.start()
+                threads[f"resume-{i}"] = t
+            last_report = -BLOCKING_REPORT_S
+            queue = list(pending)
+            while True:
+                for key in [k for k, t in threads.items() if not t.is_alive()]:
+                    threads.pop(key).join()
+                if self.admitting_stopped:
+                    queue.clear()
+                if not queue and not threads:
+                    return
+                admitted = self._admit_one(queue, threads, fallback, last_report)
+                if admitted is None:
+                    last_report = self.monotonic()
+                elif admitted:
+                    continue
+                self.sleep(ADMIT_POLL_S if queue else 5)
+        finally:
+            for t in threads.values():
+                t.join()
+
+    def _admit_one(
+        self,
+        queue: list[RowPlan],
+        threads: dict[str, threading.Thread],
+        fallback: Peak,
+        last_report: float,
+    ) -> bool | None:
+        """Admit the first row that fits: True; nothing fits: False, or None
+        when the waiting reasons were just printed."""
+        if not queue:
+            return False
+        reported = False
+        with self.ledger.transaction():
+            obs = self.observe()
             for plan in list(queue):
                 if plan.row.alone and plan is not queue[0]:
                     continue
-                decision = self.decide(plan, fallback)
-                if isinstance(decision, Unknown):
-                    reasons, blocking = [decision.reason], []
-                    ok = False
-                else:
-                    reasons, blocking, ok = decision.reasons, decision.blocking, decision.admit
-                if ok:
+                decision = self.decide(plan, obs, fallback)
+                if not isinstance(decision, Unknown) and decision.admit:
                     queue.remove(plan)
-                    self._active[plan.row.id] = plan
+                    try:
+                        self.ledger_add_logged(plan)
+                    except Exception as e:  # noqa: BLE001
+                        self.log(plan.row.id, "not-deployed", detail=f"ledger row not written: {e}")
+                        self.stop_admission(f"{plan.row.id}: ledger write failed")
+                        return True
+                    self._set_active(plan.row.id, plan)
                     t = threading.Thread(
                         target=self._guarded, args=(plan,), name=plan.row.id, daemon=False
                     )
                     t.start()
                     threads[plan.row.id] = t
-                    admitted_any = True
-                    break
-                if self.monotonic() - last_report >= BLOCKING_REPORT_S:
+                    return True
+                if self.monotonic() - last_report >= BLOCKING_REPORT_S and not reported:
+                    reasons, blocking = (
+                        ([decision.reason], [])
+                        if isinstance(decision, Unknown)
+                        else (decision.reasons, decision.blocking)
+                    )
                     self.say(
                         f"{plan.row.id} waits: {'; '.join(reasons)}"
                         + (f" (blocking: {', '.join(blocking)})" if blocking else "")
                     )
-                    last_report = self.monotonic()
-                if queue and plan is queue[0] and plan.row.alone:
+                    reported = True
+                if plan.row.alone:
                     break
-            if not admitted_any:
-                self.sleep(ADMIT_POLL_S if queue else 5)
+        return None if reported else False
 
     def _guarded(self, plan: RowPlan) -> None:
+        """A harness error keeps the row's last status (resume continues it)
+        and stops admission; it is never written as a terminal status."""
         try:
             self.deploy(plan)
-        except Exception as e:  # noqa: BLE001 -- one row's crash stops admission, not the harness
-            self.log(plan.row.id, "failed", detail=f"harness error: {type(e).__name__}: {e}")
-            self.stop_admission(f"{plan.row.id}: harness error {e}")
+        except Exception as e:  # noqa: BLE001
+            rid = plan.row.id
+            self.log(rid, self.status_of(rid), harness_error=f"{type(e).__name__}: {e}")
+            self.stop_admission(f"{rid}: harness error {e}")
+        finally:
+            self._set_active(plan.row.id, None)
 
     # -- entry points --
 
@@ -1459,6 +1771,7 @@ class Harness(ScenarioMixin):
                 peak=[plan.peak.cores, plan.peak.gib],
                 alone=row.alone,
                 aml_continuous=row.aml_continuous,
+                slots=self.slots,
             )
             plans.append(plan)
         self.schedule(plans, [])
@@ -1473,7 +1786,7 @@ class Harness(ScenarioMixin):
             self.say(
                 f"rows not finished: {', '.join(open_rows)}; resume with: python3.11 "
                 f"{HERE / 'harness.py'} resume --out {self.out} --context {self.context} "
-                f"--deployments-ledger {self.ledger.path}"
+                f"--deployments-ledger {self.ledger.path} --ledger-lock {self.ledger.lock_path}"
             )
         bad = [
             r
@@ -1483,22 +1796,29 @@ class Harness(ScenarioMixin):
         return 0 if not bad and not open_rows else 1
 
     def write_results(self) -> Path:
+        """``results.md``: one table row per matrix row; run ids only on
+        rows that passed (the release gate reads every id in the table), the
+        others listed below the table."""
         states = self.rowlog.latest()
-        name = "results-rehearsal.md" if self.rehearsal else "results.md"
-        lines = [
-            f"# UAT results {self.version}",
-            "",
-            f"Freeze commit: {self.freeze}",
-            "",
-        ]
         if self.rehearsal:
-            lines += ["Rehearsal: these runs are not release evidence.", ""]
+            name = "results-rehearsal.md"
+            lines = [
+                f"# Rehearsal results {self.version}",
+                "",
+                f"Rehearsal at {self.judge_sha or self.freeze}; these runs are not release "
+                "evidence.",
+                "",
+            ]
+        else:
+            name = "results.md"
+            lines = [f"# UAT results {self.version}", "", f"Freeze commit: {self.freeze}", ""]
         lines += [
             "| row | workload | mode | recipe | Spark / format | scale | run id | verdict | group check |",
             "|---|---|---|---|---|---|---|---|---|",
         ]
         from lakebench.metrics.release_record import RELEASE_MATRIX_VERSIONS
 
+        not_passed: list[str] = []
         for rid, s in states.items():
             row = self.rows.get(rid)
             if row is None:
@@ -1506,14 +1826,26 @@ class Harness(ScenarioMixin):
             spark, fmt = RELEASE_MATRIX_VERSIONS.get(
                 (row.workload, row.mode, row.recipe), ("?", "?")
             )
-            run_ids = ", ".join(r.removeprefix("run-") for r in s.get("run_ids") or []) or "-"
+            ids = [r.removeprefix("run-") for r in s.get("run_ids") or []]
             verdict = s.get("verdict") or "-"
-            if s["status"] != "destroyed" and verdict == "PASS":
+            passed = verdict == "PASS" and s["status"] == "destroyed"
+            if verdict == "PASS" and not passed:
                 verdict = f"PASS ({s['status']})"
+            if not passed and ids:
+                not_passed.append(f"{rid}: {', '.join(ids)}")
+            cell = ", ".join(ids) if passed and ids else "-"
             lines.append(
                 f"| {rid} | {row.workload} | {row.mode} | {row.recipe} | {spark} / {fmt} | "
-                f"{row.scale:g} | {run_ids} | {verdict} | - |"
+                f"{row.scale:g} | {cell} | {verdict} | not checked |"
             )
+        lines += [
+            "",
+            "Group check: cross-row result fingerprint equality is checked separately "
+            "(verify-groups); this table does not claim it.",
+        ]
+        if not_passed:
+            lines += ["", "Runs of rows that did not pass (not evidence):", ""]
+            lines += [f"- {entry}" for entry in not_passed]
         path = self.out / name
         path.write_text("\n".join(lines) + "\n")
         return path
@@ -1531,55 +1863,51 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
     alive = [
         r
         for r, s in states.items()
-        if s["status"] not in TERMINAL and child_alive(s.get("child_pid"), s.get("child_start"))
+        if s["status"] not in TERMINAL
+        and (
+            child_alive(s.get("child_pid"), s.get("child_start"))
+            or child_alive(s.get("script_pid"), s.get("script_start"))
+        )
     ]
     if alive:
         raise Refused(
             f"rows with a live child process: {', '.join(alive)}; wait for them or stop them first"
         )
+    unknown = [
+        rid
+        for rid, s in states.items()
+        if s["status"] not in TERMINAL and s.get("scenario") not in SCENARIOS and rid not in rows
+    ]
+    if unknown:
+        raise Refused(f"rows of {h.rowlog.path} not in the matrix: {', '.join(unknown)}")
     pending: list[RowPlan] = []
     continuing: list[Callable[[], None]] = []
     for rid, s in states.items():
         status = s["status"]
-        if status in TERMINAL:
+        if status in TERMINAL or s.get("scenario") in SCENARIOS:
             continue
-        if s.get("scenario") in SCENARIOS:
-            continue  # resumed below, one cleanup per scenario
-        row = rows.get(rid)
-        if row is None:
-            raise Refused(f"row {rid} of {h.rowlog.path} is not in the matrix")
-        plan = _rebuild_plan(row, s)
+        plan = _rebuild_plan(rows[rid], s)
         inc = s.get("incarnation")
-        if status == "planned":
+        if status == "planned" and not s.get("ledger_intent"):
             pending.append(plan)
-        elif status in ("ledgered", "deploying"):
-            h._active[rid] = plan
-            continuing.append(
-                _bind(
-                    h,
-                    rid,
-                    lambda p=plan: h.resolve_failed_deploy(p, "harness stopped during deploy"),
-                )
-            )
+            continue
+        h._set_active(rid, plan)
+        if status in ("planned", "ledgered", "deploying"):
+            fn = lambda p=plan: h.resolve_failed_deploy(p, "harness stopped during deploy")  # noqa: E731
         elif status == "deployed" and inc:
-            h._active[rid] = plan
-            continuing.append(_bind(h, rid, lambda p=plan, i=inc: h.run_and_destroy(p, i)))
+            fn = lambda p=plan, i=inc: h.run_and_destroy(p, i)  # noqa: E731
         elif status == "running" and inc:
             before = set(s.get("runs_before") or [])
-            h._active[rid] = plan
-            continuing.append(
-                _bind(h, rid, lambda p=plan, i=inc, b=before: h.finish_run(p, i, b, None))
-            )
+            fn = lambda p=plan, i=inc, b=before: h.finish_run(p, i, b, None)  # noqa: E731
         elif status == "recorded" and inc:
-            h._active[rid] = plan
-            continuing.append(_bind(h, rid, lambda p=plan, i=inc: h.destroy(p, i)))
+            fn = lambda p=plan, i=inc: h.destroy(p, i)  # noqa: E731
         elif status == "destroying":
-            h._active[rid] = plan
-            continuing.append(
-                _bind(h, rid, lambda p=plan: h.poll_gone(p, "harness stopped during destroy"))
-            )
+            fn = lambda p=plan: h.poll_gone(p, "harness stopped during destroy")  # noqa: E731
         else:
+            h._set_active(rid, None)
             h.log(rid, "failed", detail=f"cannot resume from {status} without an incarnation")
+            continue
+        continuing.append(_bind(h, rid, fn))
     for spec_id in dict.fromkeys(
         st["scenario"]
         for st in states.values()
@@ -1592,22 +1920,35 @@ def resume(h: Harness, rows: dict[str, Row]) -> int:
 
 def _resume_scenario(h: Harness, spec_id: str, states: dict[str, dict[str, Any]]) -> None:
     """Clean up a scenario the harness stopped in: destroy each leftover
-    by incarnation, remove the harness's legacy bucket; never re-run it."""
+    by incarnation (a destroy that was running is polled), remove the
+    harness's legacy bucket; never re-run it."""
     spec = SCENARIOS[spec_id]
     run = ScenarioRun(spec, {}, {})
+    polls: set[str] = set()
     for c in spec.configs:
         st = states.get(f"{spec_id}-{c}")
         if st is None:
             continue
-        if c == "A" and st.get("legacy_bucket") and not st.get("legacy_bucket_removed"):
+        if c == "A" and st.get("legacy_bucket") and st.get("legacy_bucket_removed") is None:
             run.legacy = st["legacy_bucket"]
+            run.legacy_created = True
             run.legacy_keys = list(st.get("legacy_keys") or [])
-        if st["status"] in TERMINAL and not (c == "A" and run.legacy):
+            run.s3_config = Path(st["config"])
+        if st["status"] in TERMINAL:
             continue
-        row = Row(f"{spec_id}-{c}", *astuple_base())
+        row = Row(
+            f"{spec_id}-{c}",
+            SCENARIO_BASE.workload,
+            SCENARIO_BASE.mode,
+            SCENARIO_BASE.recipe,
+            SCENARIO_BASE.scale,
+            SCENARIO_BASE.seed,
+        )
         run.plans[c] = _rebuild_plan(row, st)
         run.buckets[c] = list(st.get("owned_buckets") or [])
-    problems = h._scenario_cleanup(run, check_kept=False)
+        if st["status"] == "destroying":
+            polls.add(c)
+    problems = h._scenario_cleanup(run, check_kept=False, polls=frozenset(polls))
     h.log(
         f"{spec_id}-A",
         h.rowlog.latest()[f"{spec_id}-A"]["status"],
@@ -1617,20 +1958,15 @@ def _resume_scenario(h: Harness, spec_id: str, states: dict[str, dict[str, Any]]
     h.write_extra_results()
 
 
-def astuple_base() -> tuple[str, str, str, float, int]:
-    b = SCENARIO_BASE
-    return (b.workload, b.mode, b.recipe, b.scale, b.seed)
-
-
 def _bind(h: Harness, rid: str, fn: Callable[[], None]) -> Callable[[], None]:
     def go() -> None:
         try:
             fn()
         except Exception as e:  # noqa: BLE001
-            h.log(rid, "failed", detail=f"harness error on resume: {type(e).__name__}: {e}")
+            h.log(rid, h.status_of(rid), harness_error=f"on resume: {type(e).__name__}: {e}")
             h.stop_admission(f"{rid}: harness error {e}")
         finally:
-            h._active.pop(rid, None)
+            h._set_active(rid, None)
 
     return go
 
@@ -1693,6 +2029,11 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--context", required=True)
         sp.add_argument("--out", type=Path, required=True)
         sp.add_argument("--deployments-ledger", type=Path, required=True)
+        sp.add_argument(
+            "--ledger-lock",
+            type=Path,
+            help="the lock file the ledger's other writers take (default <ledger>.lock)",
+        )
     return p
 
 
@@ -1726,13 +2067,15 @@ def _main(args: argparse.Namespace) -> int:
         return _plan(rows, args, version)
     out: Path = args.out.expanduser().resolve()
     rowlog = RowLog(out)
+    slots = 3
     if args.cmd == "resume":
         prior = rowlog.latest()
         if not prior:
             raise Refused(f"no rows in {rowlog.path}")
-        freeze = str(next(iter(prior.values())).get("freeze_sha"))
-        rehearsal = bool(next(iter(prior.values())).get("rehearsal"))
-        slots = 3
+        first = next(iter(prior.values()))
+        freeze = str(first.get("freeze_sha"))
+        rehearsal = bool(first.get("rehearsal"))
+        slots = int(first.get("slots") or 3)
     else:
         freeze, rehearsal = args.freeze, args.rehearsal
         slots = getattr(args, "slots", 3)
@@ -1748,33 +2091,59 @@ def _main(args: argparse.Namespace) -> int:
     )
     if reasons:
         raise Refused("\n  ".join(["the harness does not start:", *reasons]))
+    full = resolve_commit(TREE, freeze)
+    head = resolve_commit(TREE, "HEAD")
+    assert full is not None and head is not None  # refuse_reasons checked both
     try:
         rowlog.acquire()
     except LedgerError as e:
         raise Refused(str(e)) from e
     runner = ProcessRunner(TREE)
     cluster = ClusterReader(_core_v1(args.context))
+    ledger_path = args.deployments_ledger.resolve()
     h = Harness(
         tree=TREE,
         out=out,
-        freeze=freeze,
+        freeze=full,
         version=version,
         rehearsal=rehearsal,
         context=args.context,
         runner=runner,
         cluster=cluster,
         rowlog=rowlog,
-        ledger=MarkdownLedger(args.deployments_ledger, out / "ledger-backups"),
+        ledger=MarkdownLedger(ledger_path, out / "ledger-backups", args.ledger_lock),
         slots=slots,
         s3_endpoint=os.environ["LB_S3_ENDPOINT"],
         s3_factory=default_s3,
+        script_runner=runner.script,
+        judge_sha=head if rehearsal else full,
     )
     h.rows = {r.id: r for r in rows}
+    sigints = {"n": 0}
+    pending = threading.Event()
 
     def on_sigint(_signum: int, _frame: Any) -> None:
-        h.stop_admission("interrupted (SIGINT); running lakebench runs get one SIGINT")
-        runner.interrupt()
+        # Signal-safe: only flags here; a watcher thread does the rest.
+        sigints["n"] += 1
+        pending.set()
 
+    def watcher() -> None:
+        seen = 0
+        while True:
+            pending.wait()
+            pending.clear()
+            n = sigints["n"]
+            if n > seen:
+                seen = n
+                h.interrupt()
+                runner.interrupt(level=min(n, 2))
+                h.say(
+                    "SIGINT: admission stopped; runs and scenario scripts got one SIGINT"
+                    if n == 1
+                    else "second SIGINT: every lakebench child got one SIGINT"
+                )
+
+    threading.Thread(target=watcher, name="sigint", daemon=True).start()
     signal.signal(signal.SIGINT, on_sigint)
     try:
         if args.cmd == "resume":

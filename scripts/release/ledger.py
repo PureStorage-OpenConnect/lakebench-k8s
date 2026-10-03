@@ -12,16 +12,19 @@ Two stores, both written only by ``harness.py``:
 
 ``MarkdownLedger``
     The deployments table in the evidence file (CLAUDE.md section 8: the
-    authority for "your own deployment"). Other sessions edit that file by
-    hand and take no lock, so every write here is defensive: under an
-    exclusive lock on ``<ledger>.lock`` it reads the file, keeps a byte copy
-    under ``<out>/ledger-backups/``, inserts or replaces exactly one line,
-    checks that every other line survived in order, writes a temporary file
-    and replaces the ledger only if its size and mtime are still those it
-    read (otherwise it re-reads and retries). It refuses when the table
-    header is missing or the file shrank below the last size it wrote.
-    A removed row is replaced by a ``closed <namespace> <utc> destroy DONE``
-    line, the convention the table already uses.
+    authority for "your own deployment"). Every write is defensive: under an
+    exclusive lock (``--ledger-lock``; pass the lock the other writers of the
+    file use, or ``<ledger>.lock`` by default) it reads the file, keeps a byte
+    copy under ``<out>/ledger-backups/``, inserts or replaces exactly one
+    line, checks that every other line survived in order, writes a temporary
+    file and replaces the ledger only if its size and mtime are still those
+    it read (otherwise it re-reads and retries), then reads the file again
+    and refuses if its own change is not there. It refuses when the table
+    header is missing or the file is more than 4 KiB smaller than the newest
+    backup. A removed row is replaced by a ``closed <namespace> <utc>
+    destroy DONE`` line, the convention the table already uses. The lock is
+    reentrant within this process (``transaction``), so admission can read
+    the ledger and add its row under one lock.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -183,25 +187,47 @@ class MarkdownLedger:
     """The deployments table of the evidence file."""
 
     RETRIES = 5
+    SHRINK_SLACK = 4096
 
-    def __init__(self, path: Path, backups: Path) -> None:
-        self.path = path
+    def __init__(self, path: Path, backups: Path, lock_path: Path | None = None) -> None:
+        # A symlinked ledger is edited at its target, never replaced by a copy.
+        self.path = path.resolve()
         self.backups = backups
-        self._last_size: int | None = None
+        self.lock_path = lock_path or self.path.with_name(self.path.name + ".lock")
+        self._tlock = threading.RLock()
+        self._depth = 0
+        self._fh: Any = None
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Hold the ledger lock across several reads and writes."""
+        with self._locked():
+            yield
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        lock = self.path.with_name(self.path.name + ".lock")
-        with open(lock, "a+") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        with self._tlock:
+            if self._depth == 0:
+                fh = open(self.lock_path, "a+")  # noqa: SIM115 -- closed on release
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                self._fh = fh
+            self._depth += 1
             try:
                 yield
             finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                self._depth -= 1
+                if self._depth == 0:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                    self._fh.close()
+                    self._fh = None
+
+    def _lines(self) -> list[str]:
+        return self.path.read_bytes().decode("utf-8").split("\n")
 
     def live_rows(self) -> list[LedgerRow]:
         """The table's pipe rows below the separator (not the closed lines)."""
-        lines = self.path.read_text(encoding="utf-8").splitlines()
+        with self._locked():
+            lines = self._lines()
         h, end = _table_span(lines)
         rows = []
         for line in lines[h + 2 : end]:
@@ -212,6 +238,9 @@ class MarkdownLedger:
                 continue
             rows.append(LedgerRow(*parts))
         return rows
+
+    def has_row(self, namespace: str) -> bool:
+        return namespace in self.live_namespaces()
 
     def live_namespaces(self) -> set[str]:
         return {r.namespace for r in self.live_rows()}
@@ -225,7 +254,7 @@ class MarkdownLedger:
                 raise LedgerError(f"the ledger already has a row for {row.namespace}")
             return [*lines[:end], row.line(), *lines[end:]]
 
-        self._rewrite(edit, inserted=1)
+        self._rewrite(edit, inserted=1, expect=row.line())
 
     def close(self, namespace: str, when: str | None = None) -> None:
         """Replace *namespace*'s row with ``closed <ns> <utc> destroy DONE``."""
@@ -242,28 +271,28 @@ class MarkdownLedger:
             out[hits[0]] = closed
             return out
 
-        self._rewrite(edit, inserted=0)
+        self._rewrite(edit, inserted=0, expect=closed)
 
-    def _rewrite(self, edit: Any, *, inserted: int) -> None:
+    def _rewrite(self, edit: Any, *, inserted: int, expect: str) -> None:
         with self._locked():
             for _attempt in range(self.RETRIES):
                 st = self.path.stat()
                 raw = self.path.read_bytes()
-                if self._last_size is not None and st.st_size < self._last_size - 4096:
+                floor = self._newest_backup_size()
+                if floor is not None and st.st_size < floor - self.SHRINK_SLACK:
                     raise LedgerError(
-                        f"{self.path} shrank from {self._last_size} to {st.st_size} bytes "
-                        "since the harness last wrote it; refusing to write over a "
-                        "truncated ledger"
+                        f"{self.path} is {st.st_size} bytes, more than "
+                        f"{self.SHRINK_SLACK} smaller than its newest backup ({floor}); "
+                        "refusing to write over a truncated ledger"
                     )
-                text = raw.decode("utf-8")
-                lines = text.splitlines()
+                lines = raw.decode("utf-8").split("\n")
                 new = edit(lines)
                 _check_preserved(lines, new, inserted)
                 self._backup(raw)
-                body = "\n".join(new) + ("\n" if text.endswith("\n") else "")
+                body = "\n".join(new)
                 fd, tmp = tempfile.mkstemp(prefix=".ledger-", dir=str(self.path.parent))
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                         fh.write(body)
                         fh.flush()
                         os.fsync(fh.fileno())
@@ -278,9 +307,20 @@ class MarkdownLedger:
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(tmp)
                     raise
-                self._last_size = len(body.encode("utf-8"))
+                if expect not in self._lines():
+                    raise LedgerError(
+                        f"{self.path} lost the harness's change right after it was written "
+                        "(another writer without the lock?); nothing more is done"
+                    )
                 return
             raise LedgerError(f"{self.path} kept changing under the harness; nothing written")
+
+    def _newest_backup_size(self) -> int | None:
+        try:
+            backups = sorted(self.backups.glob(f"{self.path.name}.*"))
+        except OSError:
+            return None
+        return backups[-1].stat().st_size if backups else None
 
     def _backup(self, raw: bytes) -> None:
         self.backups.mkdir(parents=True, exist_ok=True)

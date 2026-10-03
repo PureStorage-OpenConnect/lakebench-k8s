@@ -30,8 +30,14 @@ echo "S-P3: launching A generate in background..."
 lakebench generate --yes "$CFG_A" --timeout 1200 >"$LOG_DIR/s-p3-a-generate.log" 2>&1 &
 GEN_A=$!
 
-# Give A time to start its datagen Job.
-sleep 45
+# Wait until A's datagen Job runs and has written objects (at most 10 min).
+for _ in $(seq 1 60); do
+  if kc get job lakebench-datagen -n "$NS_A" >/dev/null 2>&1 && [ -n "$(datagen_keys "$CFG_A" | head -n 1)" ]; then break; fi
+  kill -0 $GEN_A 2>/dev/null || break
+  sleep 10
+done
+
+datagen_keys "$CFG_A" >"$LOG_DIR/s-p3-a-keys.before"
 
 echo "S-P3: destroying B while A is generating..."
 lb_run "$LOG_DIR/s-p3-b-destroy.log" destroy "$CFG_B" --yes
@@ -58,6 +64,11 @@ fi
 grep -q "Namespace $NS_B deleted" "$LOG_DIR/s-p3-b-destroy.log" || { echo "FAIL: B destroy log lacks 'Namespace $NS_B deleted'"; exit 1; }
 assert_buckets "$CFG_B" absent
 assert_buckets "$CFG_A" present
+if [ -s "$LOG_DIR/s-p3-a-keys.before" ]; then
+  assert_keys_kept "$CFG_A" "$LOG_DIR/s-p3-a-keys.before"
+else
+  echo "  A had written no datagen object before B's destroy; nothing to compare"
+fi
 assert_watched "$NS_A" yes
 assert_watched "$NS_B" no
 assert_operator_healthy "$OP0"

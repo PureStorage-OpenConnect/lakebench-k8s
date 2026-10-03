@@ -15,14 +15,16 @@ tested without a cluster:
   a ledger or own namespace counts at least its plan peak: the harness's own
   rows by their computed peak, other ledger rows by the peak of their config
   when it loads, and otherwise by ``fallback_peak`` (the largest peak of the
-  rows this harness plans), because a deployment between jobs requests
-  almost nothing. Load plus the row's peak must stay within ``fraction`` of
+  rows this harness plans, or of any default sizing cell at the row's
+  scale), because a deployment between jobs requests almost nothing. The
+  candidate's own namespaces are counted once, by its peak. Load plus the row's peak must stay within ``fraction`` of
   the schedulable nodes' allocatable cores and memory.
 * **Fail closed.** Unreadable nodes or pods, or no schedulable node, admit
   nothing.
 * **Shape.** At most ``slots`` own rows at once; at most
   ``max_aml_continuous`` own AML continuous rows; an ``alone`` row needs no
-  other lakebench deployment and blocks every other admission while active.
+  other lakebench deployment and blocks every other admission while active,
+  including one marked ``alone`` in the ledger by another harness process.
 
 Scratch capacity is not part of this decision: node allocatable does not
 show it, and each ``run``'s own capacity preflight checks scratch.
@@ -104,6 +106,7 @@ def admit(
     own_active: Iterable[ActiveRow],
     ledger_peaks: Mapping[str, Peak | None],
     fallback_peak: Peak,
+    ledger_alone: Iterable[str] = (),
     slots: int = 3,
     max_deployments: int = 4,
     fraction: float = 0.8,
@@ -119,11 +122,15 @@ def admit(
 
     if len(own) >= slots:
         reasons.append(f"{len(own)} of {slots} harness slots in use")
+    mine = {cand.namespace, *cand.namespaces}
     if any(a.alone for a in own):
         reasons.append("an alone row is running")
+    foreign_alone = sorted(set(ledger_alone) - own_ns - mine)
+    if foreign_alone:
+        reasons.append("an alone deployment of another harness is in the ledger")
+        blocking.extend(foreign_alone)
     if cand.aml_continuous and sum(a.aml_continuous for a in own) >= max_aml_continuous:
         reasons.append(f"{max_aml_continuous} AML continuous rows already running")
-    mine = {cand.namespace, *cand.namespaces}
     deployments = (managed_set | ledger_set | own_ns) - mine
     if cand.alone and deployments:
         reasons.append("alone row: other lakebench deployments exist")
@@ -141,7 +148,7 @@ def admit(
 
     load = ZERO
     own_peaks = {a.namespace: a.peak for a in own}
-    for ns in set(snapshot.requests) | own_ns | ledger_set:
+    for ns in (set(snapshot.requests) | own_ns | ledger_set) - mine:
         req = snapshot.requests.get(ns, ZERO)
         if ns in own_peaks:
             load = load + req.max(own_peaks[ns])

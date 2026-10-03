@@ -100,56 +100,79 @@ python3.11 scripts/release/harness.py plan --matrix scripts/release/matrix-1.7.y
 export LB_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 python3.11 scripts/release/harness.py run --matrix scripts/release/matrix-1.7.yaml \
     --freeze <sha> --context <kube context> --out /root/lakebench-release/<version> \
-    --deployments-ledger <deployments ledger file> [--rows M01,M02] [--slots 3] [--rehearsal]
+    --deployments-ledger <deployments ledger file> --ledger-lock <its writers' lock file> \
+    [--rows M01,M02] [--slots 3] [--rehearsal]
 python3.11 scripts/release/harness.py resume --out /root/lakebench-release/<version> \
-    --context <kube context> --deployments-ledger <deployments ledger file>
+    --context <kube context> --deployments-ledger <deployments ledger file> \
+    --ledger-lock <its writers' lock file>
 ```
 
 `plan` needs no cluster: it writes each row's config with `lakebench
 init`, checks that it resolves to the row's Spark minor and table format
 version (`RELEASE_MATRIX_VERSIONS`), and prints the row's peak from the
 same sizing code as `lakebench plan`. The matrix file must list only
-release-matrix rows (`RELEASE_MATRIX`); C360 rows use seed 42 and AML rows
-seed 43.
+release-matrix rows (`RELEASE_MATRIX`); Customer 360 rows use seed 42 and
+AML rows the pre-registered calibration seed (43); a protected seed is
+refused without being printed.
 
-`run` refuses to start (exit 2) when HEAD is on a branch, HEAD is not
-`--freeze` (`--rehearsal` waives only this), the tree has a tracked change
-or an untracked or ignored file under `src/` or `scripts/`, lakebench is
-imported from outside the tree, `--context` is not in the kubeconfig, the
-ledger file or a credential variable is missing, or `--out` is inside the
-worktree or under `/tmp`. Row configs, their `.lakebench/` state, logs and
-`rows.jsonl` (one line per row transition) live under `--out`, one
-directory per row, never in the worktree.
+`run` refuses to start (exit 2) when HEAD is on a branch, `--freeze` is
+not a commit or HEAD is not that commit (`--rehearsal` waives only the
+second), the tree has a tracked change or an untracked or ignored file
+under `src/` or `scripts/`, lakebench is imported from outside the tree,
+`--context` is not in the kubeconfig, the ledger file or a credential
+variable is missing, or `--out` is inside the worktree or under `/tmp`.
+`--freeze` is resolved to its full sha before anything is recorded. Row
+configs, their `.lakebench/` state, logs and `rows.jsonl` (one line per row
+transition) live under `--out`, one directory per row, never in the
+worktree.
 
-For each row it waits for admission, writes the row into the deployments
-ledger table, deploys with `--require-new`, reads the deployment's
-incarnation (`<namespace uid>#<nonce>`) from the config's state file,
-runs `run --generate --yes` with the default per-job timeout, writes the
-report, scrubs the record into `<out>/uat/runs/` and destroys with
-`destroy --yes --expect-incarnation <uid>#<nonce>`. A row passes only when
-its record has no `release_record.record_problems` finding; the exit code
-alone never passes a row. `<out>/results.md` is the UAT results table
-(`results-rehearsal.md` for a rehearsal, which is never evidence); copy it
-and the scrubbed records into `uat/` in the post-freeze data commit.
+For each row it waits for admission and writes the row into the
+deployments ledger table under the same lock as the admission decision,
+deploys with `--require-new`, reads the deployment's incarnation
+(`<namespace uid>#<nonce>`) from the config's state file, runs `run
+--generate --yes` with the default per-job timeout, writes the report,
+scrubs the record into `<out>/uat/runs/` and destroys with `destroy --yes
+--expect-incarnation <uid>#<nonce>`. A row passes only when its scrubbed
+record has no `release_record.record_problems` finding; the exit code
+alone never passes a row. `<out>/results.md` is the UAT results table: a
+row that did not pass cites no run id in the table (the release gate reads
+every id there), and its runs are listed below it. The "group check"
+column reads "not checked": cross-row fingerprint equality is a separate
+check. A rehearsal writes `results-rehearsal.md` with its own heading,
+judges records against HEAD, and is never evidence. Copy `results.md` and
+the scrubbed records into `uat/` in the post-freeze data commit.
 
-Safety rules: destroy is never passed `--force` and never re-invoked. Exit
-6 is followed by read-only polls for up to 20 minutes; any other non-zero
+Safety rules. Destroy is never passed `--force` and never re-invoked. Exit
+6 is followed by read-only polls for up to 20 minutes. Any other non-zero
 exit, or "Destroy NOT completed", marks the row `failed` or
-`destroy-refused` and stops admitting rows. A deploy that fails is never
+`destroy-refused` and stops admitting rows; `lease.held` is not retried,
+because destroy already waits for the lease. A ledger row is closed only
+when the namespace and the row's buckets are gone; otherwise the row is
+`left` for a person and admission stops. A deploy that fails is never
 retried: its namespace is destroyed by incarnation only when it carries the
-row's own confirmed nonce, and is otherwise left in the ledger for a
-person. A row whose namespace is already gone is `left`, because its
-buckets may remain. Admission counts lakebench namespaces, ledger rows and
-the harness's own rows against the four-deployment limit, counts every
-ledger deployment at its plan peak, keeps load within 80% of schedulable
-allocatable, runs at most two AML continuous rows at once and runs an
-`alone` row with nothing else. Unreadable nodes admit nothing. The ledger
-table is edited under a lock, with a backup under `<out>/ledger-backups/`,
-and only when the file did not change while it was read. Ctrl-C stops
-admission and sends one SIGINT to running `lakebench run` children; deploys
-and destroys finish. `resume` continues every unfinished row and never
-re-deploys, re-runs or re-destroys; it refuses while a row's child process
-is still alive.
+row's own confirmed nonce. A failed row stops new admissions, but rows
+already running finish and destroy. Each lakebench step has a time limit
+(deploy 2 h, run 12 h, destroy 2 h), after which the child gets SIGINT,
+then SIGTERM.
+
+Admission counts lakebench namespaces, ledger rows and the harness's own
+rows against the four-deployment limit. It counts every ledger deployment
+at its plan peak, and one whose config cannot be read at the largest
+default peak for its scale. It keeps load within 80% of schedulable
+allocatable, runs at most two AML continuous rows at once, and runs an
+`alone` row with nothing else, including another harness's `alone` row in
+the ledger. Unreadable nodes admit nothing.
+
+The ledger table is edited under `--ledger-lock` (pass the lock file the
+ledger's other writers take; the default `<ledger>.lock` excludes only
+other harness processes), with a backup under `<out>/ledger-backups/`,
+only when the file did not change while it was read, and the edit is read
+back. The first Ctrl-C stops admission and sends one SIGINT to running
+`lakebench run` children and scenario scripts; deploys and destroys finish,
+and rows stop before their next step. A second Ctrl-C sends one SIGINT to
+every child. `resume` continues every unfinished row and never re-deploys,
+re-runs or re-destroys; it refuses while a row's child process or a
+scenario script is still alive.
 
 ### Parallel-safety scenarios
 
@@ -158,40 +181,48 @@ time through the harness, from the same detached worktree:
 
 ```bash
 python3.11 scripts/release/harness.py scenario S-P1 --freeze <sha> --context <kube context> \
-    --out /root/lakebench-release/<version> --deployments-ledger <deployments ledger file>
+    --out /root/lakebench-release/<version> --deployments-ledger <deployments ledger file> \
+    --ledger-lock <its writers' lock file>
 ```
 
 | Scenario | Script | What it proves |
 |---|---|---|
-| S-P1 | `s-p1-destroy-running.sh` | Destroying A while B's pipeline runs leaves B's record passing (success, scale ratio at least 0.95) |
+| S-P1 | `s-p1-destroy-running.sh` | Destroying A while B's pipeline runs leaves B's record passing (success, scale ratio 0.95 to 1.10) and B's generated objects in place |
 | S-P2 | `s-p2-concurrent-deploy.sh` | Two deploys two seconds apart both finish, with distinct identities, nonces and SecretClasses |
-| S-P3 | `s-p3-destroy-during-deploy.sh` | Destroying B while A generates leaves A's datagen Job and buckets alone |
+| S-P3 | `s-p3-destroy-during-deploy.sh` | Destroying B while A generates leaves A's datagen Job, buckets and generated objects alone |
 | S-P4 | `s-p4-double-destroy.sh` | Two destroys of A a second apart: exactly one deletes, the other converges with a named outcome |
-| S-P5 | `s-p5-legacy-bucket-destroy.sh` | An untagged pre-existing bucket is refused at deploy and at destroy and left as it was |
-| S-P6 | `s-p6-same-bucket-two-configs.sh` | A second deployment naming a bucket another owns is refused at deploy |
+| S-P5 | `s-p5-legacy-bucket-destroy.sh` | A pre-existing bucket with no owner is refused at deploy and at destroy and left as it was |
+| S-P6 | `s-p6-same-bucket-two-configs.sh` | A second deployment naming A's bucket is refused at deploy and the bucket stays A's |
 
 The harness writes the scenario's configs (Customer 360 batch, scale 1,
 hive-iceberg-spark-trino, explicit bucket names) and their ledger rows,
 admits all of the scenario's deployments together, and runs the script with
 `LB_CONFIG_A`, `LB_CONFIG_B`, `LB_UAT_LOG_DIR`, `LB_KUBE_CONTEXT` and
 `LB_EXIT_<NAME>` (each exit code of the release tree) exported, and a
-`lakebench` shim for the release tree first on `PATH`. The scripts check
-exit codes and the paths `LB_EXIT_PATH_FILE` names, not message text, and
-call `kubectl` and `helm` only with the pinned context. For S-P5 the
-harness creates the untagged bucket with one object and deletes it
-afterwards, after checking it is unchanged; for S-P6 A creates the shared
-bucket.
+`lakebench` shim for the release tree first on `PATH`. Refusals and
+failures are checked by exit code and by the paths `LB_EXIT_PATH_FILE`
+names; three success-path lines are still matched as text ("Namespace X
+deleted", "deletion started by another run", "concurrent destroy").
+`kubectl` and `helm` run only with the pinned context. For S-P5 the harness
+creates the bucket, named outside A's name prefix, with one object, and
+deletes it afterwards only if it is unchanged; a bucket it did not create
+is never touched. For S-P6, B names A's bronze bucket. Bucket owners are
+read from the bucket tag, or on a backend without tagging (FlashBlade) from
+the bucket's `.lakebench/owner.json` marker. A script that exits early
+stops its background jobs, and the harness waits for the script's whole
+process group before it cleans up.
 
 After the script, whatever its exit code, the harness checks that each
 deployment the scenario keeps is present with its incarnation, destroys
 every leftover namespace with `--expect-incarnation` (B before A), allowing
-only the refusal the scenario expects (a legacy or foreign bucket refused
-and left), and closes a ledger row only when the namespace and the buckets
-that deployment owns are gone. A scenario passes when the script exits 0
-with its `PASS:` line and every harness check holds. Scenario results go to
-`<out>/results-extra.md`, never to `results.md`, so the release gate's
-records check does not read them. `resume` cleans up a scenario the harness
-stopped in and marks it failed; it never re-runs the script.
+only the refusal the scenario expects (a bucket with no owner, or another
+deployment's, refused and left), and closes a ledger row only when the
+namespace and the buckets that deployment owns are gone. A scenario passes
+when the script exits 0 with its `PASS:` line and every harness check
+holds. Scenario results go to `<out>/results-extra.md`, never to
+`results.md`, so the release gate's records check does not read them.
+`resume` cleans up a scenario the harness stopped in, polls a destroy that
+was running, and marks the scenario failed; it never re-runs the script.
 
 ### UAT results
 

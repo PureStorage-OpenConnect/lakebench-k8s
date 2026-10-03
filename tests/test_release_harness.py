@@ -1,6 +1,6 @@
 """Release harness (scripts/release/): refusals, destroy by incarnation,
-admission, resume and the ledger. Everything runs against fakes; nothing
-reaches a cluster."""
+admission, resume, the ledger and the S-P scenarios. Everything runs against
+fakes; nothing reaches a cluster or an object store."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "scripts" / "release"
+SCEN = RELEASE / "scenarios"
 
 
 def _load(name: str) -> Any:
@@ -74,50 +76,6 @@ def _api_exception(monkeypatch):
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
 
 
-class FakeCore:
-    """A CoreV1Api with namespaces, nodes and pods in memory."""
-
-    def __init__(self) -> None:
-        self.namespaces: dict[str, dict[str, Any]] = {}
-        self.nodes_fail = False
-        self.nodes = [_node("w1", "40", "400Gi"), _node("w2", "40", "400Gi")]
-        self.pods: list[Any] = []
-        self.reads = 0
-
-    def read_namespace(self, name, _request_timeout=None):
-        self.reads += 1
-        ns = self.namespaces.get(name)
-        if ns is None:
-            raise ApiException(404)
-        return SimpleNamespace(
-            metadata=SimpleNamespace(uid=ns["uid"], annotations=dict(ns["annotations"]), name=name)
-        )
-
-    def list_namespace(self, label_selector=None, _request_timeout=None):
-        return SimpleNamespace(
-            items=[
-                SimpleNamespace(metadata=SimpleNamespace(name=n))
-                for n, ns in self.namespaces.items()
-                if ns.get("managed", True)
-            ]
-        )
-
-    def list_node(self, _request_timeout=None):
-        if self.nodes_fail:
-            raise RuntimeError("forbidden")
-        return SimpleNamespace(items=self.nodes)
-
-    def list_pod_for_all_namespaces(self, field_selector=None, _request_timeout=None):
-        return SimpleNamespace(items=self.pods)
-
-    def add_ns(self, name: str, uid: str, nonce: str, managed: bool = True) -> None:
-        self.namespaces[name] = {
-            "uid": uid,
-            "annotations": {"lakebench.deployment/deploy-nonce": nonce},
-            "managed": managed,
-        }
-
-
 def _node(name: str, cpu: str, mem: str) -> Any:
     return SimpleNamespace(
         metadata=SimpleNamespace(name=name, labels={}),
@@ -139,6 +97,79 @@ def _pod(ns: str, cpu: str, mem: str) -> Any:
     )
 
 
+class FakeCore:
+    """A CoreV1Api with namespaces, nodes and pods in memory."""
+
+    def __init__(self) -> None:
+        self.namespaces: dict[str, dict[str, Any]] = {}
+        self.nodes_fail = False
+        self.read_fail = False
+        self.nodes = [_node(f"w{i}", "100", "1000Gi") for i in range(4)]
+        self.pods: list[Any] = []
+
+    def read_namespace(self, name, _request_timeout=None):
+        if self.read_fail:
+            raise RuntimeError("apiserver unreachable")
+        ns = self.namespaces.get(name)
+        if ns is None:
+            raise ApiException(404)
+        return SimpleNamespace(
+            metadata=SimpleNamespace(uid=ns["uid"], annotations=dict(ns["annotations"]), name=name)
+        )
+
+    def list_namespace(self, label_selector=None, _request_timeout=None):
+        return SimpleNamespace(
+            items=[SimpleNamespace(metadata=SimpleNamespace(name=n)) for n in self.namespaces]
+        )
+
+    def list_node(self, _request_timeout=None):
+        if self.nodes_fail:
+            raise RuntimeError("forbidden")
+        return SimpleNamespace(items=self.nodes)
+
+    def list_pod_for_all_namespaces(self, field_selector=None, _request_timeout=None):
+        return SimpleNamespace(items=self.pods)
+
+    def add_ns(self, name: str, uid: str, nonce: str) -> None:
+        self.namespaces[name] = {
+            "uid": uid,
+            "annotations": {"lakebench.deployment/deploy-nonce": nonce},
+        }
+
+
+class FakeS3:
+    def __init__(self) -> None:
+        self.buckets: dict[str, dict[str, bytes]] = {}
+        self.owner: dict[str, str] = {}
+        self.raw_client = self
+        self.create_ok = True
+
+    def bucket_exists(self, b):
+        return b in self.buckets
+
+    def create_bucket(self, b):
+        if not self.create_ok:
+            return False
+        self.buckets.setdefault(b, {})
+        return True
+
+    def put_object(self, Bucket, Key, Body):  # noqa: N803 -- boto3 names
+        self.buckets[Bucket][Key] = Body
+
+    def get_paginator(self, _name):
+        return self
+
+    def paginate(self, Bucket):  # noqa: N803
+        return [{"Contents": [{"Key": k} for k in self.buckets[Bucket]]}]
+
+    def empty_bucket(self, b, keep_prefixes=()):
+        self.buckets[b].clear()
+        return 0
+
+    def delete_bucket(self, b):
+        return self.buckets.pop(b, None) is not None
+
+
 def write_state(config: Path, name: str, namespace: str, nonces: list[tuple[str, str]]) -> None:
     from lakebench.config.deploy_state import DeployState, NonceEntry, state_path, write_state
 
@@ -155,19 +186,26 @@ def write_state(config: Path, name: str, namespace: str, nonces: list[tuple[str,
     write_state(path, state)
 
 
-class FakeRunner:
-    """Plays the lakebench CLI against a FakeCore."""
+def _buckets_of(cfg: Path) -> list[str]:
+    data = yaml.safe_load(cfg.read_text())
+    b = ((data.get("platform") or {}).get("storage") or {}).get("s3", {}).get("buckets") or {}
+    return [b.get(k) or f"{data['name']}-{k}" for k in ("bronze", "silver", "gold")]
 
-    def __init__(self, core: FakeCore) -> None:
+
+class FakeRunner:
+    """Plays the lakebench CLI against a FakeCore and a FakeS3."""
+
+    def __init__(self, core: FakeCore, s3: FakeS3) -> None:
         self.core = core
+        self.s3 = s3
         self.calls: list[tuple[str, ...]] = []
         self.deploy_code = 0
         self.deploy_writes = "confirmed"  # confirmed | pending | none | foreign
         self.run_code = 0
         self.run_records = 1
         self.destroy_override: tuple[int, list[str], str] | None = None
+        self.destroy_keeps_buckets = False
         self.on_deploy: Any = None
-        self.on_destroy: Any = None
         self.counter = 0
 
     def __call__(self, args, *, cwd, log, interruptible=False, on_spawn=None):
@@ -180,28 +218,28 @@ class FakeRunner:
         if verb == "init":
             return self._init(args, log)
         cfg = Path(args[1])
-        data = yaml.safe_load(cfg.read_text())
-        name = data["name"]
+        name = yaml.safe_load(cfg.read_text())["name"]
         if verb == "deploy":
             if self.on_deploy is not None:
                 self.on_deploy(cfg)
             self.counter += 1
             nonce, uid = f"n{self.counter}", f"u{self.counter}"
-            if self.deploy_writes == "confirmed":
-                self.core.add_ns(name, uid, nonce)
+            if self.deploy_writes in ("confirmed", "foreign"):
+                self.core.add_ns(name, uid, nonce if self.deploy_writes == "confirmed" else "x")
                 write_state(cfg, name, name, [(nonce, "confirmed")])
+                for b in _buckets_of(cfg):
+                    if b not in self.s3.buckets:
+                        self.s3.create_bucket(b)
+                        self.s3.owner[b] = name
             elif self.deploy_writes == "pending":
                 self.core.add_ns(name, uid, "")
                 write_state(cfg, name, name, [(nonce, "pending")])
-            elif self.deploy_writes == "foreign":
-                self.core.add_ns(name, uid, "someone-else")
-                write_state(cfg, name, name, [(nonce, "confirmed")])
             return H.ChildResult(self.deploy_code, [], log)
         if verb == "run":
             runs = cfg.parent / "lakebench-output" / "runs"
             for _ in range(self.run_records):
                 self.counter += 1
-                d = runs / f"run-2026-{self.counter:06d}"
+                d = runs / f"run-20261003-{self.counter:06d}-abcdef"
                 d.mkdir(parents=True)
                 (d / "metrics.json").write_text(json.dumps({"run_id": d.name}))
             return H.ChildResult(self.run_code, [], log)
@@ -223,13 +261,17 @@ class FakeRunner:
             if found != expected:
                 return H.ChildResult(3, ["destroy.incarnation_mismatch"], log)
             del self.core.namespaces[name]
-            if self.on_destroy is not None:
-                self.on_destroy(cfg)
+            if not self.destroy_keeps_buckets:
+                for b in _buckets_of(cfg):
+                    if self.s3.owner.get(b) == name:
+                        self.s3.buckets.pop(b, None)
             return H.ChildResult(0, [], log)
         raise AssertionError(f"unexpected verb {verb}")
 
     def _init(self, args, log):
-        get = lambda flag: args[args.index(flag) + 1]  # noqa: E731
+        def get(flag):
+            return args[args.index(flag) + 1]
+
         out = Path(get("-o"))
         out.write_text(
             yaml.safe_dump(
@@ -260,13 +302,24 @@ ROW = H.Row("M01", "customer360", "batch", "hive-iceberg-spark-trino", 1.0, 42)
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    monkeypatch.setattr(H, "record_verdict", lambda record, freeze, version: [])
+    judged: list[Any] = []
+
+    def verdict(record, freeze, version):
+        judged.append((record, freeze))
+        return []
+
+    monkeypatch.setattr(H, "record_verdict", verdict)
     stub = SimpleNamespace(
-        scrub_record=lambda rec: (rec, []), dump=lambda rec: json.dumps(rec) + "\n"
+        scrub_record=lambda rec: (
+            dict(rec, scrubbed=True),
+            [".config.platform.storage.s3.endpoint"],
+        ),
+        dump=lambda rec: json.dumps(rec) + "\n",
     )
     monkeypatch.setattr(H, "_scrub_module", lambda: stub)
     core = FakeCore()
-    runner = FakeRunner(core)
+    s3 = FakeS3()
+    runner = FakeRunner(core, s3)
     out = tmp_path / "out"
     ledger_path = tmp_path / "EVIDENCE.md"
     ledger_path.write_text(LEDGER_TEXT)
@@ -286,15 +339,24 @@ def env(tmp_path, monkeypatch):
         ledger=L.MarkdownLedger(ledger_path, out / "ledger-backups"),
         sleep=lambda s: None,
         say=said.append,
+        s3_factory=lambda cfg: s3,
+        judge_sha="f" * 40,
     )
     h.rows = {ROW.id: ROW}
-    yield SimpleNamespace(h=h, core=core, runner=runner, ledger=ledger_path, said=said, out=out)
+    yield SimpleNamespace(
+        h=h, core=core, runner=runner, ledger=ledger_path, said=said, out=out, s3=s3, judged=judged
+    )
     rowlog.release()
 
 
 def _plan(env, row=ROW):
-    plan = env.h.plan_row(row, env.h.row_dir(row))
-    return plan
+    return env.h.plan_row(row, env.h.row_dir(row))
+
+
+def _go(env, plan):
+    """What schedule does for an admitted row: ledger row, then the thread body."""
+    env.h.ledger_add_logged(plan)
+    env.h._guarded(plan)
 
 
 def _status(env, row="M01"):
@@ -357,10 +419,21 @@ def test_refuses_branch_checkout(repo):
 
 
 def test_refuses_foreign_sha(repo):
-    reasons = _reasons(repo, freeze="0" * 40)
-    assert any("not the freeze commit" in r for r in reasons)
+    _git(repo.path, "commit", "-q", "--allow-empty", "-m", "later")
+    assert any("not the freeze commit" in r for r in _reasons(repo))
     # --rehearsal waives only the sha check
-    assert _reasons(repo, freeze="0" * 40, rehearsal=True) == []
+    assert _reasons(repo, rehearsal=True) == []
+
+
+def test_refuses_a_freeze_that_is_not_a_commit(repo):
+    assert any("is not a commit" in r for r in _reasons(repo, freeze="0" * 40))
+    assert any("is not a commit" in r for r in _reasons(repo, freeze="0" * 40, rehearsal=True))
+
+
+def test_freeze_resolves_to_the_full_sha(repo):
+    assert H.resolve_commit(repo.path, "HEAD") == repo.sha
+    assert H.resolve_commit(repo.path, repo.sha[:8]) == repo.sha
+    assert H.resolve_commit(repo.path, "nope") is None
 
 
 def test_refuses_dirty_tree_tracked_edit(repo):
@@ -383,8 +456,6 @@ def test_refuses_ignored_file_under_src_but_not_pycache(repo):
 
 
 def test_refuses_outside_import(repo):
-    # The child process imports lakebench from wherever PYTHONPATH points;
-    # this tree has no lakebench package, so it resolves elsewhere.
     import shutil
 
     shutil.rmtree(repo.path / "src" / "lakebench")
@@ -406,7 +477,7 @@ def test_refuses_out_inside_worktree_or_tmp(repo):
     assert any("under /tmp" in r for r in _reasons(repo, out=Path("/tmp/x")))
 
 
-def test_live_run_needs_ledger_context_and_credentials(repo, tmp_path, monkeypatch):
+def test_live_run_needs_ledger_context_and_credentials(repo, monkeypatch):
     for v in ("LAKEBENCH_S3_ACCESS_KEY", "LAKEBENCH_S3_SECRET_KEY", "LB_S3_ENDPOINT"):
         monkeypatch.delenv(v, raising=False)
     reasons = _reasons(repo, live=True, contexts=lambda: ["a"], context="b")
@@ -414,6 +485,11 @@ def test_live_run_needs_ledger_context_and_credentials(repo, tmp_path, monkeypat
     assert any("--context b is not in the kubeconfig" in r for r in reasons)
     assert any("unset credential variables" in r for r in reasons)
     assert any("LB_S3_ENDPOINT" in r for r in reasons)
+
+
+def test_kubeconfig_without_contexts_refuses(repo):
+    reasons = _reasons(repo, live=True, contexts=lambda: [], context="b")
+    assert any("lists no contexts" in r for r in reasons)
 
 
 # -- matrix ------------------------------------------------------------------
@@ -442,6 +518,18 @@ def test_matrix_rejects_spent_aml_seed(tmp_path):
         H.load_matrix(p)
 
 
+def test_aml_rows_run_the_calibration_seed():
+    assert H.aml_seed_problem(43) is None
+
+
+def test_aml_seed_problem_never_names_the_seed(monkeypatch):
+    import lakebench.config.datagen_seed as ds
+
+    monkeypatch.setattr(ds, "protected_seeds", lambda: {12345: "evaluation"})
+    msg = H.aml_seed_problem(12345)
+    assert msg and "12345" not in msg
+
+
 def test_every_matrix_row_config_resolves_to_its_release_versions(env):
     _, rows = H.load_matrix(RELEASE / "matrix-1.7.yaml", H.KNOWN_STEPS)
     for row in rows:
@@ -453,8 +541,6 @@ def test_every_matrix_row_config_resolves_to_its_release_versions(env):
 
 
 def test_off_matrix_versions_refused(env):
-    row = ROW
-
     def bad_init(args, **kw):
         res = FakeRunner._init(env.runner, tuple(args), kw["log"])
         out = Path(args[args.index("-o") + 1])
@@ -465,7 +551,7 @@ def test_off_matrix_versions_refused(env):
 
     env.h.runner = bad_init
     with pytest.raises(H.Refused, match="release matrix runs"):
-        env.h.plan_row(row, env.out / "bad")
+        env.h.plan_row(ROW, env.out / "bad")
 
 
 def test_plan_peak_includes_trino(env):
@@ -476,7 +562,7 @@ def test_plan_peak_includes_trino(env):
 
     plan = _plan(env)
     p = plan_requirements(H.load_row_config(plan.config))
-    assert "Trino" in p.co_resident.label or p.co_resident.cpu_cores >= 4, p.co_resident
+    assert p.co_resident.cpu_cores >= 4, p.co_resident
     spark_only = compute_peak_requirements(1.0, "batch", "customer360")
     assert plan.peak.cores == p.full.cpu_cores
     assert plan.peak.cores >= spark_only.cpu_cores + p.co_resident.cpu_cores
@@ -485,30 +571,30 @@ def test_plan_peak_includes_trino(env):
 # -- deploy, incarnation, destroy ----------------------------------------------
 
 
-def test_ledger_row_written_before_deploy(env):
+def test_ledger_row_written_before_deploy_under_the_admission_lock(env):
     plan = _plan(env)
     seen = {}
 
     def on_deploy(cfg):
         seen["ledger"] = plan.namespace in env.ledger.read_text()
-        seen["status"] = _status(env)["status"]
 
     env.runner.on_deploy = on_deploy
-    env.h.deploy(plan)
-    assert seen == {"ledger": True, "status": "deploying"}
+    env.h.decide = lambda p, obs, f, **kw: C.Decision(True)
+    env.h.schedule([plan], [])
+    assert seen == {"ledger": True}
     states = [e["status"] for e in env.h.rowlog.entries()]
     assert states.index("ledgered") < states.index("deploying")
+    assert any(e.get("ledger_intent") for e in env.h.rowlog.entries())
 
 
 def test_full_row_destroys_by_incarnation_and_closes_ledger(env):
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     st = _status(env)
     assert st["status"] == "destroyed", st
     assert st["verdict"] == "PASS"
     assert env.runner.verbs() == ["init", "deploy", "run", "report", "destroy"]
-    deploy = env.runner.calls[1]
-    assert deploy[2:] == ("--yes", "--require-new")
+    assert env.runner.calls[1][2:] == ("--yes", "--require-new")
     text = env.ledger.read_text()
     assert f"closed {plan.namespace} " in text
     assert f"| {plan.namespace} |" not in text
@@ -517,7 +603,7 @@ def test_full_row_destroys_by_incarnation_and_closes_ledger(env):
 
 def test_destroy_passes_expect_incarnation(env):
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     destroy = [c for c in env.runner.calls if c[0] == "destroy"][0]
     assert destroy[2:4] == ("--yes", "--expect-incarnation")
     assert destroy[4] == "u1#n1"
@@ -527,10 +613,11 @@ def test_destroy_passes_expect_incarnation(env):
 def test_foreign_nonce_gets_no_destroy(env):
     env.runner.deploy_writes = "foreign"
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     assert "destroy" not in env.runner.verbs()
-    assert _status(env)["status"] == "failed"
+    assert _status(env)["status"] == "left"
     assert plan.namespace in env.core.namespaces
+    assert env.h.admitting_stopped
 
 
 def test_nonce_read_from_named_state_file(env):
@@ -573,7 +660,7 @@ def test_failed_deploy_without_namespace_is_not_deployed_and_ledger_closed(env):
     env.runner.deploy_code = 4
     env.runner.deploy_writes = "none"
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     assert _status(env)["status"] == "not-deployed"
     assert f"closed {plan.namespace} " in env.ledger.read_text()
     assert env.runner.verbs().count("deploy") == 1
@@ -582,7 +669,7 @@ def test_failed_deploy_without_namespace_is_not_deployed_and_ledger_closed(env):
 def test_failed_deploy_with_confirmed_nonce_is_destroyed_by_incarnation(env):
     env.runner.deploy_code = 1
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     st = _status(env)
     assert st["status"] == "destroyed" and st["verdict"] == "FAIL"
     assert env.runner.verbs().count("deploy") == 1
@@ -593,15 +680,16 @@ def test_failed_deploy_with_pending_nonce_is_left(env):
     env.runner.deploy_code = 1
     env.runner.deploy_writes = "pending"
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     assert _status(env)["status"] == "left"
     assert "destroy" not in env.runner.verbs()
     assert f"| {plan.namespace} |" in env.ledger.read_text()
+    assert env.h.admitting_stopped
 
 
 def test_missing_namespace_is_left_not_destroyed(env):
     plan = _plan(env)
-    env.h.log("M01", "deployed", incarnation="u1#n1")
+    env.h.ledger_add_logged(plan)
     env.h.destroy(plan, "u1#n1")
     assert _status(env)["status"] == "left"
     assert "destroy" not in env.runner.verbs()
@@ -609,6 +697,7 @@ def test_missing_namespace_is_left_not_destroyed(env):
 
 def test_exit_6_polls_and_never_reinvokes_destroy(env):
     plan = _plan(env)
+    env.h.ledger_add_logged(plan)
     env.core.add_ns(plan.namespace, "u1", "n1")
     env.runner.destroy_override = (6, ["destroy.namespace_terminating"], "still terminating")
     polls = {"n": 0}
@@ -640,27 +729,21 @@ def test_exit_6_still_present_after_limit_is_failed(env):
     env.h.destroy(plan, "u1#n1")
     assert env.runner.verbs().count("destroy") == 1
     assert _status(env)["status"] == "failed"
-    assert env.h.stopping
+    assert env.h.admitting_stopped
 
 
 @pytest.mark.parametrize(
-    ("paths", "status"),
-    [
-        (["destroy.unverified_cluster"], "failed"),
-        (["lease.held"], "failed"),
-        (["destroy.redeployed"], "failed"),
-        ([], "failed"),
-    ],
+    "paths", [["destroy.unverified_cluster"], ["lease.held"], ["destroy.redeployed"], []]
 )
-def test_destroy_refusals_stop_admission_and_never_retry(env, paths, status):
+def test_destroy_refusals_stop_admission_and_never_retry(env, paths):
     plan = _plan(env)
     env.core.add_ns(plan.namespace, "u1", "n1")
-    env.h.ledger_add(plan)
+    env.h.ledger_add_logged(plan)
     env.runner.destroy_override = (3, paths, "Destroy NOT completed")
     env.h.destroy(plan, "u1#n1")
     assert env.runner.verbs().count("destroy") == 1
-    assert _status(env)["status"] == status
-    assert env.h.stopping
+    assert _status(env)["status"] == "failed"
+    assert env.h.admitting_stopped
     assert f"| {plan.namespace} |" in env.ledger.read_text()
 
 
@@ -669,7 +752,7 @@ def test_incarnation_mismatch_is_destroy_refused(env):
     env.core.add_ns(plan.namespace, "u2", "redeployed")
     env.h.destroy(plan, "u1#n1")
     assert _status(env)["status"] == "destroy-refused"
-    assert env.h.stopping
+    assert env.h.admitting_stopped
     assert plan.namespace in env.core.namespaces
 
 
@@ -681,34 +764,122 @@ def test_destroy_exit_0_with_not_completed_text_is_failed(env):
     assert _status(env)["status"] == "failed"
 
 
+def test_destroy_text_of_an_earlier_invocation_is_not_read(tmp_path):
+    log = tmp_path / "d.log"
+    log.write_text("Destroy NOT completed: an earlier destroy\n")
+    res = H.ChildResult(0, [], log, offset=log.stat().st_size)
+    with open(log, "a") as fh:
+        fh.write("Namespace x deleted\n")
+    assert "NOT completed" not in res.text()
+
+
+def test_destroy_exit_0_with_buckets_left_keeps_the_ledger_row(env):
+    env.runner.destroy_keeps_buckets = True
+    plan = _plan(env)
+    _go(env, plan)
+    st = _status(env)
+    assert st["status"] == "left" and "buckets remain" in st["detail"]
+    assert f"| {plan.namespace} |" in env.ledger.read_text()
+    assert env.h.admitting_stopped
+
+
 def test_verdict_comes_from_the_record_not_the_exit_code(env, monkeypatch):
     monkeypatch.setattr(H, "record_verdict", lambda r, f, v: ["no silver rows"])
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     st = _status(env)
     assert st["verdict"] == "FAIL" and any("no silver rows" in p for p in st["problems"])
     assert st["status"] == "destroyed"
 
 
+def test_scrub_rewrites_are_not_refusals_and_the_scrubbed_copy_is_judged(env):
+    plan = _plan(env)
+    _go(env, plan)
+    assert _status(env)["verdict"] == "PASS"
+    record, freeze = env.judged[0]
+    assert record["scrubbed"] is True and freeze == "f" * 40
+
+
+def test_a_scrub_refusal_fails_the_row(env, monkeypatch):
+    def refuse(rec):
+        raise ValueError("bucket name 'silver' is a single word")
+
+    monkeypatch.setattr(H, "_scrub_module", lambda: SimpleNamespace(scrub_record=refuse))
+    plan = _plan(env)
+    _go(env, plan)
+    st = _status(env)
+    assert st["verdict"] == "FAIL" and any("scrub refused" in p for p in st["problems"])
+    assert not (env.out / "uat" / "runs").exists()
+
+
+def test_a_record_that_cannot_be_judged_fails_and_the_row_is_destroyed(env, monkeypatch):
+    def boom(r, f, v):
+        raise KeyError("experiment")
+
+    monkeypatch.setattr(H, "record_verdict", boom)
+    plan = _plan(env)
+    _go(env, plan)
+    st = _status(env)
+    assert st["verdict"] == "FAIL" and st["status"] == "destroyed"
+
+
 def test_two_run_records_fail_the_row(env):
     env.runner.run_records = 2
     plan = _plan(env)
-    env.h.deploy(plan)
+    _go(env, plan)
     assert _status(env)["verdict"] == "FAIL"
 
 
-def test_stopping_after_run_leaves_row_recorded_for_resume(env):
+def test_admission_stop_lets_rows_in_flight_finish(env):
     plan = _plan(env)
     real = env.runner.__call__
 
     def runner(args, **kw):
         res = real(args, **kw)
         if args[0] == "run":
-            env.h.stop_admission("test interrupt")
+            env.h.stop_admission("another row failed")
         return res
 
     env.h.runner = runner
-    env.h.deploy(plan)
+    _go(env, plan)
+    assert _status(env)["status"] == "destroyed"
+
+
+def test_interrupt_after_run_leaves_row_recorded_for_resume(env):
+    plan = _plan(env)
+    real = env.runner.__call__
+
+    def runner(args, **kw):
+        res = real(args, **kw)
+        if args[0] == "run":
+            env.h.interrupt()
+        return res
+
+    env.h.runner = runner
+    _go(env, plan)
+    assert _status(env)["status"] == "recorded"
+    assert "destroy" not in env.runner.verbs()
+
+
+def test_harness_error_keeps_the_row_resumable(env):
+    plan = _plan(env)
+    env.h.ledger_add_logged(plan)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    env.h.runner = boom
+    env.h._guarded(plan)
+    st = _status(env)
+    assert st["status"] not in L.TERMINAL and "disk full" in st["harness_error"]
+    assert env.h.admitting_stopped
+
+
+def test_namespace_read_failure_before_destroy_keeps_status(env):
+    plan = _plan(env)
+    env.h.log("M01", "recorded", incarnation="u1#n1")
+    env.core.read_fail = True
+    env.h.destroy(plan, "u1#n1")
     assert _status(env)["status"] == "recorded"
     assert "destroy" not in env.runner.verbs()
 
@@ -777,12 +948,42 @@ def test_resume_never_redeploys_a_deploying_row(env):
     assert _status(env)["status"] == "left"
 
 
+def test_resume_of_a_failed_deploy_goes_to_destroy_never_to_a_run(env):
+    env.runner.deploy_code = 1
+    plan = _plan(env)
+    env.h.ledger_add_logged(plan)
+    real = env.h.destroy
+    env.h.destroy = lambda p, i: None  # the harness dies before its destroy
+    env.h.deploy(plan)
+    env.h.destroy = real
+    assert _status(env)["status"] == "recorded" and _status(env)["verdict"] == "FAIL"
+    H.resume(env.h, {"M01": ROW})
+    assert "run" not in env.runner.verbs()
+    st = _status(env)
+    assert st["status"] == "destroyed" and st["verdict"] == "FAIL"
+
+
+def test_resume_of_a_row_stopped_while_ledgering_creates_nothing(env):
+    _seed_row(env, "planned", ledger_intent=True)
+    H.resume(env.h, {"M01": ROW})
+    assert "deploy" not in env.runner.verbs()
+    assert _status(env)["status"] == "not-deployed"
+    assert not env.h.admitting_stopped
+
+
 def test_resume_destroying_polls_only(env):
     plan = _seed_row(env, "destroying", incarnation="u1#n1", child_pid=1, child_start="x")
     H.resume(env.h, {"M01": ROW})
     assert "destroy" not in env.runner.verbs()
     assert _status(env)["status"] == "destroyed"
     assert plan.namespace not in env.core.namespaces
+
+
+def test_resume_refuses_unknown_rows_before_touching_anything(env):
+    _seed_row(env, "recorded", incarnation="u1#n1")
+    with pytest.raises(H.Refused, match="not in the matrix"):
+        H.resume(env.h, {})
+    assert _status(env)["status"] == "recorded"
 
 
 def test_run_refuses_rows_already_in_the_log(env):
@@ -834,6 +1035,7 @@ def test_reader_fails_closed_on_unreadable_nodes():
 
 def test_reader_sums_requests_per_namespace():
     core = FakeCore()
+    core.nodes = [_node("w1", "40", "400Gi"), _node("w2", "40", "400Gi")]
     core.pods = [_pod("a", "2", "4Gi"), _pod("a", "500m", "1Gi"), _pod("b", "1", "2Gi")]
     snap = C.ClusterReader(core).snapshot()
     assert snap.allocatable == C.Peak(80.0, 800.0)
@@ -856,6 +1058,22 @@ def test_ledger_namespace_counts_its_peak_not_its_idle_requests():
     assert not d.admit
 
 
+def test_the_candidates_own_ledger_row_is_counted_once():
+    # a resumed row whose ledger row exists: its peak must not count twice
+    d = _admit(
+        _cand(cores=40.0),
+        _snap(),
+        ledger_live=["rel17-m01"],
+        ledger_peaks={"rel17-m01": C.Peak(40.0, 1.0)},
+    )
+    assert d.admit, d.reasons
+
+
+def test_ledger_alone_marker_of_another_harness_blocks_admission():
+    d = _admit(_cand(), _snap(), ledger_live=["rel17-m16"], ledger_alone=["rel17-m16"])
+    assert not d.admit and "rel17-m16" in d.blocking
+
+
 def test_alone_row_needs_an_empty_cluster_and_blocks_others():
     assert not _admit(_cand(alone=True), _snap(), managed=["x"]).admit
     own = [C.ActiveRow("rel17-m16", C.Peak(1, 1), alone=True)]
@@ -870,14 +1088,51 @@ def test_slots_and_aml_continuous_cap():
     assert not _admit(_cand(), _snap(), own_active=own3).admit
 
 
+def test_group_admission_counts_size():
+    group = C.Candidate("S", "a", C.Peak(1, 1), size=2, namespaces=("a", "b"))
+    assert not _admit(group, _snap(), managed=["x", "y", "z"]).admit
+    assert _admit(group, _snap(), managed=["x", "y"]).admit
+
+
+def test_unreadable_ledger_config_counts_the_worst_case_at_its_scale(env, tmp_path):
+    worst = H.worst_case_peak(1.0)
+    m14 = H.Row("M14", "financial", "continuous", "hive-iceberg-spark-trino", 1.0, 43)
+    assert worst.cores >= env.h.plan_row(m14, tmp_path / "m14").peak.cores
+    row = L.LedgerRow("lb17-x", str(tmp_path / "nowhere"), "v17-run", "1", "t")
+    assert env.h._ledger_peak(row) == worst
+
+
+def test_ledger_config_directory_resolves_to_its_one_yaml(tmp_path):
+    d = tmp_path / "ledger-configs" / "lb17-x"
+    d.mkdir(parents=True)
+    (d / "lb17-x.yaml").write_text("name: x\n")
+    assert H.ledger_config_path(str(d)) == d / "lb17-x.yaml"
+    (d / "other.yaml").write_text("name: y\n")
+    assert H.ledger_config_path(str(d)) is None
+
+
+def test_decide_fails_closed_on_an_unexpected_error(env):
+    plan = _plan(env)
+    row = SimpleNamespace(namespace="n", config="c", session="s", scale="x")
+    obs = H.Observation([row], set(), None)
+    assert isinstance(env.h.decide(plan, obs, C.Peak(0, 0)), C.Unknown)
+
+
 def test_schedule_waits_then_admits(env):
     plan = _plan(env)
     decisions = iter([C.Unknown("nodes"), C.Decision(True)])
-    env.h.decide = lambda p, f: next(decisions)
-    sleeps = []
+    env.h.decide = lambda p, obs, f, **kw: next(decisions)
+    sleeps: list[float] = []
     env.h.sleep = sleeps.append
     env.h.schedule([plan], [])
     assert sleeps and _status(env)["status"] == "destroyed"
+
+
+def test_threads_finish_before_schedule_returns(env):
+    plan = _plan(env)
+    env.h.decide = lambda p, obs, f, **kw: C.Decision(True)
+    env.h.schedule([plan], [])
+    assert not [t for t in threading.enumerate() if t.name == "M01"]
 
 
 # -- ledger --------------------------------------------------------------------
@@ -917,7 +1172,7 @@ def test_ledger_refuses_duplicate_and_unknown_close(tmp_path):
     assert p.read_text() == LEDGER_TEXT
 
 
-def test_ledger_retries_when_edited_underneath(tmp_path, monkeypatch):
+def test_ledger_retries_when_edited_underneath(tmp_path):
     p = tmp_path / "E.md"
     p.write_text(LEDGER_TEXT)
     led = L.MarkdownLedger(p, tmp_path / "b")
@@ -938,14 +1193,66 @@ def test_ledger_retries_when_edited_underneath(tmp_path, monkeypatch):
     assert "- entry two" in text and "| rel17-x |" in text
 
 
+def test_ledger_refuses_when_its_change_is_lost_right_after_writing(tmp_path, monkeypatch):
+    p = tmp_path / "E.md"
+    p.write_text(LEDGER_TEXT)
+    led = L.MarkdownLedger(p, tmp_path / "b")
+    real_replace = os.replace
+
+    def replace_then_clobber(src, dst):
+        real_replace(src, dst)
+        Path(dst).write_text(LEDGER_TEXT)  # an unlocked writer's stale copy lands
+
+    monkeypatch.setattr(L.os, "replace", replace_then_clobber)
+    with pytest.raises(L.LedgerError, match="lost the harness's change"):
+        led.add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))
+
+
 def test_ledger_refuses_a_shrunken_file(tmp_path):
     p = tmp_path / "E.md"
     p.write_text(LEDGER_TEXT + "x" * 10000 + "\n")
     led = L.MarkdownLedger(p, tmp_path / "b")
     led.add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))
     p.write_text(LEDGER_TEXT)
-    with pytest.raises(L.LedgerError, match="shrank"):
+    again = L.MarkdownLedger(p, tmp_path / "b")  # a new process: the backups remember
+    with pytest.raises(L.LedgerError, match="smaller than its newest backup"):
+        again.close("rel17-x")
+
+
+def test_ledger_keeps_other_line_endings(tmp_path):
+    p = tmp_path / "E.md"
+    p.write_bytes(LEDGER_TEXT.replace("- entry one\n", "- entry one\r\n").encode())
+    L.MarkdownLedger(p, tmp_path / "b").add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))
+    assert b"- entry one\r\n" in p.read_bytes()
+
+
+def test_ledger_symlink_is_edited_at_its_target(tmp_path):
+    real = tmp_path / "real.md"
+    real.write_text(LEDGER_TEXT)
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    L.MarkdownLedger(link, tmp_path / "b").add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))
+    assert link.is_symlink() and "| rel17-x |" in real.read_text()
+
+
+def test_ledger_lock_is_reentrant_and_excludes_other_threads(tmp_path):
+    p = tmp_path / "E.md"
+    p.write_text(LEDGER_TEXT)
+    led = L.MarkdownLedger(p, tmp_path / "b", lock_path=tmp_path / "queue.lock")
+    order: list[str] = []
+
+    def other():
         led.close("rel17-x")
+        order.append("closed")
+
+    with led.transaction():
+        led.add(L.LedgerRow("rel17-x", "/c", "s", "1", "t"))  # same thread: no deadlock
+        t = threading.Thread(target=other)
+        t.start()
+        time.sleep(0.3)
+        order.append("released")
+    t.join(5)
+    assert order == ["released", "closed"]
 
 
 def test_rowlog_lock_is_exclusive_and_appends_fold(tmp_path):
@@ -963,30 +1270,51 @@ def test_rowlog_lock_is_exclusive_and_appends_fold(tmp_path):
     a.release()
 
 
+# -- results -------------------------------------------------------------------
+
+
 def test_results_table_lists_rows_with_verdicts(env):
     plan = _plan(env)
-    env.h.deploy(plan)
-    path = env.h.write_results()
-    text = path.read_text()
+    _go(env, plan)
+    text = env.h.write_results().read_text()
     assert text.startswith("# UAT results 1.7.0\n")
     assert f"Freeze commit: {'f' * 40}" in text
     assert "| M01 | customer360 | batch | hive-iceberg-spark-trino | 4.1 / 1.11.0 | 1 |" in text
-    assert "| PASS | - |" in text
+    assert "| PASS | not checked |" in text
 
 
-def test_rehearsal_writes_its_own_results_file(env):
+def test_failed_rows_cite_no_run_id_in_the_table(env, monkeypatch):
+    import re
+
+    monkeypatch.setattr(H, "record_verdict", lambda r, f, v: ["bad"])
+    plan = _plan(env)
+    _go(env, plan)
+    text = env.h.write_results().read_text()
+    table = [ln for ln in text.splitlines() if ln.startswith("| M01")]
+    assert table and not re.search(r"\d{8}-\d{6}-[0-9a-f]{6}", table[0])
+    assert "Runs of rows that did not pass (not evidence):" in text
+
+
+def test_rehearsal_results_are_not_a_uat_results_file(env):
     env.h.rehearsal = True
-    assert env.h.write_results().name == "results-rehearsal.md"
+    path = env.h.write_results()
+    assert path.name == "results-rehearsal.md"
+    assert not path.read_text().startswith("# UAT results")
 
 
-def test_sigint_reaches_only_interruptible_children(tmp_path, monkeypatch):
-    sent = []
+# -- children and signals --------------------------------------------------------
+
+
+def test_sigint_level_1_reaches_runs_level_2_reaches_all(monkeypatch):
+    sent: list[int] = []
     monkeypatch.setattr(H.os, "killpg", lambda pid, sig: sent.append(pid))
     r = H.ProcessRunner(ROOT)
     r._children = {11: True, 12: False}
-    r.interrupt()
-    r.interrupt()
+    r.interrupt(1)
+    r.interrupt(1)
     assert sent == [11]
+    r.interrupt(2)
+    assert sent == [11, 12]
 
 
 def test_process_runner_reads_exit_paths(tmp_path):
@@ -1000,69 +1328,58 @@ def test_process_runner_reads_exit_paths(tmp_path):
     assert res.paths == ["cli.bad_argument"]
 
 
-def test_threads_finish_before_schedule_returns(env):
-    plan = _plan(env)
-    env.h.decide = lambda p, f: C.Decision(True)
-    env.h.schedule([plan], [])
-    assert not [t for t in threading.enumerate() if t.name == "M01"]
+def test_process_runner_keeps_waiting_when_recording_the_child_fails(tmp_path):
+    r = H.ProcessRunner(ROOT)
+
+    def broken(pid, start):
+        raise OSError("No space left on device")
+
+    res = r(["version"], cwd=tmp_path, log=tmp_path / "v.log", on_spawn=broken)
+    assert res.code == 0
+    assert "could not record the child" in res.log.read_text()
+
+
+def test_a_child_past_its_time_limit_is_stopped():
+    proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    start = time.monotonic()
+    assert H._wait_or_stop(proc, 0.2, graces=(2, 2, 2)) == H.TIMED_OUT
+    assert time.monotonic() - start < 10 and proc.poll() is not None
+
+
+def _gone(pid: int) -> bool:
+    stat = Path(f"/proc/{pid}/stat")
+    return not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+
+
+def test_script_runner_reaps_what_the_script_left_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(H, "SCRIPT_REAP_S", 0.5)
+    script = tmp_path / "s.sh"
+    pidfile = tmp_path / "bg.pid"
+    script.write_text(f"sleep 120 & echo $! > {pidfile}\nexit 0\n")
+    real = H.reap_group
+    monkeypatch.setattr(H, "reap_group", lambda pgid, out: real(pgid, out, poll=0.1))
+    r = H.ProcessRunner(ROOT)
+    rc = r.script(["bash", str(script)], env=dict(os.environ), cwd=tmp_path, log=tmp_path / "s.log")
+    assert rc == 0
+    bg = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while not _gone(bg) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert _gone(bg)
 
 
 # -- scenarios (S-P1 to S-P6) ----------------------------------------------------
 
-SCEN = RELEASE / "scenarios"
-
-
-class FakeS3:
-    def __init__(self) -> None:
-        self.buckets: dict[str, dict[str, bytes]] = {}
-        self.owner: dict[str, str] = {}
-        self.raw_client = self
-
-    def bucket_exists(self, b):
-        return b in self.buckets
-
-    def create_bucket(self, b):
-        self.buckets.setdefault(b, {})
-        return True
-
-    def put_object(self, Bucket, Key, Body):  # noqa: N803 -- boto3 names
-        self.buckets[Bucket][Key] = Body
-
-    def get_paginator(self, _name):
-        return self
-
-    def paginate(self, Bucket):  # noqa: N803
-        return [{"Contents": [{"Key": k} for k in self.buckets[Bucket]]}]
-
-    def empty_bucket(self, b, keep_prefixes=()):
-        self.buckets[b].clear()
-        return 0
-
-    def delete_bucket(self, b):
-        return self.buckets.pop(b, None) is not None
-
-
-@pytest.fixture
-def senv(env):
-    # a scenario admits two s1 deployments at once: give the fake room
-    env.core.nodes = [_node(f"w{i}", "100", "1000Gi") for i in range(4)]
-    s3 = FakeS3()
-    env.h.s3_factory = lambda cfg: s3
-    env.s3 = s3
-    env.runner.on_destroy = lambda cfg: _destroy_fake(env, cfg)
-    return env
-
 
 def _deploy_fake(env, cfg: Path, nonce: str, uid: str) -> str:
-    data = yaml.safe_load(cfg.read_text())
-    name = data["name"]
+    name = yaml.safe_load(cfg.read_text())["name"]
     env.core.add_ns(name, uid, nonce)
     from lakebench.config.deploy_state import read_state
 
     old = read_state(cfg)
     kept = [(e.nonce, e.status) for e in (old.nonces if old else [])]
     write_state(cfg, name, name, [(nonce, "confirmed"), *kept])
-    for b in data["platform"]["storage"]["s3"]["buckets"].values():
+    for b in _buckets_of(cfg):
         if b not in env.s3.buckets:
             env.s3.create_bucket(b)
             env.s3.owner[b] = name
@@ -1070,21 +1387,24 @@ def _deploy_fake(env, cfg: Path, nonce: str, uid: str) -> str:
 
 
 def _destroy_fake(env, cfg: Path) -> None:
-    data = yaml.safe_load(cfg.read_text())
-    env.core.namespaces.pop(data["name"], None)
-    for b in data["platform"]["storage"]["s3"]["buckets"].values():
-        if env.s3.owner.get(b) == data["name"]:
+    name = yaml.safe_load(cfg.read_text())["name"]
+    env.core.namespaces.pop(name, None)
+    for b in _buckets_of(cfg):
+        if env.s3.owner.get(b) == name:
             env.s3.buckets.pop(b, None)
 
 
 def _script(env, body, rc=0, pass_line=True):
-    def run(argv, *, env: dict, cwd: Path, log: Path) -> int:
+    def run(argv, *, env: dict, cwd: Path, log: Path, on_spawn=None) -> int:
         assert argv[0] == "bash" and Path(argv[1]).parent == SCEN
         assert env["LB_EXIT_REFUSED"] == "3"
+        if on_spawn is not None:
+            on_spawn(os.getpid(), "0")
         body(env)
         log.parent.mkdir(parents=True, exist_ok=True)
         sid = Path(argv[1]).name.split("-")[1].upper()
-        log.write_text(f"PASS: S-{sid} -- fake\n" if pass_line else "done\n")
+        with open(log, "a") as fh:
+            fh.write(f"PASS: S-{sid} -- fake\n" if pass_line else "done\n")
         return rc
 
     return run
@@ -1099,8 +1419,7 @@ def test_scenario_shim_imports_release_tree(tmp_path):
     H.write_shim(ROOT, bin_dir)
     env = H.child_env(ROOT)
     env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
-    seen = H.shim_imports_from(bin_dir, env)
-    assert seen == str(ROOT / "src" / "lakebench" / "__init__.py")
+    assert H.shim_imports_from(bin_dir, env) == str(ROOT / "src" / "lakebench" / "__init__.py")
 
 
 def test_scenario_shim_runs_the_cli(tmp_path):
@@ -1120,140 +1439,163 @@ def test_scenario_shim_runs_the_cli(tmp_path):
     assert pf.read_text().split() == ["2", "cli.bad_argument"]
 
 
-def test_scenario_leftover_namespace_destroyed_by_incarnation(senv):
+def test_scenario_leftover_namespace_destroyed_by_incarnation(env):
     def body(e):
-        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
-        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
-        _destroy_fake(senv, Path(e["LB_CONFIG_A"]))
+        _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(env, Path(e["LB_CONFIG_B"]), "nb", "ub")
+        _destroy_fake(env, Path(e["LB_CONFIG_A"]))
 
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P1"]) == 0
-    st = _scen_states(senv, "S-P1")
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P1"]) == 0, env.said
+    st = _scen_states(env, "S-P1")
     assert st["S-P1-A"]["status"] == "destroyed" and st["S-P1-B"]["status"] == "destroyed"
-    destroys = [c for c in senv.runner.calls if c[0] == "destroy"]
+    destroys = [c for c in env.runner.calls if c[0] == "destroy"]
     assert len(destroys) == 1 and destroys[0][4] == "ub#nb"
-    text = senv.ledger.read_text()
-    assert text.count("closed rel17-s-p1-") == 2
+    assert env.ledger.read_text().count("closed rel17-s-p1-") == 2
     assert st["S-P1-A"]["scenario_verdict"] == "PASS"
-    assert (senv.out / "results-extra.md").read_text().count("| S-P1 |") == 1
-    assert "S-P1" not in (senv.h.write_results().read_text())
+    assert (env.out / "results-extra.md").read_text().count("| S-P1 |") == 1
+    assert "S-P1" not in env.h.write_results().read_text()
 
 
-def test_scenario_kept_namespace_missing_fails(senv):
+def test_scenario_kept_namespace_missing_fails(env):
     def body(e):
-        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
-        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
-        _destroy_fake(senv, Path(e["LB_CONFIG_A"]))
-        _destroy_fake(senv, Path(e["LB_CONFIG_B"]))
+        for c in ("A", "B"):
+            _deploy_fake(env, Path(e[f"LB_CONFIG_{c}"]), f"n{c}", f"u{c}")
+            _destroy_fake(env, Path(e[f"LB_CONFIG_{c}"]))
 
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P1"]) == 1
-    assert any(
-        "expected present" in p for p in _scen_states(senv, "S-P1")["S-P1-A"]["scenario_problems"]
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P1"]) == 1
+    problems = _scen_states(env, "S-P1")["S-P1-A"]["scenario_problems"]
+    assert any("expected present" in p for p in problems)
+
+
+def test_scenario_exit_0_without_pass_line_fails(env):
+    env.h.script_runner = _script(env, lambda e: None, pass_line=False)
+    assert env.h.scenario(H.SCENARIOS["S-P4"]) == 1
+
+
+def test_scenario_script_failure_still_cleans_up(env):
+    env.h.script_runner = _script(
+        env, lambda e: _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua"), rc=1
     )
+    assert env.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    assert _scen_states(env, "S-P4")["S-P4-A"]["status"] == "destroyed"
+    assert not env.core.namespaces
 
 
-def test_scenario_exit_0_without_pass_line_fails(senv):
-    senv.h.script_runner = _script(senv, lambda e: None, pass_line=False)
-    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
-
-
-def test_scenario_script_failure_still_cleans_up(senv):
-    def body(e):
-        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
-
-    senv.h.script_runner = _script(senv, body, rc=1)
-    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
-    assert _scen_states(senv, "S-P4")["S-P4-A"]["status"] == "destroyed"
-    assert not senv.core.namespaces
-
-
-def test_scenario_redeployed_config_uses_its_current_kept_nonce(senv):
+def test_scenario_redeployed_config_uses_its_current_kept_nonce(env):
     def body(e):
         cfg = Path(e["LB_CONFIG_A"])
-        _deploy_fake(senv, cfg, "n1", "u1")
-        _destroy_fake(senv, cfg)
-        _deploy_fake(senv, cfg, "n2", "u2")
+        _deploy_fake(env, cfg, "n1", "u1")
+        _destroy_fake(env, cfg)
+        _deploy_fake(env, cfg, "n2", "u2")
 
-    senv.h.script_runner = _script(senv, body)
-    senv.h.scenario(H.SCENARIOS["S-P4"])
-    destroy = [c for c in senv.runner.calls if c[0] == "destroy"][0]
-    assert destroy[4] == "u2#n2"
+    env.h.script_runner = _script(env, body)
+    env.h.scenario(H.SCENARIOS["S-P4"])
+    assert [c for c in env.runner.calls if c[0] == "destroy"][0][4] == "u2#n2"
 
 
-def test_scenario_cleanup_allows_its_designed_refusal(senv):
+def test_scenario_cleanup_allows_its_designed_refusal(env):
     def body(e):
-        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
-        _deploy_fake(senv, Path(e["LB_CONFIG_B"]), "nb", "ub")
+        _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(env, Path(e["LB_CONFIG_B"]), "nb", "ub")
 
-    real = senv.runner.__call__
+    real = env.runner.__call__
 
     def runner(args, **kw):
-        if args[0] == "destroy" and "s-p6-b" in args[1].lower():
-            _destroy_fake(senv, Path(args[1]))
+        if args[0] == "destroy" and Path(args[1]).name == "S-P6-B.yaml":
+            env.runner.calls.append(tuple(args))
+            _destroy_fake(env, Path(args[1]))
             return H.ChildResult(3, ["deploy.identity_foreign"], kw["log"])
         return real(args, **kw)
 
-    senv.h.runner = runner
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P6"]) == 0, senv.said
-    st = _scen_states(senv, "S-P6")
+    env.h.runner = runner
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P6"]) == 0, env.said
+    st = _scen_states(env, "S-P6")
     assert st["S-P6-B"]["status"] == "destroyed" and st["S-P6-A"]["status"] == "destroyed"
-    order = [Path(c[1]).name for c in senv.runner.calls if c[0] == "destroy"]
-    assert order == ["S-P6-A.yaml"]  # B went through the designed refusal first
+    order = [Path(c[1]).name for c in env.runner.calls if c[0] == "destroy"]
+    assert order == ["S-P6-B.yaml", "S-P6-A.yaml"]
 
 
-def test_scenario_cleanup_unexpected_refusal_fails_and_stops(senv):
+def test_scenario_cleanup_unexpected_refusal_fails_and_stops(env):
+    env.runner.destroy_override = (3, ["deploy.identity_foreign"], "")
+    env.h.script_runner = _script(
+        env, lambda e: _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua")
+    )
+    assert env.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    assert _scen_states(env, "S-P4")["S-P4-A"]["status"] == "failed"
+    assert env.h.admitting_stopped
+
+
+def test_scenario_buckets_left_keep_the_ledger_row(env):
     def body(e):
-        _deploy_fake(senv, Path(e["LB_CONFIG_A"]), "na", "ua")
+        _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua")
+        env.core.namespaces.clear()  # namespace gone, buckets not
 
-    senv.runner.destroy_override = (3, ["deploy.identity_foreign"], "")
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
-    assert _scen_states(senv, "S-P4")["S-P4-A"]["status"] == "failed"
-    assert senv.h.stopping
-
-
-def test_scenario_buckets_left_keep_the_ledger_row(senv):
-    def body(e):
-        cfg = Path(e["LB_CONFIG_A"])
-        _deploy_fake(senv, cfg, "na", "ua")
-        senv.core.namespaces.clear()  # namespace gone, buckets not
-
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P4"]) == 1
-    st = _scen_states(senv, "S-P4")["S-P4-A"]
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P4"]) == 1
+    st = _scen_states(env, "S-P4")["S-P4-A"]
     assert st["status"] == "left"
-    assert f"| {st['namespace']} |" in senv.ledger.read_text()
+    assert f"| {st['namespace']} |" in env.ledger.read_text()
 
 
-def test_legacy_bucket_created_checked_and_removed(senv):
+def test_scenario_script_pid_is_recorded_and_resume_refuses_while_it_lives(env):
+    def body(e):
+        _deploy_fake(env, Path(e["LB_CONFIG_A"]), "na", "ua")
+        st = env.h.rowlog.latest()["S-P4-A"]
+        assert st["script_pid"] == os.getpid()
+        env.h.log("S-P4-A", st["status"], script_start=H._start_time(os.getpid()))
+        with pytest.raises(H.Refused, match="live child"):
+            H.resume(env.h, {})
+
+    env.h.script_runner = _script(env, body)
+    env.h.scenario(H.SCENARIOS["S-P4"])
+    assert env.h.rowlog.latest()["S-P4-A"]["script_pid"] is None
+
+
+def test_legacy_bucket_created_checked_and_removed(env):
     seen = {}
 
     def body(e):
         seen["legacy"] = e["LB_LEGACY_BUCKET"]
-        seen["objects"] = dict(senv.s3.buckets[e["LB_LEGACY_BUCKET"]])
-        cfg = Path(e["LB_CONFIG_A"])
-        assert (
-            yaml.safe_load(cfg.read_text())["platform"]["storage"]["s3"]["buckets"]["bronze"]
-            == seen["legacy"]
-        )
+        seen["objects"] = dict(env.s3.buckets[e["LB_LEGACY_BUCKET"]])
+        data = yaml.safe_load(Path(e["LB_CONFIG_A"]).read_text())
+        seen["bronze"] = data["platform"]["storage"]["s3"]["buckets"]["bronze"]
+        seen["name"] = data["name"]
 
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P5"]) == 0
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P5"]) == 0, env.said
     assert list(seen["objects"]) == ["harness-legacy/object.txt"]
-    assert seen["legacy"] not in senv.s3.buckets
+    assert seen["bronze"] == seen["legacy"]
+    assert not seen["legacy"].startswith(seen["name"])  # outside A's name prefix
+    assert seen["legacy"] not in env.s3.buckets
 
 
-def test_legacy_bucket_changed_fails_the_scenario(senv):
+def test_preexisting_legacy_bucket_is_never_emptied_or_deleted(env, monkeypatch):
+    monkeypatch.setattr(H.secrets, "token_hex", lambda n: "abcdef")
+    env.s3.buckets["rel17-s-p5-legacy-abcdef"] = {"theirs": b"x"}
+    env.h.script_runner = _script(env, lambda e: None)
+    assert env.h.scenario(H.SCENARIOS["S-P5"]) == 1
+    assert env.s3.buckets["rel17-s-p5-legacy-abcdef"] == {"theirs": b"x"}
+
+
+def test_legacy_bucket_not_created_is_never_removed(env):
+    env.s3.create_ok = False
+    env.h.script_runner = _script(env, lambda e: None)
+    assert env.h.scenario(H.SCENARIOS["S-P5"]) == 1
+
+
+def test_changed_legacy_bucket_is_left_for_a_person(env):
     def body(e):
-        senv.s3.buckets[e["LB_LEGACY_BUCKET"]]["extra"] = b"x"
+        env.s3.buckets[e["LB_LEGACY_BUCKET"]]["extra"] = b"x"
 
-    senv.h.script_runner = _script(senv, body)
-    assert senv.h.scenario(H.SCENARIOS["S-P5"]) == 1
+    env.h.script_runner = _script(env, body)
+    assert env.h.scenario(H.SCENARIOS["S-P5"]) == 1
+    assert any(b.startswith("rel17-s-p5-legacy-") for b in env.s3.buckets)
 
 
-def test_shared_bucket_is_bronze_of_both_configs(senv):
+def test_s_p6_b_names_as_bronze_bucket(env):
     seen = {}
 
     def body(e):
@@ -1262,44 +1604,30 @@ def test_shared_bucket_is_bronze_of_both_configs(senv):
         seen["a"] = a["platform"]["storage"]["s3"]["buckets"]["bronze"]
         seen["b"] = b["platform"]["storage"]["s3"]["buckets"]["bronze"]
         seen["env"] = e["LB_SHARED_BUCKET"]
+        seen["a_name"] = a["name"]
 
-    senv.h.script_runner = _script(senv, body)
-    senv.h.scenario(H.SCENARIOS["S-P6"])
-    assert seen["a"] == seen["b"] == seen["env"]
+    env.h.script_runner = _script(env, body)
+    env.h.scenario(H.SCENARIOS["S-P6"])
+    assert seen["a"] == seen["b"] == seen["env"] == f"{seen['a_name']}-bronze"
 
 
-def test_scenario_admission_asks_for_all_its_deployments(senv):
+def test_scenario_admission_asks_for_all_its_deployments(env):
     asked = {}
 
-    def decide(plan, fallback, size=1, namespaces=()):
+    def decide(plan, obs, fallback, size=1, namespaces=()):
         asked["size"], asked["ns"] = size, namespaces
         return C.Decision(True)
 
-    senv.h.decide = decide
-    senv.h.script_runner = _script(senv, lambda e: None)
-    senv.h.scenario(H.SCENARIOS["S-P2"])
+    env.h.decide = decide
+    env.h.script_runner = _script(env, lambda e: None)
+    env.h.scenario(H.SCENARIOS["S-P2"])
     assert asked["size"] == 2 and len(asked["ns"]) == 2
 
 
-def test_group_admission_counts_size():
-    d = _admit(
-        C.Candidate("S", "a", C.Peak(1, 1), size=2, namespaces=("a", "b")),
-        _snap(),
-        managed=["x", "y", "z"],
-    )
-    assert not d.admit
-    assert _admit(
-        C.Candidate("S", "a", C.Peak(1, 1), size=2, namespaces=("a", "b")),
-        _snap(),
-        managed=["x", "y"],
-    ).admit
-
-
-def test_scenario_resume_cleans_up_without_rerunning(senv):
-    plans = senv.h.scenario_rows(H.SCENARIOS["S-P4"])
-    plan = plans["A"]
-    senv.h._set_buckets(plan)
-    senv.h.log(
+def test_scenario_resume_cleans_up_without_rerunning(env):
+    plan = env.h.scenario_rows(H.SCENARIOS["S-P4"])["A"]
+    env.h._set_buckets(plan)
+    env.h.log(
         "S-P4-A",
         "planned",
         namespace=plan.namespace,
@@ -1308,12 +1636,30 @@ def test_scenario_resume_cleans_up_without_rerunning(senv):
         scenario="S-P4",
         owned_buckets=[],
     )
-    senv.h.log("S-P4-A", "ledgered")
-    _deploy_fake(senv, plan.config, "na", "ua")
-    H.resume(senv.h, {})
-    st = _scen_states(senv, "S-P4")["S-P4-A"]
+    env.h.log("S-P4-A", "ledgered")
+    _deploy_fake(env, plan.config, "na", "ua")
+    H.resume(env.h, {})
+    st = _scen_states(env, "S-P4")["S-P4-A"]
     assert st["status"] == "destroyed" and st["scenario_verdict"] == "FAIL"
-    assert [c[0] for c in senv.runner.calls if c[0] != "init"] == ["destroy"]
+    assert [c[0] for c in env.runner.calls if c[0] != "init"] == ["destroy"]
+
+
+def test_scenario_resume_polls_a_destroy_that_was_running(env):
+    plan = env.h.scenario_rows(H.SCENARIOS["S-P4"])["A"]
+    env.h.log(
+        "S-P4-A",
+        "destroying",
+        namespace=plan.namespace,
+        config=str(plan.config),
+        peak=[1, 1],
+        scenario="S-P4",
+        owned_buckets=[],
+        child_pid=1,
+        child_start="x",
+    )
+    H.resume(env.h, {})
+    assert "destroy" not in env.runner.verbs()
+    assert _scen_states(env, "S-P4")["S-P4-A"]["status"] == "destroyed"
 
 
 # -- the scripts themselves --------------------------------------------------------
@@ -1358,7 +1704,7 @@ def test_scenario_scripts_use_the_v17_cli(path):
     ctx = click.Context(root)
     code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith(("#", "echo")))
     calls = re.findall(r"(?:^|[\s(])lakebench (\w[\w-]*)([^\n>&|]*)", code)
-    calls += re.findall(r"lb_run \"[^\"]+\" (\w[\w-]*)([^\n>&|]*)", code)
+    calls += re.findall(r'lb_run "[^"]+" (\w[\w-]*)([^\n>&|]*)', code)
     assert calls
     for verb, rest in calls:
         cmd = root.get_command(ctx, verb)
@@ -1372,3 +1718,21 @@ def test_lib_checks_reads_credentials_from_the_environment():
     text = (SCEN / "lib-checks.sh").read_text()
     assert "os.path.expandvars" in text
     assert "print(key" not in text and "print(secret" not in text
+    assert "trap _lb_reap EXIT" in text
+    assert ".lakebench/owner.json" in text
+
+
+def test_lib_checks_reaps_background_jobs_on_an_early_exit(tmp_path):
+    pidfile = tmp_path / "bg.pid"
+    script = tmp_path / "s.sh"
+    script.write_text(
+        f'LB_KUBE_CONTEXT=x LB_EXIT_REFUSED=3\nsource "{SCEN / "lib-checks.sh"}"\n'
+        f"sleep 120 &\necho $! > {pidfile}\nexit 1\n"
+    )
+    rc = subprocess.run(["bash", str(script)], check=False, timeout=30).returncode
+    assert rc == 1
+    bg = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while not _gone(bg) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert _gone(bg)

@@ -1672,18 +1672,20 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
 # lease held) without reading message text. Deploy and destroy step
 # refusals exit through typer.Exit and note their paths first.
 _REFUSALS = sorted(n for n in SCENARIOS if exit_codes.path_code(n) == ExitCode.REFUSED)
+# Exit 6 has one producer the harness and S-P4 check by path.
+_PATH_NAMED = [*_REFUSALS, "destroy.namespace_terminating"]
 
 
-@pytest.mark.parametrize("name", _REFUSALS)
+@pytest.mark.parametrize("name", _PATH_NAMED)
 def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     target = tmp_path / "exit-path"
     monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
     result = SCENARIOS[name](monkeypatch, tmp_path)
-    assert result.exit_code == ExitCode.REFUSED, result.output
+    assert result.exit_code == exit_codes.path_code(name), result.output
     code, *paths = target.read_text().splitlines()[-1].split()
-    assert code == "3"
+    assert code == str(int(exit_codes.path_code(name)))
     assert name in paths, (name, paths)
 
 
