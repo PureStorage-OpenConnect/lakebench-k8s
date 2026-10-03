@@ -778,3 +778,57 @@ def test_local_run_exits_one_when_its_record_fails(tmp_path, monkeypatch) -> Non
     assert "Verdict: gold has 0 rows" in result.output
     saved = _saved_record(tmp_path)
     assert saved["success"] is False and saved["verdict"]["gates"]["layer_rows"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# path-cap (owner, 10-03): an allowed, labelled Lakebench cap for W3 and W17
+# ---------------------------------------------------------------------------
+
+
+def _s100_without_its_benchmark_failure() -> dict:
+    """The stored s100 AML batch record (W1 vertex-cap, W3 and W17 path-cap)
+    with the two fields of its unrelated benchmark failure edited out: the
+    ImportError (benchmark_error) and the success flag it cleared."""
+    rec = sr.load_record("85b404")
+    del rec["benchmark_error"]
+    rec["success"] = True
+    return rec
+
+
+def test_s100_path_cap_skips_pass_with_the_cap_qualifier() -> None:
+    rec = _s100_without_its_benchmark_failure()
+    v = V.verdict_from_record(rec)
+    assert v.status == "PASSED", v.reasons
+    assert v.gates["aml_rules"] == "PASS"
+    assert v.qualifiers[V.RULE_CAPS] == {
+        "W17_layering_chain": "path-cap",
+        "W1_connected_components": "vertex-cap",
+        "W3_round_tripping": "path-cap",
+    }
+    # The same skips are labelled as Lakebench bounds in the stored limits.
+    kinds = rec["experiment"]["limits"]["bound_kinds"]
+    assert "rule W3_round_tripping cap" in kinds and "rule W17_layering_chain cap" in kinds
+
+
+def test_s100_other_skip_still_fails() -> None:
+    rec = _s100_without_its_benchmark_failure()
+    gold = _job(rec, "gold-finalize")
+    gold["rules_skipped"]["W3_round_tripping"] = "timeout"
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
+    assert any("W3_round_tripping skipped (timeout)" in r for r in v.reasons)
+    rec = _s100_without_its_benchmark_failure()
+    _job(rec, "gold-finalize")["rules_skipped"]["W2_structuring"] = "path-cap"
+    assert V.verdict_from_record(rec).gates["aml_rules"] == "FAIL"
+
+
+def test_path_cap_is_a_registered_bound_kind() -> None:
+    from lakebench.metrics import bounds
+
+    entries = bounds.bound_entries({}, {"skipped": {"W3_round_tripping": "path-cap"}}, strict=True)
+    assert entries == [("rule W3_round_tripping cap", "rule W3_round_tripping skipped: path-cap")]
+
+
+def test_giant_component_is_allowed_but_not_a_cap() -> None:
+    v = V.verdict_from_record(sr.load_record(AML_BATCH))
+    assert v.status == "PASSED" and V.RULE_CAPS not in v.qualifiers
