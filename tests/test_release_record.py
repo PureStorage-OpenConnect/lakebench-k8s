@@ -650,3 +650,38 @@ def test_corpus_problems_refused(ready):
     rec = _release("c360_batch")
     rec["experiment"]["corpus"]["problems"] = ["datagen pods ran different images: a, b"]
     _fails(rec, "corpus problems")
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        pytest.param(lambda s: s, id="int"),
+        pytest.param(lambda s: str(s), id="text"),
+        pytest.param(lambda s: f"+{s}", id="plus"),
+        pytest.param(lambda s: f"{s}.0", id="decimal-text"),
+        pytest.param(lambda s: float(s), id="float"),
+        pytest.param(lambda s: [s], id="list"),
+    ],
+)
+def test_a_calibration_seed_in_any_readable_form_passes(ready, held, form):
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = form(held.CALIBRATION)
+    assert _problems(rec) == []
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param(1.2345678901234567e19, id="float-above-2^53"),
+        pytest.param("1.2345678901234567e19", id="exponent-text"),
+        pytest.param(2**70, id="above-u64"),
+        pytest.param("9" * 40, id="long-digits"),
+        pytest.param(-5, id="negative"),
+    ],
+)
+def test_a_lossy_or_out_of_range_seed_is_unidentified(ready, held, seed):
+    """A form that could have rounded a held-out seed is never read as
+    'not held out'."""
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = seed
+    assert any("unidentified" in p for p in _problems(rec))

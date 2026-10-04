@@ -239,10 +239,20 @@ def recorded_seed_role(value: Any) -> str | None:
     return None
 
 
+#: Seeds are unsigned 64-bit; a float holds an integer exactly only below 2**53.
+_SEED_MAX = 2**64 - 1
+_FLOAT_EXACT = 2**53
+
+
 def seed_readable(value: Any) -> bool:
-    """Whether ``recorded_seed_role`` can read *value* as a seed (in any of
-    its recorded forms), so a None from it means "not held out" rather than
-    "could not tell". Never raises and never reads the held-out record."""
+    """Whether *value* is a recorded seed form ``recorded_seed_role`` reads
+    exactly, so a None from it means "not held out" rather than "could not
+    tell": an integer in the seed range, a float or decimal text that holds
+    one exactly (no exponent, a float below 2**53), a salted hash, a
+    ``{seed_ref, role}`` mapping or a non-empty list of these. A form that
+    could round a seed (a large float, exponent text) is not readable, so
+    the release gate and the audit refuse it as unidentified. Never raises
+    and never reads the held-out record."""
     if value is None or isinstance(value, bool):
         return False
     if isinstance(value, Mapping):
@@ -252,18 +262,22 @@ def seed_readable(value: Any) -> bool:
     if isinstance(value, list | tuple):
         return bool(value) and all(seed_readable(v) for v in value)
     if isinstance(value, int):
-        return True
+        return 0 <= value <= _SEED_MAX
     if isinstance(value, float):
-        return value.is_integer()
+        return value.is_integer() and 0 <= value < _FLOAT_EXACT
     if isinstance(value, str):
         text = value.strip()
-        if _HEX64.fullmatch(text.lower()) or _INT_TEXT.fullmatch(text):
+        if _HEX64.fullmatch(text.lower()):
             return True
+        if _INT_TEXT.fullmatch(text):
+            return 0 <= int(text.replace("_", "")) <= _SEED_MAX
+        if "e" in text.lower():
+            return False
         try:
             d = Decimal(text)
         except InvalidOperation:
             return False
-        return d.is_finite() and d.adjusted() < 20 and d == d.to_integral_value()
+        return d.is_finite() and d == d.to_integral_value() and 0 <= d <= _SEED_MAX
     return False
 
 

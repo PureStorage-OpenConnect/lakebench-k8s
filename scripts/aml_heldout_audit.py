@@ -6,8 +6,10 @@ the evaluation or robustness corpus (a protected role, or a seed that hashes
 to a held-out seed), and lists every place it searched:
 
 1. Records: every ``metrics.json`` under ``--runs-dir``, through
-   ``lakebench.aml.look_guard.protected_record_reason`` (fail closed; a
-   financial record with no corpus seed is listed as unidentified).
+   ``lakebench.aml.look_guard.protected_record_reason`` (fail closed; an
+   AML record, by corpus schema, scoring block or workload name, with no
+   corpus seed or a seed in no form the guard reads exactly is listed as
+   unidentified).
 2. Journals: every ``session-*.jsonl`` under ``--journal-dir``. The config
    each session names is read raw (no validation) and checked by the same
    rule as ``generate`` and ``run``; a config that is gone is listed as
