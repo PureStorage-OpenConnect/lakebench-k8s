@@ -454,12 +454,18 @@ ABSENCE_MODES = ("report", "enforce")
 _HELDOUT_KEYS = frozenset({"format", "algorithm", "salt", "roles", "spent", "absence_check"})
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
-# BEGIN HELDOUT FLOOR (written once, by the owner, when the file was created)
+# BEGIN HELDOUT FLOOR (the owner's registrations, appended to only)
 _HELDOUT_FLOOR: dict = {
     "salt": "267910981b7370a7aaed163588284507373136289bfeec908df42ae15e1d75aa",
     "roles": {
-        "evaluation": ("206064919eb86d06940ba8f4a66510605707e6cfe99bb2564f47dc859c2cba06",),
-        "robustness": ("9d730778dff8ae49bc2eb428a83016de00a9f227e6c0a9c43f84043fe2869562",),
+        "evaluation": (
+            "206064919eb86d06940ba8f4a66510605707e6cfe99bb2564f47dc859c2cba06",
+            "e67e2ade9d5ff63721d79f5bb2aed5613fcf936a2c3e9bc80bc1697ee26e1c37",
+        ),
+        "robustness": (
+            "9d730778dff8ae49bc2eb428a83016de00a9f227e6c0a9c43f84043fe2869562",
+            "26b6c7817d64c1e6dfc853157a1c501e166cd4e5edcecab6549f5f3d34d696fc",
+        ),
     },
 }
 # END HELDOUT FLOOR
