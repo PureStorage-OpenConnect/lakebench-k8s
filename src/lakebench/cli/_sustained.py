@@ -2732,7 +2732,7 @@ def drain_gold_refresh(
     when its first tick is not cycle 1 (the log was trimmed). *window_end* (naive UTC on the cluster
     clock, as the window record) gives the scored tick's
     ``pinned_after_window_end_s``. *kept_log*, when given, returns the
-    driver's whole log kept across rotation (LB-270); it is parsed instead of
+    driver's whole log kept across rotation; it is parsed instead of
     the drain's single read when it holds anything.
     """
     from lakebench.cli._aml_post import DRAIN_BUDGET_S, request_drain
@@ -3828,7 +3828,7 @@ def _run_sustained(
         start = time.time()
         check_interval = 30
         # Every driver's whole log, kept across kubelet log rotation by
-        # reading the new lines at each health check (LB-270).
+        # reading the new lines at each health check.
         from lakebench.metrics.driver_log_accumulator import DriverLogAccumulator
 
         driver_log_acc = DriverLogAccumulator(
@@ -4128,7 +4128,7 @@ def _run_sustained(
         for _job_type, job_name in submitted:
             try:
                 # The lines kept at every health check, plus the newest ones;
-                # one plain read only when nothing was kept (LB-270).
+                # one plain read only when nothing was kept.
                 try:
                     driver_log_acc.poll(job_name)
                 except Exception as e:  # noqa: BLE001
@@ -4192,7 +4192,7 @@ def _run_sustained(
                 f"{_job}: driver log incomplete, continuous metrics not measured ({_gaps[0]})"
             )
         # The verdict names what failed instead of "crashed or was
-        # interrupted" (LB-272).
+        # interrupted".
         if collector.current_run is not None:
             for _problem in window_problems:
                 if _problem not in collector.current_run.failure_reasons:
@@ -4535,7 +4535,7 @@ def _run_sustained(
             streaming_metrics.requested_executors = requested_executors.get(job_name)
             # A stream failed when it died or was resubmitted inside the
             # window; a gate the run failed is the run's, not every
-            # stream's (LB-272).
+            # stream's.
             streaming_metrics.success = not any(
                 f"lakebench-{job_name} was" in p for p in window_problems
             )

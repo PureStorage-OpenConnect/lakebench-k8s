@@ -1,4 +1,4 @@
-"""Keep a streaming driver's whole log across kubelet log rotation (LB-270).
+"""Keep a streaming driver's whole log across kubelet log rotation.
 
 ``read_namespaced_pod_log`` returns only the kubelet's current log file. A
 streaming driver of a long continuous window writes more than one file holds
