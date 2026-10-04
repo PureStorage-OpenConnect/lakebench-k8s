@@ -451,7 +451,13 @@ def test_a_shallow_history_refuses(tmp_path, monkeypatch):
 
 
 def test_a_tag_pinned_image_is_refused(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
+    # The default image is pinned by digest (tag@sha256), so name a tag alone.
+    cfg = pc.financial_config(
+        env.tmp / "c.yaml",
+        seed=pc.EV,
+        role="evaluation",
+        image="docker.io/sillidata/lb-datagen:1.6.0",
+    )
     r = _gen(cfg, "--registered-corpus", "--yes")
     assert r.exit_code == 2 and "pinned by digest" in r.output, r.output
     assert cluster == [] and not env.ledger.exists()
