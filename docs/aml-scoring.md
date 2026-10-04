@@ -830,7 +830,9 @@ snapshot records none.
 After the score job of a run that passed its gates, `time-travel-financial`
 reads those snapshots back (`spark/scripts/time_travel_financial.py`),
 newest first. A hash pass fingerprints each recorded snapshot still in the
-table over every column, the batch stamping columns included, and writes
+table over its business columns (every column less the batch-version
+sentinels `_batch_id`, `_stream_id`, `ingest_ts`, `committed_at`, the
+definition `scripts/release/silver_parity.py` uses), and writes
 `scoring/<run_id>/tt_hashes.json` with any snapshot it could not read; the
 read pass reads that file back from storage, times a full scan `VERSION AS
 OF` each snapshot with the same fingerprint, and compares it with the

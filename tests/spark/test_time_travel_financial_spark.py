@@ -102,8 +102,12 @@ def mod(load_script, monkeypatch):
     return m
 
 
+#: The batch-version sentinels the CLI sends (metrics.time_travel.SENTINEL_COLUMNS).
+EXCLUDE = ["_batch_id", "_stream_id", "committed_at", "ingest_ts"]
+
+
 def _inputs(records):
-    return {"run_id": "run-tt", "nonce": "n-1", "records": records}
+    return {"run_id": "run-tt", "nonce": "n-1", "exclude_columns": EXCLUDE, "records": records}
 
 
 def test_expired_and_verified_on_a_real_table(spark, mod, three_commits, tmp_path):
@@ -121,6 +125,17 @@ def test_expired_and_verified_on_a_real_table(spark, mod, three_commits, tmp_pat
     assert out["incomplete"] is False
     doc = json.loads((tmp_path / "tt_hashes.json").read_text())
     assert doc["nonce"] == "n-1"
+    # The hash covers the business columns: the column spec is that of the
+    # table less the batch-version sentinels.
+    from common import frame_fingerprint
+
+    df = spark.table(f"lakehouse.{_table}")
+    business = [c for c in df.columns if c not in EXCLUDE]
+    assert business == ["txn_id", "amount", "tags"]
+    want_sha = frame_fingerprint(df, business)[2]
+    assert {h["cols_sha"] for h in doc["hashes"]} == {want_sha}
+    assert want_sha != frame_fingerprint(df, df.columns)[2]
+    assert out["excluded_columns"] == EXCLUDE
     assert sorted(h["snapshot"] for h in doc["hashes"]) == sorted(
         r["snapshot"] for r in records[1:]
     )

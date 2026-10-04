@@ -8,8 +8,11 @@ submits this job with those records (``--input``, written by
 ``cli/_aml_post.run_time_travel``) and reads its result.
 
 1. Hash pass: for each recorded snapshot still in the table's snapshots
-   metadata, newest first, fingerprint the raw snapshot over every column
-   of its schema (``common.frame_fingerprint``; no sealed filter) and write
+   metadata, newest first, fingerprint the raw snapshot over its business
+   columns (``common.frame_fingerprint``; no sealed filter): every column of
+   the snapshot's schema except the batch-version sentinels the input names
+   (``exclude_columns``, the CLI's ``metrics.time_travel.SENTINEL_COLUMNS``,
+   which is release/silver_parity.py's definition), and write
    ``tt_hashes.json``, with the snapshots it could not read. This is the
    order-independent hash computed for that snapshot after the window.
 2. Read pass, the published measurement: re-read ``tt_hashes.json`` from
@@ -111,16 +114,26 @@ def current_snapshot(spark, fq: str) -> int | None:
     return int(rows[0]["snapshot_id"]) if rows else None
 
 
+#: Columns left out of the hash: the batch-version sentinels, from the input
+#: (``exclude_columns``); set by ``time_travel`` before any scan.
+EXCLUDED_COLUMNS: frozenset[str] = frozenset()
+
+
+def business_columns(columns: list[str]) -> list[str]:
+    """The snapshot's columns, in schema order, less ``EXCLUDED_COLUMNS``."""
+    return [c for c in columns if c not in EXCLUDED_COLUMNS]
+
+
 def fingerprint_at(spark, fq: str, sid: int | None) -> dict:
     """``{rows, fp, cols_sha}`` of the raw table at snapshot *sid* (the
-    current table for None), over every column of that snapshot's schema,
-    including the batch stamping columns. One full scan."""
+    current table for None), over its business columns (the batch-version
+    sentinels left out). One full scan; ``rows`` counts every row."""
     df = (
         spark.table(fq)
         if sid is None
         else spark.sql(f"SELECT * FROM {fq} VERSION AS OF {int(sid)}")
     )
-    rows, fp, cols_sha = frame_fingerprint(df, df.columns)
+    rows, fp, cols_sha = frame_fingerprint(df, business_columns(df.columns))
     return {"rows": int(rows), "fp": str(fp), "cols_sha": str(cols_sha)}
 
 
@@ -369,6 +382,14 @@ def read_pass(
 def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget) -> dict:
     """Both passes and the current-snapshot scan: the ``time_travel.json``
     body (without the nonce)."""
+    global EXCLUDED_COLUMNS
+    excluded = inputs.get("exclude_columns")
+    if not isinstance(excluded, list) or not all(isinstance(c, str) for c in excluded):
+        # No business-column definition: hashing every column would publish
+        # another measurement than the one defined. A crash: the CLI reads
+        # not_run.
+        raise SystemExit("tt_input.json names no exclude_columns (the business-column definition)")
+    EXCLUDED_COLUMNS = frozenset(excluded)
     records = [r for r in inputs.get("records") or [] if isinstance(r, dict)]
     names = sorted({str(r.get("table")) for r in records if r.get("table")})
     tables = table_state(spark, names)
@@ -422,6 +443,7 @@ def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget) -> dict:
         current = {"table": readable[0], "not_read": "the time-travel budget ran out"}
     return {
         "status": "read",
+        "excluded_columns": sorted(EXCLUDED_COLUMNS),
         "ticks": ticks,
         "current": current,
         "incomplete": (not complete) or any(t["state"] == NOT_READ for t in ticks),

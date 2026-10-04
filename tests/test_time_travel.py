@@ -65,7 +65,12 @@ def job(load_script, monkeypatch):
 
 
 def _run(job, records, budget=None):
-    inputs = {"run_id": "r", "nonce": "n1", "records": records}
+    inputs = {
+        "run_id": "r",
+        "nonce": "n1",
+        "exclude_columns": sorted(tt.SENTINEL_COLUMNS),
+        "records": records,
+    }
     return job.mod.time_travel(None, inputs, "mem://tt_hashes.json", job.mod.Budget(budget))
 
 
@@ -484,6 +489,7 @@ def test_step_submits_the_job_with_the_records_and_merges_its_result():
     assert out is cont["time_travel"] and out["verdict"] == "pass"
     sent = json.loads(s3.objects["scoring/run-1/tt_input.json"])
     assert [r["snapshot"] for r in sent["records"]] == [T2]
+    assert sent["exclude_columns"] == ["_batch_id", "_stream_id", "committed_at", "ingest_ts"]
     assert "completed" not in sent["records"][0]
     args = jm.submit_job.call_args
     assert args.args[0] == JobType.TIME_TRAVEL_FINANCIAL
@@ -806,3 +812,37 @@ def test_the_settle_carries_the_run_outcome_and_the_stage():
     assert '"interrupted during the time-travel reads"' in body
     assert 'if _stage == "time-travel"' in body
     assert "pipeline_success," in body
+
+
+# --- the hash covers the business columns (SPEC section 8) ------------------
+
+
+def test_the_sentinels_are_silver_paritys():
+    """One business-column definition: the batch-version sentinels that
+    release/silver_parity.py leaves out of its silver hash."""
+    from tests.test_silver_parity import SP
+
+    assert tt.SENTINEL_COLUMNS == SP.SENTINELS
+
+
+def test_the_job_hashes_business_columns_only(job):
+    _run(job, [_rec(2, T2)])
+    cols = ["txn_id", "_batch_id", "txn_amount", "_stream_id", "ingest_ts"]
+    assert job.mod.business_columns(cols) == ["txn_id", "txn_amount"]
+
+
+def test_the_job_refuses_an_input_with_no_column_definition(job):
+    inputs = {"run_id": "r", "nonce": "n1", "records": [_rec(2, T2)]}
+    with pytest.raises(SystemExit, match="exclude_columns"):
+        job.mod.time_travel(None, inputs, "mem://h", job.mod.Budget(None))
+    assert job.scans == []
+
+
+def test_the_record_says_which_columns_were_hashed():
+    got = tt.merge(
+        _continuous([_rec(1, T1)], []),
+        {**_result([(1, "verified")]), "excluded_columns": sorted(tt.SENTINEL_COLUMNS)},
+        POLICY,
+    )
+    assert got["hashed_columns"]["excluded"] == sorted(tt.SENTINEL_COLUMNS)
+    assert got["hashed_columns"]["basis"].startswith("business columns")

@@ -550,6 +550,7 @@ def run_time_travel(
                 {
                     "run_id": run_id,
                     "nonce": nonce,
+                    "exclude_columns": sorted(tt_mod.SENTINEL_COLUMNS),
                     "records": [{k: r.get(k) for k in fields} for r in records],
                 }
             ).encode("utf-8"),

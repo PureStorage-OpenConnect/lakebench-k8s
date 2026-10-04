@@ -977,7 +977,10 @@ Primary: `data_freshness_seconds`, lower is better.
 Each tick records the `silver.transactions` snapshot it read and the
 snapshot summary's record and delete counts, from metadata only. After the
 window a Spark job fingerprints each recorded snapshot still in the table,
-newest first, over every column (`common.frame_fingerprint`), writes the
+newest first, over its business columns (`common.frame_fingerprint`; every
+column less the batch-version sentinels `_batch_id`, `_stream_id`,
+`ingest_ts` and `committed_at`, as `scripts/release/silver_parity.py`
+defines them, recorded in `hashed_columns`), writes the
 hashes to the gold `scoring/<run_id>/` prefix, reads them back, and then
 times a full scan `VERSION AS OF` each snapshot with the same fingerprint.
 Only ticks in the current gold-refresh driver pod's log are read (a driver

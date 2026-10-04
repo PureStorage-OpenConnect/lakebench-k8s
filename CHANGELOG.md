@@ -641,7 +641,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **AML continuous runs re-read the snapshots their ticks read.** After
   the score job of a run that passed its gates, a `time-travel-financial`
   Spark job fingerprints each recorded `silver.transactions` snapshot still
-  in the table, newest first (every column, order-independent), writes the
+  in the table, newest first (its business columns: every column less the
+  batch-version sentinels; order-independent), writes the
   hashes, reads them back, then times a full scan of each snapshot (scan
   plus fingerprint) and compares its rows with the count the tick recorded
   and its fingerprint with the hash. Each tick in

@@ -17,6 +17,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+#: Columns the time-travel hash leaves out: the batch-version sentinels, so
+#: the hash covers the business columns (SPEC section 8, "Time-travel read").
+#: The same set release/silver_parity.py excludes as ``SENTINELS``; a test
+#: keeps the two equal.
+SENTINEL_COLUMNS = frozenset({"_batch_id", "_stream_id", "ingest_ts", "committed_at"})
+
 #: Record states of a snapshot read back intact (``pass`` also needs at
 #: least one ``verified``).
 TT_VERIFIED_STATES = ("verified", "verified_hash_only")
@@ -208,6 +214,11 @@ def merge(
     tt["current_read_s"] = (result.get("current") or {}).get("read_s")
     tt["current"] = result.get("current")
     tt["policy"] = pol
+    tt["hashed_columns"] = {
+        "basis": "business columns: every column of the snapshot schema less the "
+        "batch-version sentinels",
+        "excluded": result.get("excluded_columns"),
+    }
     if budget is not None:
         tt["budget"] = dict(budget)
     tt["verdict"] = verdict
