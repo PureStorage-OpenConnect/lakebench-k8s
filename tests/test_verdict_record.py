@@ -858,16 +858,6 @@ def _benchmark_record() -> dict:
     return rec
 
 
-def test_benchmark_record_is_not_a_compare_member() -> None:
-    """Even named directly to the ladder, a benchmark record is no member."""
-    from lakebench.metrics import comparability as cmp
-
-    bench = _benchmark_record()
-    v = cmp.pair_verdict([bench], [sr.load_record(C360_BATCH)])
-    assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "1")
-    assert "a benchmark record of run 20260929-212900-5105a0" in v.reasons[0]
-
-
 def test_benchmark_record_is_refused_by_release_and_perf_readers() -> None:
     from lakebench.metrics import release_record as rr
 
@@ -931,25 +921,6 @@ def test_verdict_of_an_unreadable_record_is_failed() -> None:
 def test_verdict_of_a_summary_row_is_what_it_stored() -> None:
     row = {"run_id": "r", "success": True, "verdict": {"status": "PASSED"}}
     assert V.verdict_of(row) == {"stored": "PASSED", "recomputed": None, "status": "PASSED"}
-
-
-def test_compare_member_verdict_is_a_status_and_the_reason_says_why(tmp_path: Path) -> None:
-    """compare --json members[].verdict is a status, as report --json's; the
-    explanation is in reason. An unreadable record is refused, not a crash."""
-    from lakebench.metrics import compare as cm
-
-    bad = sr.load_record(C360_BATCH)
-    _silver_zero(bad)
-    doc = cm.compare_records([bad], [sr.load_record(C360_BATCH)])
-    (member,) = doc["sides"]["a"]["members"]
-    assert member["verdict"] == "FAILED" and member["excluded"]
-    assert member["reason"].startswith("recomputed FAILED: silver has 0 rows")
-    broken = sr.load_record(C360_BATCH)
-    broken["jobs"][0]["start_time"] = "not a time"
-    doc = cm.compare_records([broken], [sr.load_record(C360_BATCH)])
-    (member,) = doc["sides"]["a"]["members"]
-    assert member["verdict"] == "FAILED"
-    assert member["reason"].startswith("the verdict could not be recomputed")
 
 
 def test_text_report_heads_with_the_strictest_verdict(monkeypatch, tmp_path: Path) -> None:

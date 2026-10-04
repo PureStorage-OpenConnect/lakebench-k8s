@@ -1069,24 +1069,6 @@ def test_seed_is_protected_by_hash_and_fails_closed(held, monkeypatch):
     assert ds.seed_is_protected(43), "an unreadable record must hide every seed"
 
 
-def test_compare_redaction_uses_the_hash_record(held, monkeypatch):
-    # The real _hidden_seeds, not a stubbed frozenset: a held-out seed is
-    # hidden in a seed field and in text, a development seed is shown, and an
-    # unreadable record hides every integer seed.
-    from lakebench.metrics import compare
-
-    hidden = compare._hidden_seeds()
-    assert isinstance(hidden, compare.ProtectedSeeds)
-    doc = {"seed": EV, "dev": {"seed": 43}, "note": f"corpus seed {EV} differs"}
-    out = compare.redact(doc, hidden)
-    assert out["seed"] == "<protected seed>" and out["dev"]["seed"] == 43
-    assert _no_seed_in(json.dumps(out))
-    assert (hidden - {EV}).__contains__(EV) is False  # public seeds subtract
-    monkeypatch.setattr(ds, "_heldout", _gone)
-    assert compare._hidden_seeds() is None
-    assert compare.redact({"seed": 43}, None)["seed"] == "<protected seed>"
-
-
 def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch):
     from lakebench.cli import _reproduce as rep
 

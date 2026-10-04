@@ -12,8 +12,8 @@ Support is judged in four layers:
 Passing all four is ``supported``; passing 1 to 3 only is ``unverified``;
 failing any of 1 to 3 is ``unsupported`` and refused before a run. This module
 is the one place that computes the state: the metrics ``experiment`` block,
-``lakebench config show``, ``lakebench config recipes``, the report, compare
-and the docs tables all read it from here.
+``lakebench config show``, ``lakebench config recipes``, the report and
+the docs tables all read it from here.
 """
 
 from __future__ import annotations

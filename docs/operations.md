@@ -176,6 +176,6 @@ files, and leaves the infrastructure up (`src/lakebench/cli/_clean.py`). See
 Every command writes under `lakebench-output/` in the working directory:
 `runs/run-<id>/` holds each run's `metrics.json` and `report.html`, and
 `journal/` the session provenance logs. Keep that directory: `results`,
-`report`, `compare` and `reproduce` read the records in it. The root is
+`report` and `reproduce` read the records in it. The root is
 `src/lakebench/_constants.py:DEFAULT_OUTPUT_DIR`; the layout is described in
 [Benchmarking](benchmarking.md).

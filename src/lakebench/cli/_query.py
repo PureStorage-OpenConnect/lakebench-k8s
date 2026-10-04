@@ -607,7 +607,7 @@ def _save_benchmark_record(
     memory; its file is never opened for writing). The new record is that
     copy with *result* as its benchmark everywhere a reader takes a QpH
     from: ``benchmark``, the pipeline benchmark's ``query_benchmark`` and
-    query stage (so its scores, ``compare`` and the HTML card show this
+    query stage (so its scores and the HTML card show this
     benchmark), and the experiment block's benchmark half. A continuous
     parent's in-stream rounds are dropped from the copy, with the aggregates
     taken from them and the experiment block's round counts: they are the

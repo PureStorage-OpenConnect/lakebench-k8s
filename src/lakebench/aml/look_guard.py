@@ -10,7 +10,8 @@ silently. One guard serves every caller:
   ``corpus_role`` or whose ``datagen.seed`` hashes to a held-out seed
   (``heldout_hashes.json`` and the compiled floor);
 - ``protected_record_reason(record)``: a stored run record whose corpus is a
-  protected one, for ``compare``, the release gate and the held-out audit;
+  protected one, for ``financial reproduce``, the release gate and the
+  held-out audit;
 - ``manifest_protected_reason(rows)``: a corpus manifest, over every row
   (``config/datagen_seed.py``, which also ships flat to the Spark driver);
 - ``refuse_if_protected(cfg, verb)``: the refusal itself, exit 2 on the
@@ -294,13 +295,10 @@ def protected_record_reason(
     that names a held-out seed in any form ``recorded_seed_role`` reads, or
     is withheld. With ``fail_closed`` (the default), a financial record whose
     held-out check cannot run because the held-out record cannot be read is
-    refused; ``compare``, which spends nothing and then hides every value that
-    reads as an integer seed, passes False. The release gate and the
-    held-out audit are to call it with the fail-closed defaults. With ``require_identity`` (the release gate and the
-    audit), a financial record with no corpus block or no seed is refused as
+    refused. With ``require_identity`` (the release gate and the audit), a
+    financial record with no corpus block or no seed is refused as
     unidentified, and so is one whose seed is in no form the guard can read
-    (``seed_readable``); ``compare`` passes False and shows such a record as
-    not established instead."""
+    (``seed_readable``)."""
     if not isinstance(record, Mapping):
         return "the record cannot be read"
     exp = record.get("experiment")
@@ -348,11 +346,11 @@ def refuse_protected_records(
     verb: str,
     *,
     require_identity: bool = False,
-    fail_closed: bool = False,
+    fail_closed: bool = True,
 ) -> None:
     """Raise UsageError (exit 2) for the first ``(run_id, record)`` whose
-    record is from a protected AML corpus. The defaults are compare's: a
-    record is refused only when it is shown to be protected."""
+    record is from a protected AML corpus. Fail-closed by default: a
+    financial record whose held-out check cannot run is refused."""
     for run_id, record in records:
         reason = protected_record_reason(
             record, require_identity=require_identity, fail_closed=fail_closed

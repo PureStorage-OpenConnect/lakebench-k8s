@@ -402,7 +402,7 @@ class ReportGenerator:
 
         # Take the pass/fail bit from the run's verdict so the badge
         # agrees with every other reader wired in A2b (CLI list, perf
-        # gate, compare all read verdict.status). Reasons stay from the
+        # gate all read verdict.status). Reasons stay from the
         # badge helper so the tooltip still names what went wrong.
         # Warnings are amber-badge only and never flip the pass/fail bit.
         verdict = compute_verdict(metrics)
@@ -3417,7 +3417,14 @@ class ReportGenerator:
 
         digest = dg.get("digest") or f"unresolved: {dg.get('digest_reason', 'unknown')}"
         caps_hit = [x["job_type"] for x in lim.get("executors") or [] if x.get("cap_hit")]
+        try:
+            from lakebench.metrics.experiment import identity_hash
+
+            ident = identity_hash(exp)
+        except Exception:  # noqa: BLE001
+            ident = "unresolved"
         rows = [
+            ("Experiment identity digest", ident),
             ("Workload", f"{w.get('name')} {w.get('version')}"),
             ("Generator model version", w.get("generator_model_version") or "none"),
             ("Corpus id", c.get("id")),
@@ -3502,14 +3509,47 @@ class ReportGenerator:
         fp_html = (
             f"<p>{e(note)}</p>"
             if note
-            else f"<table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead>"
+            else f"<p>Query set <code class='mono'>{e(str(res.get('query_set_id') or 'unknown'))}"
+            "</code></p>"
+            f"<table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead>"
             f"<tbody>{fp_rows}</tbody></table>"
         )
         return (
             "<section><h2>Experiment</h2>"
+            "<p>Two runs with equal identity digests are repeats of one experiment. Two runs "
+            "that differ in one thing (the recipe, say) can be compared when their workload, "
+            "corpus and mode match and every result fingerprint below (and, for an AML batch "
+            "run, the alert set) is equal.</p>"
             f"<table><tbody>{body}</tbody></table>"
             "<h3>Result fingerprints</h3>"
-            f"{fp_html}</section>"
+            f"{fp_html}{self._alert_set_html(exp)}</section>"
+        )
+
+    @staticmethod
+    def _alert_set_html(exp: dict) -> str:
+        """The AML batch alert set (per rule: alerts and an order-independent
+        hash), or why it is missing; "" for a run that records none."""
+        from lakebench.metrics.alert_set import alert_set_missing, alert_set_of
+
+        e = _html_escape
+        value = alert_set_of(exp)
+        if value is None:
+            missing = alert_set_missing(exp)
+            return f"<h3>Alert set</h3><p>{e(missing)}</p>" if missing else ""
+        by_rule = value.get("by_rule") or {}
+        body = "".join(
+            f"<tr><td>{e(str(r))}</td><td>{e(str(p.get('rows')))}</td>"
+            f"<td><code class='mono'>{e(str(p.get('h')))}</code></td></tr>"
+            for r, p in sorted(by_rule.items())
+        )
+        body += (
+            f"<tr><td>total</td><td>{e(str(value.get('rows')))}</td>"
+            f"<td><code class='mono'>{e(str(value.get('h')))}</code></td></tr>"
+        )
+        return (
+            "<h3>Alert set</h3>"
+            "<table><thead><tr><th>Rule</th><th>Alerts</th><th>Hash</th></tr></thead>"
+            f"<tbody>{body}</tbody></table>"
         )
 
     # Infrastructure pods excluded from the per-stage summary table

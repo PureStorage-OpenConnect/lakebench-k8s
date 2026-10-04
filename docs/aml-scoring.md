@@ -355,7 +355,7 @@ seeds are registered as salted hashes in `heldout_hashes.json`, next to
 `aml_preregistration.json`, and are refused at config load unless
 `workload.datagen.corpus_role` declares the matching role. Even then,
 every command that reads or scores data (`run`, `benchmark`, `query`,
-`compare`, `reproduce` and the `financial` subcommands) refuses the
+`reproduce` and the `financial` subcommands) refuses the
 protected corpus with exit 2 before any cluster call: its corpus is
 generated only with `lakebench generate --registered-corpus --yes`, which
 records the attempt in `~/.lakebench/aml_corpora.jsonl` first, and scored
@@ -728,16 +728,15 @@ keeps it as `experiment.results.alert_set`:
   their totals. `spec` (`as1`) and `cols_sha` name the definition and the
   column types. The value is the same on the Spark 4.0 and 4.1 lines.
 
-`lakebench compare` treats a different alert set like a different query
-result: any rule whose count or hash differs makes the pair NOT
-COMPARABLE (exit 10), and the reason names the rule. An AML batch record
-written by 1.7 (exp2, or exp1 with `v2_unavailable`) that has no alert set,
-because the fingerprint failed (the reason is in
-`results.alert_set_unavailable`) or gold-finalize did not run, has results
-not established: NOT ESTABLISHED (exit 11), never compared on its query
-results alone. The perf gate and `reproduce` refuse such a run too; they
+A different alert set is a different result, like a different query
+result: two runs where any rule's count or hash differs are not
+comparable. An AML batch record written by 1.7 (exp2, or exp1 with
+`v2_unavailable`) that has no alert set, because the fingerprint failed
+(the reason is in `results.alert_set_unavailable`) or gold-finalize did not
+run, cannot show its results match another run's; do not compare it on its
+query results alone. The perf gate and `reproduce` refuse such a run; they
 do not yet compare alert sets with their baseline or package. Records from
-1.6 have no alert set, and two of them compare as before. A rule that ran
+1.6 have no alert set. A rule that ran
 and raised no alert is absent from `by_rule`, like a rule that did not run;
 which rules ran is recorded separately (`experiment.rules`).
 
@@ -1026,8 +1025,8 @@ probes `gold.cases` for the run's `base_run_id` (untimed) and runs the 12-query
 set when a row comes back, or the 8-query set before the first TM pass, labelled
 `investigator_queries: absent_no_cases` (`probe_failed` when the probe errors).
 Such a run's rounds usually span both sets, so its in-stream composite QpH reads
-`blended`, with the median per set in `scores.composite_qph_by_set`. QpH is recorded with its query-set id; `compare` and
-`reproduce` refuse to compare QpH across different query sets, so an 8-query
+`blended`, with the median per set in `scores.composite_qph_by_set`. QpH is recorded with its query-set id; `reproduce`
+refuses to compare QpH across different query sets, so an 8-query
 AML run is never set against a 12-query one. A run recorded before the id
 existed gets a pinned historical id when its query names are the c360 set or
 the 8-query AML set and was recorded after that set's last SQL change (so
@@ -1051,9 +1050,8 @@ settled, they return the batch answer. The change moved the AML query-set
 id (12 queries and the 8 before the first TM pass), so no record from
 before it compares with one after; it is part of workload version `aml-2`.
 A batch record is still never compared with a continuous one: the mode is a
-workload identity key, so `compare` stops at "one workload on one corpus"
-before reading any result, and the perf gate and `reproduce` refuse the
-pair.
+workload identity key, so the two are not comparable, and the perf gate
+and `reproduce` refuse the pair.
 
 **Investigators under load (`architecture.benchmark.investigator_sessions`).**
 Set to N (1 to 32) on an AML config with TM operations on Trino or Spark

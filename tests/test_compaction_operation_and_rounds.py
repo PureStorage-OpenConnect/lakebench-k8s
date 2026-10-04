@@ -8,7 +8,6 @@ blended and not assessed in compare.
 
 from __future__ import annotations
 
-import io
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -255,73 +254,7 @@ def test_a_stored_round_with_a_failed_query_is_blended():
     assert composite_qph_basis(rounds)[0]["blended"] is True
 
 
-def _pair(edit_a=None, edit_b=None) -> dict:
-    """compare over one stored continuous record against itself, after
-    *edit_a* / *edit_b* change a side's rounds."""
-    from lakebench.metrics.compare import compare_records
-
-    a = sr.load_record("011043-e338c5")
-    b = sr.load_record("011043-e338c5")
-    b["run_id"] = "20260927-011043-bbbbbb"
-    for rec, edit in ((a, edit_a), (b, edit_b)):
-        if edit:
-            edit(rec["pipeline_benchmark"]["benchmark_rounds"])
-    return {r["metric"]: r for r in compare_records([a], [b])["metrics"]}
-
-
 ROUND_MEDIANS = ("composite_qph", "in_stream_composite_qph", "qph_degradation_pct")
-
-
-def _fail_one_round(rounds):
-    rounds[1]["queries"][0]["success"] = False
-
-
-def _fail_every_round(rounds):
-    for r in rounds:
-        r["queries"][0]["success"] = False
-
-
-def test_compare_does_not_assess_a_blended_composite():
-    """A side whose rounds ran different query sets (here a stored record,
-    which keeps no basis, read from its rounds as the perf gate and
-    reproduce read it): its round medians are not assessed, named per
-    side; other rows are untouched."""
-    from lakebench.metrics.compare import NOT_ASSESSED
-
-    clean = _pair()
-    assert all("query set" not in (clean[m]["hint"] or "") for m in ROUND_MEDIANS)
-    for kw, label in (({"edit_a": _fail_one_round}, "A"), ({"edit_b": _fail_one_round}, "B")):
-        rows = _pair(**kw)
-        for metric in ROUND_MEDIANS:
-            assert rows[metric]["assessment"] == NOT_ASSESSED
-            assert f"rounds ran different query sets ({label})" in rows[metric]["hint"]
-            assert rows[metric]["winner"] is None
-        assert "query set" not in (rows["data_freshness_seconds"]["hint"] or "")
-
-
-def test_the_rounds_reason_reaches_the_table_and_the_csv():
-    from rich.console import Console
-
-    from lakebench.cli import _compare as cli_compare
-    from lakebench.metrics.compare import compare_records, to_csv
-
-    a = sr.load_record("011043-e338c5")
-    b = sr.load_record("011043-e338c5")
-    b["run_id"] = "20260927-011043-bbbbbb"
-    _fail_one_round(a["pipeline_benchmark"]["benchmark_rounds"])
-    doc = compare_records([a], [b])
-    rows = {r["metric"]: r for r in doc["metrics"]}
-    assert rows["composite_qph"]["rounds"] == "rounds ran different query sets (A)"
-    assert rows["data_freshness_seconds"]["rounds"] is None
-    csv_text = to_csv(doc)
-    assert csv_text.splitlines()[
-        next(i for i, line in enumerate(csv_text.splitlines()) if line.startswith("metric,"))
-    ].endswith(",rounds")
-    assert "rounds ran different query sets (A)" in csv_text
-    buf = io.StringIO()
-    with mock.patch.object(cli_compare, "console", Console(file=buf, width=300)):
-        cli_compare._print_table(doc)
-    assert "not_assessed: rounds ran different query sets (A)" in buf.getvalue()
 
 
 def test_a_mode_less_round_median_is_still_blended_by_rounds():
@@ -332,14 +265,6 @@ def test_a_mode_less_round_median_is_still_blended_by_rounds():
     for key in ROUND_MEDIANS:
         assert lookup(key, None).blended_by_rounds is True
     assert lookup("composite_qph", "batch").blended_by_rounds is False
-
-
-def test_compare_does_not_assess_rounds_that_all_missed_a_query():
-    """Every round missed the same query: one executed set, not blended, but
-    smaller than the other side's, so the medians are not assessed."""
-    rows = _pair(edit_a=_fail_every_round)
-    for metric in ROUND_MEDIANS:
-        assert "every round missed a query (A)" in rows[metric]["hint"]
 
 
 def test_two_blends_are_not_one_query_set():
@@ -414,14 +339,13 @@ def test_perf_gate_excludes_a_blended_composite(tmp_path):
 
 
 def test_odd_stored_rounds_do_not_crash_the_basis():
-    from lakebench.metrics.storage import recorded_executed_query_set, recorded_qph_basis
+    from lakebench.metrics.storage import recorded_qph_basis
 
     a = sr.load_record("011043-e338c5")
     rounds = a["pipeline_benchmark"]["benchmark_rounds"]
     rounds[0]["qph"] = None
     rounds.append("not a round")
     assert recorded_qph_basis(a)["blended"] is False
-    assert recorded_executed_query_set(a) is None
 
 
 def test_mixed_compaction_operations_are_named_mixed():
@@ -536,19 +460,6 @@ def test_recorded_rounds_that_all_missed_a_query_read_the_smaller_set():
     for i in range(3):
         c.record_round(_round(EIGHT, index=i))
     assert executed_subset_query_set(c.current_run.benchmark_rounds) is None
-
-
-def test_a_legacy_subset_never_hashes_todays_sql():
-    """A stored round from before the round record that missed a query in
-    every round maps its executed names through the legacy table, so it
-    never shares an id with a current run over today's SQL."""
-    from lakebench.benchmark.queries import query_set_id
-    from lakebench.metrics.storage import recorded_executed_query_set
-
-    a = sr.load_record("011043-e338c5")
-    _fail_every_round(a["pipeline_benchmark"]["benchmark_rounds"])
-    names = [q["name"] for q in a["pipeline_benchmark"]["benchmark_rounds"][0]["queries"][1:]]
-    assert recorded_executed_query_set(a) not in (None, query_set_id(names))
 
 
 # --- QpH degradation over rounds of different query sets (owner, 10-03) -------

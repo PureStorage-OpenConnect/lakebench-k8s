@@ -130,22 +130,15 @@
   text: '`clean metrics`, `clean journal` and `clean --metrics-dir` are refused (exit 2): records and
     journals are evidence.'
   fix: Delete run records or journals by hand if you must; the CLI does not.
-- id: compare-runs-nothing
-  title: compare runs nothing
+- id: compare-is-removed
+  title: compare is removed
   kind: refused-command
-  subject:
-  - compare --keep
-  - compare --generate
-  - compare --local
-  - compare --skip-benchmark
-  - compare --timeout
-  - compare --scale
-  - compare --yes
-  - compare -y
-  source: src/lakebench/cli/_aliases.py:REFUSED_FLAGS
-  text: '`compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`,
-    ...) exit 2.'
-  fix: Run each side with `lakebench run` (add `--repeat 3`), then `lakebench compare A.yaml B.yaml`.
+  subject: compare
+  source: src/lakebench/cli/_aliases.py:REFUSED
+  text: '`lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each
+    report states the corpus, components, result fingerprints and caps needed to judge a comparison.'
+  fix: Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench
+    report CONFIG`); see Comparing Runs in docs/benchmarking.md.
 - id: init-refuses-credential-values
   title: init refuses credential values
   kind: refused-command
@@ -259,19 +252,6 @@
   source: src/lakebench/exit_codes.py:PATHS
   text: A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
   fix: Read `verdict.reasons` in `metrics.json` instead of the exit code.
-- id: compare-exits-with-its-verdict
-  title: compare exits with its verdict
-  kind: exit-code
-  subject:
-  - compare.not_comparable
-  - compare.not_established
-  - compare.not_like_for_like
-  - compare.confounded
-  source: src/lakebench/exit_codes.py:PATHS
-  text: '`compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like
-    and 13 confounded (all were 0).'
-  fix: Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the
-    `cmp2` document.
 - id: customer-360-records-carry-a-new-workload-version
   title: Customer 360 records carry a new workload version
   kind: identity
@@ -296,8 +276,8 @@
   source: src/lakebench/metrics/comparability.py:access_paths
   text: 'Experiment identity v2: the system and the query access path are architecture and system groups,
     no longer conditions that make a pair not like-for-like.'
-  fix: Re-read stored pairs with `lakebench compare`; a pair whose architecture and system both differ
-    is confounded.
+  fix: Re-run a baseline under 1.7 before comparing; when the architecture and the system both differ,
+    no difference can be put down to either.
 - id: continuous-pairs-with-different-round-counts-are-not-like-for-like
   title: Continuous pairs with different round counts are not like-for-like
   kind: identity
@@ -571,7 +551,7 @@
   subject:
   - verdict.passed
   source: src/lakebench/metrics/verdict.py:verdict_of
-  text: '`compare`, `report`, the perf gate and the release gate read the stricter of a record''s stored
+  text: '`report`, the perf gate and the release gate read the stricter of a record''s stored
     verdict and the one recomputed from it: three stored AML batch records without a watchlist now read
     FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.'
   fix: Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed`
@@ -639,7 +619,7 @@
   kind: default-change
   subject: protected AML corpus
   source: src/lakebench/aml/look_guard.py:refuse_if_protected
-  text: '`run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
+  text: '`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
   fix: 'Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.'
 - id: financial-reproduce-reruns-the-alerts-rule-on-what-gold-read
   title: financial reproduce reruns the alert's rule on what gold read

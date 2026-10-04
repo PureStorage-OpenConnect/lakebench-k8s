@@ -28,7 +28,7 @@ Exit codes are listed in [Exit Codes](exit-codes.md).
 
 ### Machine-readable output (`--json`)
 
-`plan`, `status`, `report`, `config recipes`, `compare` and `query` take
+`plan`, `status`, `report`, `config recipes` and `query` take
 `--json`. The command then writes exactly one JSON document to stdout and
 every human line to stderr:
 
@@ -51,11 +51,10 @@ Spark Thrift's tsv2 has one, and DuckDB returns up to 100 rows as Python
 reprs; `count` is the rows the engine returned. `report --json` gives the
 scores as stored and the verdict three ways: `verdict_stored` as the
 record holds it, `verdict_recomputed` from the record's own fields, and
-`verdict`, the stricter of the two, which is what `compare`, the perf gate
+`verdict`, the stricter of the two, which is what the perf gate
 and the release gate read (`report --list --json` rows carry the same
-three). `compare --json`
-carries the `cmp2` document `--format json` writes; `--json` does not
-combine with `--format` on `report`, `compare` or `query`, nor with
+three). `--json` does not
+combine with `--format` on `report` or `query`, nor with
 `status --local` or `query --interactive`. `plan --json` makes no cluster
 call, as before.
 
@@ -113,158 +112,6 @@ export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
 # Another recipe and endpoint, credentials from MY_LAB_ACCESS_KEY / MY_LAB_SECRET_KEY
 lakebench init -r hive-iceberg-spark-trino --endpoint http://my-s3:80 --credentials-env MY_LAB
 ```
-
-### compare
-
-Compare two sides of stored run records. `compare` is read-only: it reads
-`metrics.json` files and series manifests, and deploys, runs, generates and
-destroys nothing.
-
-<!-- BEGIN GENERATED: cli compare (scripts/gen_cli_reference.py) -->
-```
-lakebench compare SIDE_A SIDE_B [OPTIONS]
-```
-
-| Argument | Required | Description |
-|---|---|---|
-| `SIDE_A` | yes | Side A (the baseline): run ids, run directories, metrics.json files, series:<id> or a config, comma-separated |
-| `SIDE_B` | yes | Side B (the candidate), in the same forms |
-
-| Flag | Short | Type | Default | Description |
-|---|---|---|---|---|
-| `--runs-dir` |  | path, repeatable |  | Directory of run-<id>/ records (repeatable; default lakebench-output/runs) |
-| `--format` |  | text | `table` | Output format: table, json, csv |
-| `--output` | `-o` | path |  | Write the comparison (json, or csv) to this file |
-| `--json` |  | flag |  | Write one lb-cli/1 JSON document to stdout; human text goes to stderr |
-
-Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
-
-- `0` `compare.like_for_like`: `compare` finds the sides like-for-like
-- `2` `compare.equal_names`: `compare` was given two configs with the same deployment name and different contents
-- `2` `compare.bad_ref`: a `compare` side names a run, record, series or config that resolves to no record
-- `2` `compare.same_runs`: the two `compare` sides resolve to the same runs, or share a run
-- `2` `compare.unreadable_record`: a `compare` record or series manifest cannot be read, or two files disagree about one run
-- `2` `compare.removed_flag`: a flag of the `compare` that ran both configs; the message names the replacement
-- `10` `compare.not_comparable`: `compare` verdict
-- `11` `compare.not_established`: `compare` verdict
-- `12` `compare.not_like_for_like`: `compare` verdict
-- `13` `compare.confounded`: `compare` verdict
-<!-- END GENERATED: cli compare -->
-
-- `--runs-dir` can be repeated to search several directories; series
-  manifests are read from each directory's sibling `series/`.
-- `--output` writes the comparison (JSON, or CSV with `--format csv`);
-  nothing is written without it. A path that is one of the inputs, is named
-  `metrics.json`, or lies inside a runs or series directory is refused.
-
-A side is one or more comma-separated refs. Each ref is tried in this order:
-
-1. `series:<id>`: the members of a `run --repeat` series, read from its
-   manifest `<output dir>/series/<id>.json`.
-2. A run id (`20260929-212900-5105a0`, with or without `run-`), looked up in
-   every `--runs-dir` (default `lakebench-output/runs`). Two directories
-   holding different files for one run id are refused.
-3. A run directory holding `metrics.json`, or a path to a `metrics.json`.
-4. A config (`.yaml`/`.yml`): the latest run record of its deployment name,
-   by `start_time`. When that record belongs to a series, every member the
-   series manifest names is taken; a series whose manifest is missing is
-   refused (pass the run ids instead). A record in the runs directories
-   that cannot be read is skipped with a warning naming it.
-
-Side A is the baseline and B the candidate; deltas are B relative to A.
-
-```bash
-lakebench compare 20260929-212900-5105a0 20260929-214442-825153
-lakebench compare a.yaml b.yaml --format json -o comparison.json
-lakebench compare series:s-20261101-120000-a1b2c3 b.yaml
-lakebench compare r1,r2,r3 r4,r5,r6 --runs-dir lakebench-output/runs
-```
-
-The flags of the earlier `compare`, which ran both configs (`--keep`,
-`--scale`, `--skip-benchmark`, `--timeout`, `--local`, `--generate`,
-`--yes`), are refused with exit 2 and the replacement: run each side first
-with `lakebench run`, then compare.
-
-**Resolution.** Before anything else `compare` prints, on stderr, how each
-side resolved: its refs, deployment, series and every member with its
-verdict, for example `A: a.yaml -> deployment lb-a1, series s-..., 3 runs:
-r1 passed, r2 passed, r3 FAILED: ... (excluded)`. A member whose verdict did
-not pass is excluded and listed; n counts the passed members. A record
-written before the experiment block is not excluded: the pair is refused
-on it. Two sides that resolve to the same runs, or share a run, are
-refused, as are two configs with one deployment name and different
-contents, whether on two sides or listed on one ("a name is one
-deployment"). The same config, or a byte-equal copy, given twice is not an
-equal-name refusal; given as both sides it is the same runs, refused as
-such.
-
-**Verdicts.** The pair is decided by the comparability ladder over the
-passed members, and the exit code is the verdict:
-
-| Verdict | Meaning | Exit |
-|---|---|---|
-| LIKE-FOR-LIKE | Same experiment, equal results, same execution conditions. The attribution says what differs: the architecture, the system, or nothing (a repeat) | 0 |
-| NOT COMPARABLE | Different experiments (workload, version, mode, corpus, seed, scale, generator), different results (benchmark query results, or an AML batch alert set), a run that did not pass, a record without the experiment block, or a side whose runs are not one experiment (a side whose runs differ only in in-stream rounds or investigator sessions is one experiment: NOT LIKE-FOR-LIKE) | 10 |
-| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results (no benchmark, a recipe without a query engine, a continuous run without an end-of-run result check, an AML batch record from 1.7 without its alert-set fingerprint) | 11 |
-| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs: effective maintenance or its compaction operation (maintenance skipped by the user on both sides counts as the same, across table formats), maintenance settings, benchmark iterations or mode, in-stream rounds (between the sides or inside one), the Lakebench limits that bound; or the only architecture difference is the dependency set | 12 |
-| CONFOUNDED | Comparable, but the architecture and the system both differ, so no difference can be put down to either | 13 |
-
-Usage errors (a ref that resolves to nothing, the same runs on both sides,
-an unreadable record or manifest, a removed flag, an unsupported format)
-exit 2.
-
-**The missing condition.** Every verdict comes with the one condition the
-pair lacks, for the first ladder step that failed, and, where one exists,
-the command that supplies it, for example "corpus scale differs (1 vs 10).
-Missing: the same corpus. Set `architecture.workload.datagen.scale: 1` in
-b.yaml, then `lakebench run b.yaml --generate --regenerate`" (a continuous
-side regenerates with `lakebench run <config> --continuous`). Some
-conditions have no command: two table formats that run different
-maintenance operations, compaction by different engines, a Lakebench
-bound, a differing round count. Commands name the side's config from its
-record (`provenance.config_path`), or "the config of deployment <name>"
-for a record that does not carry it. A continuous side cannot be repeated
-with `--repeat`, so its hint says to run it again with `--continuous` and
-pass the run ids. Two continuous runs on one side whose in-stream rounds
-differ are still one experiment (rounds are an outcome of speed): the pair
-is NOT LIKE-FOR-LIKE, with no command. A run with no in-stream round (its
-QpH is the post-stream benchmark) beside runs with rounds is not one
-experiment.
-
-**Metrics.** Each score is shown with the median, range and n of each side
-and the delta of the medians. No winner is named and no colour marks a
-better side: the winner rule is not in this release. Each row's
-`assessment` says what may be read from it:
-
-| Assessment | When |
-|---|---|
-| `withheld` | The pair is NOT COMPARABLE or NOT ESTABLISHED; the delta is not computed |
-| `not_directional` | The score has no better side (correctness, guard and diagnostic scores, scores that follow the config, a score the registry does not know, or a mode-dependent score on a record without a mode) |
-| `confounded` | The pair is confounded |
-| `not_assessed` | A median over in-stream rounds (`composite_qph`, `in_stream_composite_qph`, `qph_degradation_pct`) on a side whose rounds ran different query sets or all missed the same query, on any pair that is not withheld (the hint names the side); every other directional row: on a NOT LIKE-FOR-LIKE pair because the pair is not like-for-like, otherwise because the winner rule is not in this release |
-| `capped` | On a like-for-like pair, a Lakebench limit bound the row on a passed member of either side (a bound kind the row depends on, or the trickle of a continuous run): the figure measures that limit, not the system |
-
-Whatever its assessment, a row that a Lakebench limit bound on either side
-lists the limit in `capped_by` (`bound_by` in the CSV), and the table says
-BOUNDED BY it. Directions come from the metric registry
-(`metrics/metric_registry.py`).
-
-**Output.** `--format json` (and `-o`) writes the `cmp2` document:
-`verdict`, `exit_code`, `step`, `attribution`, `missing` (`condition`,
-`command`, `hint`), `cause`, `reasons`, `notes`, `sides` (per side: `refs`,
-`deployment`, `series`, `members` with `run_id`, `verdict`, `digest`,
-`excluded` and `reason`, `n_attempted`, `n_passed`, the first passed
-member's `experiment` block, `support`, `bound`), `groups` (the differing
-keys per identity group), `warnings` and `metrics` (per row: `metric`,
-`unit`, `direction`, `a` and `b` with `median`, `min`, `max`, `values`, `n`,
-`delta_pct`, `assessment`, `winner` (always null), `missing`, `hint`,
-`capped_by`, and `rounds`, which says why a round median is not assessed
-for its rounds, else null). `--format csv` writes the header fields as `# key: value`
-lines, then one row per metric with `metric`, the medians and ranges,
-`delta_pct`, `verdict`, `attribution`, `n_a`, `n_b`, `assessment`,
-`bound_by` and `rounds`; the table prints the `rounds` reason after the
-assessment. A protected or spent AML seed is never printed; it reads
-`<protected seed>`.
 
 ### config
 
@@ -1605,7 +1452,7 @@ list is `lakebench.cli._aliases`.
 | `clean data` | refused (exit 2): a run regenerates its own corpus, so the corpus a record names is the one it read | lakebench clean silver CONFIG and lakebench clean gold CONFIG, then lakebench run CONFIG --generate --regenerate; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first (an owner action) |
 | `clean metrics` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
 | `clean journal` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
-| `compare --keep`, `compare --generate`, `compare --local`, `compare --skip-benchmark`, `compare --timeout`, `compare --scale`, `compare --yes`, `compare -y` | refused (exit 2): compare reads stored records and no longer runs configs | lakebench run A.yaml and lakebench run B.yaml (add --repeat 3), then lakebench compare A.yaml B.yaml |
+| `compare` | refused (exit 2): comparing runs is left to the reader, and each report states the data, recipe, versions, result fingerprints and caps needed to judge a comparison | lakebench report RUN_A and lakebench report RUN_B, then read the two reports side by side |
 | `init --access-key`, `init --secret-key` | refused (exit 2): init writes a reference to the variable, never the key | export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY (or the names --credentials-env PREFIX gives) |
 | `clean --metrics-dir`, `clean -m` | refused (exit 2): run records and journals are evidence, and the CLI does not delete them | nothing |
 <!-- END GENERATED: cli aliases -->

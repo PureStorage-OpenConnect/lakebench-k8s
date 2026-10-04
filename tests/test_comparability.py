@@ -9,7 +9,6 @@ maintenance id, provenance) in the test, never from the code under test.
 from __future__ import annotations
 
 import copy
-import json
 import tempfile
 from pathlib import Path
 
@@ -132,7 +131,6 @@ class TestIdentityVersions:
         exp = sr.load_record(run_id)["experiment"]
         assert ex.identity(exp) == ex._identity_v1(exp)
         assert ex.identity_hash(exp) == EXPECTED[run_id]["identity_digest"]
-        assert ex.identity_digest(sr.load_record(run_id)) == EXPECTED[run_id]["identity_digest"]
 
     def test_v2_baseline_against_v1_run_names_both_versions(self):
         """L8: one refusal naming the versions, not per-key lines."""
@@ -267,15 +265,6 @@ def test_record_without_block_is_built_once():
 # ---------------------------------------------------------------------------
 # Classification of stored records
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_no_stored_record_misses_a_required_key(run_id):
-    """d2's check, kept: ladder step 0 changes no pinned pair."""
-    rec = sr.load_record(run_id)
-    c = cmp.classify(rec["experiment"], rec)
-    assert cmp.missing_required(c) == []
-    assert c.keys(cmp.CORPUS)["corpus role"] == cmp.UNDECLARED_ROLE
 
 
 #: Compaction operation by recipe, from the statement builders
@@ -420,54 +409,11 @@ class TestDifferences:
         assert ex.identity_differences(a, b) == []
         ca, cb = cmp.classify(a), cmp.classify(b)
         assert [d.key for d in cmp.diff_group(ca, cb, cmp.ARCHITECTURE)] == ["query access path"]
-        assert cmp.system_relation(ca, cb)[0] == "different"
 
     def test_identity_version_mismatch_is_an_identity_difference(self):
         v2 = _fresh().to_dict()["experiment"]
         v1 = _fresh(markers=False).to_dict()["experiment"]
         assert ex.identity_differences(v1, v2) == ["identity version differs (exp1 vs exp2)"]
-
-
-class TestSystemRelation:
-    def _c(self, sysid=None, system="cluster"):
-        exp = sr.load_record("5105a0")["experiment"]
-        exp["system"] = system
-        if sysid is not None:
-            exp["system_identity"] = sysid
-        return cmp.classify(exp)
-
-    def test_absent_on_both_assumed_same_with_note(self):
-        rel, note = cmp.system_relation(self._c(), self._c())
-        assert rel == "same" and "assumed the same" in note
-
-    def test_absent_on_one_side_is_different(self):
-        """The design rule: identity absent on one side only counts as
-        different (a run whose start sample timed out included)."""
-        rel, note = cmp.system_relation(self._c(SYSID), self._c())
-        assert rel == cmp.UNOBSERVED and "one side only" in note
-
-    def test_no_common_part_is_different(self):
-        a = copy.deepcopy(SYSID)
-        a["parts"] = {"api_server_ca": {"not_observed": "x"}}
-        b = copy.deepcopy(SYSID)
-        b["parts"] = {"kubernetes": {"not_observed": "x"}}
-        # Nothing was compared: never assumed the same.
-        assert cmp.system_relation(self._c(a), self._c(b))[0] == cmp.UNOBSERVED
-
-    def test_same_fingerprint_with_ca_is_same(self):
-        assert cmp.system_relation(self._c(SYSID), self._c(copy.deepcopy(SYSID))) == ("same", None)
-
-    def test_without_ca_is_unknown(self):
-        """ER-8 carry: equal shapes without the CA are not one system."""
-        a = copy.deepcopy(SYSID)
-        a["parts"]["api_server_ca"] = {"not_observed": "no CA"}
-        rel, note = cmp.system_relation(self._c(a), self._c(copy.deepcopy(SYSID)))
-        assert rel == "unknown" and "API server CA" in note
-
-    def test_different_ca_is_different(self):
-        b = copy.deepcopy(SYSID)
-        b["parts"]["api_server_ca"] = "d" * 12
-        assert cmp.system_relation(self._c(SYSID), self._c(b))[0] == "different"
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +487,6 @@ def test_benchmark_path_refreshes_the_stored_block():
 
 def test_records_json_drift_list_is_empty():
     assert sr.expected("records")["known_rebuild_drift"]["runs"] == []
-    json.dumps(cmp.REQUIRED_KEYS)  # the table is plain data
 
 
 # ---------------------------------------------------------------------------
@@ -564,457 +509,14 @@ def _rec(run_id="5105a0", new_id=None, **edits):
     return rec
 
 
-def _sys(ca="c" * 12, **parts):
-    out = copy.deepcopy(SYSID)
-    out["parts"]["api_server_ca"] = ca
-    out["parts"].update(parts)
-    from lakebench.metrics.system_identity import fingerprint_of
-
-    out["fingerprint"] = fingerprint_of(out["parts"])
-    return out
-
-
-def _verdict(a, b):
-    return cmp.pair_verdict(a if isinstance(a, list) else [a], b if isinstance(b, list) else [b])
-
-
-class TestLadder:
-    def test_a_a_is_a_repeat(self):
-        v = _verdict(_rec(), _rec(new_id="x"))
-        assert (v.verdict, v.step, v.attribution) == (cmp.LIKE_FOR_LIKE, "8", "repeat")
-        assert v.code == 0 and v.comparable
-
-    def test_three_by_three_repeat(self):
-        side_a = [_rec(new_id=f"a{i}") for i in range(3)]
-        side_b = [_rec(new_id=f"b{i}") for i in range(3)]
-        v = _verdict(side_a, side_b)
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "repeat")
-
-    def test_confounded_fixture(self):
-        """System fingerprint and recipe both differ: CONFOUNDED (13)."""
-        a = _rec(experiment__system_identity=_sys())
-        b = _rec(
-            new_id="b",
-            experiment__system_identity=_sys(ca="d" * 12),
-        )
-        b["experiment"]["architecture"]["recipe"] = "polaris-iceberg-spark-trino"
-        b["experiment"]["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
-        v = _verdict(a, b)
-        assert (v.verdict, v.code, v.step) == (cmp.CONFOUNDED, 13, "6")
-        assert v.keys(cmp.ARCHITECTURE) == ["recipe", "catalog"]
-        assert v.system == "different"
-
-    def test_system_only_difference_is_a_system_differential(self):
-        v = _verdict(
-            _rec(experiment__system_identity=_sys()),
-            _rec(new_id="b", experiment__system_identity=_sys(ca="d" * 12)),
-        )
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system differential")
-
-    def test_local_vs_cluster_with_the_local_composition_is_confounded(self):
-        b = _rec(new_id="b", experiment__system="local")
-        b["experiment"]["architecture"].update(
-            {"recipe": "none-iceberg-spark-duckdb", "query_access_path": "direct_storage"}
-        )
-        v = _verdict(_rec(), b)
-        assert v.verdict == cmp.CONFOUNDED
-        assert v.keys(cmp.ARCHITECTURE) == ["recipe", "query access path"]
-
-    def test_system_not_established_is_never_a_repeat(self):
-        """ER-8 carry: without the CA on one side the systems are not shown
-        to be one, so the pair is not called a repeat, and with an
-        architecture difference it is confounded."""
-        a = _rec(experiment__system_identity=_sys(ca={"not_observed": "no CA"}))
-        b = _rec(new_id="b", experiment__system_identity=_sys())
-        v = _verdict(a, b)
-        assert (v.verdict, v.attribution, v.system) == (
-            cmp.LIKE_FOR_LIKE,
-            "system not established",
-            "unknown",
-        )
-        # With an architecture difference: an architecture differential
-        # with the note (the systems are not shown to differ).
-        b["experiment"]["architecture"]["recipe"] = "other"
-        v = _verdict(a, b)
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "architecture differential")
-        assert any("not established" in n for n in v.notes)
-
-    def test_identity_on_one_side_only_counts_as_different(self):
-        """A 1.6 record against a 1.7 one: not a system differential and not
-        a repeat, and with an architecture difference CONFOUNDED (never
-        credited to the architecture)."""
-        b = _rec(new_id="b", experiment__system_identity=_sys())
-        assert _verdict(_rec(), b).attribution == "system not established"
-        b["experiment"]["architecture"]["recipe"] = "other"
-        assert _verdict(_rec(), b).verdict == cmp.CONFOUNDED
-
-    def test_two_local_runs_are_never_one_system(self, monkeypatch):
-        from lakebench.metrics import system_identity as si
-
-        a = _rec(experiment__system="local", experiment__system_identity=si._local_identity(None))
-        b = _rec(
-            new_id="b",
-            experiment__system="local",
-            experiment__system_identity=si._local_identity(None),
-        )
-        v = _verdict(a, b)
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
-
-    def test_version_bump_is_not_comparable(self):
-        b = _rec(new_id="b")
-        b["experiment"]["workload"]["version"] = "c360-2"
-        v = _verdict(_rec(), b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "3")
-        assert v.keys(cmp.WORKLOAD) == ["workload version"]
-
-    def test_within_side_mismatch(self):
-        odd = _rec(new_id="a2")
-        odd["experiment"]["corpus"]["scale"] = 2.0
-        v = _verdict([_rec(new_id="a1"), odd], [_rec(new_id="b")])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-        assert v.reasons[0].startswith("side A is not one experiment (a1 vs a2)")
-        assert "scale differs (1.0 vs 2.0)" in v.reasons[1:] or any(
-            r.startswith("scale differs") for r in v.reasons
-        )
-
-    def test_within_side_result_mismatch(self):
-        odd = _rec(new_id="a2")
-        fps = odd["experiment"]["results"]["fingerprints"]
-        name = sorted(fps)[0]
-        fps[name] = {**fps[name], "rows": (fps[name].get("rows") or 0) + 1, "exact": "0" * 16}
-        v = _verdict([_rec(new_id="a1"), odd], [_rec(new_id="b")])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-        assert any(name in r for r in v.reasons)
-
-    @staticmethod
-    def _rounds_side(prefix, counts):
-        side = []
-        for i, rounds in enumerate(counts):
-            rec = _rec("204941-1d17f4", new_id=f"{prefix}{i}")
-            rec["experiment"]["limits"]["benchmark_rounds"] = rounds
-            side.append(rec)
-        return side
-
-    @pytest.mark.parametrize("order", [(4, 4, 5), (5, 4, 4)])
-    def test_outcome_condition_within_a_side_is_not_like_for_like(self, order):
-        """Owner decision 10-03 (a): a side whose repeats ran different
-        in-stream round counts is one experiment; the pair is NOT
-        LIKE-FOR-LIKE (step 7), not NOT COMPARABLE, whatever the order."""
-        v = _verdict(self._rounds_side("a", order), self._rounds_side("b", (4, 4, 4)))
-        assert (v.verdict, v.step) == (cmp.NOT_LIKE_FOR_LIKE, "7"), v.reasons
-        # With A's first run at 5 the sides differ too, and that cross-side
-        # condition is the cause; otherwise the side's own outcome is.
-        want = "condition" if order[0] != 4 else "side_outcome"
-        assert v.cause.kind == want and v.cause.key == "benchmark rounds"
-        assert any(r.startswith("side A: benchmark rounds differs inside") for r in v.reasons)
-
-    @pytest.mark.parametrize("order", [(4, 4, 0), (0, 4, 4)])
-    def test_post_stream_estimator_within_a_side_still_refuses(self, order):
-        """0 rounds is the post-stream estimator, not a round count: a side
-        mixing it with in-stream medians is not one experiment."""
-        v = _verdict(self._rounds_side("a", order), self._rounds_side("b", (4, 4, 4)))
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-
-    def test_outcome_inside_a_side_does_not_hide_a_stronger_rung(self):
-        """Results, identity and confounding still decide first: a side with
-        an outcome difference whose other side returned other results is
-        NOT COMPARABLE at step 5."""
-        side_b = self._rounds_side("b", (4, 4))
-        for rec in side_b:
-            fps = rec["experiment"]["results"]["fingerprints"]
-            name = sorted(fps)[0]
-            fps[name] = {**fps[name], "exact": "0" * 16}
-        v = _verdict(self._rounds_side("a", (4, 5)), side_b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
-
-    def test_confounded_pair_keeps_the_side_outcome_reason(self):
-        side_a = self._rounds_side("a", (4, 5))
-        side_b = self._rounds_side("b", (4,))
-        side_b[0]["experiment"]["architecture"]["recipe"] = "other"
-        side_b[0]["experiment"]["system_identity"] = _sys(ca="d" * 12)
-        for rec in side_a:
-            rec["experiment"]["system_identity"] = _sys()
-        v = _verdict(side_a, side_b)
-        assert v.verdict == cmp.CONFOUNDED, v.reasons
-        assert any(r.startswith("side A: benchmark rounds differs inside") for r in v.reasons)
-
-    def test_is_outcome_difference_predicate(self):
-        d = cmp.Difference
-        assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", 4, 5))
-        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", 0, 5))
-        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark rounds", None, 5))
-        assert cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", 2, 3))
-        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "investigator sessions", None, 3))
-        # Not counts on both runs, or none against some: strict.
-        for va, vb in ((0, 3), ([], ["s1"]), ({"c": 1}, {"c": 8}), ("unreadable", 3), (True, 2)):
-            assert not cmp.is_outcome_difference(
-                d(cmp.CONDITIONS, "investigator sessions", va, vb)
-            ), (va, vb)
-        assert not cmp.is_outcome_difference(d(cmp.CONDITIONS, "benchmark mode", "power", "x"))
-        assert not cmp.is_outcome_difference(d(cmp.CORPUS, "scale", 1.0, 2.0))
-
-    def test_within_side_system_difference_refuses(self):
-        v = _verdict(
-            [
-                _rec(new_id="a1", experiment__system_identity=_sys()),
-                _rec(new_id="a2", experiment__system_identity=_sys(ca="d" * 12)),
-            ],
-            [_rec(new_id="b", experiment__system_identity=_sys())],
-        )
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-        assert any(r.startswith("system:") for r in v.reasons)
-
-    def test_digest_across_members_of_a_side(self):
-        """Generator digests [None, D1, D2] are not one corpus."""
-        side = []
-        for i, d in enumerate((None, "sha256:" + "1" * 64, "sha256:" + "2" * 64)):
-            rec = _rec(new_id=f"a{i}")
-            rec["experiment"]["corpus"]["datagen"]["digest"] = d
-            side.append(rec)
-        v = _verdict(side, [_rec(new_id="b")])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-
-    def test_digest_across_sides_uses_every_member(self):
-        a = [_rec(new_id="a1"), _rec(new_id="a2")]
-        a[1]["experiment"]["corpus"]["datagen"]["digest"] = "sha256:" + "1" * 64
-        b = [_rec(new_id="b1"), _rec(new_id="b2")]
-        b[1]["experiment"]["corpus"]["datagen"]["digest"] = "sha256:" + "2" * 64
-        v = _verdict(a, b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "3")
-        assert v.keys(cmp.CORPUS) == ["generator digest"]
-
-    def test_corpus_problems_refuse_at_step_3(self):
-        b = _rec(new_id="b")
-        b["experiment"]["corpus"]["problems"] = ["cycle 0 nodes [3] have no marker"]
-        v = _verdict(_rec(), b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "3")
-        assert v.reasons == ["B: cycle 0 nodes [3] have no marker"]
-
-    def test_v16_success_false_refused(self):
-        b = _rec(new_id="b")
-        b.pop("verdict", None)
-        b["success"] = False
-        assert _verdict(_rec(), b).step == "1"
-
-    def test_refused_status_refused(self):
-        b = _rec(new_id="b", verdict={"status": "REFUSED", "reasons": []})
-        assert _verdict(_rec(), b).step == "1"
-
-    def test_recomputed_verdict_never_promotes(self, monkeypatch):
-        """The seam for the verdict recomputed from the record: a stored
-        PASSED that recomputes FAILED is refused."""
-        from types import SimpleNamespace
-
-        from lakebench.metrics import verdict as verdict_mod
-
-        monkeypatch.setattr(
-            verdict_mod, "_recompute", lambda rec: SimpleNamespace(status="FAILED", reasons=[])
-        )
-        v = _verdict(_rec(), _rec(new_id="b"))
-        assert v.step == "1" and "(recomputed FAILED)" in v.reasons[0]
-
-    def test_confounded_wins_over_conditions(self):
-        """Architecture, system and conditions all differ: 13, not 12."""
-        a = _rec(experiment__system_identity=_sys())
-        b = _rec(new_id="b", experiment__system_identity=_sys(ca="d" * 12))
-        b["experiment"]["architecture"]["recipe"] = "other"
-        b["experiment"]["effective_maintenance"]["id"] = "m2-2026-09-26:expire_snapshots=not_run"
-        assert _verdict(a, b).code == 13
-
-    def test_exp2_without_benchmark_is_not_established(self):
-        """A v2 run with no checked results has no query set id: NOT
-        ESTABLISHED (step 4), not identity incomplete."""
-        a, b = _fresh().to_dict(), _fresh().to_dict()
-        b["run_id"] = "b"
-        for rec in (a, b):
-            rec["experiment"]["results"] = {
-                "query_set_id": None,
-                "fingerprints": {},
-                "not_checked": "no benchmark ran",
-            }
-        v = _verdict(a, b)
-        assert (v.verdict, v.step) == (cmp.NOT_ESTABLISHED, "4")
-
-    def test_cotenant_load_is_observational(self):
-        """The constructed co-tenant-load pair: load differs, nothing else;
-        the verdict is a repeat (the winner rule that reads load is v1.8)."""
-        low = {"cotenant_requested": {"start": {"cpu": 10.0}, "end": {"cpu": 12.0}}}
-        high = {"cotenant_requested": {"start": {"cpu": 300.0}, "end": {"cpu": 280.0}}}
-        v = _verdict(_rec(experiment__observed=low), _rec(new_id="b", experiment__observed=high))
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "repeat")
-
-    def test_none_required_key_refused(self):
-        """S1, the failing case: two v2 records with corpus id v2 None on
-        both sides; with step 0 removed they read LIKE-FOR-LIKE."""
-        a = _fresh().to_dict()
-        b = _fresh().to_dict()
-        b["run_id"] = "b"
-        for rec in (a, b):
-            rec["experiment"]["corpus"]["id_v2"] = None
-            rec["success"] = True
-        v = _verdict(a, b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
-        assert v.reasons[0].startswith("identity incomplete: corpus id v2 not recorded on")
-
-    def test_none_on_one_side_refused(self):
-        b = _rec(new_id="b")
-        b["experiment"]["workload"]["version"] = None
-        v = _verdict(_rec(), b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
-        assert v.reasons == ["identity incomplete: workload version not recorded on b"]
-
-    def test_withheld_seed_refused(self):
-        b = _rec(new_id="b")
-        b["experiment"]["corpus"]["seed"] = {"seed_ref": None, "role": "unknown", "withheld": "x"}
-        v = _verdict(_rec(), b)
-        assert v.step == "0" and v.reasons == ["identity incomplete: seed withheld on b"]
-
-    def test_generations_differ(self):
-        v2 = _fresh().to_dict()
-        v = _verdict(_rec(), v2)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
-        assert v.reasons == ["A was recorded with identity v1 and B with v2"]
-
-    def test_undeclared_role_against_exp2_role(self):
-        """An exp2 record with role development against an exp1 record with
-        None is refused at step 0 (the versions differ)."""
-        v2 = _fresh().to_dict()
-        v2["experiment"]["corpus"]["corpus_role"] = "development"
-        assert _verdict(_rec(), v2).step == "0"
-
-    def test_failed_member_refused(self):
-        bad = _rec(new_id="a2", verdict={"status": "FAILED", "reasons": ["gold has 0 rows"]})
-        v = _verdict([_rec(new_id="a1"), bad], [_rec(new_id="b")])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "1")
-        assert v.reasons == ["A run a2 did not pass (gold has 0 rows); fix it and re-run"]
-
-    def test_empty_side_refused(self):
-        assert _verdict([], [_rec()]).reasons == ["side A has no run"]
-
-    def test_results_not_established(self):
-        b = _rec(new_id="b")
-        b["experiment"]["results"] = {"query_set_id": None, "fingerprints": {}, "not_checked": "x"}
-        v = _verdict(_rec(), b)
-        assert (v.verdict, v.code, v.step) == (cmp.NOT_ESTABLISHED, 11, "4")
-
-    def test_different_results(self):
-        b = _rec(new_id="b")
-        fps = b["experiment"]["results"]["fingerprints"]
-        name = sorted(fps)[0]
-        fps[name] = {**fps[name], "rows": (fps[name].get("rows") or 0) + 1, "exact": "0" * 16}
-        v = _verdict(_rec(), b)
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
-
-    def _v17(self, pinset, new_id=None):
-        """A 1.7 record (it sampled its system, as a 1.7 run does)."""
-        rec = _rec(new_id=new_id, experiment__system_identity=_sys())
-        rec["experiment"]["lakebench"]["lakebench_version"] = "1.7.0"
-        rec["provenance"]["deps"] = {"pinset_sha256": pinset}
-        return rec
-
-    def test_pinset_only_difference_is_not_like_for_like(self):
-        """S8, the owner's rule: same composition, different jars (7a)."""
-        v = _verdict(self._v17("a" * 64), self._v17("b" * 64, "b"))
-        assert (v.verdict, v.step) == (cmp.NOT_LIKE_FOR_LIKE, "7a")
-        assert v.reasons == [
-            "same composition, different dependency sets (dependency pinset differs)"
-        ]
-
-    def test_pinset_with_other_arch_difference_is_differential(self):
-        b = self._v17("b" * 64, "b")
-        b["experiment"]["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
-        v = _verdict(self._v17("a" * 64), b)
-        assert (v.verdict, v.step, v.attribution) == (
-            cmp.LIKE_FOR_LIKE,
-            "8",
-            "architecture differential",
-        )
-
-    def test_dev_build_records_carry_the_pinset(self):
-        """A 1.7 development build still reports version 1.6; its blocks
-        carry v2_unavailable, which only 1.7 writes, so the pinset key is
-        present and a pinset-only difference is 7a, not a repeat."""
-        recs = []
-        for i, pin in enumerate(("a" * 64, "b" * 64)):
-            rec = _rec(new_id=f"r{i}", experiment__system_identity=_sys())
-            rec["experiment"]["v2_unavailable"] = ["corpus id v2"]
-            rec["provenance"]["deps"] = {"pinset_sha256": pin}
-            recs.append(rec)
-        assert recs[0]["experiment"]["lakebench"]["lakebench_version"].startswith("1.6")
-        assert _verdict(recs[0], recs[1]).step == "7a"
-
-    def test_both_not_recorded_pinsets_note(self):
-        recs = [self._v17(None, f"r{i}") for i in range(2)]
-        for rec in recs:
-            rec["provenance"].pop("deps")
-        v = _verdict(recs[0], recs[1])
-        assert (v.attribution, "dependency set not recorded" in v.notes) == ("repeat", True)
-
-    def test_pinset_v16_pair_notes_not_recorded(self):
-        v = _verdict(_rec(), _rec(new_id="b"))
-        assert "dependency set not recorded" in v.notes
-
-    def test_sessions_run_is_an_outcome_condition(self):
-        """S9: sessions run [8] against [3] is not like-for-like in compare
-        and not a refusal for the perf gate and reproduce."""
-        a = _rec(experiment__investigators={"requested": 8, "run": [8]})
-        b = _rec(new_id="b", experiment__investigators={"requested": 8, "run": [3]})
-        v = _verdict(a, b)
-        assert (v.verdict, v.keys(cmp.CONDITIONS)) == (
-            cmp.NOT_LIKE_FOR_LIKE,
-            ["investigator sessions"],
-        )
-        assert "investigator sessions" in ex.OUTCOME_CONDITION_KEYS
-
-    def test_to_dict_is_json(self):
-        json.dumps(_verdict(_rec(), _rec(new_id="b")).to_dict())
-
-
-class TestUnsampledV17:
-    def test_two_unsampled_v17_runs_are_not_a_repeat(self):
-        """Two 1.7 runs that both failed to sample their system identity
-        are never assumed to share a system."""
-        a = _rec(experiment__v2_unavailable=["corpus id v2", "system identity"])
-        b = _rec(new_id="b", experiment__v2_unavailable=["corpus id v2", "system identity"])
-        v = _verdict(a, b)
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
-        b["experiment"]["architecture"]["recipe"] = "other"
-        assert _verdict(a, b).verdict == cmp.CONFOUNDED
-
-    def test_timed_out_start_records_a_stub_that_matches_nothing(self, monkeypatch):
-        from lakebench.metrics import system_identity as si
-
-        stub = si._unobserved_identity("cluster", "not sampled within 120 s")
-        a = _rec(experiment__system_identity=stub)
-        b = _rec(new_id="b", experiment__system_identity=copy.deepcopy(stub))
-        assert (
-            cmp.system_relation(cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b))[
-                0
-            ]
-            == cmp.UNOBSERVED
-        )
+def _condition_keys(a, b):
+    """The Conditions keys that differ between two stored records, as the
+    perf gate and reproduce read them (comparability.diff_group)."""
+    ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
+    return [d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
 
 
 class TestRelationFolding:
-    @pytest.mark.parametrize("order", ["a1a2", "a2a1"])
-    def test_relation_folds_over_every_member(self, order):
-        """A side holding a run not shown to be on the system is never a
-        repeat, whatever the member order (same_system is not transitive)."""
-        a1 = _rec(new_id="a1", experiment__system_identity=_sys())
-        a2 = _rec(new_id="a2", experiment__system_identity=_sys(ca={"not_observed": "no CA"}))
-        b1 = _rec(new_id="b1", experiment__system_identity=_sys())
-        side = [a1, a2] if order == "a1a2" else [a2, a1]
-        v = _verdict(side, [b1])
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "system not established")
-
-    def test_non_transitive_same_system_is_caught(self):
-        a1 = _rec(new_id="a1", experiment__system_identity=_sys(kubernetes="v1.31.6"))
-        b1 = _rec(new_id="b1", experiment__system_identity=_sys())
-        b1["experiment"]["system_identity"]["parts"] = {"api_server_ca": "c" * 12}
-        b2 = _rec(new_id="b2", experiment__system_identity=_sys(kubernetes="v1.32.0"))
-        v = _verdict([a1], [b1, b2])
-        assert v.attribution != "repeat"
-
     def test_stub_identity_is_not_v2(self):
         from lakebench.metrics import system_identity as si
 
@@ -1024,32 +526,6 @@ class TestRelationFolding:
         )
         e = run.to_dict()["experiment"]
         assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
-
-
-class TestWithinSideSystem:
-    @pytest.mark.parametrize("order", [(0, 1, 2), (1, 0, 2), (2, 1, 0)])
-    def test_every_pair_within_a_side(self, order):
-        """a1 observed only the CA; a2 and a3 observed different nodes.
-        a1 matches both, but a2 and a3 are not one system: the side is
-        refused in any order."""
-
-        def rec(i, nodes):
-            ident = _sys(nodes=nodes) if nodes else _sys()
-            if not nodes:
-                ident["parts"].pop("kubernetes")
-                from lakebench.metrics.system_identity import fingerprint_of
-
-                ident["fingerprint"] = fingerprint_of(ident["parts"])
-            return _rec(new_id=f"a{i}", experiment__system_identity=ident)
-
-        members = [
-            rec(1, None),
-            rec(2, [{"cpu": 8, "count": 1}]),
-            rec(3, [{"cpu": 16, "count": 1}]),
-        ]
-        side = [members[i] for i in order]
-        v = _verdict(side, [_rec(new_id="b", experiment__system_identity=_sys())])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
 
 
 def test_local_identity_does_not_block_exp2():
@@ -1067,19 +543,6 @@ def test_local_identity_does_not_block_exp2():
 
 
 class TestWrappers:
-    def test_unknown_schema_reads_as_no_provenance(self):
-        """The wrappers and the ladder agree on a block they cannot read."""
-        b = _rec(new_id="b")
-        b["experiment"]["schema"] = "exp3"
-        prov, _, _ = ex.refusals(_rec(), b)
-        assert prov and "no provenance" in prov[0]
-        assert _verdict(_rec(), b).step == "1"
-
-    def test_version_mismatch_is_one_refusal_line(self):
-        v2 = _fresh().to_dict()
-        prov, _, _ = ex.refusals(_rec(), v2)
-        assert sum("identity v" in p for p in prov) == 1
-
     def test_optional_key_absent_from_the_baseline_is_a_difference(self):
         run = _fresh().to_dict()["experiment"]
         baseline = ex.identity(run)
@@ -1087,24 +550,6 @@ class TestWrappers:
         refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
         assert any(r.startswith("spark executor overrides differs") for r in refs), refs
         assert not any("older experiment identity" in r for r in refs)
-
-    def test_like_for_like_lists_the_confounded_line(self):
-        a = _rec(experiment__system_identity=_sys())
-        b = _rec(new_id="b", experiment__system_identity=_sys(ca="d" * 12))
-        b["experiment"]["architecture"]["recipe"] = "other"
-        lines = ex.like_for_like(a, b)
-        assert lines and lines[0].startswith("architecture and system both differ")
-
-    def test_like_for_like_lists_the_pinset_line(self):
-        t = TestLadder()
-        lines = ex.like_for_like(t._v17("a" * 64), t._v17("b" * 64, "b"))
-        assert lines == ["same composition, different dependency sets (dependency pinset differs)"]
-
-    def test_refusals_carry_step_0(self):
-        b = _rec(new_id="b")
-        b["experiment"]["workload"]["version"] = None
-        prov, _, _ = ex.refusals(_rec(), b)
-        assert prov[0] == "identity incomplete: workload version not recorded on b"
 
 
 def test_reference_with_no_observed_system_is_refused():
@@ -1139,17 +584,6 @@ def test_config_only_identity_is_not_v2():
 class TestDerivedBenchmarkRounds:
     """Owner decision 10-01 (EVD-7 P2): continuous records that do not store
     limits.benchmark_rounds have it derived at read time."""
-
-    def test_stored_records_without_the_key_are_derived(self):
-        a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
-        assert a["experiment"]["limits"].get("benchmark_rounds") is None
-        ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
-        assert (
-            ca.keys(cmp.CONDITIONS)["benchmark rounds"],
-            cb.keys(cmp.CONDITIONS)["benchmark rounds"],
-        ) == (5, 4)
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.keys(cmp.CONDITIONS)) == (cmp.NOT_LIKE_FOR_LIKE, ["benchmark rounds"])
 
     def test_stored_value_wins_and_identity_does_not_move(self):
         rec = sr.load_record("011043-e338c5")
@@ -1211,25 +645,20 @@ class TestSkippedMaintenance:
         b["experiment"]["effective_maintenance"] = {"id": delta_id}
         return a, b
 
-    def test_iceberg_and_delta_both_skipped_are_like_for_like(self):
-        v = _verdict(*self._pair(self.ICE, self.DELTA))
-        assert "effective maintenance" not in v.keys(cmp.CONDITIONS), v.reasons
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "architecture differential")
+    def test_iceberg_and_delta_both_skipped_are_one_condition(self):
+        assert "effective maintenance" not in _condition_keys(*self._pair(self.ICE, self.DELTA))
 
     def test_settings_of_maintenance_that_never_ran_are_not_compared(self):
         a, b = self._pair(self.ICE, self.DELTA)
         a["experiment"]["maintenance_settings"] = {"retention_interval": 1800}
         b["experiment"]["maintenance_settings"] = {"retention_interval": 600}
-        v = _verdict(a, b)
-        assert v.keys(cmp.CONDITIONS) == [], v.reasons
+        assert _condition_keys(a, b) == []
         ran = "m2-2026-09-26:vacuum=ran,compaction=not_supported"
         a2, b2 = self._pair(ran, ran)
         a2["experiment"]["maintenance_settings"] = {"retention_interval": 1800}
         b2["experiment"]["maintenance_settings"] = {"retention_interval": 600}
-        assert "maintenance settings" in _verdict(a2, b2).keys(cmp.CONDITIONS)
+        assert "maintenance settings" in _condition_keys(a2, b2)
 
-    def test_one_side_ran_maintenance_is_not_like_for_like(self):
+    def test_one_side_ran_maintenance_differs_in_conditions(self):
         ran = "m2-2026-09-26:vacuum=ran,compaction=not_supported"
-        v = _verdict(*self._pair(self.ICE, ran))
-        assert v.verdict == cmp.NOT_LIKE_FOR_LIKE
-        assert v.keys(cmp.CONDITIONS)[0] == "effective maintenance"
+        assert _condition_keys(*self._pair(self.ICE, ran))[0] == "effective maintenance"

@@ -331,7 +331,6 @@ def test_report_list_names_benchmark_records(tmp_path, monkeypatch):
 )
 def test_benchmark_record_of_a_continuous_run_drops_its_rounds(cont, tmp_path):
     from lakebench.cli._query import _save_benchmark_record
-    from lakebench.metrics.compare import compare_records
 
     runs = _runs(tmp_path, cont)
     storage = MetricsStorage(runs)
@@ -351,10 +350,6 @@ def test_benchmark_record_of_a_continuous_run_drops_its_rounds(cont, tmp_path):
     exp = data.get("experiment") or {}  # a 1.6 record may have no block
     assert (exp.get("limits") or {}).get("benchmark_rounds") in (None, 0)
     assert (exp.get("repetitions") or {}).get("benchmark_rounds") in (None, 0)
-    # One post-run benchmark never stands like-for-like against a median of
-    # in-stream rounds.
-    parent_rec = json.loads((runs / f"run-{cont}" / "metrics.json").read_text())
-    assert compare_records([parent_rec], [data])["verdict"] != "LIKE-FOR-LIKE"
 
 
 def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):

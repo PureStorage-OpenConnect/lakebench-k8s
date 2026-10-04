@@ -762,8 +762,8 @@ def query_set_id(names) -> str:
 
     QpH is queries per hour over a set; two runs over different sets (the
     Financial set grew from 8 to 12 queries with the investigator class, or a
-    query's SQL changed) do not have comparable QpH, and compare/reproduce
-    refuse to put them side by side.
+    query's SQL changed) do not have comparable QpH, and reproduce refuses
+    to put them side by side.
     """
     import hashlib
 

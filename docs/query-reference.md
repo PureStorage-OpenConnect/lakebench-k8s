@@ -120,7 +120,7 @@ gold tables (FQ1-FQ8) and four investigator queries over the transaction
 monitoring operations tables (IQ1-IQ4). The investigator queries read only
 the current run's rows, and the runner leaves them out unless the TM
 operations layer ran for this run. QpH is recorded with its query-set id, so
-`compare` and `reproduce` never set an 8-query run against a 12-query one.
+`reproduce` never sets an 8-query run against a 12-query one.
 
 | ID | Category | Purpose |
 |---|---|---|

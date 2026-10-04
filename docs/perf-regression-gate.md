@@ -244,9 +244,9 @@ reads faster, so the drift between them is a bias, and a gate that exits
 nonzero on regression should refuse rather than warn. `lakebench reproduce`
 applies the same rule against the package's `benchmark_samples_per_query`
 (1 for packages recorded before it existed) and refuses before running the
-pipeline when the config asks for a different count. `lakebench compare`
-reports such a pair NOT LIKE-FOR-LIKE (benchmark iterations are an
-execution condition) and shows the numbers without assessing them.
+pipeline when the config asks for a different count. Two runs with
+different counts are not like-for-like (benchmark iterations are an
+execution condition).
 
 `maintenance_value_pct` is reported by `lakebench run` but not gated. It is
 (post - pre) / pre, and both halves are gated on their own

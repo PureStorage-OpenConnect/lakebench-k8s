@@ -399,28 +399,3 @@ def test_failed_query_detail_is_on_the_error_line(monkeypatch, tmp_path):
     assert result.exit_code == 1
     assert _stdout(result) == ""
     assert "ERROR Query failed (0.10s): line 1:8: Table [main].x does not exist" in _stderr(result)
-
-
-@pytest.mark.parametrize("fmt", ["json", "csv"])
-def test_compare_machine_output_is_only_data(fmt, monkeypatch, tmp_path):
-    """The resolution and every notice go to stderr; stdout is the data."""
-    from tests.fixtures import stored_records as sr
-
-    monkeypatch.chdir(tmp_path)
-    # Pinned pair P3 (like-for-like); P1's records read failed since the
-    # verdict is recomputed from the record (W5 and W6 did not run).
-    ids = ("20260927-011043-e338c5", "20260927-073818-7934eb")
-    for rid in ids:
-        d = tmp_path / "runs" / f"run-{rid}"
-        d.mkdir(parents=True)
-        (d / "metrics.json").write_text(json.dumps(sr.load_record(rid)))
-    result = CliRunner().invoke(
-        app, ["compare", *ids, "--runs-dir", str(tmp_path / "runs"), "--format", fmt]
-    )
-    out = _stdout(result)
-    if fmt == "json":
-        assert json.loads(out)["verdict"] == "LIKE-FOR-LIKE"
-    else:
-        assert out.splitlines()[0] == "# schema: cmp2"
-    assert f"A: {ids[0]} -> deployment" in _stderr(result)
-    assert "A: " not in out

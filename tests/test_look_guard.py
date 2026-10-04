@@ -173,77 +173,6 @@ def test_reproduce_pipeline_refuses_before_it_deploys(tmp_path, monkeypatch, hel
     assert info.value.path == lg.PATH and no_cluster == []
 
 
-def _write_record(runs: Path, run_id: str, *, role=None, seed=None) -> None:
-    rec = json.loads(RECORD.read_text())
-    rec["run_id"] = run_id
-    corpus = rec["experiment"]["corpus"]
-    corpus["corpus_role"] = role
-    if seed is not None:
-        corpus["seed"] = seed
-    d = runs / f"run-{run_id}"
-    d.mkdir(parents=True)
-    (d / "metrics.json").write_text(json.dumps(rec))
-
-
-@pytest.mark.parametrize("kw", [{"role": "evaluation"}, {"seed": pc.RB}], ids=["role", "seed-hash"])
-def test_compare_refuses_a_protected_record(tmp_path, monkeypatch, held, no_cluster, kw):
-    monkeypatch.chdir(tmp_path)
-    runs = tmp_path / "runs"
-    _write_record(runs, "20261002-000001-aaaaaa", **kw)
-    _write_record(runs, "20261002-000002-bbbbbb")
-    result = _invoke(
-        [
-            "compare",
-            "20261002-000001-aaaaaa",
-            "20261002-000002-bbbbbb",
-            "--runs-dir",
-            str(runs),
-        ]
-    )
-    _assert_refused(result, no_cluster, "compare")
-    assert "20261002-000001-aaaaaa" in result.output
-
-
-def test_compare_still_reads_ordinary_records(tmp_path, monkeypatch, held, no_cluster):
-    monkeypatch.chdir(tmp_path)
-    runs = tmp_path / "runs"
-    _write_record(runs, "20261002-000001-aaaaaa")
-    _write_record(runs, "20261002-000002-bbbbbb")
-    result = _invoke(
-        ["compare", "20261002-000001-aaaaaa", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
-    )
-    assert "protected AML corpus" not in result.output
-    assert result.exit_code in (0, 10, 11, 12, 13), result.output
-
-
-def test_compare_reads_records_when_the_held_out_record_is_unreadable(
-    tmp_path, monkeypatch, no_cluster
-):
-    """compare spends nothing and hides every integer seed then: an ordinary
-    AML record is not refused because the hash file or floor cannot be read."""
-    pc.use_heldout(monkeypatch)
-
-    def gone():
-        raise ValueError("the compiled held-out floor (_HELDOUT_FLOOR) is not initialised")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    monkeypatch.chdir(tmp_path)
-    runs = tmp_path / "runs"
-    _write_record(runs, "20261002-000001-aaaaaa")
-    _write_record(runs, "20261002-000002-bbbbbb")
-    result = _invoke(
-        ["compare", "20261002-000001-aaaaaa", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
-    )
-    assert "protected AML corpus" not in result.output
-    assert result.exit_code in (0, 10, 11, 12, 13), result.output
-    # A record shown to be protected is still refused.
-    _write_record(runs, "20261002-000003-cccccc", role="evaluation")
-    result = _invoke(
-        ["compare", "20261002-000003-cccccc", "20261002-000002-bbbbbb", "--runs-dir", str(runs)]
-    )
-    assert result.exit_code == 2 and no_cluster == []
-
-
 # -- refused at load ---------------------------------------------------------
 
 
@@ -498,36 +427,6 @@ def test_seed_is_protected_hides_on_an_unreadable_record(monkeypatch, held):
     assert ds.seed_is_protected(pc.CALIBRATION)
 
 
-def test_compare_redaction_hides_every_integer_form_when_unreadable(monkeypatch):
-    from lakebench.metrics import compare as cm
-
-    def gone():
-        raise ValueError("unreadable")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    hidden = cm._hidden_seeds()
-    assert hidden is None
-    for v in (pc.EV, f"+{pc.EV}", f"{pc.EV}.0", f"{pc.EV}.", "1.23456e5", float(43), " 7 "):
-        assert cm._seed_out(v, hidden) == "<protected seed>", v
-    assert cm._seed_out("1_234", hidden) == "<protected seed>"
-    assert cm._seed_out({"seed_ref": str(pc.EV)}, hidden) == {"seed_ref": "<protected seed>"}
-    assert cm._seed_out({"seed": pc.EV}, hidden) == {"seed": "<protected seed>"}
-    doc = cm.redact({"note": f"corpus seed differs ({pc.EV}.0 vs +{pc.RB}, 1_234_567)"}, hidden)
-    assert "1_234_567" not in doc["note"]
-    assert pc.seed_tokens(json.dumps(doc)) == []
-
-
-def test_compare_redaction_hides_held_out_seeds(held):
-    from lakebench.metrics import compare as cm
-
-    hidden = cm._hidden_seeds()
-    doc = cm.redact({"seed": pc.EV, "note": f"seed {pc.RB} and seed 43"}, hidden)
-    assert doc["seed"] == "<protected seed>"
-    assert pc.seed_tokens(json.dumps(doc)) == [] and "seed 43" in doc["note"]
-    assert pc.CALIBRATION not in hidden and pc.EV in hidden
-    assert pc.EV not in (hidden - {pc.EV})
-
-
 # -- every command that loads to change data is guarded or allowlisted -------
 
 #: (module, function) pairs that load a config for MUTATE or RUN and may take
@@ -751,3 +650,19 @@ def test_a_financial_stage_subset_runs_the_check_before_its_stages():
     assert "stages[0][0] != JobType.BRONZE_VERIFY" in guard
     # Every subset is checked; a multi-cycle one may have no manifest yet.
     assert "required=total_cycles == 1" in body[check : check + 200]
+
+
+def test_record_refusal_is_fail_closed_by_default(monkeypatch):
+    """With compare gone, no caller needs the fail-open default: a financial
+    record whose held-out check cannot run is refused unless a caller
+    opts out."""
+
+    def boom(seed):
+        raise OSError("held-out record unreadable")
+
+    monkeypatch.setattr(lg, "recorded_seed_role", boom)
+    rec = _rec(seed=12345)
+    with pytest.raises(lg.UsageError) as e:
+        lg.refuse_protected_records([("r1", rec)], "financial reproduce")
+    assert "cannot be read" in str(e.value)
+    lg.refuse_protected_records([("r1", rec)], "financial reproduce", fail_closed=False)

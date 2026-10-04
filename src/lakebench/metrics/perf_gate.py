@@ -1201,7 +1201,7 @@ def load_store(path: Path) -> BaselineStore:
             if schema != 1:
                 required_keys.append("fingerprint_version")
                 # A version 1 entry carried into a schema 2 store by a save
-                # has no pinset; compare refuses it by its version instead.
+                # has no pinset; it is refused by its version instead.
                 if fp_version == FINGERPRINT_VERSION:
                     required_keys.append("pinset_sha256")
             missing = [k for k in required_keys if not entry.get(k)]

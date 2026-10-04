@@ -40,7 +40,6 @@ class LoadPurpose(str, Enum):
     RUN = "run"  # run (and the perf gate's pinned configs): MUTATE plus run-only refusals
     TEARDOWN = "teardown"  # destroy, stop, admin
     READ = "read"  # status, logs, report, results: read about a deployment
-    COMPARE = "compare"  # compare's config resolution (read-only compare)
     INSPECT = "inspect"  # config show, info, config storage/recommend/upgrade: no deployment
 
 

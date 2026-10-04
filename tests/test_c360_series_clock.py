@@ -79,10 +79,9 @@ def test_single_cycle_c360_keeps_the_ladder(window, bronze, expected):
     assert _silver_env(_cfg("customer360", 1, **window), bronze) == expected
 
 
-def test_workload_version_names_the_change_and_orders_after_c360_2():
-    from lakebench.metrics.compare import _workload_version_number
+def test_workload_version_is_pinned():
+    """c360-2.dev1 names the one-data-clock change; any change to Customer
+    360 results bumps it (the release takes c360-3)."""
     from lakebench.metrics.experiment import WORKLOAD_VERSIONS
 
     assert WORKLOAD_VERSIONS["customer360"] == "c360-2.dev1"
-    order = ["c360-1", "c360-2", "c360-2.dev1", "c360-2.dev2", "c360-3"]
-    assert sorted(order, key=_workload_version_number) == order

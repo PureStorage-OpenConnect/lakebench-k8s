@@ -38,7 +38,6 @@ ALLOWLIST = {
     "tests/fixtures/verdict/*": "recorded run output names the image that ran",
     "uat/runs/*": "checked-in run output names the image that ran",
     "tests/fixtures/perf_v16_store/*": "the v1.6 perf store, kept as v1.6 shipped it",
-    "tests/expected/pairs.json": "expected compare output over the recorded runs",
     "tests/test_experiment.py": "a record fixture naming an old image on purpose",
     "tests/test_datagen_robustness.py": "comment on what an old image produced",
     "tests/test_aml_scale_invariance.py": "refusal test feeds a floating tag on purpose",

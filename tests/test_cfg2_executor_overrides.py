@@ -245,18 +245,6 @@ def test_driver_overrides_are_their_own_architecture_key():
     assert [d.key for d in cmp.diff_group(ca, cb, cmp.ARCHITECTURE)] == ["spark driver overrides"]
 
 
-def test_binding_override_not_like_for_like():
-    from lakebench.metrics.compare import compare_records
-
-    a = sr.load_record("5105a0")
-    b = copy.deepcopy(a)
-    b["experiment"]["limits"]["bound_kinds"] = sorted(
-        [*b["experiment"]["limits"].get("bound_kinds", []), "silver-build: executor override"]
-    )
-    assert compare_records([a], [copy.deepcopy(a)])["verdict"] == cmp.LIKE_FOR_LIKE
-    assert compare_records([a], [b])["verdict"] != cmp.LIKE_FOR_LIKE
-
-
 # -- 6. not a baseline, not evidence -------------------------------------------------------
 
 

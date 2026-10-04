@@ -544,36 +544,3 @@ def test_report_card_hints_match_the_registry():
 
 
 # --- compare: stored pair P2 -------------------------------------------------
-
-
-def _rows(a: dict, b: dict) -> dict[str, dict]:
-    from lakebench.metrics.compare import compare_records
-
-    return {r["metric"]: r for r in compare_records([a], [b])["metrics"]}
-
-
-def test_p2_degraded_side_not_winner():
-    """P2 (C360 continuous, Trino vs Thrift): qph_degradation_pct -7.85 on A
-    and 26.97 on B. B degraded; its larger number was rendered as a B win
-    when the direction came from the "qph" name token. The direction is
-    the registry's, and compare names no winner on any row."""
-    a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
-    scores_a = a["pipeline_benchmark"]["scores"]
-    scores_b = b["pipeline_benchmark"]["scores"]
-    assert scores_a["qph_degradation_pct"] < scores_b["qph_degradation_pct"]
-    assert reg.lookup("qph_degradation_pct", _mode(a)).direction == "lower"
-    rows = _rows(a, b)
-    assert rows["qph_degradation_pct"]["direction"] == "lower"
-    assert all(r["winner"] is None for r in rows.values())
-    # Continuous total elapsed and core-hours have no better side.
-    for metric in ("total_elapsed_seconds", "total_core_hours"):
-        assert metric in scores_a
-        assert rows[metric]["assessment"] == "not_directional", metric
-
-
-def test_compare_does_not_assess_diagnostic_scores():
-    a, b = sr.load_record("011043-e338c5"), sr.load_record("073533-9de9c9")
-    rows = _rows(a, b)
-    for metric in ("total_rows_processed", "bronze_busy_fraction"):
-        assert metric in a["pipeline_benchmark"]["scores"]
-        assert rows[metric]["assessment"] == "not_directional", metric

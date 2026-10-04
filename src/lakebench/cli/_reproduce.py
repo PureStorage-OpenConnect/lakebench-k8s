@@ -274,7 +274,7 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
 def _run_query_set(metrics: Any) -> str | None:
     """The query-set id of the run's QpH (the benchmark the QpH came from):
     the smaller set when every in-stream round missed the same query
-    (collector.executed_subset_query_set), as compare reads it."""
+    (collector.executed_subset_query_set)."""
     from lakebench.metrics.collector import executed_subset_query_set
 
     pb = getattr(metrics, "pipeline_benchmark", None)

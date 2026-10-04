@@ -1,7 +1,7 @@
 """``--json``: one machine-readable document per command run (``lb-cli/1``).
 
 With ``--json`` a read verb (``plan``, ``status``, ``report``, ``config
-recipes``, ``compare``, ``query``) writes exactly one document to stdout::
+recipes``, ``query``) writes exactly one document to stdout::
 
     {"schema": "lb-cli/1", "command": "status", "exit_code": 1,
      "data": {...} | null,
@@ -155,7 +155,6 @@ class PlanData(TypedDict):
     differences: list[dict[str, Any]]
 
 
-#: ``compare``'s data is the ``cmp2`` document (metrics/compare.py), and
 #: ``plan``'s each plan is ``cli/_plan.plan_one``'s dict.
 
 
@@ -182,9 +181,9 @@ def active() -> bool:
 
 def _stdout_consoles() -> list[Any]:
     """The module-level Rich consoles that print to stdout."""
-    from lakebench.cli import _compare, _config, _financial, _helpers, _recommend
+    from lakebench.cli import _config, _financial, _helpers, _recommend
 
-    return [m.console for m in (_helpers, _compare, _config, _financial, _recommend)]
+    return [m.console for m in (_helpers, _config, _financial, _recommend)]
 
 
 def start(command: str) -> None:

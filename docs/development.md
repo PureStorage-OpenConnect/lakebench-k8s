@@ -405,8 +405,7 @@ section, with a source pointer for each statement:
 8. Metrics: the primary metric per mode, then each published metric with
    unit, direction, definition, window and any cap it depends on.
 9. Disclosure: the fields a published result carries.
-10. Comparability: when two runs are comparable, when like-for-like, and
-    when `lakebench compare` refuses.
+10. Comparability: when two runs are comparable and when like-for-like.
 11. Supported compositions, with support state and known exclusions.
 12. Known limitations.
 

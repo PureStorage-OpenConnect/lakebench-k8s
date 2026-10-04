@@ -340,9 +340,7 @@ def reproduce(
     # A run on a protected corpus is read only by its registered look.
     from lakebench.aml.look_guard import refuse_protected_records
 
-    refuse_protected_records(
-        [(str(record.get("run_id")), record)], "financial reproduce", fail_closed=True
-    )
+    refuse_protected_records([(str(record.get("run_id")), record)], "financial reproduce")
     problem, snapshots, run_id = snapshots_problem(record)
     if problem:
         raise LakebenchError(

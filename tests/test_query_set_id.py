@@ -75,28 +75,6 @@ def test_legacy_run_gets_the_id_of_the_set_it_ran(tmp_path):
     assert qph_comparable(loaded.query_set_id, query_set_id(FIN))[0] is False
 
 
-def test_compare_refuses_qph_across_query_sets():
-    """Two runs whose benchmark query sets differ are NOT COMPARABLE
-    (ladder step 5): no QpH delta is drawn."""
-    import copy
-
-    from lakebench.metrics.compare import compare_records
-    from tests.fixtures import stored_records as sr
-
-    a = sr.load_record("825153")
-    b = copy.deepcopy(a)
-    b["run_id"] = "20261001-000000-95e700"
-    b["experiment"]["results"]["query_set_id"] = query_set_id(FIN8)
-    c = compare_records([a], [b])
-    assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
-    assert "benchmark query sets differ" in c["reasons"][0]
-    qph = next(r for r in c["metrics"] if r["metric"] == "composite_qph")
-    assert qph["delta_pct"] is None and qph["assessment"] == "withheld"
-    same = copy.deepcopy(a)
-    same["run_id"] = "20261001-000000-95e701"
-    assert compare_records([a], [same])["verdict"] != "NOT COMPARABLE"
-
-
 def test_reproduce_refuses_qph_across_query_sets():
     from lakebench.cli._reproduce import _build_package, _compare
 

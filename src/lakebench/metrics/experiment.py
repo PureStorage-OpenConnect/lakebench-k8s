@@ -8,7 +8,7 @@ the stages and detection rules that ran or were skipped, the limits
 Lakebench imposed on the run, and a result fingerprint per benchmark query
 (benchmark.fingerprint).
 
-``lakebench compare`` and the perf gate read it through ``refusals``: two
+The perf gate and ``reproduce`` read it (``stored_identity_refusals``): two
 runs whose workload, corpus, seed, scale or mode differ, or whose benchmark
 queries returned different results, are not compared on performance
 (invariant 2). A record without the block (written before it existed) is
@@ -55,9 +55,8 @@ nothing measured under this one):
   ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
   ``customer_recency_score`` is anchored to one day across cycles.
   Single-cycle results do not change. With it, multi-cycle time to value
-  leaves the cycles' datagen out. A ``.devN`` version orders after its
-  ``-N`` (``metrics.compare``); the release takes ``c360-3``, never ``c360-2``
-  again, so no release record shares an identity with a pre-``dev1`` one
+  leaves the cycles' datagen out. The release takes ``c360-3``, never
+  ``c360-2`` again, so no release record shares an identity with a pre-``dev1`` one
   (2026-10-03).
 
 Identity versions. A block is stamped ``exp2``
@@ -1271,8 +1270,8 @@ CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
 #: Conditions that are also outcomes of the run: the in-stream round count
 #: depends on how long each round took, so a slower build fits fewer rounds,
 #: and the investigator sessions that ran depend on the cases open.
-#: compare reports a difference (not like-for-like); the perf gate and
-#: reproduce do not refuse on it, or a regression that costs a round would
+#: A difference is not like-for-like; the perf gate and reproduce do not
+#: refuse on it, or a regression that costs a round would
 #: read as "not comparable" instead of a regression.
 OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
 
@@ -1312,17 +1311,6 @@ def identity_hash(exp: Mapping[str, Any]) -> str:
     # one side is not a difference (the image reference still is).
     ident.pop("generator digest", None)
     return _short_hash(ident)
-
-
-def identity_digest(record_or_block: Mapping[str, Any]) -> str | None:
-    """``identity_hash`` of a metrics.json dict's stored block (or of a
-    block passed directly); None for a record without one."""
-    exp = (
-        experiment_of(record_or_block)
-        if "experiment" in record_or_block or "run_id" in record_or_block
-        else record_or_block
-    )
-    return identity_hash(exp) if exp else None
 
 
 def experiment_of(record: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
@@ -1418,106 +1406,6 @@ def diff_fingerprints(
                 f"({label_a}: {describe(fa)}; {label_b}: {describe(fb)})"
             )
     return out
-
-
-def fingerprint_differences(
-    a: Mapping[str, Any], b: Mapping[str, Any], label_a: str = "A", label_b: str = "B"
-) -> list[str]:
-    return diff_fingerprints(result_fingerprints(a), result_fingerprints(b), label_a, label_b)
-
-
-def refusals(
-    record_a: Mapping[str, Any] | None,
-    record_b: Mapping[str, Any] | None,
-    label_a: str = "A",
-    label_b: str = "B",
-) -> tuple[list[str], list[str], list[str]]:
-    """Why metrics.json dicts *record_a* and *record_b* cannot be compared on
-    performance: (provenance refusals, result refusals, notes).
-
-    Provenance refusals mean the runs are different experiments. Result
-    refusals mean the same experiment returned different query results or
-    alert sets. Notes are caveats that do not refuse; a "result equivalence
-    not checked" note means the results were NOT compared (no benchmark, or
-    a missing alert set), so empty result refusals then prove nothing.
-    Execution conditions are not refusals: see ``like_for_like``.
-    """
-    ea, eb = experiment_of(record_a), experiment_of(record_b)
-    prov: list[str] = []
-    for label, rec, exp in ((label_a, record_a, ea), (label_b, record_b, eb)):
-        if exp is None:
-            rid = (rec or {}).get("run_id") or "unknown run"
-            prov.append(f"{NO_PROVENANCE} ({label}: run {rid} has no experiment block)")
-    if prov:
-        return prov, [], []
-    assert ea is not None and eb is not None
-    from lakebench.metrics import comparability as cmp
-
-    # Ladder step 0 (identity versions, required keys, a withheld seed).
-    step0 = cmp.pair_verdict([record_a or {}], [record_b or {}], label_a, label_b)
-    prov = list(step0.reasons) if step0.step == "0" else []
-    if _cmp.block_generation(ea) == _cmp.block_generation(eb):
-        # (A version mismatch is already the step 0 line.)
-        prov += identity_differences(ea, eb, record_a, record_b)
-    for label, exp in ((label_a, ea), (label_b, eb)):
-        prov.extend(f"{label}: {p}" for p in corpus_problems(exp))
-    notes: list[str] = []
-    res_a, res_b = ea.get("results") or {}, eb.get("results") or {}
-    unchecked = res_a.get("not_checked") or res_b.get("not_checked")
-    if unchecked:
-        notes.append(f"result equivalence not checked: {unchecked}")
-        return prov, [], notes
-    from lakebench.metrics.alert_set import (
-        alert_set_missing,
-        alert_set_notes,
-        alert_set_of,
-        diff_alert_sets,
-    )
-
-    missing = [
-        f"{lb}: {m}" for lb, e in ((label_a, ea), (label_b, eb)) if (m := alert_set_missing(e))
-    ]
-    if missing:
-        notes.append(f"result equivalence not checked: {'; '.join(missing)}")
-        return prov, [], notes
-    qa, qb = res_a.get("query_set_id"), res_b.get("query_set_id")
-    results: list[str] = []
-    if qa != qb:
-        results.append(f"benchmark query sets differ ({qa} vs {qb})")
-    results.extend(fingerprint_differences(ea, eb, label_a, label_b))
-    results.extend(diff_alert_sets(alert_set_of(ea), alert_set_of(eb), label_a, label_b))
-    notes.extend(alert_set_notes(ea, eb, label_a, label_b))
-    return prov, results, notes
-
-
-def like_for_like(
-    record_a: Mapping[str, Any] | None, record_b: Mapping[str, Any] | None
-) -> list[str]:
-    """Why two metrics.json dicts are not like-for-like: the execution
-    conditions that differ (effective maintenance, the compaction
-    operation and the rest of the Conditions group), preceded by the
-    ladder's confounded line (architecture and system both differ) or its
-    step 7a line (only the dependency set differs). Empty when either has
-    no experiment block (that pair is refused before this matters)."""
-    ea, eb = experiment_of(record_a), experiment_of(record_b)
-    if ea is None or eb is None:
-        return []
-    from lakebench.metrics import comparability as cmp
-
-    out = condition_differences(ea, eb, record_a, record_b)
-    verdict = cmp.pair_verdict([record_a or {}], [record_b or {}])
-    if verdict.verdict == cmp.CONFOUNDED or verdict.step == "7a":
-        # Not conditions, but just as fatal to like-for-like (ladder steps
-        # 6 and 7a): shown with the conditions until compare reads the
-        # ladder itself.
-        out = list(verdict.reasons) + out
-    return out
-
-
-def support_of(record: Mapping[str, Any] | None) -> str:
-    """The recorded support state of a metrics.json dict, or "unknown"."""
-    exp = experiment_of(record)
-    return str(((exp or {}).get("support") or {}).get("state") or "unknown")
 
 
 def stored_identity_refusals(

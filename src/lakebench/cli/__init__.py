@@ -117,11 +117,6 @@ app.add_typer(config_app)
 app.add_typer(financial_app)
 app.add_typer(admin_app)
 
-# Compare command (registered from separate module)
-from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
-
-app.command(name="compare")(_compare_fn)
-
 # Extracted commands (registered from separate modules)
 from lakebench.cli._clean import clean as _clean_fn  # noqa: E402
 from lakebench.cli._deploy import deploy as _deploy_fn  # noqa: E402
@@ -1662,7 +1657,7 @@ def _report_run_data(
     ``load_run`` reads them). Scores are as stored. The verdict carries both
     halves: ``verdict_stored`` as the record holds it, ``verdict_recomputed``
     from the record (``verdict.verdict_from_record``), and ``verdict``, the
-    strictest of them, as compare, the perf gate and the release gate read
+    strictest of them, as the perf gate and the release gate read
     it. A record that cannot be read as stored gives null for all three and
     for the scores."""
     from lakebench.metrics.verdict import verdict_of

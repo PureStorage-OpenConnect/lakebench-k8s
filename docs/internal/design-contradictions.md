@@ -24,6 +24,11 @@ remains open only as implementation work.
    and mark mismatched comparisons invalid [impl]. [decided D1] `compare`
    shows the evidence, gives a NOT COMPARABLE verdict, suppresses any winner
    or performance conclusion, and exits non-zero.
+   **Superseded 2026-10-03 (owner):** `compare` is removed; humans compare
+   two reports. Each report shows the evidence (per-query result
+   fingerprints, the query set, the AML batch alert set and the identity
+   digest), and the perf gate and `reproduce` still refuse a run whose query
+   results differ from their reference. They do not compare alert sets.
 
 2. **Queries are never checked for non-empty or correct results.**
    `rows_returned` (`benchmark/runner.py:37`) is only displayed

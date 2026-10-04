@@ -21,17 +21,13 @@ the bronze and datagen gates of `run` and `reproduce` name every refusal and
 
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
-| 0 | `OK` | Success: the run passed, the read succeeded, or the comparison is like-for-like. | `version.ok`, `run.pass`, `compare.like_for_like`, `status.ok`, `plan.ok` |
+| 0 | `OK` | Success: the run passed or the read succeeded. | `version.ok`, `run.pass`, `status.ok`, `plan.ok` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod`, `financial.reproduce.mismatch`, `financial.reproduce.not_found` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `financial.reproduce.no_record`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `run.protected_corpus`, `alias.refused`, `compare.equal_names`, `compare.bad_ref`, `compare.same_runs`, `compare.unreadable_record`, `compare.removed_flag`, `reproduce.report_required` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `financial.reproduce.no_record`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `run.protected_corpus`, `alias.refused`, `reproduce.report_required` |
 | 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `run.series_mismatch`, `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `s3.unreachable`, `financial.k8s_unreachable`, `financial.reproduce.snapshot_gone`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
-| 10 | `COMPARE_NOT_COMPARABLE` | compare: NOT COMPARABLE. | `compare.not_comparable` |
-| 11 | `COMPARE_NOT_ESTABLISHED` | compare: COMPARABILITY NOT ESTABLISHED. | `compare.not_established` |
-| 12 | `COMPARE_NOT_LIKE_FOR_LIKE` | compare: comparable, not like-for-like. | `compare.not_like_for_like` |
-| 13 | `COMPARE_CONFOUNDED` | compare: comparable, confounded. | `compare.confounded` |
 | 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift`, `reproduce.verify_out_of_band` |
 | 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM). | `sigint`, `run.interrupted` |
 
@@ -42,7 +38,6 @@ the CLI down every path listed here and checks the code.
 
 | Path | Code | When |
 |---|---|---|
-| `compare.like_for_like` | 0 | `compare` finds the sides like-for-like |
 | `plan.ok` | 0 | `plan` finds every prerequisite and enough capacity |
 | `run.pass` | 0 | `run` finished and its verdict passed |
 | `status.ok` | 0 | `status` finds every listed component ready |
@@ -58,14 +53,9 @@ the CLI down every path listed here and checks the code.
 | `status.namespace_missing` | 1 | `status` finds no namespace |
 | `stop.api_error` | 1 | `stop` could not list or delete a job; it still tried every other deletion |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
-| `alias.refused` | 2 | a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean journal`); the message names the replacement, and no argument is echoed |
+| `alias.refused` | 2 | a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean journal`, `compare`); the message names the replacement, and no argument is echoed |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
-| `compare.bad_ref` | 2 | a `compare` side names a run, record, series or config that resolves to no record |
-| `compare.equal_names` | 2 | `compare` was given two configs with the same deployment name and different contents |
-| `compare.removed_flag` | 2 | a flag of the `compare` that ran both configs; the message names the replacement |
-| `compare.same_runs` | 2 | the two `compare` sides resolve to the same runs, or share a run |
-| `compare.unreadable_record` | 2 | a `compare` record or series manifest cannot be read, or two files disagree about one run |
 | `config.name_required` | 2 | a command that changes data or tears a deployment down was given a config with no name; a read command (`status`, `logs`, `report`) too, in a directory whose v1.6 state names a deployment |
 | `config.unsupported` | 2 | the workload, recipe and mode combination is unsupported, or the scale is above the workload's datagen ceiling |
 | `config.upgrade_refused` | 2 | `config upgrade` is removed; the message names `init --from` |
@@ -115,10 +105,6 @@ the CLI down every path listed here and checks the code.
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `run.namespace_missing_no_yes` | 5 | `run` would create a missing namespace and was not given --yes |
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
-| `compare.not_comparable` | 10 | `compare` verdict |
-| `compare.not_established` | 11 | `compare` verdict |
-| `compare.not_like_for_like` | 12 | `compare` verdict |
-| `compare.confounded` | 13 | `compare` verdict |
 | `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
 | `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
 | `reproduce.verify_out_of_band` | 14 | `reproduce --report` of a registered look: the report does not match the look record, or the record holds no report sha256 |
@@ -133,5 +119,5 @@ one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`
 (the fix) and `Where` lines when they apply. An error Lakebench does
 not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`
 to get the traceback. Machine output (`--format json` and `--format csv`
-on `query`, `report` and `compare`) goes to plain stdout, unwrapped, so
+on `query` and `report`) goes to plain stdout, unwrapped, so
 it can be piped to a parser.

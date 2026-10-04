@@ -16,10 +16,8 @@ from pathlib import Path
 import pytest
 
 from lakebench.metrics import alert_set as als
-from lakebench.metrics import comparability as cmp
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import JobMetrics, MetricsCollector
-from tests.fixtures import stored_records as sr
 from tests.test_comparability import SYSID, observe, series_body, two_nodes
 from tests.test_experiment import _cfg, _metrics
 
@@ -151,12 +149,6 @@ def _fresh(schema="financial", mode="batch", aset=ASET, unavailable=None, system
     return run
 
 
-def _record(run, run_id):
-    d = run.to_dict()
-    d["run_id"] = run_id
-    return d
-
-
 class TestRecord:
     def test_batch_results_carry_it(self):
         e = _fresh().to_dict()["experiment"]
@@ -199,120 +191,7 @@ class TestRecord:
 # ---------------------------------------------------------------------------
 
 
-def _with_aset(run_id: str, new_id: str, aset):
-    rec = sr.load_record(run_id)
-    rec["run_id"] = new_id
-    if aset is not None:
-        rec["experiment"]["results"]["alert_set"] = copy.deepcopy(aset)
-    return rec
-
-
 class TestCompare:
-    def test_alert_set_refusal(self):
-        """Two copies of 1320bd (AML batch, exp1) with one rule's hash
-        changed read NOT COMPARABLE, different results, naming the rule."""
-        changed = copy.deepcopy(ASET)
-        changed["by_rule"]["W2_structuring"]["h"] = "908"
-        changed["h"] = str(int(changed["h"]) + 1)
-        a = _with_aset("1320bd", "a", ASET)
-        b = _with_aset("1320bd", "b", changed)
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.step, v.code) == (cmp.NOT_COMPARABLE, "5", 10)
-        assert v.reasons == [
-            "alert set differs: rule W2_structuring raised 5 alert(s) in A and 5 in B "
-            "(same count, different alerts)"
-        ]
-        # The legacy refusals path agrees.
-        _prov, results, _notes = ex.refusals(a, b)
-        assert results == v.reasons
-
-    def test_equal_alert_sets_are_a_repeat(self):
-        v = cmp.pair_verdict([_with_aset("1320bd", "a", ASET)], [_with_aset("1320bd", "b", ASET)])
-        assert (v.verdict, v.attribution) == (cmp.LIKE_FOR_LIKE, "repeat")
-
-    def test_inside_one_side_is_step_2(self):
-        other = _aset(W1_connected_components=(3, "-12"))
-        v = cmp.pair_verdict(
-            [_with_aset("1320bd", "a1", ASET), _with_aset("1320bd", "a2", other)],
-            [_with_aset("1320bd", "b", ASET)],
-        )
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "2")
-        assert any(
-            "rule W2_structuring raised 5 alert(s) in a1 and none in a2" in r for r in v.reasons
-        )
-
-    def test_exp1_absent_on_one_side_is_a_note(self):
-        """d1: a 1.6 record never had an alert set; absent on one exp1 side
-        is a note and the pair reads on its benchmark results."""
-        v = cmp.pair_verdict([_with_aset("1320bd", "a", ASET)], [_with_aset("1320bd", "b", None)])
-        assert v.verdict == cmp.LIKE_FOR_LIKE
-        assert any("recorded no alert-set fingerprint" in n for n in v.notes)
-
-    def test_exp1_absent_on_both_sides_unchanged(self):
-        """Stored 1.6 AML pairs keep their verdicts and notes."""
-        base = cmp.pair_verdict([sr.load_record("1320bd")], [_with_aset("1320bd", "b", None)])
-        assert base.verdict == cmp.LIKE_FOR_LIKE
-        assert not any("alert-set" in n for n in base.notes)
-
-    def test_exp2_missing_alert_set_not_established(self):
-        """d2-5: an exp2 AML batch record without an alert set is NOT
-        ESTABLISHED, never let through on its benchmark results."""
-        a, b = _record(_fresh(), "a"), _record(_fresh(aset=None), "b")
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.step, v.code) == (cmp.NOT_ESTABLISHED, "4", 11)
-        assert v.reasons == ["B run b: the alert-set fingerprint was not recorded"]
-        # A block that only 1.6 could have written (exp1, no 1.7 marker) is
-        # not required to carry one (the d1 "absent is a note" rule).
-        for rec in (a, b):
-            rec["experiment"]["schema"] = "exp1"
-            rec["experiment"].pop("identity_version", None)
-            rec["experiment"]["lakebench"] = {"version": "1.6.0"}
-        assert ex.results_established(b["experiment"]) is True
-
-    def test_v17_exp1_missing_alert_set_not_established(self):
-        """1.7 writes exp1 when its identity is incomplete (no system
-        identity sample): a failed fingerprint there is still NOT
-        ESTABLISHED, never read as a 1.6 record's absence."""
-        a = _record(_fresh(system=False), "a")
-        b = _record(_fresh(system=False, aset=None, unavailable="Py4JJavaError"), "b")
-        assert b["experiment"]["schema"] == "exp1" and "v2_unavailable" in b["experiment"]
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.step) == (cmp.NOT_ESTABLISHED, "4")
-        assert v.reasons == ["B run b: the alert-set fingerprint was not recorded (Py4JJavaError)"]
-        both = cmp.pair_verdict([_record(_fresh(system=False, aset=None), "c")], [b])
-        assert (both.verdict, both.step) == (cmp.NOT_ESTABLISHED, "4")
-
-    def test_missing_alert_set_does_not_hide_a_missing_query_set_id(self):
-        """Step 0 still requires the query set id of a run whose benchmark
-        results were checked, whatever its alert set."""
-        a = _record(_fresh(aset=None), "a")
-        a["experiment"]["results"]["query_set_id"] = None
-        v = cmp.pair_verdict([a], [_record(_fresh(), "b")])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "0")
-        assert any("query set id not recorded on a" in r for r in v.reasons)
-
-    def test_exp2_both_present_equal_and_different(self):
-        a, b = _record(_fresh(), "a"), _record(_fresh(), "b")
-        assert cmp.pair_verdict([a], [b]).verdict == cmp.LIKE_FOR_LIKE
-        b["experiment"]["results"]["alert_set"] = _aset(W1_connected_components=(3, "-12"))
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "5")
-
-    def test_exp2_malformed_alert_set_not_established(self):
-        a, b = _record(_fresh(), "a"), _record(_fresh(), "b")
-        b["experiment"]["results"]["alert_set"]["rows"] = 99
-        v = cmp.pair_verdict([a], [b])
-        assert (v.verdict, v.step) == (cmp.NOT_ESTABLISHED, "4")
-        assert "malformed" in v.reasons[0]
-
-    def test_refusals_note_when_missing_on_exp2(self):
-        a, b = _record(_fresh(), "a"), _record(_fresh(aset=None), "b")
-        _prov, results, notes = ex.refusals(a, b)
-        assert results == []
-        assert notes == [
-            "result equivalence not checked: B: the alert-set fingerprint was not recorded"
-        ]
-
     @pytest.mark.parametrize(
         "b, expected",
         [

@@ -80,11 +80,11 @@ The keys:
 
 **What to do:** Delete run records or journals by hand if you must; the CLI does not.
 
-### compare runs nothing
+### compare is removed
 
-`compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`, ...) exit 2.
+`lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each report states the corpus, components, result fingerprints and caps needed to judge a comparison.
 
-**What to do:** Run each side with `lakebench run` (add `--repeat 3`), then `lakebench compare A.yaml B.yaml`.
+**What to do:** Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench report CONFIG`); see Comparing Runs in docs/benchmarking.md.
 
 ### init refuses credential values
 
@@ -186,12 +186,6 @@ A `run` whose datagen did not finish in time exits 1 (was 5); the record says "d
 
 **What to do:** Read `verdict.reasons` in `metrics.json` instead of the exit code.
 
-### compare exits with its verdict
-
-`compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like and 13 confounded (all were 0).
-
-**What to do:** Read the verdict from the exit code or `--format json`; the old JSON fields are replaced by the `cmp2` document.
-
 ## Comparability and identity
 
 ### Customer 360 records carry a new workload version
@@ -210,7 +204,7 @@ AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carr
 
 Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
 
-**What to do:** Re-read stored pairs with `lakebench compare`; a pair whose architecture and system both differ is confounded.
+**What to do:** Re-run a baseline under 1.7 before comparing; when the architecture and the system both differ, no difference can be put down to either.
 
 ### Continuous pairs with different round counts are not like-for-like
 
@@ -226,7 +220,7 @@ The perf-gate fingerprint is version 2 and the baseline store schema 2; older ru
 
 ### Readers take the strictest verdict
 
-`compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+`report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 
 **What to do:** Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed` beside the `verdict` it heads with.
 
@@ -290,7 +284,7 @@ An AML run over a corpus with no manifest (batch, continuous with `--skip-genera
 
 ### A protected AML corpus is refused outside its look
 
-`run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
+`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
 
 **What to do:** Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.
 

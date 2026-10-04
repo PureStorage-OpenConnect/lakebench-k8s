@@ -250,7 +250,7 @@ def _ints(values: Sequence[Any]) -> list[int]:
 def marker_problems(markers: Mapping[str, Any], model_version: str | None) -> list[str]:
     """Why the persisted marker set is not one complete corpus written by
     one generator given one set of arguments. Each is a corpus problem
-    (``corpus.problems``), which compare reads as NOT COMPARABLE."""
+    (``corpus.problems``), which makes the run not comparable."""
     if markers.get("error"):
         return []
     problems = list(markers.get("problems") or [])

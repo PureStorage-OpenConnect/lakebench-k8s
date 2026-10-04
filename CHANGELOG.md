@@ -20,7 +20,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `lakebench config upgrade` exits 2 before opening any file: it rewrote configs lossily and wrote secrets in plaintext.
 - `clean bronze` and `clean data` are refused (exit 2): a run regenerates its own corpus.
 - `clean metrics`, `clean journal` and `clean --metrics-dir` are refused (exit 2): records and journals are evidence.
-- `compare` reads stored records and runs nothing; its old run flags (`--keep`, `--scale`, `--yes`, ...) exit 2.
+- `lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each report states the corpus, components, result fingerprints and caps needed to judge a comparison.
 - `init --access-key` and `--secret-key` exit 2 without echoing the value; init writes `${VAR}` references.
 - `generate --wait` / `-w`, `admin release-lock --expired-only` and `deploy --include-observability` are unknown options (exit 2).
 - The run-from-a-checkout wrapper `lbrun.py` is removed.
@@ -32,7 +32,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `destroy` exits 6 (was 4) when its steps finished but the namespace is still terminating.
 - `reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.
 - A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
-- `compare` exits 0 like-for-like, 10 not comparable (was 1), 11 not established, 12 not like-for-like and 13 confounded (all were 0).
 - Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 - AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
 - Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
@@ -44,7 +43,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A continuous AML run that passed its gates ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout; its check is reported beside the verdict and never fails the run.
 - `financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
 - An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
-- `run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
+- `run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
 - Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
 - `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
 - `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
@@ -70,7 +69,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
 - The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 - A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
-- `compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+- `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
@@ -110,7 +109,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   conditions that before only turned the report badge red: a continuous
   ingest ratio below 0.95 that the trickle does not explain, gold stale for
   more than half the run, and a batch scale ratio between 0 and 0.95.
-  `compare`, the perf gate, the release gate and `report` take the
+  The perf gate, the release gate and `report` take the
   strictest of a record's stored verdict and the one recomputed from it
   (`report --json` and its `--list` rows show `verdict_stored`,
   `verdict_recomputed` and that strictest one as `verdict`), so stored
@@ -120,9 +119,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
   records the stage (`stage_only`), is judged on that stage's layer, and is
   refused as a perf baseline. A stored scale or ingest ratio just under
-  0.95 is rounded down, never up to 0.95. `compare` refuses a `lakebench
-  benchmark` record even when it is named by id, and such a record's
-  `success` follows its verdict (the command's exit code does not change).
+  0.95 is rounded down, never up to 0.95. A `lakebench benchmark`
+  record's `success` follows its verdict (the command's exit code does not change).
 - **Multi-cycle runs and reused corpora check a corpus series marker.**
   Every generate (`generate`, `run --generate`, each cycle of a multi-cycle
   run, and a continuous run's datagen) now writes
@@ -204,8 +202,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   hidden aliases that print "`lakebench OLD` is now `lakebench NEW`; the old
   name is removed in v1.8" on stderr, then run the new command. The list of
   aliased, refused and deprecated commands and flags is
-  `lakebench.cli._aliases`; `init` and `compare` word their flag refusals
-  from it.
+  `lakebench.cli._aliases`; `init` words its flag refusals from it.
 - **`benchmark` and `query` no longer write into a run's record.**
   `lakebench benchmark` saves its result as a record of its own under a new
   run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
@@ -213,42 +210,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   benchmark inside the run's own `metrics.json`. The copy's QpH, scores and
   query stage are the new benchmark's, `provenance.benchmark` names the code
   and time of the benchmark, and a continuous run's in-stream rounds and the
-  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`
-  or `compare`, nor a perf-gate candidate or baseline: read it by its run id
+  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`,
+  nor a perf-gate candidate or baseline: read it by its run id
   (`benchmark` prints it). `lakebench query` prints and journals its result
   and no longer appends it to the latest record. `MetricsStorage.save_run`
   refuses to replace an existing `metrics.json` unless called with
   `seal_update=True`.
-- **`compare` compares stored records and runs nothing.** `lakebench compare
-  SIDE_A SIDE_B` takes, per side, run ids, run directories, `metrics.json`
-  paths, `series:<id>` or a config (its latest run, or every member of that
-  run's `run --repeat` series), with `--runs-dir`, `--format` and `-o`. It
-  no longer deploys, runs or destroys either config. The flags of the
-  command that did (`--keep`, `--scale`, `--skip-benchmark`, `--timeout`,
-  `--local`, `--generate`, `--yes`) exit 2 and name the replacement: run
-  each side with `lakebench run`, then compare. The exit code is the
-  verdict: 0 LIKE-FOR-LIKE, 10 NOT COMPARABLE (was 1), 11 NOT ESTABLISHED
-  (was 0), 12 NOT LIKE-FOR-LIKE and 13 CONFOUNDED (both were 0); 2 for a ref
-  that resolves to no record, the same runs on both sides, an unreadable
-  record or two configs with one name and different contents (on two
-  sides or listed on one). Every
-  verdict prints the one condition the pair is missing and, where one
-  exists, the command that supplies it. Each score shows each side's median, range and n; no
-  winner is named and no delta is coloured (the winner rule is not in this
-  release), so the 2% noise floor and `noise_floor_pct` are gone, and a
-  NOT COMPARABLE or NOT ESTABLISHED pair shows no delta. A row a
-  Lakebench limit bound carries the limit (`capped_by`, BOUNDED BY)
-  whatever the verdict. A member whose
-  verdict did not pass is excluded and listed. The automatic
-  `lakebench-output/comparisons/compare-<ts>/comparison.json` is no longer
-  written; pass `-o`. `--format json` writes the `cmp2` document (`verdict`,
-  `exit_code`, `missing`, `sides`, `groups`, `metrics` with `assessment`
-  and `capped_by`), replacing the old `comparable`, `like_for_like`,
-  `refusals` and `config_a`/`config_b` fields; the CSV gains `# key: value`
-  header lines and `verdict`, `attribution`, `n_a`, `n_b`, `assessment` and
-  `bound_by` columns. Two continuous runs on one side whose in-stream
-  rounds differ are not one experiment (NOT COMPARABLE): compare them
-  singly. Scripts that parsed the old JSON or exit codes need updating.
 - **`run` refuses arguments it used to ignore, before any cluster call.**
   An unknown `--stage` used to be found only after `run` had read the
   cluster's capacity (and, with `--yes`, could auto-deploy first), and
@@ -391,7 +358,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   Without a config it checks all of them at their default names, and
   Stackable and the observability stack are reported without failing.
 - **A config needs a `name:` to change data.** `deploy`, `generate`,
-  `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
+  `run`, `benchmark`, `query`, `clean`, `reproduce`,
   `financial` and `validate` refuse a nameless config and offer a name to
   add (`config upgrade` is removed, see Removed). A nameless config no longer gets a
   name written to `.lakebench/state.json`; that file is only read. Because
@@ -556,14 +523,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `c360-batch-s10`); the release workflow now runs the `perf-baselines`
   check, which fails a tag only for configs marked required (none until the
   post-freeze data commit). See docs/perf-regression-gate.md.
-- **AML batch runs record their alert set, and `compare` checks it.**
+- **AML batch runs record their alert set.**
   After its last alert write, gold-finalize fingerprints the run's alerts
   over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
   generated ids and wall-clock times (`experiment.results.alert_set`, equal
-  on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are NOT
-  COMPARABLE (exit 10), naming the rule; an AML batch record written by
-  1.7 without one is NOT ESTABLISHED (exit 11), and the perf gate,
-  `reproduce` and the release record refuse it. The fingerprint runs last in
+  on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are not
+  comparable; the perf gate, `reproduce` and the release record refuse an
+  AML batch record written by 1.7 without one. The fingerprint runs last in
   the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
   off the stage's time, as the Customer 360 check's are (time to value of a
   multi-cycle run keeps the earlier cycles'), and the report shows them
@@ -731,7 +697,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   statistical). Before, the
   34 checks a C360 run records were never shown.
 - **`--json` on the read verbs.** `plan`, `status`, `report`, `config
-  recipes`, `compare` and `query` write one `lb-cli/1` document to stdout
+  recipes` and `query` write one `lb-cli/1` document to stdout
   (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
   output to stderr; the exit code and `exit_code` always agree, and a
   failed command's document has `data: null` and the error, including an
@@ -768,26 +734,23 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   now). `financial replay` builds the rule's arguments with the same
   function as gold-finalize.
 - **A protected AML corpus is never read or scored outside its registered
-  look.** `run`, `benchmark`, `query`, `compare`, `reproduce` and every
+  look.** `run`, `benchmark`, `query`, `reproduce` and every
   `financial` subcommand refuse a config that declares the evaluation or
   robustness `corpus_role`, or whose `datagen.seed` hashes to a held-out
-  seed, and `compare` refuses a run record from one. Each refusal exits 2
+  seed. Each refusal exits 2
   on the `run.protected_corpus` path before any cluster call and names a
   role, never a seed. A spent seed, a held-out seed under another role and a
   role that does not match its seed are refused when the config loads
   (exit 2, as a config error). The commands that tear down, read about or
   show a deployment (`destroy`, `stop`, `admin`, `status`, `logs`,
-  `report`, `results`, `plan`, `info`, the `config` read commands, and
-  `compare`'s name resolution) skip that load-time check, so a registered
+  `report`, `results`, `plan`, `info` and the `config` read commands) skip that load-time check, so a registered
   look's deployment can be torn down once its seed is spent; `clean` still
   refuses it (use `destroy`). A financial config whose bronze prefix is one
   this host generated a registered corpus into (the corpus ledger below) is
   refused the same way, so a development config pointed at that bucket does
   not read the registered corpus. The in-run scorer (`score-financial`) also
   reads every manifest row and refuses a corpus any of whose rows come from
-  a held-out or spent seed. `compare` refuses a record only when it is shown
-  to be protected; when the held-out record cannot be read it hides every
-  integer seed instead.
+  a held-out or spent seed.
 - **`lakebench generate --registered-corpus`** generates the registered
   evaluation or robustness corpus; it is the only Lakebench command that
   does (without it a protected config is refused, 2). It needs `--yes`,
@@ -870,8 +833,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   over released rows) of at least 0.99 and a lag at window end of at most
   one trigger, records `experiment.limits.trickle_bound` and a `trickle:`
   line in `limits.bound`. The report labels the continuous rows/s, GB/s and
-  efficiency figures as the offered load, not capacity, and `compare` marks
-  those rows `capped`, with `capped_by` naming the trickle; QpH,
+  efficiency figures as the offered load, not capacity; QpH,
   freshness and time to detect are not labelled. Stored records get the same
   answer when read. The trickle is not a bound kind, so no experiment
   identity moves. The `intake_limit` description now says `none` means
@@ -899,15 +861,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   their query set id; `scores.composite_qph_basis` and
   `scores.composite_qph_by_set` say when the in-stream QpH blends rounds
   that executed different sets (a round with a failed query). Such a run's
-  in-stream benchmark reads query set `blended`; `compare` marks its round
-  medians `not_assessed` and gives the reason ("rounds ran different query
-  sets (A)") in the table, the cmp2 row's `rounds` field and a new CSV
-  `rounds` column, and the perf gate and `reproduce` leave it out. A record stored before rounds named
+  in-stream benchmark reads query set `blended`, and the perf gate and
+  `reproduce` leave it out. A record stored before rounds named
   their set gets each round's set from its queries' success flags, so an
   older continuous run in which a query failed in some rounds and not
   others now reads blended too. A run whose rounds all missed the same
-  query is not assessed in `compare` either, and `reproduce` reads it as
-  the smaller set it executed. A mix of engines reads
+  query is read by `reproduce` as the smaller set it executed. A mix of engines reads
   `compaction=ran(mixed(<op>+<op>))`. See `docs/benchmarking.md`.
 - **`lakebench plan CONFIG...`**, read-only: the components, recipe and
   support state, the minimum cluster from the one sizing source (the
@@ -973,8 +932,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   in `series.json`, mapped through `src/lakebench/config/datagen_lineage.yaml`
   and resolved when the run is observed), so a config edited after
   generation does not change it. Markers that disagree, miss a node or
-  cycle, or come from different builds are corpus problems, which
-  `compare` reads as not comparable. `corpus.id` (v1) is unchanged, and no
+  cycle, or come from different builds are corpus problems, which make
+  the run not comparable. `corpus.id` (v1) is unchanged, and no
   stored id or identity digest moves.
 - **`docs/prerequisites.md` is generated** from the prerequisite checks in
   `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
@@ -1080,23 +1039,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   1.6.0 root, so the two images give one corpus lineage. Every perf-gate
   config under `benchmarks/perf/` takes the same pin (they follow the
   default; none has a baseline recorded on the 1.7 tree yet).
-- **`compare`: outcome keys inside a side, and maintenance skipped on both
-  sides.** A side whose repeat runs differ only in in-stream rounds or
-  investigator sessions (outcomes of the runs' speed) is now one
-  experiment, and the pair is NOT LIKE-FOR-LIKE (exit 12) instead of NOT
-  COMPARABLE (exit 10): a continuous side of three runs, whose round counts
-  almost always differ, now shows its medians, though no directional row is
-  assessed. A round count of 0 (the post-stream estimator) against more than
-  0 inside a side, an outcome value that is not a count, and every other
-  difference inside a side still read NOT COMPARABLE. Two runs that each
-  skipped every maintenance operation by the user's choice under one policy
-  now have the same effective maintenance, across table formats, and their
-  maintenance settings are not compared, so an Iceberg and a Delta run with
-  `--skip-maintenance` can be LIKE-FOR-LIKE; the hint for an Iceberg-Delta
-  maintenance difference now names that remedy, and no "maintenance policy
-  differs" warning prints for such a pair. A pair whose QpH is an in-stream
-  median on one side and the post-stream benchmark on the other now says
-  so in its hint.
 - **Support is keyed by Spark minor and table format version, and the record
   is generated from run records.** A `validated_combinations.yaml` entry now
   names `spark` (the Spark minor of the image tag) and
@@ -1377,7 +1319,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   range the run's cycles cover (`data_clock_source` `cycle_series_end` in the
   silver driver log). Single-cycle Customer 360 and AML at any cycle count
   are unchanged. Customer 360 records carry `c360-2.dev1`, which does not
-  compare with `c360-2` records; `compare` names the older side.
+  compare with `c360-2` records.
 - **`admin repair-operator` reads and repairs under the lease.** It now
   takes the cluster lease first (waiting up to 37.5 min, three watch-list
   holds) and reads the release state, the Helm values, the `--namespaces`
@@ -1478,10 +1420,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   context name that is not in the kubeconfig is refused (`admin` commands
   used to fall back to in-cluster credentials), and in-cluster credentials
   are used only when no kubeconfig file exists (before, a command with no
-  configured context tried them first). `compare` reads stored records
-  and opens no cluster context.
+  configured context tried them first).
 - **One source of metric metadata.** Every score's unit, direction and band
-  now come from `metrics/metric_registry.py`, which `compare`, `reproduce`,
+  now come from `metrics/metric_registry.py`, which `reproduce`,
   the perf gate, the HTML report and `score_descriptions` read, and some
   directions change:
   `qph_degradation_pct` is lower is better (a run that slowed down was shown
@@ -1494,8 +1435,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   core-hours (they scale with the window) and total elapsed seconds are not
   coloured, and the report's continuous CPU-hours card drops its "lower is
   better" hint. A score with no registry entry is shown uncoloured (it used
-  to read as lower is better). Each side of a comparison records the
-  `mode` its directions were read under. Score values, their
+  to read as lower is better). Score values, their
   descriptions, and what `reproduce` and the perf gate check are unchanged.
 - **One sizing source.** `config show`, `info`, `recommend`,
   `config recommend`, the `run` capacity preflight and the sizing tables in
@@ -1689,9 +1629,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `ERROR`, `WARN`, `OK` and progress lines now go to stderr, and their text
   is printed verbatim: a value such as `s3a://b/[x]/y` or `[/tmp]` no longer
   vanishes or crashes the command with a Rich `MarkupError`, and a long
-  message is not wrapped. `query --format json|csv`, `results --format
-  json|csv` and `compare --format json|csv` (without `-o`, which used to
-  print the table instead) write to plain stdout, with notices such as
+  message is not wrapped. `query --format json|csv` and `results --format
+  json|csv` write to plain stdout, with notices such as
   "N rows in Xs" on stderr, so the output pipes into a parser. urllib3
   retry lines and warnings are silenced. A config whose top level is not a
   YAML mapping is refused with one line naming the problem instead of an
@@ -1713,8 +1652,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   the system fingerprint, `architecture.access_paths` and the dependency
   pinset, so exp2 runs of an unchanged config get new identity digests;
   stored records keep theirs. The system and the query access path are no
-  longer execution conditions: `compare` no longer calls a pair "not
-  like-for-like" because they differ. The compaction operation now is
+  longer execution conditions: a pair that differs in them is no longer
+  "not like-for-like". The compaction operation now is
   one: Trino `optimize` at 128MB and Spark Thrift Iceberg
   `rewrite_data_files` read as different conditions, so the stored AML
   batch pair polaris-Thrift against hive-Trino (runs 103055-de1772 and
@@ -1917,6 +1856,14 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `lakebench admin repair-operator`.
 
 ### Removed
+- **`compare`.** Comparing two runs is left to the reader: read the two
+  runs' reports side by side. Each report's Experiment section states the
+  corpus, datagen image, components, maintenance, stages and rules that
+  ran, and a result fingerprint per benchmark query; see Comparing Runs in
+  `docs/benchmarking.md`. `lakebench compare` exits 2 with any arguments
+  and names the replacement, and exit codes 10 to 13 are gone. `run
+  --repeat` still records a series, but nothing summarises it: read its
+  members' records for the spread.
 - **`config upgrade` refuses.** It rewrote configs lossily, in place
   by default, and wrote the S3 secret key into the result in plaintext. It
   now exits 2 before opening any file and names the replacement,
@@ -1944,7 +1891,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **A nameless config reached through a symbolic link reads the v1.6 name
   where v1.6 did.** The name in `.lakebench/state.json` is read beside the
   path given, not beside the file the link points to, so `destroy`, `stop`,
-  `status` or `compare` through a link no longer use, or check `--name`
+  or `status` through a link no longer use, or check `--name`
   against, another directory's v1.6 name. When the two directories record
   different names, or only the target's records one, every command that
   may look at a deployment refuses a nameless load without `--name`;

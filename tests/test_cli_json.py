@@ -199,19 +199,6 @@ def test_unknown_recipe_is_an_error_document():
 # -- compare -----------------------------------------------------------------------
 
 
-def test_compare_json_is_the_cmp2_document(monkeypatch, tmp_path):
-    runs = _runs(tmp_path)
-    other = "20260929-214442-825153"
-    shutil.copytree(RECORDS / f"run-{other}", runs / f"run-{other}")
-    monkeypatch.chdir(tmp_path)
-    plain = CliRunner().invoke(app, ["compare", RUN, other, "--format", "json"])
-    wrapped = CliRunner().invoke(app, ["compare", RUN, other, "--json"])
-    doc = _doc(wrapped)
-    assert wrapped.exit_code == plain.exit_code == doc["exit_code"]
-    assert doc["data"] == json.loads(plain.stdout)
-    assert doc["command"] == "compare"
-
-
 # -- plan --------------------------------------------------------------------------
 
 

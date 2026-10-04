@@ -20,7 +20,7 @@ result as a record of its own, `record_kind: "benchmark"` with
 `parent_run_id` naming the run it measured: a copy of that run's record with
 the new benchmark, under a new run id. The run's own record is never
 rewritten, and a benchmark record is never a deployment's "latest run" for
-`report` or `compare`, nor a candidate or baseline for the perf gate. Its
+`report`, nor a candidate or baseline for the perf gate. Its
 QpH, scores and query stage are the new benchmark's; its pipeline stages,
 sizes and timings are the run's, and `provenance.benchmark` names the code
 that ran the benchmark and when. A continuous run's in-stream rounds and the
@@ -77,7 +77,7 @@ included; `data_freshness_seconds` covered every gold cycle in the log;
 `corpus_drained` also needed two idle gold cycles; `total_rows_processed`
 counted whole logs. Continuous records made before this are not comparable
 with later ones on those scores (their experiment identity and results
-differ, so compare, the perf gate and reproduce refuse them).
+differ, so the perf gate and reproduce refuse them).
 
 | Score | Formula | Meaning |
 |---|---|---|
@@ -87,7 +87,7 @@ differ, so compare, the perf gate and reproduce refuse them).
 | `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
 | `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
-| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic: `compare` does not colour it). |
+| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic, with no better side). |
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
@@ -122,10 +122,10 @@ part of the experiment identity. The report labels the continuous rows/s
 GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not
 capacity)", with "trickle N files per trigger; this is the offered load,
 not infrastructure capacity" as the tooltip, and counts the trickle among
-the run's limits. `compare` marks the rows that depend on the trickle
+the run's limits. The rows that depend on the trickle
 (`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
-efficiency and `corpus_drain_seconds`) `capped`, with `capped_by` naming
-the trickle, and each side's `bound` lists the trickle line. A record written before 1.7 gets the
+efficiency and `corpus_drain_seconds`) are capped, with `capped_by` naming
+the trickle, and the run's limits list the trickle line. A record written before 1.7 gets the
 same answer, computed when it is read. `released_rows` counts the trigger at
 the window's edge, so a run whose last batch was still in flight can read up
 to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
@@ -297,19 +297,17 @@ than the others, so its QpH is over different queries.
 QpH (those with a QpH) executed more than one set (`blended`) and how many
 rounds each set has; `scores.composite_qph_by_set` is the median per set. A
 round recorded before 1.7 gets its set from its queries' success flags,
-and `compare`, the perf gate and `reproduce` all read the basis from the
+and the perf gate and `reproduce` read the basis from the
 rounds, so an older run in which a query failed in some rounds and not
 others reads blended too. When the rounds are blended, the aggregate
 benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
 set of every query name the rounds ran, even when one query failed in every
-round). `compare` marks a continuous run's `composite_qph` and
-`in_stream_composite_qph` `not_assessed` with the hint "rounds ran
-different query sets (A)"; such a run records no `qph_degradation_pct`
-(`scores.qph_degradation_withheld` says why; a record from before 1.7 that
-carries one reads `not_assessed` the same way). The perf gate and
+round). Such a run's `composite_qph` and `in_stream_composite_qph` are
+medians over different query sets and are not comparable with another
+run's; it records no `qph_degradation_pct`
+(`scores.qph_degradation_withheld` says why). The perf gate and
 `reproduce` leave the in-stream QpH out. When every round missed the same
-query, the medians are over a smaller set than the run declared: `compare`
-marks the same rows `not_assessed` ("every round missed a query"), and
+query, the medians are over a smaller set than the run declared, and
 `reproduce` reads the run's query set as the smaller set the rounds
 executed (for a record from before 1.7, its pinned legacy id or `unknown`).
 
@@ -369,7 +367,7 @@ compaction calls fell back to the other engine), taken from the code that
 writes the statements. Delta compaction never runs. An exp2 block also names
 it in the id (`compaction=ran(trino_optimize:128MB)`, or
 `compaction=ran(mixed(iceberg_rewrite_data_files+trino_optimize:128MB))`); for a record from before it,
-`compare` derives the operation from the query engine and table format. The
+the operation is derived from the query engine and table format. The
 compaction operation is an execution condition: a Trino and a Spark Thrift
 run that both compacted are not like-for-like.
 
@@ -611,7 +609,7 @@ with a warning and no QpH score is produced.
 
 The verdict in `metrics.json` (`verdict.status`, with each gate in
 `verdict.gates`) is decided from the record as it is saved, so `run`,
-`compare`, the perf gate and the release gate read the same outcome from
+`report`, the perf gate and the release gate read the same outcome from
 the same record. Besides the stages succeeding and no query failing, a
 PASSED run shows:
 
@@ -650,7 +648,7 @@ it already did not pass. A `run --stage` run is judged on its stage's
 layer, on the rules when the stage is gold-finalize, and on the scale ratio
 only when the stage is bronze-verify. When the record does not read PASSED
 although every check the run printed passed, `run` prints `Verdict:
-<reason>` and exits 1. `compare`, the perf gate and the release gate take
+<reason>` and exits 1. `report`, the perf gate and the release gate take
 the strictest of the stored verdict and the one recomputed from the
 record, so a record saved by an earlier Lakebench can read failed now.
 
@@ -822,8 +820,8 @@ read silver after its last commit), for at most 1800 s, then stops the
 streams and runs the query set once over the settled tables. A query that
 fails there fails the run, as in batch. Its result
 fingerprints are the run's results (`continuous.result_check` and the
-experiment block's `results`), the same as a batch run's, so `compare`, the
-perf gate and `reproduce` hold continuous runs to "no comparison without
+experiment block's `results`), the same as a batch run's, so the perf
+gate and `reproduce` hold continuous runs to "no comparison without
 equivalent results". A run whose corpus does not settle in time, or that ran
 with `--skip-benchmark` or without a query engine, records why in
 `results.not_checked` and is never presented as comparable. AML continuous
@@ -1055,8 +1053,8 @@ The JSON structure includes:
 measured under (see `docs/perf-regression-gate.md`). `provenance` records
 what produced the run. The experiment block's `lakebench` copy carries the
 code fields, `deps` and `images_observed`: the dependency pinset
-(`deps.pinset_sha256`) is part of the experiment identity, and `compare`
-reads the observed image digests as an architecture key, comparing each
+(`deps.pinset_sha256`) is part of the experiment identity, and the
+observed image digests are an architecture key, compared for each
 role both runs observed (a role seen by one run only, or a run that
 observed none, is not a difference). The rest is provenance only:
 
@@ -1078,7 +1076,7 @@ observed none, is not a difference). The rest is provenance only:
 - `scripts_sha256`, `scripts_maps` and `scripts_files_sha256`: the Spark
   scripts ConfigMaps the run applied and read back.
 - `deps`: the deployment's dependency set the run checked before anything
-  was submitted: `pinset_sha256` (the set's identity, which compare reads),
+  was submitted: `pinset_sha256` (the set's identity),
   `request_sha256`, the repositories and index, the files per group with
   their sha256, `resolved_at` and the server pod. At run end the Spark
   Thrift or DuckDB pods are checked against it: `pods_checked` (how many),
@@ -1473,75 +1471,48 @@ count containers more than once.
 
 ## Comparing Runs
 
-`lakebench compare SIDE_A SIDE_B` compares stored run records: each side is
-run ids, run directories, a `series:<id>` or a config (its latest run, or
-every member of that run's `run --repeat` series). It runs nothing; run each
-side first with `lakebench run`. It checks the runs' experiment blocks and
-results before it shows any number, and the exit code is the verdict:
+Lakebench does not compare runs for you: read the two runs' reports side by
+side. Each HTML report's Experiment section, and the `experiment` block of
+its `metrics.json`, holds what you need to judge whether a comparison is
+fair. Check, in this order:
 
-| Verdict | When | Exit |
-|---|---|---|
-| LIKE-FOR-LIKE | Same experiment, equal benchmark results, same execution conditions | 0 |
-| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results or AML alert sets, a run that did not pass, a record without an experiment block, or a side whose runs are not one experiment | 10 |
-| NOT ESTABLISHED | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, a continuous run whose result check did not settle, or an AML batch record from 1.7 without its alert-set fingerprint | 11 |
-| NOT LIKE-FOR-LIKE | Comparable, but an execution condition differs | 12 |
-| CONFOUNDED | Comparable, but the architecture and the system both differ | 13 |
+1. **Both runs passed.** A run whose verdict is not PASS has no performance
+   to compare.
+2. **Same workload and data.** The workload and its version, the corpus id
+   (the generator, seed and scale behind it), and the mode are equal. If
+   they differ, the runs are not comparable. Equal experiment identity
+   digests mean the two runs are repeats of one experiment; the digest also
+   covers the architecture and the system, so two different recipes always
+   have different digests.
+3. **Same answers.** The query set and every benchmark query's result
+   fingerprint are equal, and for AML batch every rule's alert count and
+   hash in the Alert set table are equal. Different fingerprints mean the
+   two stacks returned different results, and their performance is not
+   comparable. A run with no checked results (`--skip-benchmark`, a `*-none`
+   recipe, a continuous run whose result check did not settle) cannot show
+   this.
+4. **Same execution conditions.** Effective maintenance and the compaction
+   operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
+   `rewrite_data_files` are different operations), maintenance settings,
+   benchmark iterations, in-stream rounds (continuous) and the Lakebench
+   limits that bound. A difference here can explain a difference in the
+   numbers, so it is not attributable to the architecture. Effective
+   maintenance skipped on every operation on both sides counts as the same
+   maintenance, so an Iceberg and a Delta run both with `--skip-maintenance`
+   can be compared on architecture.
+5. **One thing varied.** The architecture (the recipe, its components and
+   versions, the query access path, the dependency set, and any Spark
+   executor or driver overrides and user Spark conf) and the system (the
+   cluster and object store, `experiment.system_identity`) are what a
+   comparison varies. When both differ, no difference can be put down to
+   either. Records written before 1.7 carry no system identity.
 
-The execution conditions are effective maintenance and the compaction
-operation it ran (Trino `optimize` at 128MB and Spark Thrift Iceberg
-`rewrite_data_files` are different operations), maintenance settings,
-benchmark iterations and mode, in-stream rounds (continuous), and the
-Lakebench limits that bound. A delta between runs whose conditions differ
-may come from those conditions rather than the architecture. Each verdict
-is printed with the one condition the pair is missing and, where one
-exists, the command that supplies it. Medians, ranges and n are shown for
-every score, with the delta of medians where the pair is comparable; no
-winner is named in this release. See the [CLI reference](cli-reference.md#compare).
-
-Two of these rules decide pairs that would otherwise read differently:
-
-- **Outcome keys inside a side.** The in-stream round count and the
-  investigator sessions are outcomes of a run's own speed. When the
-  repeats on one side differ in them, the side is still one experiment and
-  the pair is NOT LIKE-FOR-LIKE (exit 12), as when the two sides differ in
-  them. A round count of 0 against more than 0 is not such an outcome: 0
-  means the QpH is the post-stream benchmark, another estimator, so that
-  side is not one experiment (NOT COMPARABLE). Any other difference inside
-  a side, in the workload, corpus, architecture, system, another condition
-  or the query results, still makes it not one experiment. No run records
-  investigator sessions in this release (the key is reserved); when one
-  does, it counts as an outcome only when both runs recorded a count and
-  neither ran none against some. Such a pair shows its medians, but no
-  directional row is assessed, since it is not like-for-like.
-- **Maintenance skipped on both sides.** Effective maintenance skipped by
-  the user on every operation, on both sides, is the same maintenance
-  (above), so an Iceberg and a Delta run with `--skip-maintenance` can be
-  LIKE-FOR-LIKE, attributed to the architecture. With maintenance on, an
-  Iceberg and a Delta run always differ on this key, and the hint says to
-  run both with `--skip-maintenance`.
-
-The architecture (the recipe, its components and versions, the query access
-path, the dependency set) and the system (the cluster and object store,
-recorded as `experiment.system_identity`) are not conditions; they are what
-a comparison varies. A pair that differs in the architecture alone is an
-architecture differential, and one that differs in the system alone is a
-system differential. A pair that differs in both is **confounded**: no
-difference can be put down to either, and the table lists "architecture
-and system both differ" with the not like-for-like reasons. Two runs whose
-only architecture difference is the dependency set (same composition,
-different jars) are not like-for-like. Records written before 1.7 carry no
-system identity, and two of them are assumed to share a system. A record
-with a system identity against one without counts as a different system,
-as does a 1.7 run whose system could not be sampled, or two observations
-with no part in common; such a pair is confounded when the architecture
-also differs, and is never called a system differential. A pair whose observations agree on every part both
-read but cannot show one cluster (an API server CA that could not be read),
-or two `--local` runs, which record no part, is treated as one system but
-never as a repeat of the same experiment. Each
-run also records the allocatable CPU and memory of the schedulable workers
-and the CPU and memory other namespaces' pods requested, platform pods
-included, at run start and when the record is saved
-(`experiment.observed`), as evidence only.
+A number bounded by a Lakebench cap or the trickle is labelled as such in
+the report and is not a measure of the infrastructure. With `run --repeat 3`
+on each side, compare medians and ranges, not single runs. Each run also
+records the allocatable CPU and memory and the requests of other
+namespaces' pods at run start and at save (`experiment.observed`), as
+evidence of what else was on the cluster.
 
 For ad hoc analysis the metrics JSON can also be diffed directly. Key
 fields:

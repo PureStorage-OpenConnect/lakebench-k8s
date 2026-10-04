@@ -213,8 +213,8 @@ def _deserialize_benchmark_rounds(
 def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
     """The ``composite_qph_basis`` of a stored metrics.json record, read from
     its in-stream rounds (collector.composite_qph_basis) so a record written
-    before the basis was stored gets the same answer in compare, the perf
-    gate and reproduce. A record that keeps no rounds gives its stored basis,
+    before the basis was stored gets the same answer in the perf gate and
+    reproduce. A record that keeps no rounds gives its stored basis,
     or None."""
     from .collector import composite_qph_basis
 
@@ -226,14 +226,6 @@ def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
     pb = record.get("pipeline_benchmark") or {}
     stored = (pb.get("scores") or {}).get("composite_qph_basis") if isinstance(pb, dict) else None
     return stored if isinstance(stored, dict) else None
-
-
-def recorded_executed_query_set(record: Any) -> str | None:
-    """collector.executed_subset_query_set over a stored record's rounds."""
-    from .collector import executed_subset_query_set
-
-    when = record.get("start_time") if isinstance(record, dict) else None
-    return executed_subset_query_set(_recorded_rounds(record), when)
 
 
 def _recorded_rounds(record: Any) -> list[BenchmarkMetrics]:

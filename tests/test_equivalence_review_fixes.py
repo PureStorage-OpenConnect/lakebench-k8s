@@ -4,7 +4,6 @@ work (lane compare-equiv). Each test fails with its fix reverted."""
 from __future__ import annotations
 
 import copy
-import json
 from types import SimpleNamespace
 from unittest import mock
 
@@ -275,48 +274,6 @@ class TestFailedQueries:
 
 
 class TestNotEstablished:
-    def _pair(self, a, b):
-        b = dict(b)
-        b["run_id"] = "20260926-120000-bbbbbb"
-        for m in (a, b):
-            # scale_ratio: a batch pipeline benchmark always records it, and
-            # the verdict fails a ratio of 0.
-            m.setdefault("pipeline_benchmark", {})["scores"] = {
-                "time_to_value_seconds": 100.0,
-                "scale_ratio": 1.0,
-            }
-        b["pipeline_benchmark"]["scores"]["time_to_value_seconds"] = 50.0
-        return a, b
-
-    def _comparison(self, a, b):
-        from lakebench.metrics.compare import compare_records
-
-        return compare_records(*[[m] for m in self._pair(a, b)])
-
-    def test_runs_without_results_are_not_established(self):
-        c = self._comparison(_run(fps={}).to_dict(), _run(fps={}).to_dict())
-        assert c["verdict"] == "NOT ESTABLISHED" and c["exit_code"] == 11
-        assert all(r["assessment"] == "withheld" for r in c["metrics"])
-        assert all(r["delta_pct"] is None for r in c["metrics"])
-        assert c["missing"]["condition"] == "checked results"
-
-    def test_compare_exits_11_and_shows_no_winner_when_not_established(self, tmp_path):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        a, b = self._pair(_run(fps={}).to_dict(), _run(fps={}).to_dict())
-        runs = tmp_path / "runs"
-        for m in (a, b):
-            d = runs / f"run-{m['run_id']}"
-            d.mkdir(parents=True)
-            (d / "metrics.json").write_text(json.dumps(m))
-        result = CliRunner().invoke(
-            app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)]
-        )
-        assert result.exit_code == 11, result.output
-        assert "NOT ESTABLISHED" in result.output and "-50.00%" not in result.output
-
     def test_stored_references_refuse_a_batch_run_without_results(self):
         exp = stub_experiment(["Q1"])
         empty = stub_experiment([])
@@ -334,16 +291,6 @@ class TestNotEstablished:
 
 
 class TestObservedCorpus:
-    def test_fleet_values_are_stamped_and_disagreement_refuses(self):
-        cfg = _cfg()
-        fleet = {"seed": 999, "scale": 1.0, "image": cfg.images.datagen, "image_ids": []}
-        e = _run(cfg, fleet=fleet).to_dict()["experiment"]
-        assert e["corpus"]["seed"] == 999 and e["corpus"]["observed"] is True
-        assert any("seed" in p for p in e["corpus"]["problems"])
-        good = _run(cfg).to_dict()
-        prov, _, _ = ex.refusals(good, _run(cfg, fleet=fleet).to_dict())
-        assert any("datagen pods ran 999" in p for p in prov), prov
-
     def test_mixed_fleet_is_a_problem(self):
         e = _run(fleet={"data_quality": "mixed", "mixed_params": ["scale"]}).to_dict()["experiment"]
         assert any("mixed" in p for p in e["corpus"]["problems"])
@@ -371,18 +318,6 @@ class TestObservedCorpus:
 
 
 class TestStamps:
-    def test_local_run_stamps_what_ran(self):
-        run = _run(_cfg(query_engine={"type": "trino"}))
-        run.config_snapshot["local"] = True
-        e = run.to_dict()["experiment"]
-        assert e["system"] == "local"
-        assert e["architecture"]["query_engine"]["type"] == "duckdb"
-        assert e["architecture"]["query_access_path"] == "direct_storage"
-        assert "not_supported" in e["effective_maintenance"]["id"]
-        # The system is its own OD-2 group, not an execution condition.
-        cluster = _run(_cfg(query_engine={"type": "duckdb"})).to_dict()
-        assert not any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
-
     def test_streaming_budget_cap_and_tm_cap_are_bound(self):
         run = _run(
             _cfg(
@@ -411,8 +346,11 @@ class TestStamps:
         ra, rb = _run(_cfg(benchmark={"iterations": 1})), _run(_cfg(benchmark={"iterations": 3}))
         ra.benchmark.iterations, rb.benchmark.iterations = 1, 3
         a, b = ra.to_dict(), rb.to_dict()
-        assert ex.refusals(a, b)[0] == []
-        assert any(d.startswith("benchmark iterations") for d in ex.like_for_like(a, b))
+        assert ex.identity_differences(a["experiment"], b["experiment"]) == []
+        assert any(
+            d.startswith("benchmark iterations")
+            for d in ex.condition_differences(a["experiment"], b["experiment"])
+        )
 
     def test_hive_version_is_the_stackable_image(self):
         v = ex.experiment_inputs(_cfg())["architecture"]["catalog"]["version"]
@@ -534,21 +472,6 @@ class TestFixPass:
                 config_reference="c",
                 commit_sha="a",
             )
-
-    def test_bound_condition_carries_no_counts(self):
-        def run(granted):
-            r = _run(_cfg(pipeline={"mode": "sustained"}))
-            r.streaming.append(
-                StreamingJobMetrics(
-                    job_name="s", job_type="silver-stream", requested_executors=granted
-                )
-            )
-            return r.to_dict()
-
-        a, b = run(1), run(2)
-        ea, eb = ex.experiment_of(a), ex.experiment_of(b)
-        assert ea["limits"]["bound"] != eb["limits"]["bound"]  # evidence keeps the counts
-        assert not [d for d in ex.like_for_like(a, b) if d.startswith("Lakebench limits")]
 
     def test_iterations_come_from_the_recorded_benchmark(self):
         r = _run(_cfg(benchmark={"iterations": 3}))

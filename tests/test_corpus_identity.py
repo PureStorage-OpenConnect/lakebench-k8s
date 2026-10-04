@@ -317,11 +317,6 @@ class TestCorpusBlock:
         corpus = corpus_of(obs=obs)
         assert corpus["id_v2"] is None and corpus["id_v2_unavailable"] == ci.NOT_ONE_CORPUS
         assert any("different arguments (cycle 0)" in p for p in corpus["problems"])
-        run = _metrics(_cfg())
-        run.config_snapshot["experiment_inputs"]["corpus_observation"] = obs
-        rec = run.to_dict()
-        prov, _, _ = ex.refusals(rec, _metrics(_cfg()).to_dict())
-        assert any("different arguments" in p for p in prov)
 
     def test_missing_node_is_corpus_problem(self):
         obs, _ = observe([marker(node=0, total=3), marker(node=2, total=3)], series())

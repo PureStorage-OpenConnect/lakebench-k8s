@@ -212,8 +212,7 @@ def verdict_of(record: Mapping[str, Any] | None) -> dict[str, str | None]:
 def judge(record: Mapping[str, Any]) -> dict[str, Any]:
     """``verdict_of`` plus why: ``reasons`` (the recomputed verdict's
     reasons, without the gate markers) and ``error`` (why the record could
-    not be recomputed, else None). Readers that explain a refusal (compare)
-    use this; everything else uses ``verdict_of`` or ``passed``."""
+    not be recomputed, else None). Readers that explain a refusal use this; everything else uses ``verdict_of`` or ``passed``."""
     stored = verdict_status(record)
     base = stored if stored is not None else ("PASSED" if record.get("success") else "FAILED")
     if not base:
@@ -581,7 +580,7 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
 
 # ---------------------------------------------------------------------------
 # Record gates: decided from the record alone.
-# Each reads only fields a stored metrics.json carries, so a report, compare,
+# Each reads only fields a stored metrics.json carries, so a report,
 # the perf gate and the release gate recompute the outcome the run saved.
 # They apply to a run that was not interrupted: an interrupted run is never
 # PASSED, and its partial layers must not turn INTERRUPTED into FAILED.

@@ -215,7 +215,7 @@ def test_every_hidden_command_and_flag_is_in_a_table():
     assert hidden_cmds == []
     assert hidden_flags == []
     # Not vacuous: hidden params are visible to the walk.
-    assert {("clean", "--metrics-dir"), ("compare", "--keep"), ("results", "-f")} <= seen
+    assert {("clean", "--metrics-dir"), ("results", "-f")} <= seen
 
 
 @pytest.mark.parametrize("old", sorted(DEPRECATED_COMMANDS))
@@ -225,12 +225,25 @@ def test_deprecated_commands_point_at_live_commands(old):
     assert target is not None and not target.hidden
 
 
-def test_compare_refusal_says_the_tables_reason(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["compare"],
+        ["compare", "--help"],
+        ["compare", "a.yaml", "b.yaml", "--keep"],
+        ["compare", "r1", "r2"],
+    ],
+)
+def test_compare_is_removed_and_names_the_report(tmp_path, monkeypatch, argv):
+    """1.7 removed compare: any invocation exits 2 with the replacement and
+    never echoes an argument."""
     monkeypatch.chdir(tmp_path)
-    for flag in ("--keep", "--generate", "-y"):
-        res = CliRunner().invoke(app, ["compare", "a.yaml", "b.yaml", flag])
-        assert res.exit_code == 2, res.output
-        assert REFUSED_FLAGS["compare"][flag].reason in " ".join(res.output.split())
+    res = CliRunner().invoke(app, argv)
+    assert res.exit_code == 2, res.output
+    out = " ".join(res.output.split())
+    assert "`lakebench compare` is removed" in out
+    assert "lakebench report RUN_A and lakebench report RUN_B" in out
+    assert "a.yaml" not in out and "r1" not in out
 
 
 @pytest.mark.parametrize("flag", ["--access-key", "--secret-key"])

@@ -17,9 +17,9 @@ returned the same workload results.
 
 - **Compare stacks.** Swap catalogs (Hive, Polaris), query engines (Trino,
   Spark Thrift, DuckDB), and table formats (Iceberg, Delta) -- same data,
-  same queries, different architecture. `lakebench compare` checks that both
-  sides returned the same results before it shows any performance
-  difference, and says NOT COMPARABLE when they did not.
+  same queries, different architecture. Each run's report records a result
+  fingerprint per query, so you can see that two runs returned the same
+  answers before you compare their performance.
 - **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
   where throughput plateaus or resources saturate on your hardware.
 - **Measure freshness.** Continuous mode keeps data arriving through the
@@ -164,18 +164,22 @@ Every run records its state in `metrics.json`. As computed by this release:
 
 <!-- END GENERATED: support-states -->
 
-Compare two configurations side-by-side:
+Compare two configurations by running each and reading the two reports side
+by side:
 
 ```bash
 lakebench deploy config-hive.yaml && lakebench run config-hive.yaml
 lakebench deploy config-polaris.yaml && lakebench run config-polaris.yaml
-lakebench compare config-hive.yaml config-polaris.yaml
+lakebench report config-hive.yaml
+lakebench report config-polaris.yaml
 ```
 
-`compare` reads the two configs' latest stored runs; it never deploys, runs
-or destroys anything. It reports the verdict as its exit code and names the
-one condition a pair that is not like-for-like is missing, with the command
-that supplies it where one exists.
+`report` prints each run's scorecard and the path of the HTML report the run
+wrote. Each HTML report's Experiment section states the corpus, datagen image, components,
+maintenance, the stages and rules that ran, a result fingerprint per
+benchmark query and, for AML batch runs, the alert set. Compare performance
+only when the corpus, the result fingerprints and the alert set match:
+a difference means the two stacks returned different answers. A number bounded by a Lakebench cap is labelled as such.
 
 For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples), `lakebench config recipes`,
 or `lakebench init --recipe <name>`.
@@ -301,7 +305,6 @@ snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
 | `query` | Execute ad-hoc SQL against the active engine |
 | `status` | Show deployment status |
 | `report` | Show a run's scorecard in the terminal (`--format` for the stage matrix, `--render` for HTML) |
-| `compare` | Compare stored runs; show performance only when their results match |
 | `config recommend` | Recommend a scale factor for the connected cluster |
 | `config recipes` | List recipes and their support state per workload and mode |
 | `admin` | Cluster-admin setup and repair: `install --component`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` (`install-spark-operator` and `install-scratch-storage-class` are aliases of `install --component`) |

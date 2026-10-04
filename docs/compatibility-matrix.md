@@ -46,7 +46,7 @@ not per recipe:
   refuses to load an entry that is not a release-matrix row at the matrix's
   versions, and the record is empty until the release runs fill it.
 - **unverified**: valid for the workload and mode, but no release validation
-  run is listed. It runs, and its evidence and `compare` output carry the
+  run is listed. It runs, and its evidence and report carry the
   state; an unverified run is not proof that the combination is supported.
 - **unsupported**: refused before a run, at config load (or by `run` when
   `--continuous` selects a mode the workload does not declare).
@@ -69,7 +69,7 @@ The state is computed when the run starts and recorded in `metrics.json` as
 from a lakebench checkout with local changes is never stamped supported.
 `--local` runs Customer 360 in batch mode only and refuses anything else;
 local runs are at most unverified. `lakebench config show`,
-`lakebench config recipes`, the HTML report and `lakebench compare` show it. The table below is generated from the code.
+`lakebench config recipes` and the HTML report show it. The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
 <!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->

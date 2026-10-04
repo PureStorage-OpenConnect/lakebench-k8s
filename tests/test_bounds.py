@@ -9,9 +9,7 @@ so no identity moves.
 from __future__ import annotations
 
 import copy
-import io
 import re
-from unittest import mock
 
 import pytest
 
@@ -348,64 +346,6 @@ def test_stored_blocks_reproduce_their_bound_lists():
 
 
 # --- readers -----------------------------------------------------------------
-
-
-def _rows(a: dict, b: dict) -> dict[str, dict]:
-    from lakebench.metrics.compare import compare_records
-
-    a = copy.deepcopy(a)
-    b = copy.deepcopy(b)
-    if a.get("run_id") == b.get("run_id"):
-        b["run_id"] = "20261001-000000-b0b0b0"
-    return {r["metric"]: r for r in compare_records([a], [b])["metrics"]}
-
-
-def test_p2_throughput_capped_by_the_trickle_qph_not():
-    """Pinned pair P2 (C360 continuous, Trino vs Thrift): rows/s is BOUNDED
-    BY trickle on both sides; QpH, freshness and the degradation are not."""
-    rows = _rows(_rec("011043-e338c5"), _rec("073533-9de9c9"))
-    for metric in ("sustained_throughput_rps", "pipeline_throughput_gb_per_second"):
-        assert rows[metric]["capped_by"] == ["trickle"], metric
-    for metric in ("composite_qph", "data_freshness_seconds", "qph_degradation_pct"):
-        assert rows[metric]["capped_by"] == [], metric
-
-
-def test_p2_rendered_bounded_on_throughput_only():
-    from rich.console import Console
-
-    from lakebench.cli import _compare
-    from lakebench.metrics.compare import compare_records
-
-    buf = io.StringIO()
-    a, b = _rec("011043-e338c5"), _rec("073533-9de9c9")
-    with mock.patch.object(_compare, "console", Console(file=buf, width=250)):
-        _compare._print_table(compare_records([a], [b]))
-    text = buf.getvalue()
-    rps = next(line for line in text.splitlines() if "sustained_throughput_rps" in line)
-    qph = next(line for line in text.splitlines() if "composite_qph " in line)
-    assert "BOUNDED BY trickle" in rps and "BOUNDED" not in qph
-
-
-def test_one_side_trickle_bound_caps_the_row():
-    a, b = _rec("011043-e338c5"), _rec("073533-9de9c9")
-    b["experiment"]["limits"]["trickle_bound"] = None  # stored: B was not bound
-    rows = _rows(a, b)
-    assert rows["sustained_throughput_rps"]["capped_by"] == ["trickle"]
-
-
-def test_another_cap_bounds_only_the_rows_that_depend_on_it():
-    """A bound kind caps the rows whose registry entry depends on it, not
-    every row."""
-    from lakebench.metrics import metric_registry as reg
-
-    kind = "silver-stream: concurrent executor budget"
-    a, b = _rec("011043-e338c5"), _rec("073533-9de9c9")
-    a["experiment"]["limits"]["bound_kinds"] = [kind]
-    rows = _rows(a, b)
-    for metric, row in rows.items():
-        want = kind in reg.capped_by(metric, [kind], "sustained")
-        assert (kind in row["capped_by"]) is want, metric
-    assert any(kind in r["capped_by"] for r in rows.values())
 
 
 def _cards(html: str) -> dict[str, str]:

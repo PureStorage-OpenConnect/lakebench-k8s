@@ -31,7 +31,6 @@ CONFIG = "recipe: hive-iceberg-spark-trino\n"
 LOOKS_AT_A_DEPLOYMENT = [
     LoadPurpose.TEARDOWN,
     LoadPurpose.READ,
-    LoadPurpose.COMPARE,
     LoadPurpose.MUTATE,
     LoadPurpose.RUN,
 ]

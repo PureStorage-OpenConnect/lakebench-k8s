@@ -120,13 +120,13 @@ REFUSED: dict[str, Refusal] = {
     ),
     "clean metrics": _EVIDENCE,
     "clean journal": _EVIDENCE,
+    "compare": Refusal(
+        "lakebench report RUN_A and lakebench report RUN_B, then read the two reports side by side",
+        "comparing runs is left to the reader, and each report states the data, recipe, "
+        "versions, result fingerprints and caps needed to judge a comparison",
+    ),
 }
 
-_COMPARE_RUNS = Refusal(
-    "lakebench run A.yaml and lakebench run B.yaml (add --repeat 3), then "
-    "lakebench compare A.yaml B.yaml",
-    "compare reads stored records and no longer runs configs",
-)
 _INIT_CREDENTIALS = Refusal(
     "export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY (or the names "
     "--credentials-env PREFIX gives)",
@@ -135,19 +135,6 @@ _INIT_CREDENTIALS = Refusal(
 
 #: Refused flags of commands that remain (each command refuses its own).
 REFUSED_FLAGS: dict[str, dict[str, Refusal]] = {
-    "compare": dict.fromkeys(
-        (
-            "--keep",
-            "--generate",
-            "--local",
-            "--skip-benchmark",
-            "--timeout",
-            "--scale",
-            "--yes",
-            "-y",
-        ),
-        _COMPARE_RUNS,
-    ),
     "init": {"--access-key": _INIT_CREDENTIALS, "--secret-key": _INIT_CREDENTIALS},
     "clean": dict.fromkeys(("--metrics-dir", "-m"), _EVIDENCE),
 }
@@ -234,8 +221,20 @@ def results(
     )
 
 
+def compare(ctx: typer.Context) -> None:
+    """Removed in 1.7: refused with the replacement, whatever it is given."""
+    raise refusal("compare")
+
+
 def register(app: typer.Typer) -> None:
-    """Add the top-level aliases to *app*, hidden from help and the
-    generated reference. The ``admin`` aliases live in ``cli/_admin.py`` and
-    ``config upgrade`` in ``cli/_config.py``; both read these tables."""
+    """Add the top-level aliases and refused commands to *app*, hidden from
+    help and the generated reference. The ``admin`` aliases live in
+    ``cli/_admin.py`` and ``config upgrade`` in ``cli/_config.py``; both read
+    these tables."""
     app.command("results", hidden=True)(results)
+    app.command(
+        "compare",
+        hidden=True,
+        add_help_option=False,
+        context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    )(compare)

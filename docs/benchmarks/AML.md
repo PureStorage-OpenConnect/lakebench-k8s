@@ -306,8 +306,8 @@ after the config loads, before any cluster call, with exit 2
 (`run.protected_corpus`): a config that declares `corpus_role: evaluation`
 or `robustness`, names a seed whose hash matches a held-out role, or (AML)
 points its bronze datagen prefix at one where this host generated a
-registered corpus; `compare` (which loads no config) and `financial reproduce`
-refuse a stored run record from such a corpus. `generate` writes
+registered corpus; `financial reproduce` refuses a stored run record from
+such a corpus. `generate` writes
 a protected corpus only with `--registered-corpus --yes` and a digest-pinned
 `images.datagen`; it records the attempt in the host's corpus ledger
 (`~/.lakebench/aml_corpora.jsonl`, `LB_AML_CORPORA_LEDGER`) before its first
@@ -808,29 +808,28 @@ Aggregates: `aggregate_alert_volume`, `aggregate_top_entities`,
 A publishable AML result is a full batch `lakebench run` without `--stage`,
 with the benchmark and a query engine, on an unverified or supported
 composition, with verdict PASSED. An AML continuous run records no result
-fingerprints, so `compare` reports it NOT ESTABLISHED against any other run.
+fingerprints, so it cannot show it returned the same answers as another run.
 
 ### 7.2 Permitted tuning (still publishable)
 
 None of these changes the Workload or Corpus keys of the experiment
-identity, so `lakebench compare` still compares runs that differ only here.
-What `compare` then sees depends on the setting (`metrics/comparability.py`):
+identity, so runs that differ only here stay comparable. What the difference
+means depends on the setting (`metrics/comparability.py`):
 
 - **Architecture keys.** Catalog (Hive or Polaris) and query engine within
   the Iceberg recipes; component versions; the query access path (catalog
   or direct storage); the observed image digests and the dependency
   pinset; user-set executor overrides, driver overrides and Spark conf. Two
   runs that differ only here, on the same system and with matching results,
-  are LIKE-FOR-LIKE and the difference is attributed to the architecture.
-  If the system also differs, `compare` reports CONFOUNDED. A pair whose
-  only Architecture difference is the dependency pinset is NOT
-  LIKE-FOR-LIKE. Query engine `none` runs no benchmark, so it records no
-  results and is never better than NOT ESTABLISHED.
+  differ in architecture alone. If the system also differs, no difference
+  can be put down to either. A pair whose only Architecture difference is
+  the dependency pinset is not like-for-like. Query engine `none` runs no
+  benchmark, so it records no results and cannot show matching answers.
 - **Not in the identity.** Executor counts and sizes that Lakebench derives
   from scale, Trino sizing, scratch storage class and size, and datagen pod
   CPU and memory. An executor override below what the profile asks at that
   scale is recorded as a Lakebench limit that bound the run (a condition).
-- **Conditions** (NOT LIKE-FOR-LIKE when they differ): effective
+- **Conditions** (not like-for-like when they differ): effective
   maintenance, the compaction operation that ran (Trino `optimize` or Spark
   `rewrite_data_files`), maintenance settings, benchmark iterations and
   mode, the Lakebench limits that bound, and (continuous) the in-stream
@@ -842,7 +841,7 @@ Datagen parallelism is not permitted tuning: it is a corpus input (section
 
 ### 7.3 Prohibited changes (invalidate a result or are refused)
 
-These change the identity, so `compare` returns NOT COMPARABLE (exit 10):
+These change the identity, so the runs are not comparable:
 the workload version (`aml-2` in this release; records at `aml-1` are not
 comparable with it); generator `MODEL_VERSION`; workload parameters
 (`parameters_id` hashes every TM operations setting, `w1_max_vertices`,
@@ -873,8 +872,8 @@ naming it.
 
 Also prohibited, not enforced: modifying stage scripts, detection rules,
 queries or the TM simulation without a new workload version (a change to a
-benchmark query's SQL does change `query_set_id`, which `compare` refuses
-on); an executor override above 28 (warned, not refused); publishing
+benchmark query's SQL does change `query_set_id`, so such runs are not
+comparable); an executor override above 28 (warned, not refused); publishing
 numbers from `lakebench benchmark` (300 s query timeout, not the 900 s
 `run` uses) or from `--stage` runs; using the calibration or held-out seeds
 outside the protocol in 3.3.
@@ -906,8 +905,8 @@ by the trickle, not infrastructure capacity (`metrics/bounds.py`).
 ## 8. Metrics
 
 Units, directions and bands are the metric registry's
-(`metrics/metric_registry.py`), which `compare`, `reproduce`, the perf gate
-and the report read; `pipeline_benchmark.score_descriptions` gives a
+(`metrics/metric_registry.py`), which `reproduce`, the perf gate and the
+report read; `pipeline_benchmark.score_descriptions` gives a
 one-line description of each score a run recorded. A direction of `none`
 means a delta in the metric has no better side. Pipeline scores are in
 `metrics.json` under `pipeline_benchmark.scores`; AML scoring is the
@@ -1008,8 +1007,8 @@ published record carries a time-travel result yet.
 On AML with TM enabled a round adds IQ1 to IQ4 once the run has a case, so
 rounds can execute different query sets. `composite_qph_basis.blended` then
 says so, `composite_qph_by_set` gives the median per set,
-`qph_degradation_pct` is withheld, and `compare` does not assess the round
-median. A published continuous `composite_qph` must carry
+`qph_degradation_pct` is withheld, and the round median is not comparable
+with another run's. A published continuous `composite_qph` must carry
 `composite_qph_basis`.
 
 ### 8.3 Both modes
@@ -1147,7 +1146,7 @@ missing (`metrics/experiment.py`). A published AML result must show:
 | Maintenance policy id, settings and effective outcome per operation | `maintenance_policy_id`, `experiment.maintenance_settings`, `experiment.effective_maintenance` |
 | Stages executed and skipped; rules executed, skipped (with reason) and errored | `experiment.stages`, `experiment.rules`. Continuous: the five mode-excluded rules are not listed in `experiment.rules.skipped`; disclose them from `experiment.support.mode_note` |
 | Caps configured and caps that bound | `experiment.limits` (`bound`, `bound_kinds`; continuous `trickle_bound`) |
-| Repetitions | `experiment.repetitions` (each record is one run, `runs: 1`; `lakebench run` with `--repeat` records a series, and `compare` reports the median, range and n of each side; label a figure from one run n=1) |
+| Repetitions | `experiment.repetitions` (each record is one run, `runs: 1`; `lakebench run` with `--repeat` records a series whose members are listed in its manifest; label a figure from one run n=1) |
 | Query set id and per-query fingerprints, or `not_checked` with the reason | `experiment.results.query_set_id`, `.fingerprints`, `.not_checked` |
 | AML scoring and its mode | `financial_scoring` (`mode`, `status`, `reason`) |
 | Code provenance | `provenance` and `experiment.lakebench` (`lakebench_version`, `git_sha`, `git_dirty`, `install`, `tree_sha256`, the dependency set and observed image digests) |
@@ -1160,46 +1159,33 @@ rule and any skipped-rule warning the batch gate printed (not enforced).
 
 ## 10. Comparability
 
-`lakebench compare A B` reads stored records (run ids, run directories,
-`metrics.json` files, `series:<id>`, or a config's latest run); it runs,
-deploys and destroys nothing (`cli/_compare.py`). Run each side first with
-`lakebench run`. Each side may hold one run or a series of repeated runs; a
-member whose verdict did not pass is excluded and listed, and a side left
-with no passing member is NOT COMPARABLE. It gives one of
-five verdicts (`metrics/comparability.py`, `pair_verdict`):
+Lakebench does not compare runs for you; a reader compares two reports (see
+[Comparing Runs](../benchmarking.md#comparing-runs)). For AML, two runs are
+comparable only when all of these hold (`metrics/comparability.py`):
 
-| Verdict | When | Exit |
-|---|---|---|
-| NOT COMPARABLE | a Workload or Corpus identity key differs or is missing (7.3), a corpus problem (config and datagen pods disagree), mixed identity versions, a run without an experiment block, a side with no PASSED member, a `lakebench benchmark` record, a different query set, a result fingerprint mismatch or a fingerprint on one side only, or a side whose runs differ from each other | 10 |
-| NOT ESTABLISHED | nothing contradicts the pair, but a member has no checked results: every AML continuous run (`experiment.results.not_checked`), and any run of a `*-none` recipe | 11 |
-| CONFOUNDED | the architecture and the system both differ | 13 |
-| NOT LIKE-FOR-LIKE | the execution conditions differ (7.2), or only the dependency pinset does; the differences are named | 12 |
-| LIKE-FOR-LIKE | identity and conditions match and every fingerprint matches; attributed as an architecture differential, a system differential, or a repeat | 0 |
+- both passed, and both carry an experiment block of the same identity
+  version;
+- every Workload and Corpus identity key (7.3) is equal, and neither run has
+  a corpus problem (config and datagen pods disagree);
+- they ran the same query set and every result fingerprint matches, and for
+  batch the alert set matches rule by rule (a different alert set is a
+  different result).
 
-Usage errors exit 2: a reference that resolves to nothing, the same runs on
-both sides, an unreadable record, `--format html` or any format other than
-table, json or csv, and the flags of the earlier command that ran both
-configs (`--keep`, `--scale`, `--skip-benchmark`, `--timeout`, `--local`,
-`--generate`, `--yes`), which are refused with the `lakebench run` commands
-to use instead.
-
-`compare` names no winner in this release (`metrics/compare.py`). Every
-per-metric row lists the Lakebench limits that bound it on either side and
-reads one of: withheld (a NOT COMPARABLE or NOT ESTABLISHED pair; no delta
-is shown), not directional (a metric with no better side), confounded, not
-assessed (a directional metric of a comparable pair; the delta of medians is
-shown with no better side), or capped (a metric a Lakebench limit bound on
-either side). `compare` prints a held-out, spent or recorded-look AML seed
-as `<protected seed>`, and a record whose seed is withheld is NOT
-COMPARABLE.
+Results are not checked for AML continuous runs
+(`experiment.results.not_checked`) or for a `*-none` recipe, so such runs
+cannot show they returned the same answers. Execution conditions (7.2), or
+only the dependency pinset, differing make the pair comparable but not
+like-for-like: a difference in the numbers may come from them. When the
+architecture and the system both differ, no difference can be put down to
+either.
 
 Batch and continuous AML runs are never comparable (mode is a Workload key).
 A batch run whose TM layer did not run (8 queries) is not comparable with
 one where it ran (12), because the query sets differ. A different
-maintenance policy id is a warning in `compare` and a refusal in the perf
-gate and `reproduce`. Records written by Lakebench 1.6 (exp1, workload
-`aml-1`), including the three published AML records, are NOT COMPARABLE
-with this release's records: they are reference figures, not baselines.
+maintenance policy id is refused by the perf gate and `reproduce`. Records
+written by Lakebench 1.6 (exp1, workload `aml-1`), including the three
+published AML records, are not comparable with this release's records: they
+are reference figures, not baselines.
 
 ## 11. Supported compositions
 
@@ -1217,7 +1203,7 @@ the release matrix, stays unverified.
 | hive-iceberg-spark-trino (`default`) | catalog | unverified / unverified | 4.1.1 | recorded: continuous scale 1 PASSED (`run-20260929-205000-ebb26f`) and batch scale 10 PASSED (`run-20260929-214442-825153`), both n=1 on Spark 4.0.2 |
 | hive-iceberg-spark-thrift | catalog | unverified / unverified | 4.1.1 | query and pipeline share Spark |
 | hive-iceberg-spark-duckdb | direct storage | unverified / unverified | 4.1.1 | DuckDB runs no Iceberg maintenance |
-| hive-iceberg-spark-none | none (no query engine) | unverified / unverified | 4.1.1 | no query benchmark, no QpH, never better than NOT ESTABLISHED |
+| hive-iceberg-spark-none | none (no query engine) | unverified / unverified | 4.1.1 | no query benchmark, no QpH, no result fingerprints |
 | polaris-iceberg-spark-trino | catalog | unverified / unverified | 4.0.2 | recorded: batch scale 1 PASSED (`run-20260929-221146-9d5345`, n=1, Spark 4.0.2) |
 | polaris-iceberg-spark-thrift | catalog | unverified / unverified | 4.0.2 | |
 | polaris-iceberg-spark-duckdb | direct storage | unverified / unverified | 4.0.2 | as DuckDB above |
@@ -1278,8 +1264,8 @@ only.
   `limits.trickle_bound`; label continuous throughput with the resolved
   trickle whenever it is published. The published continuous record
   predates that label and shows `bound: []`.
-- **`compare` names no winner.** A directional metric of a comparable pair
-  reads not assessed; a winner rule is not part of this release.
+- **Lakebench names no winner.** Comparing two runs is left to the reader
+  (section 10).
 - **No expected results.** Lakebench ships no expected AML query results for
   a user run. Correctness across architectures rests on fingerprint
   equality between batch runs; an answer wrong in the same way on both sides
@@ -1291,7 +1277,8 @@ only.
   a PASSED verdict asserts no relation. Check them from `metrics.json`
   before publishing.
 - **Repeatability.** Each run record is one run (`runs: 1`). `run --repeat`
-  (up to 20 runs) runs a series on one corpus and `compare` counts n over it.
+  (up to 20 runs) runs a series on one corpus; Lakebench does not summarise
+  the series, so read its members' records for the spread.
   Every published AML record is n=1, and any investigator or time-travel
   figure from this release is one run per arm on one system (n=1).
 - **The corpus is fixed in time and zone-less.** 2021-01-01 to 2026-01-01.
@@ -1302,7 +1289,7 @@ only.
   otherwise is the run date.
 - **Corpus id v1 hashes inert fields.** On exp1 records an edit to a field
   the AML generator never receives (the timestamps, `dirty_data_ratio`, the
-  Customer 360 `unique_customers`) makes identical corpora NOT COMPARABLE.
+  Customer 360 `unique_customers`) makes identical corpora not comparable.
   Corpus id v2 hashes what the generator applied, but only an image that
   writes corpus markers produces it. The default image does; records from an
   image without markers, `1.6.0` included, stay exp1 (section 3.1).

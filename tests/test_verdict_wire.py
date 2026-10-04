@@ -348,57 +348,6 @@ class TestPerfGateSuccessReaders:
 
 
 # ---------------------------------------------------------------------------
-# Site 4: compare comparability ladder
-# ---------------------------------------------------------------------------
-
-
-class TestCompareVerdictRefusal:
-    def test_verdict_failed_side_refuses_comparison(self) -> None:
-        import copy
-
-        from lakebench.metrics.compare import compare_records
-        from tests.fixtures import stored_records as sr
-
-        good = sr.load_record("5105a0")
-        failed = copy.deepcopy(good)
-        failed["run_id"] = "20261001-000000-fa1100"
-        failed["verdict"] = {"status": "FAILED", "reasons": ["ingest saturated"]}
-        comparison = compare_records([failed], [good])
-        assert comparison["verdict"] == "NOT COMPARABLE" and comparison["step"] == "1"
-        assert "did not pass (FAILED: ingest saturated" in comparison["reasons"][0] or (
-            "did not pass" in comparison["reasons"][0]
-        )
-        assert comparison["sides"]["a"]["members"][0]["excluded"] is True
-        # The raw scores are still visible; no delta is drawn from them.
-        for row in comparison["metrics"]:
-            assert row["assessment"] == "withheld" and row["delta_pct"] is None
-
-    def test_legacy_success_true_is_refused_as_legacy_not_as_failed(self) -> None:
-        """A v1.5 record with success=True and no verdict block reaches the
-        ladder, which refuses it for predating the experiment block."""
-        from lakebench.metrics.compare import compare_records
-
-        a = {"run_id": "run-a", "success": True}
-        b = {"run_id": "run-b", "success": True}
-        comparison = compare_records([a], [b])
-        assert comparison["cause"]["kind"] == "legacy"
-        assert not any("did not pass" in r for r in comparison["reasons"])
-
-    def test_compare_never_changes_its_inputs(self) -> None:
-        """A2b hard requirement: the raw ``success`` field survives on
-        every record compare touches (compare is read-only over its inputs)."""
-        import copy
-
-        from lakebench.metrics.compare import compare_records
-
-        rec = {"run_id": "run-a", "success": True, "verdict": {"status": "FAILED"}}
-        other = {"run_id": "run-b", "success": True}
-        before = copy.deepcopy(rec)
-        compare_records([rec], [other])
-        assert rec == before
-
-
-# ---------------------------------------------------------------------------
 # c360 gate: a c360-failed run seals a FAILED verdict via the c360 gate
 # ---------------------------------------------------------------------------
 

@@ -32,16 +32,12 @@ class ExitCode(IntEnum):
     PREREQUISITE = 4
     NOT_CONFIRMED = 5
     INCOMPLETE = 6
-    COMPARE_NOT_COMPARABLE = 10
-    COMPARE_NOT_ESTABLISHED = 11
-    COMPARE_NOT_LIKE_FOR_LIKE = 12
-    COMPARE_CONFOUNDED = 13
     REQUIREMENT_UNMET = 14
     INTERRUPTED = 130
 
 
 MEANINGS: dict[ExitCode, str] = {
-    ExitCode.OK: "Success: the run passed, the read succeeded, or the comparison is like-for-like.",
+    ExitCode.OK: "Success: the run passed or the read succeeded.",
     ExitCode.FAILED: (
         "Negative verdict of the command's own object: the run failed, a record "
         "was modified, status found drift. Also any error Lakebench did not classify."
@@ -63,10 +59,6 @@ MEANINGS: dict[ExitCode, str] = {
         "and the command was not given --yes."
     ),
     ExitCode.INCOMPLETE: "Incomplete and safe to re-run: for example the namespace is still terminating.",
-    ExitCode.COMPARE_NOT_COMPARABLE: "compare: NOT COMPARABLE.",
-    ExitCode.COMPARE_NOT_ESTABLISHED: "compare: COMPARABILITY NOT ESTABLISHED.",
-    ExitCode.COMPARE_NOT_LIKE_FOR_LIKE: "compare: comparable, not like-for-like.",
-    ExitCode.COMPARE_CONFOUNDED: "compare: comparable, confounded.",
     ExitCode.REQUIREMENT_UNMET: (
         "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
         "to verify at another commit, or could only be verified out of band."
@@ -178,7 +170,6 @@ PATHS: tuple[ExitPath, ...] = (
     # 0
     ExitPath("version.ok", _C.OK, "`lakebench version` prints the version"),
     ExitPath("run.pass", _C.OK, "`run` finished and its verdict passed"),
-    ExitPath("compare.like_for_like", _C.OK, "`compare` finds the sides like-for-like"),
     ExitPath("status.ok", _C.OK, "`status` finds every listed component ready"),
     ExitPath("plan.ok", _C.OK, "`plan` finds every prerequisite and enough capacity"),
     # 1
@@ -307,33 +298,8 @@ PATHS: tuple[ExitPath, ...] = (
         "alias.refused",
         _C.USAGE,
         "a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean "
-        "journal`); the message names the replacement, and no argument is echoed",
+        "journal`, `compare`); the message names the replacement, and no argument is echoed",
         v16_code=0,
-    ),
-    ExitPath(
-        "compare.equal_names",
-        _C.USAGE,
-        "`compare` was given two configs with the same deployment name and different contents",
-    ),
-    ExitPath(
-        "compare.bad_ref",
-        _C.USAGE,
-        "a `compare` side names a run, record, series or config that resolves to no record",
-    ),
-    ExitPath(
-        "compare.same_runs",
-        _C.USAGE,
-        "the two `compare` sides resolve to the same runs, or share a run",
-    ),
-    ExitPath(
-        "compare.unreadable_record",
-        _C.USAGE,
-        "a `compare` record or series manifest cannot be read, or two files disagree about one run",
-    ),
-    ExitPath(
-        "compare.removed_flag",
-        _C.USAGE,
-        "a flag of the `compare` that ran both configs; the message names the replacement",
     ),
     ExitPath(
         "reproduce.report_required",
@@ -567,15 +533,7 @@ PATHS: tuple[ExitPath, ...] = (
         "`destroy` finished its steps but the namespace is still terminating",
         v16_code=4,
     ),
-    # 10 to 14
-    ExitPath("compare.not_comparable", _C.COMPARE_NOT_COMPARABLE, "`compare` verdict", v16_code=1),
-    ExitPath(
-        "compare.not_established", _C.COMPARE_NOT_ESTABLISHED, "`compare` verdict", v16_code=0
-    ),
-    ExitPath(
-        "compare.not_like_for_like", _C.COMPARE_NOT_LIKE_FOR_LIKE, "`compare` verdict", v16_code=0
-    ),
-    ExitPath("compare.confounded", _C.COMPARE_CONFOUNDED, "`compare` verdict", v16_code=0),
+    # 14
     ExitPath(
         "reproduce.drift",
         _C.REQUIREMENT_UNMET,
@@ -703,7 +661,7 @@ def render_markdown() -> str:
         "(the fix) and `Where` lines when they apply. An error Lakebench does",
         "not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`",
         "to get the traceback. Machine output (`--format json` and `--format csv`",
-        "on `query`, `report` and `compare`) goes to plain stdout, unwrapped, so",
+        "on `query` and `report`) goes to plain stdout, unwrapped, so",
         "it can be piped to a parser.",
     ]
     if LEGACY_CODES:

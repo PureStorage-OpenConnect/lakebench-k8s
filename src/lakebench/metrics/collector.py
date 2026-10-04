@@ -1067,9 +1067,8 @@ class PipelineBenchmark:
     # Why qph_degradation_pct is withheld though there are enough rounds:
     # the rounds ran different query sets (an AML continuous run's 8-query
     # rounds before its first case, 12 after), so the halves time different
-    # work. This matches compare's rule for the blended case only
-    # (composite_qph_basis.blended); compare also marks a run whose every
-    # round missed the same query, which still records a figure here.
+    # work (composite_qph_basis.blended). A run whose every round missed
+    # the same query still records a figure here.
     qph_degradation_withheld: str | None = None
 
     # Maintenance cost metrics (v1.3)
@@ -1862,7 +1861,7 @@ class PipelineBenchmark:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
             trend = self.qph_trend()
             if trend is not None:
-                # Beside the scores, not in them: compare deltas scores.
+                # Beside the scores, not in them.
                 d["qph_trend"] = trend
         if self.cycles:
             d["cycles"] = [c.to_dict() for c in self.cycles]

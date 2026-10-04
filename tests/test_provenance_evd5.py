@@ -723,17 +723,3 @@ def test_observed_digests_compare_over_roles_both_sides_saw():
     assert _arch_diff(full, {**full, "spark_driver": "mirror/spark@sha256:1"}) == []
     (d,) = _arch_diff(full, {**full, "spark_executor": "r/spark@sha256:9"})
     assert d.key == "observed image digests"
-
-
-def test_partial_digest_compare_is_noted():
-    from lakebench.metrics import comparability as cmp
-
-    full = {"spark_driver": "r@sha256:1", "spark_executor": "r@sha256:1"}
-    assert cmp.observed_images_note(None, None) is None
-    assert cmp.observed_images_note(full, dict(full)) is None
-    assert cmp.observed_images_note(full, {"spark_driver": "r@sha256:1"}) == (
-        "observed image digests compared on spark_driver; not observed on both sides: "
-        "spark_executor"
-    )
-    assert "a side observed none" in cmp.observed_images_note(full, "not_observed")
-    assert "no role in common" in cmp.observed_images_note(full, {"thrift": "t@sha256:2"})

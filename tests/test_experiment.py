@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from typer.testing import CliRunner
 
 from lakebench.benchmark.fingerprint import fingerprint_rows
 from lakebench.config.recipes import RECIPES
@@ -315,65 +314,8 @@ class TestLegacy:
         loaded = storage.load_run(raw["run_id"])
         assert "experiment" not in loaded.to_dict()
 
-    def test_compare_reports_no_provenance(self):
-        new = _metrics(_cfg()).to_dict()
-        old = {"run_id": "old-1", "pipeline_benchmark": {}}
-        prov, results, _ = ex.refusals(old, new)
-        assert prov and prov[0].startswith(ex.NO_PROVENANCE) and "old-1" in prov[0]
-        assert results == []
-
 
 class TestRefusals:
-    def test_the_same_experiment_with_the_same_results_compares(self):
-        a, b = _metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict()
-        assert ex.refusals(a, b) == ([], [], [])
-
-    @pytest.mark.parametrize(
-        "other,field",
-        [
-            ({"seed": 7}, "seed"),
-            ({"scale": 2}, "scale"),
-            ({"schema": "financial"}, "workload"),
-            ({"mode": "sustained"}, "mode"),
-        ],
-    )
-    def test_a_different_experiment_is_refused(self, other, field):
-        schema = other.pop("schema", "customer360")
-        mode = other.pop("mode", "batch")
-        a = _metrics(_cfg()).to_dict()
-        b = _metrics(_cfg(schema, mode, **other)).to_dict()
-        prov, _, _ = ex.refusals(a, b)
-        assert any(p.startswith(field) for p in prov), prov
-
-    def test_different_results_name_the_query_and_both_fingerprints(self):
-        a = _metrics(_cfg(), {"Q2_filtered_aggregation": _fp(455)}).to_dict()
-        b = _metrics(_cfg(), {"Q2_filtered_aggregation": _fp(470)}).to_dict()
-        prov, results, _ = ex.refusals(a, b)
-        assert prov == []
-        assert len(results) == 1
-        line = results[0]
-        assert "Q2_filtered_aggregation" in line
-        assert _fp(455)["exact"] in line and _fp(470)["exact"] in line
-
-    def test_a_query_without_a_fingerprint_is_not_shown_equal(self):
-        a = _metrics(_cfg(), {"Q1": _fp()}).to_dict()
-        b = _metrics(_cfg(), {"Q1": None}).to_dict()
-        _, results, _ = ex.refusals(a, b)
-        assert results and "Q1" in results[0]
-
-    def test_trino_vs_duckdb_is_comparable_but_not_like_for_like(self):
-        """DESIGN 6.5: matching results make the pair comparable; the
-        different effective maintenance makes it not like-for-like. The
-        access path is part of the architecture (OD-2), not a condition.
-        Neither is a refusal."""
-        a = _metrics(_cfg(engine="trino")).to_dict()
-        b = _metrics(_cfg(engine="duckdb")).to_dict()
-        prov, results, _ = ex.refusals(a, b)
-        assert prov == [] and results == []
-        conditions = ex.like_for_like(a, b)
-        assert any(c.startswith("effective maintenance") for c in conditions), conditions
-        assert not any(c.startswith("query access path") for c in conditions), conditions
-
     def test_stored_references_refuse_on_conditions(self):
         """The perf gate and reproduce need the same experiment under the same
         conditions: a condition difference refuses there."""
@@ -383,12 +325,6 @@ class TestRefusals:
             ex.identity(a), ex.result_fingerprints(a), b, "baseline"
         )
         assert any(r.startswith("effective maintenance") for r in reasons), reasons
-
-    def test_continuous_results_are_noted_not_refused(self):
-        a = _metrics(_cfg(mode="sustained")).to_dict()
-        b = _metrics(_cfg(mode="sustained")).to_dict()
-        prov, results, notes = ex.refusals(a, b)
-        assert prov == [] and results == [] and notes
 
     def test_query_set_change_is_refused(self):
         """Tiebreakers moved the query-set id: the old id never matches the new."""
@@ -498,108 +434,6 @@ class TestEffectiveMaintenance:
         assert stopped["detail_id"].endswith(",stopped") and "stopped" not in stopped["id"]
 
 
-class TestCompareCommand:
-    """compare over stored records built by the collector (the stored-pair
-    goldens are tests/test_compare_stored.py)."""
-
-    @staticmethod
-    def _pair(a, b, *, qph=(100.0, 100.0)):
-        a = dict(a)
-        b = dict(b)
-        b["run_id"] = "20260926-120000-bbbbbb"
-        for m, q in ((a, qph[0]), (b, qph[1])):
-            # scale_ratio: a batch pipeline benchmark always records it, and
-            # the verdict fails a ratio of 0 (EVD-1).
-            m.setdefault("pipeline_benchmark", {})["scores"] = {
-                "composite_qph": q,
-                "scale_ratio": 1.0,
-            }
-        return a, b
-
-    def _comparison(self, a, b, **kw):
-        from lakebench.metrics.compare import compare_records
-
-        a, b = self._pair(a, b, **kw)
-        return compare_records([a], [b])
-
-    def test_comparable_pair(self):
-        c = self._comparison(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
-        assert c["verdict"] == "LIKE-FOR-LIKE" and c["exit_code"] == 0
-        assert c["attribution"] in ("repeat", "system not established")
-        assert all(r["winner"] is None for r in c["metrics"])
-        assert c["sides"]["a"]["support"] == "unverified"
-        assert c["sides"]["b"]["support"] == "unverified"
-
-    def test_other_query_engine_is_an_architecture_differential(self):
-        a = _metrics(_cfg(engine="trino")).to_dict()
-        b = _metrics(_cfg(engine="duckdb")).to_dict()
-        c = self._comparison(a, b)
-        assert c["verdict"] != "NOT COMPARABLE"
-        assert "architecture" in c["groups"]
-
-    def test_legacy_records_are_not_comparable_and_do_not_crash(self):
-        a = _metrics(_cfg()).to_dict()
-        b = dict(a)
-        b.pop("experiment")
-        c = self._comparison(a, b)
-        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "1"
-        assert "predates the experiment block" in c["missing"]["hint"]
-
-    def test_non_comparable_pair_keeps_the_numbers_and_withholds_them(self):
-        a = _metrics(_cfg(), {"Q1": _fp(1)}).to_dict()
-        b = _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        c = self._comparison(a, b, qph=(100.0, 200.0))
-        assert c["verdict"] == "NOT COMPARABLE" and c["step"] == "5"
-        assert "invariant 2" in c["missing"]["condition"]
-        assert [r["metric"] for r in c["metrics"]] == ["composite_qph", "scale_ratio"]
-        (row,) = [r for r in c["metrics"] if r["metric"] == "composite_qph"]
-        assert row["a"]["median"] == 100.0 and row["b"]["median"] == 200.0
-        assert row["assessment"] == "withheld" and row["delta_pct"] is None
-
-    def test_table_withholds_deltas(self, tmp_path):
-        a, b = self._pair(
-            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(),
-            _metrics(_cfg(), {"Q1": _fp(2)}).to_dict(),
-            qph=(100.0, 200.0),
-        )
-        result = self._invoke(tmp_path, a, b)
-        assert result.exit_code == 10, result.output
-        assert "NOT COMPARABLE" in result.output and "withheld" in result.output
-        assert "+100.00%" not in result.output
-
-    @staticmethod
-    def _invoke(tmp_path, a, b):
-        from lakebench.cli import app
-
-        runs = tmp_path / "runs"
-        for m in (a, b):
-            d = runs / f"run-{m['run_id']}"
-            d.mkdir(parents=True)
-            (d / "metrics.json").write_text(json.dumps(m))
-        return CliRunner().invoke(
-            app, ["compare", a["run_id"], b["run_id"], "--runs-dir", str(runs)]
-        )
-
-    def test_exit_code_is_10_when_not_comparable(self, tmp_path):
-        a, b = self._pair(
-            _metrics(_cfg(), {"Q1": _fp(1)}).to_dict(), _metrics(_cfg(), {"Q1": _fp(2)}).to_dict()
-        )
-        result = self._invoke(tmp_path, a, b)
-        assert result.exit_code == 10, result.output
-        assert not (tmp_path / "lakebench-output").exists()
-
-    def test_exit_code_is_zero_when_like_for_like(self, tmp_path):
-        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg()).to_dict())
-        result = self._invoke(tmp_path, a, b)
-        assert result.exit_code == 0, result.output
-
-    def test_different_seeds_are_not_comparable(self, tmp_path):
-        a, b = self._pair(_metrics(_cfg()).to_dict(), _metrics(_cfg(seed=7)).to_dict())
-        result = self._invoke(tmp_path, a, b)
-        assert "NOT COMPARABLE" in result.output
-        assert result.exit_code == 10
-
-
 class TestBenchmarkGateEmptyResults:
     def test_a_query_that_returned_no_rows_fails_the_gate(self):
         from lakebench.cli._run import _benchmark_gate_problems
@@ -634,3 +468,41 @@ class TestBenchmarkGateEmptyResults:
             q.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs if q.allow_empty
         }
         assert declared == {"IQ2_case_activity_12m", "IQ4_open_cases_over_60_days"}
+
+
+class TestReportCarriesWhatAReaderCompares:
+    """compare is removed (owner, 10-03): the report itself must show what a
+    reader checks before comparing two runs (invariant 2)."""
+
+    def test_identity_digest_and_query_set_are_shown(self, tmp_path):
+        from lakebench.reports.generator import ReportGenerator
+
+        run = _metrics(_cfg())
+        html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(run)
+        exp = run.to_dict()["experiment"]
+        assert "Experiment identity digest" in html
+        assert ex.identity_hash(exp) in html
+        assert "Query set" in html
+
+    def test_aml_alert_set_is_shown_per_rule(self):
+        from lakebench.reports.generator import ReportGenerator
+
+        exp = {
+            "results": {
+                "alert_set": {
+                    "spec": "as1",
+                    "rows": 7,
+                    "h": "30",
+                    "by_rule": {"W2": {"rows": 3, "h": "10"}, "W5": {"rows": 4, "h": "20"}},
+                }
+            }
+        }
+        html = ReportGenerator._alert_set_html(exp)
+        assert "<h3>Alert set</h3>" in html
+        for cell in ("<td>W2</td><td>3</td>", "<td>W5</td><td>4</td>", "<td>total</td><td>7</td>"):
+            assert cell in html
+
+    def test_a_run_with_no_alert_set_shows_none(self):
+        from lakebench.reports.generator import ReportGenerator
+
+        assert ReportGenerator._alert_set_html({"results": {}}) == ""

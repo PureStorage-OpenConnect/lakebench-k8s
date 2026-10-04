@@ -438,7 +438,7 @@ def test_v16_conflicting_config_refused_for_deploy_with_the_recipe_to_keep(tmp_p
     assert exc.value.errors[0]["loc"] == ("recipe",)
 
 
-@pytest.mark.parametrize("purpose", ["teardown", "read", "inspect", "compare"])
+@pytest.mark.parametrize("purpose", ["teardown", "read", "inspect"])
 def test_v16_conflicting_config_loads_as_deployed_for_destroy_and_status(tmp_path, purpose):
     from lakebench.config import LoadPurpose
 

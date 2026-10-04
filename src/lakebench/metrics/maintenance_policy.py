@@ -38,7 +38,7 @@ when every chunk does) and name each failed table.
 
 A run with ``--skip-maintenance`` is stamped ``<id>+skipped``: it ran no
 table maintenance, so the perf gate matches it with nothing measured under
-the policy. ``compare`` reads two runs that each skipped every operation
+the policy. The identity reads two runs that each skipped every operation
 under one policy (``+skipped``, or ``pre_benchmark_maintenance`` off in
 batch) as the same maintenance (comparability.maintenance_equal).
 

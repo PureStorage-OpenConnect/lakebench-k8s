@@ -490,17 +490,17 @@ the terminal (`--format json` or `csv` for scripts).
 ```bash
 lakebench deploy lakebench-polaris.yaml --yes
 lakebench run lakebench-polaris.yaml
-lakebench compare lakebench.yaml lakebench-polaris.yaml
+lakebench report lakebench.yaml
+lakebench report lakebench-polaris.yaml
 ```
 
-`compare` reads the stored records of the two configs' latest runs (the
-first from step 4, the second just made) and runs nothing itself. It prints
-how each side resolved, the verdict (LIKE-FOR-LIKE, NOT COMPARABLE, NOT
-ESTABLISHED, NOT LIKE-FOR-LIKE or CONFOUNDED, also its exit code), the one
-condition the pair is missing with the command that supplies it (where
-one exists), and each
-score's median, range and n. Give the two configs different names: a name
-is one deployment.
+Read the two HTML reports side by side (`report` prints each path). The
+Experiment section of each states the corpus, datagen image, components,
+maintenance, the stages and rules that ran, a result fingerprint per
+benchmark query and, for AML batch runs, the alert set. Compare performance
+only when the corpus, every result fingerprint and the alert set match: a
+difference means the two stacks returned different answers. A number bounded by a Lakebench cap is labelled as such.
+Give the two configs different names: a name is one deployment.
 
 ### 8. Tear down
 

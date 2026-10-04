@@ -14,9 +14,6 @@ from __future__ import annotations
 
 import copy
 
-import pytest
-
-from lakebench.metrics import comparability as cmp
 from lakebench.metrics import experiment as ex
 from tests.fixtures import stored_records as sr
 
@@ -41,15 +38,6 @@ def test_the_aml_record_fingerprints_the_mode_sensitive_queries():
     assert {"FQ4_running_balance_window", "IQ3_counterparty_two_hop"} <= set(fps)
 
 
-@pytest.mark.parametrize("mode_b", ["sustained", "continuous"])
-def test_compare_stops_at_the_mode_before_any_result(mode_b):
-    a, b = _pair(mode_b=mode_b, change=("FQ4_running_balance_window", "IQ3_counterparty_two_hop"))
-    v = cmp.pair_verdict([a], [b])
-    assert (v.verdict, v.step) == (cmp.NOT_COMPARABLE, "3"), v.reasons
-    assert v.keys(cmp.WORKLOAD) == ["mode"], v.reasons
-    assert not any("FQ4" in r or "IQ3" in r for r in v.reasons), v.reasons
-
-
 def test_the_perf_gate_refuses_a_cross_mode_baseline():
     a, b = _pair(mode_b="sustained")
     refusals = ex.stored_identity_refusals(
@@ -59,11 +47,3 @@ def test_the_perf_gate_refuses_a_cross_mode_baseline():
         "baseline",
     )
     assert any("mode" in r for r in refusals), refusals
-
-
-def test_within_one_mode_a_different_fq4_answer_is_not_comparable():
-    """Invariant 2 inside one mode: the results decide (here FQ4 differs)."""
-    a, b = _pair(mode_b="batch")
-    v = cmp.pair_verdict([a], [b])
-    assert v.verdict == cmp.NOT_COMPARABLE, v.reasons
-    assert any("FQ4_running_balance_window" in r for r in v.reasons), v.reasons

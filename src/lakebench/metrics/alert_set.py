@@ -208,23 +208,3 @@ def diff_alert_sets(
             f"{b.get('rows')} in {label_b}"
         )
     return out
-
-
-def alert_set_notes(
-    ea: Mapping[str, Any] | None,
-    eb: Mapping[str, Any] | None,
-    label_a: str = "A",
-    label_b: str = "B",
-) -> list[str]:
-    """The caveat for a pair where one side recorded an alert set and the
-    other, a 1.6 record, did not: the results were compared on the
-    benchmark queries only. Empty otherwise (a 1.7 side without one is not
-    established, step 4, and never reaches this)."""
-    sa, sb = alert_set_of(ea), alert_set_of(eb)
-    if (sa is None) == (sb is None):
-        return []
-    lacking = label_b if sb is None else label_a
-    return [
-        f"{lacking} recorded no alert-set fingerprint (a record from before 1.7); "
-        "results compared on the benchmark queries only"
-    ]

@@ -17,7 +17,7 @@ from lakebench.config.schema import investigator_sessions_problem
 from lakebench.metrics import comparability as cmp
 from lakebench.metrics import experiment as ex
 from tests.conftest import make_config
-from tests.test_comparability import _rec, _verdict
+from tests.test_comparability import _condition_keys, _rec
 from tests.test_experiment import _cfg, _metrics
 
 
@@ -113,17 +113,13 @@ def _with_sessions(run_id, run):
 def test_a_lowered_round_is_not_like_for_like():
     """Both configured at 8; one ran 8 sessions, one 3 (fewer cases): not
     like-for-like. Keyed on the configured N they would read like-for-like."""
-    v = _verdict(_with_sessions("a", 8), _with_sessions("b", 3))
-    assert (v.verdict, v.keys(cmp.CONDITIONS)) == (
-        cmp.NOT_LIKE_FOR_LIKE,
-        ["investigator sessions"],
-    )
+    assert _condition_keys(_with_sessions("a", 8), _with_sessions("b", 3)) == [
+        "investigator sessions"
+    ]
 
 
 def test_a_skipped_round_against_a_default_run_is_not_like_for_like():
-    v = _verdict(_with_sessions("a", 0), _rec(new_id="b"))
-    assert v.verdict == cmp.NOT_LIKE_FOR_LIKE
-    assert v.keys(cmp.CONDITIONS) == ["investigator sessions"]
+    assert _condition_keys(_with_sessions("a", 0), _rec(new_id="b")) == ["investigator sessions"]
 
 
 def _exp2(run=None):

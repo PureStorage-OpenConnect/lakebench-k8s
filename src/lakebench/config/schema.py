@@ -1331,8 +1331,8 @@ class DuckDBConfig(ConfigModel):
     # engine change would move, so the drift was invisible to the noise floor.
     version: str = "1.5.5"
     """DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes
-    whatever is current, so two runs weeks apart can query with different engines while
-    `compare` reports the difference as a result.
+    whatever is current, so two runs weeks apart can query with different engines and the
+    difference would read as a result.
     """
 
 
@@ -2027,9 +2027,7 @@ class TmOperationsConfig(ConfigModel):
 #: Load purposes that skip the AML seed guard at load: they tear down, read
 #: about or show a deployment, or resolve a config's name, and never generate
 #: or score data (``WorkloadConfig._seed_allowed``).
-_SEED_GUARD_SKIPPED = frozenset(
-    {LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.INSPECT, LoadPurpose.COMPARE}
-)
+_SEED_GUARD_SKIPPED = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.INSPECT})
 
 
 class WorkloadConfig(ConfigModel):
@@ -2589,7 +2587,7 @@ class BenchmarkConfig(ConfigModel):
     `financial`, `tm_operations.enabled` is true and the query engine is `trino` or
     `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer
     when the run has fewer cases) are an outcome condition: two runs that differ in it
-    compare as not like-for-like.
+    are not like-for-like.
     """
 
     @model_validator(mode="after")

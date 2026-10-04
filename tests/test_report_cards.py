@@ -11,10 +11,8 @@ capped figure as bare headline evidence, or a compare table that says only
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -398,61 +396,6 @@ class TestConfidenceChipOnBadge:
 # Compare CLI: WCAG 1.4.1 -- nothing is carried by colour alone. compare
 # names no winner, so it prints no winner token; what a row may be read as
 # is its assessment, in text.
-# ---------------------------------------------------------------------------
-
-
-def _strip_rich_markup(text: str) -> str:
-    """Remove Rich colour tags: WCAG check reads the plain text stream."""
-    return re.sub(r"\[/?[a-zA-Z0-9_ ]+\]", "", text)
-
-
-def _capture_compare_print(comparison: dict) -> str:
-    from io import StringIO
-
-    from rich.console import Console
-
-    from lakebench.cli import _compare as compare_mod
-
-    buf = StringIO()
-    fake_console = Console(file=buf, force_terminal=False, width=250)
-    with mock.patch.object(compare_mod, "console", fake_console):
-        compare_mod._print_table(comparison)
-    return buf.getvalue()
-
-
-class TestCompareTextNotColour:
-    def _pair(self, qph_a: float, qph_b: float, *, results_differ: bool = False) -> dict:
-        import copy
-
-        from lakebench.metrics.compare import compare_records
-        from tests.fixtures import stored_records as sr
-
-        a = sr.load_record("5105a0")
-        b = copy.deepcopy(a)
-        b["run_id"] = "20261001-000000-c0c0c0"
-        a["pipeline_benchmark"]["scores"] = {"composite_qph": qph_a}
-        b["pipeline_benchmark"]["scores"] = {"composite_qph": qph_b}
-        if results_differ:
-            fps = b["experiment"]["results"]["fingerprints"]
-            first = next(iter(fps))
-            fps[first] = "different"
-        return compare_records([a], [b])
-
-    def test_no_winner_token_on_a_like_for_like_pair(self):
-        out = _strip_rich_markup(_capture_compare_print(self._pair(100.0, 120.0)))
-        assert DELTA_TOKEN_A_FASTER not in out and DELTA_TOKEN_B_FASTER not in out
-        assert "not_assessed" in out and "+20.00%" in out
-
-    def test_withheld_in_text_when_not_comparable(self):
-        out = _strip_rich_markup(
-            _capture_compare_print(self._pair(100.0, 120.0, results_differ=True))
-        )
-        assert "NOT COMPARABLE" in out and "withheld" in out
-        assert "+20.00%" not in out
-
-
-# ---------------------------------------------------------------------------
-# caps_bound_from + n_runs_of: pull-through helpers from PipelineMetrics.
 # ---------------------------------------------------------------------------
 
 

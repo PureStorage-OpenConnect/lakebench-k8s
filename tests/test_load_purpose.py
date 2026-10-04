@@ -108,7 +108,7 @@ def test_v16_state_name_read_verbatim(tmp_path):
             load_config(cfg_path, purpose=purpose)
         assert "name: lb-20260915-101530" in str(e.value)
         assert e.value.resolution.source == "legacy-state"
-    for purpose in (LoadPurpose.COMPARE, LoadPurpose.INSPECT):
+    for purpose in (LoadPurpose.INSPECT,):
         cfg = load_config(cfg_path, purpose=purpose)
         assert cfg.name == "lb-20260915-101530"
         res = name_resolution(cfg)
@@ -169,7 +169,7 @@ def test_removed_key_refused_under_mutate(tmp_path, purpose):
     assert "Delete it from the config" in msg
 
 
-@pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.COMPARE])
+@pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
 def test_removed_key_loads_for_destroy(tmp_path, purpose):
     cfg = load_config(_write(tmp_path, REMOVED_KEY), purpose=purpose)
     assert not hasattr(cfg.images, "pull_secrets")
@@ -210,7 +210,6 @@ def test_allow_long_names_with_mutate_keeps_mutate_refusals(tmp_path):
     [
         (LoadPurpose.MUTATE, False),
         (LoadPurpose.RUN, False),
-        (LoadPurpose.COMPARE, False),
         (LoadPurpose.TEARDOWN, True),
         (LoadPurpose.READ, True),
     ],
@@ -278,7 +277,6 @@ def test_load_notes_can_be_left_to_the_caller(tmp_path, capsys, monkeypatch):
         (LoadPurpose.RUN, False),
         (LoadPurpose.TEARDOWN, True),
         (LoadPurpose.READ, True),
-        (LoadPurpose.COMPARE, True),
     ],
 )
 def test_old_file_size_follows_the_removed_key_rule(tmp_path, purpose, loads):
@@ -320,7 +318,6 @@ VERB_PURPOSES = [
     ("lakebench.cli._config", ["config", "recommend"], LoadPurpose.INSPECT, False),
     ("lakebench.cli", ["report"], LoadPurpose.READ, False),
     ("lakebench.cli", ["results"], LoadPurpose.READ, False),
-    ("lakebench.config", ["compare", "CFG"], LoadPurpose.COMPARE, False),
     (
         "lakebench.cli._financial",
         ["financial", "score", "--manifest", "s3://m", "--output", "s3://o"],
@@ -367,7 +364,7 @@ def test_readonly_load_writes_nothing_with_legacy_state(tmp_path):
     before = _listing(tmp_path)
     with pytest.raises(ConfigNameRequired):
         load_config(cfg_path, purpose=LoadPurpose.READ)
-    assert load_config(cfg_path, purpose=LoadPurpose.COMPARE).name == "lb-20260101-000000"
+    assert load_config(cfg_path, purpose=LoadPurpose.INSPECT).name == "lb-20260101-000000"
     assert _listing(tmp_path) == before
 
 

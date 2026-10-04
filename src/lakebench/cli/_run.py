@@ -412,7 +412,7 @@ def _record_local_jobs(collector, cfg, result) -> None:
 
 
 def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
-    """Record benchmark queries so `results` and `compare` can read them.
+    """Record benchmark queries so `results` and `report` can read them.
 
     Shaped exactly like the cluster path's record: queries are dicts, not
     QueryMetrics, and the single-round case goes through record_benchmark.
@@ -430,7 +430,7 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
             engine="duckdb",
             # This field is int and display-only. A sub-1 local scale would
             # truncate to 0 and read as "no data", so floor at 1; the exact
-            # value stays in the config snapshot, which is what compare reads.
+            # value stays in the config snapshot.
             scale=max(1, int(cfg.architecture.workload.datagen.scale)),
             qph=qph,
             total_seconds=sum(r[2] for r in bench_results),
@@ -1391,7 +1391,7 @@ def _run_local_mode(
     j.begin_command(CommandName.RUN, {"local": True, "stages": list(stages)})
 
     # Same collector and storage the cluster path uses, so `results`,
-    # `report`, and `compare` read local runs without special-casing them.
+    # and `report` read local runs without special-casing them.
     import uuid as _uuid
 
     from lakebench.metrics import MetricsCollector, MetricsStorage, build_config_snapshot

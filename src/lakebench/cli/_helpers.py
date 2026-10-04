@@ -1,7 +1,7 @@
 """Shared CLI helpers for Lakebench.
 
 Extracted from cli/__init__.py so that submodules (_sustained.py,
-_compare.py, _config.py) can import these without circular dependencies.
+_config.py) can import these without circular dependencies.
 """
 
 from __future__ import annotations

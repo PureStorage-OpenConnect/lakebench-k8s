@@ -561,12 +561,6 @@ class TestReviewFixes:
                 _run._stage_timing(monitor, "x", result, T0, T0 + timedelta(seconds=65))
         assert len(calls) == 1
 
-    def test_compare_maps_the_old_freshness_key(self):
-        from lakebench.metrics.compare import _scores
-
-        rec = {"pipeline_benchmark": {"scores": {"query_time_freshness_seconds": 5.0, "x": 1}}}
-        assert _scores(rec) == {"query_time_event_age_seconds": 5.0, "x": 1.0}
-
 
 class TestRunOrdering:
     def test_latest_run_is_by_instant_not_string(self, tmp_path, monkeypatch):

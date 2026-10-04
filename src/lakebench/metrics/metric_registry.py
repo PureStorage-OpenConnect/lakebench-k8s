@@ -1,10 +1,9 @@
 """One source of metric metadata: unit, direction, band, modes, workloads
 and Lakebench caps a metric depends on.
 
-Readers: ``lakebench compare`` (which deltas carry a better side),
-``lakebench reproduce`` and the perf gate (``reproduce_class``), the HTML
+Readers: ``lakebench reproduce`` and the perf gate (``reproduce_class``), the HTML
 report's "higher is better" hints (``direction_hint``), and the collector's
-``score_descriptions``. Still outside it: compare's QpH query-set check and
+``score_descriptions``. Still outside it: the QpH query-set check and
 its "capped" rendering, and the perf gate's own rule that continuous stage
 seconds are not measurements (later work moves them here). A score emitted
 with no entry fails ``tests/test_metric_registry.py``.
@@ -30,8 +29,7 @@ direction is ``higher`` or ``lower``.
 type, and ``{job}`` the job type of the stage a key names) that, when they
 bound a run, bound this metric: it is then capped, not infrastructure
 performance. ``capped_by`` takes the trickle, which is not a bound kind, as
-``extra``. No reader calls ``capped_by`` yet: compare still labels a delta
-capped when any limit bound either run.
+``extra``.
 
 Some keys mean different things by mode (a continuous stream stage's
 seconds are the window length; continuous core-hours scale with it): they
@@ -44,7 +42,7 @@ mode, use ``reproduce_class``.
 History of band and direction changes to published metrics (to be named in
 UPGRADING-1.7.md):
 
-- 1.7: compare had derived direction from name tokens. ``qph_degradation_pct``
+- 1.7: direction had been derived from name tokens. ``qph_degradation_pct``
   is lower is better (was higher). Not directional (were higher or lower):
   ``qph_spread``, ``maintenance_value_pct``, ``window_seconds``,
   ``benchmark_rounds_count``, ``benchmark_samples_per_query``,

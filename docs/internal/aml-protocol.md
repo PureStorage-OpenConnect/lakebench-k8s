@@ -167,7 +167,7 @@ scorer's report records it as `corpus_seed`; and the run record
 run record writes the seed's salted hash instead. Do not check in the run
 output of a registered generate before its look is recorded. In practice
 only `lakebench generate --registered-corpus` reaches the cluster with such
-a config: `run`, `benchmark`, `query`, `compare`, `reproduce` and the
+a config: `run`, `benchmark`, `query`, `reproduce` and the
 `financial` commands refuse it before any cluster call, so the in-cluster
 reference scorer never scores a registered corpus; the look scores the local
 copy with `scripts/aml_gate.py --registered`.

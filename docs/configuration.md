@@ -34,7 +34,7 @@ workload:
 Recipe defaults to `hive-iceberg-spark-trino`.
 
 The name is required by every command that changes data: `deploy`,
-`generate`, `run`, `benchmark`, `query`, `clean`, `compare`, `reproduce`,
+`generate`, `run`, `benchmark`, `query`, `clean`, `reproduce`,
 `financial` and `validate` refuse a config without one, and the error
 offers a name to add. (`config upgrade` is removed in v1.7 for every
 config; see the CHANGELOG.)
@@ -425,8 +425,8 @@ An override changes what a run measures:
 
 - It enters the experiment record (`architecture.spark_executor_overrides`;
   the driver overrides as `architecture.spark_driver_overrides`) and the
-  identity, as an architecture difference: compare reports two runs with
-  different overrides as differing in architecture. They are like-for-like
+  identity, as an architecture difference: two runs with different
+  overrides differ in architecture. They are like-for-like
   only when no override binds one run and not the other (below).
 - An override below what the profile asks for at the run's scale binds the
   run. It is labelled in `limits.bound` ("silver-build: executor override 4
@@ -727,7 +727,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB memory. |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
-| `architecture.query_engine.duckdb.version` | string | `1.5.5` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines while `compare` reports the difference as a result. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.5` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
 
 ### Architecture -- Pipeline
 
@@ -813,7 +813,7 @@ Advanced workload overrides. Most users should leave these at defaults and contr
 | `architecture.benchmark.maintenance_settle.tolerance_pct` | number | `10.0` | advanced | Settled when two consecutive probes differ by at most this percent and neither is slower than the pre-maintenance time by more. Range: above 0, up to 100. |
 | `architecture.benchmark.maintenance_settle.probe_query` | string or null | `null` | advanced | Benchmark query name to probe with. Default: the workload's first scan-class query (a full scan of the table compaction rewrote) |
 | `architecture.benchmark.maintenance_settle.probe_samples` | integer | `1` | advanced | Timed runs per probe; the probe time is their median. Range: 1--10. |
-| `architecture.benchmark.investigator_sessions` | integer or null | `null` | advanced | AML continuous only: concurrent investigator sessions run once, as an extra round after the first in-stream round that had a case, each working one case of the run (IQ1 to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is `financial`, `tm_operations.enabled` is true and the query engine is `trino` or `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer when the run has fewer cases) are an outcome condition: two runs that differ in it compare as not like-for-like. |
+| `architecture.benchmark.investigator_sessions` | integer or null | `null` | advanced | AML continuous only: concurrent investigator sessions run once, as an extra round after the first in-stream round that had a case, each working one case of the run (IQ1 to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is `financial`, `tm_operations.enabled` is true and the query engine is `trino` or `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer when the run has fewer cases) are an outcome condition: two runs that differ in it are not like-for-like. |
 
 ### Architecture -- Table Names
 
@@ -911,12 +911,12 @@ address), is recorded as `<redacted>`. Any other value is recorded as
 not protect: put secrets under a secret-named key or an environment
 variable. A per-bucket S3A key records its bucket's layer (`<bronze>`,
 `<silver>`, `<gold>`) or `<other-bucket>` instead of its name. The
-recorded map is the `spark conf` key of the experiment identity, so compare
-reports two runs whose recorded maps differ as an architecture difference,
+recorded map is the `spark conf` key of the experiment identity, so two
+runs whose recorded maps differ differ in architecture,
 while two deployments that differ only in buckets and endpoints do not
 differ there. A difference
 in a value recorded as `<redacted>` (an environment variable's value, for
-example) is not seen by compare.
+example) is not in the identity.
 
 
 Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:

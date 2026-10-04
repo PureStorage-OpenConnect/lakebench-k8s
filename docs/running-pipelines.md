@@ -404,7 +404,7 @@ Continuous mode produces a different set of scores than batch:
 | **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
 | **composite_qph** | In-stream median QpH. When the rounds executed different query sets (a round with a failed query), `composite_qph_basis.blended` is true, the median is over different queries and is not compared, and `composite_qph_by_set` holds the median per set. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
-| **composite_qph_rounds** | In-stream rounds behind the composite_qph median (0 when it is the post-stream benchmark). Benchmark iterations are an execution condition, so two runs with different counts are comparable but not like-for-like, and `lakebench compare` says so. |
+| **composite_qph_rounds** | In-stream rounds behind the composite_qph median (0 when it is the post-stream benchmark). Benchmark iterations are an execution condition, so two runs with different counts are comparable but not like-for-like. |
 | **stage_latency_profile** | Average micro-batch processing time per stage (`bronze_ms`, `silver_ms`, `gold_ms`). |
 | **total_rows_processed** | Total volume processed during the measurement window. |
 | **pre_window_rows** | Bronze rows taken in before the window opened; not in any score. |
