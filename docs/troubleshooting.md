@@ -669,6 +669,33 @@ setting.
 Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_build_manifest`,
 `src/lakebench/templates/spark-thrift/sparkapplication.yaml.j2`.
 
+### Iceberg compaction fails on open writers or per-node memory
+
+**Symptom:** a run's maintenance outcomes show compaction partial, and the
+log or `effective_maintenance.reasons` has "compaction failed on <table>"
+with "Exceeded limit of 100 open writers for partitions" or "Query
+exceeded per-node memory limit of ... [TableWriterOperator=...]".
+
+**Cause:** one Trino `optimize` rewrote too many partitions at once. Each
+partition keeps an open Parquet writer; Trino caps the partitions one
+writer may open at 100, and Lakebench sets a query's memory per node to
+35% of the worker heap.
+Continuous runs leave small files in every partition, so a long window
+makes every partition a rewrite: Customer 360 silver has a partition per
+day, and the AML silver `transactions` and `account_statements`
+tables a partition per month, about 160 MB of writer memory each at scale
+1.
+
+**Fix:** none needed on current code: these tables are compacted in
+chunks (90 days, or one month, per statement). If it still appears, check
+the record's `detail.compaction_statements`: one statement without a
+`WHERE` for a chunked table means the partition read failed (the reason
+names it), or the table was renamed in `architecture.tables`, which the
+chunking does not follow.
+
+Code: `src/lakebench/modules/table_formats/iceberg/maintenance.py:build_compaction_plan`,
+`src/lakebench/cli/_sustained.py:_compaction_partitions`.
+
 ### Delta: no compaction, and VACUUM only on Trino
 
 **Symptom:** a Delta run's record shows compaction skipped, and on Delta

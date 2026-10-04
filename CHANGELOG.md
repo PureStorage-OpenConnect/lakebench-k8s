@@ -2194,6 +2194,22 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   table whose compaction failed in `reasons` and
   `detail.compaction_failures`. The maintenance policy id and the effective
   maintenance `id` are unchanged.
+- Trino compaction of the AML silver tables `silver.transactions` and
+  `silver.account_statements` no longer fails with "Query exceeded per-node
+  memory limit". Both are partitioned by month, and one `optimize`
+  rewrote every month at once: in a continuous AML scale-1 run (n=1) the
+  compaction at about 4,320 s, with small micro-batch files in 12 to 13
+  months, used 2.06 GB of a 2.24 GB per-node limit in its table writers and
+  failed on both tables, so any AML continuous Trino run longer than about
+  an hour recorded a partial compaction. Each table is now compacted one
+  month per statement, after a read of its month partitions, with a
+  `WHERE` range on the timestamp column that starts and ends on a month
+  boundary in UTC (Trino 483 applies such a range to whole partitions).
+  This also applies to batch AML runs on Trino, whose pre-benchmark
+  maintenance now runs two partition reads and one statement per month on
+  those two tables where it ran one each, which can change the recorded
+  maintenance time. The rewrite settings, the compaction operation recorded
+  (`trino_optimize` at 128MB) and the maintenance ids are unchanged.
 - Continuous AML on Spark 4.1 with Iceberg no longer fails its silver
   stream with an internal error ("No plan for TableReference") on the
   entity and account MERGEs. Every MERGE in the AML silver stream whose

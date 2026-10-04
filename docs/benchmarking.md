@@ -377,7 +377,13 @@ every statement for it succeeded. On Trino, a Customer 360 silver table
 compacted in chunks of at most 90 partitions, one `optimize ... WHERE
 interaction_date ...` per chunk, in batch and continuous mode alike: Trino
 refuses an `optimize` that rewrites files in more than 100 partitions, and
-continuous silver has small files in every partition. A table whose chunks
+continuous silver has small files in every partition. The AML tables
+`silver.transactions` and `silver.account_statements` (partitioned by
+month) are compacted one month per statement, `optimize ... WHERE
+txn_timestamp >= TIMESTAMP '<month> 00:00:00.000000 UTC' AND txn_timestamp
+< ...` (`book_ts` for statements), with the first statement open below and
+the last open above: an `optimize` over every month at once ran out of
+Trino's per-node query memory. A table whose chunks
 partly succeeded is partial: it keeps `compaction=ran` in the id (which reads
 `failed` only when no statement succeeded) and reads `compaction=partial` in
 `detail_id`. `reasons` names each failed table as "compaction failed on

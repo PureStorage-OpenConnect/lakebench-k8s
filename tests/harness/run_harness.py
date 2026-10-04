@@ -420,6 +420,13 @@ class FakeTrino:
             day += timedelta(days=1)
         return out
 
+    @staticmethod
+    def aml_month_partitions() -> list[int]:
+        """The AML month tables' partitions (LB-273): Iceberg month
+        transform values for 2024-01 to 2025-01: 13 months, the upper
+        count of the lb17-qr32-cont diagnosis (continuous AML s1 silver)."""
+        return list(range(648, 661))
+
     def answer(self, sql: str) -> tuple[int, str, str]:
         low = sql.lower()
         if (
@@ -427,6 +434,14 @@ class FakeTrino:
             and '.silver."customer_interactions_enriched$partitions"' in low
         ):
             return 0, "".join(f'"{d}"\n' for d in self.silver_partitions()), ""
+        if (
+            low.startswith("select distinct partition.txn_timestamp_month from")
+            and '.silver."transactions$partitions"' in low
+        ) or (
+            low.startswith("select distinct partition.book_ts_month from")
+            and '.silver."account_statements$partitions"' in low
+        ):
+            return 0, "".join(f'"{m}"\n' for m in self.aml_month_partitions()), ""
         if "execute optimize" in low:
             self._advance(low)
             return 0, "", ""

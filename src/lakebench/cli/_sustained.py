@@ -1617,12 +1617,12 @@ def _compaction_partitions(
     from lakebench.deploy.iceberg import query_sql
     from lakebench.modules.table_formats.iceberg.maintenance import (
         build_partition_values_sql,
-        compaction_partition_column,
+        compaction_partitioning,
         parse_partition_values,
     )
 
-    column = compaction_partition_column(table)
-    if engine != "trino" or column is None:
+    spec = compaction_partitioning(table)
+    if engine != "trino" or spec is None:
         return None
     if budget is not None and budget.exhausted():
         return None
@@ -1635,10 +1635,10 @@ def _compaction_partitions(
             k8s,
             pod_name,
             namespace,
-            build_partition_values_sql(table, column),
+            build_partition_values_sql(table, spec.partition_field),
             timeout=read_timeout,
         )
-        return parse_partition_values(output)
+        return parse_partition_values(output, spec.transform)
     except Exception as e:
         notes.append(
             f"partition read failed on {table}, ran one unchunked statement: {_error_line(str(e))}"

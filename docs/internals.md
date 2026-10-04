@@ -264,6 +264,46 @@ the run records, so a new call site must take its retentions from it.
 `7d`) and is checked at load
 (`src/lakebench/config/schema.py:SustainedConfig`).
 
+**Trino compaction is chunked by partition.**
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:build_compaction_plan`
+splits one `optimize` into several for the tables on
+`src/lakebench/modules/table_formats/iceberg/maintenance.py:_COMPACTION_PARTITIONING`,
+after `src/lakebench/cli/_sustained.py:_compaction_partitions` reads the
+table's partition values from `$partitions`. Each partition an `optimize`
+rewrites keeps open Parquet writers, so what one statement can take is
+bounded by partitions, not rows:
+
+- **Customer 360 silver** (identity on `interaction_date`): at most 90
+  partitions per statement
+  (`src/lakebench/modules/table_formats/iceberg/maintenance.py:COMPACTION_CHUNK_PARTITIONS`),
+  below Trino's limit of 100 open writers.
+- **AML silver** `transactions` and `account_statements` (`months()` on
+  `txn_timestamp` and `book_ts`): one month per statement
+  (`src/lakebench/modules/table_formats/iceberg/maintenance.py:COMPACTION_CHUNK_MONTHS`).
+  A writer buffers up to a row group (128 MB) per partition, and 12 to 13
+  months of small continuous files in one statement exceeded the 2.24 GB
+  per-node query memory at scale 1. One month keeps a statement
+  to one partition's writers, and Trino stops scaling writers at 70% of
+  the per-node limit, so it does not grow with scale.
+
+Trino accepts `optimize ... WHERE` only when the connector applies the
+whole predicate to partitions; anything else fails with "Unexpected
+FilterNode found in plan; probably connector was not able to handle
+provided WHERE expression". For a `months()` field that means a range on
+the source column whose bounds sit on month starts
+(`IcebergUtil.canEnforceRangeWithPartitioningField` in Trino 483), so the
+bounds are `TIMESTAMP 'YYYY-MM-01 00:00:00.000000 UTC'`: the month
+transform of a `timestamp with time zone` is taken in UTC, and an explicit
+UTC literal does not depend on the session time zone. The chunks are
+contiguous and the first and last are open-ended, so a partition written
+after the read, or missing from it, is still compacted by exactly one
+statement. A failed partition read falls back to one statement and is
+named in the record. Each statement is the same per-partition rewrite as
+one `optimize` over the table (it compacts each partition on its own, with
+the same threshold and writer settings); the commits are one snapshot per
+chunk, and the record names the operation (`trino_optimize` with its
+threshold) as before.
+
 **Where maintenance runs.** In a continuous run,
 `src/lakebench/cli/_sustained.py:_run_iceberg_maintenance` runs a round
 every `retention_interval` seconds (unset means a third of the window,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -249,31 +250,87 @@ def build_compaction_sql(
     return []
 
 
-# Lakebench-created tables with a single identity partition column, taken
-# from Lakebench's own DDL (silver_build.py and silver_stream.py both create
-# customer_interactions_enriched partitioned by interaction_date). Keyed by
-# the bare table name; a renamed table falls back to one statement.
-_COMPACTION_PARTITION_COLUMN = {"customer_interactions_enriched": "interaction_date"}
+@dataclass(frozen=True)
+class CompactionPartitioning:
+    """How a Trino compaction chunks one Lakebench table.
 
-# Partitions per Trino optimize statement. Trino's Iceberg connector refuses
-# a write that opens more than max_partitions_per_writer (default 100)
-# writers: "Exceeded limit of 100 open writers for partitions: 101" (seen in
-# run-20260929-204941-1d17f4). What trips it is the number of partitions one
-# optimize rewrites, not the number the table holds: batch C360 s1 silver
-# (366 interaction_date partitions, a few large files each) compacted in one
-# statement (run-20260929-212900-5105a0), while continuous silver, with small
+    ``column`` is the source column the ``optimize ... WHERE`` ranges on;
+    ``transform`` the table's partition transform on it (``identity`` or
+    ``month``); ``chunk`` the most partitions one statement rewrites.
+    """
+
+    column: str
+    transform: str
+    chunk: int
+
+    @property
+    def partition_field(self) -> str:
+        """The field name in Trino's ``$partitions.partition`` row: the
+        column itself for identity, Iceberg's default ``<column>_month``
+        for months()."""
+        return self.column if self.transform == "identity" else f"{self.column}_{self.transform}"
+
+
+# Partitions per Trino optimize statement on an identity-partitioned table.
+# Trino's Iceberg connector refuses a write that opens more than
+# max_partitions_per_writer (default 100) writers: "Exceeded limit of 100
+# open writers for partitions: 101" (seen in run-20260929-204941-1d17f4).
+# What trips it is the number of partitions one optimize rewrites, not the
+# number the table holds: batch C360 s1 silver (366 interaction_date
+# partitions, a few large files each) compacted in one statement
+# (run-20260929-212900-5105a0), while continuous silver, with small
 # micro-batch files in every partition, did not. The plan chunks every table
 # above 90 partitions anyway, so a run never depends on how many of them hold
 # small files; 90 leaves 10 writers of margin below the default. (Both runs
 # had 366 distinct interaction dates, c360_correctness distinct_dates.)
 COMPACTION_CHUNK_PARTITIONS = 90
 
+# Months per Trino optimize statement on a months()-partitioned AML table.
+# Each partition a statement rewrites keeps an open Parquet writer
+# that buffers up to a row group (parquet_writer_block_size, 128 MB) before
+# it flushes, so writer memory grows with the partitions written at once,
+# not with the table: continuous AML s1 silver.transactions at about 4,320 s
+# (12 to 13 months of small micro-batch files) failed one unchunked optimize
+# on "Query exceeded per-node memory limit of 2.24GB [TableWriterOperator=
+# 2.06GB ...]" (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a
+# month. One month per statement keeps a statement to one partition's
+# writers; Trino stops scaling writers past 70% of the per-node limit
+# (task.scale-writers.max-writer-memory-percentage), so this does not grow
+# with scale either. Each statement is the same per-partition rewrite as an
+# unchunked optimize (optimize compacts each partition on its own; same
+# threshold, no writer setting changed), committed as one snapshot per month.
+COMPACTION_CHUNK_MONTHS = 1
+
+# Lakebench-created tables compaction chunks, from Lakebench's own DDL:
+# silver_build.py and silver_stream.py create customer_interactions_enriched
+# partitioned by interaction_date; financial_ddl.py and
+# silver_build_financial.py create silver.transactions by
+# months(txn_timestamp) and silver.account_statements by months(book_ts).
+# Keyed by "schema.table" first, then the bare table name; a renamed table
+# falls back to one statement.
+_COMPACTION_PARTITIONING = {
+    "customer_interactions_enriched": CompactionPartitioning(
+        "interaction_date", "identity", COMPACTION_CHUNK_PARTITIONS
+    ),
+    "silver.transactions": CompactionPartitioning(
+        "txn_timestamp", "month", COMPACTION_CHUNK_MONTHS
+    ),
+    "silver.account_statements": CompactionPartitioning(
+        "book_ts", "month", COMPACTION_CHUNK_MONTHS
+    ),
+}
+
 _DATE_VALUE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_INT_VALUE = re.compile(r"-?\d+")
 
 
-def compaction_partition_column(table: str) -> str | None:
-    """The identity partition column compaction chunks *table* by, or None."""
-    return _COMPACTION_PARTITION_COLUMN.get(table.rsplit(".", 1)[-1].strip('"'))
+def compaction_partitioning(table: str) -> CompactionPartitioning | None:
+    """How compaction chunks *table* (``catalog.schema.table``), or None."""
+    parts = [p.strip('"') for p in table.split(".")]
+    for key in (".".join(parts[-2:]), parts[-1]):
+        if key in _COMPACTION_PARTITIONING:
+            return _COMPACTION_PARTITIONING[key]
+    return None
 
 
 def _system_table_ref(table: str, suffix: str) -> str:
@@ -285,19 +342,32 @@ def _system_table_ref(table: str, suffix: str) -> str:
 
 
 def build_partition_values_sql(table: str, column: str) -> str:
-    """Trino query listing *table*'s values of identity partition *column*."""
+    """Trino query listing *table*'s values of partition field *column*
+    (``CompactionPartitioning.partition_field``)."""
     ref = _system_table_ref(table, "partitions")
     return f"SELECT DISTINCT partition.{column} FROM {ref} ORDER BY 1"
 
 
-def parse_partition_values(output: str) -> list[str | None]:
+def _month_start(epoch_month: int) -> str:
+    """Iceberg's month transform value (months since 1970-01) as the first
+    day of that month, ``YYYY-MM-01``."""
+    year, month = divmod(epoch_month, 12)
+    return f"{1970 + year:04d}-{month + 1:02d}-01"
+
+
+def parse_partition_values(output: str, transform: str = "identity") -> list[str | None]:
     """Partition values from the Trino CLI's CSV output of
     :func:`build_partition_values_sql`, sorted, with None last for a NULL
     partition (the CLI prints NULL as an empty field).
 
-    Raises ``ValueError`` on any line that is not a ``YYYY-MM-DD`` date, so
-    an unexpected format never turns into statements that miss partitions.
+    ``identity`` values are ``YYYY-MM-DD`` dates. ``month`` values are
+    Iceberg's month transform (an integer, months since 1970-01) and come
+    back as the month's first day, ``YYYY-MM-01``. Raises ``ValueError`` on
+    any line that is neither, so an unexpected format never turns into
+    statements that miss partitions.
     """
+    if transform not in ("identity", "month"):
+        raise ValueError(f"unsupported partition transform {transform!r}")
     values: list[str | None] = []
     for raw in (output or "").splitlines():
         line = raw.strip()
@@ -306,12 +376,28 @@ def parse_partition_values(output: str) -> list[str | None]:
         value = line.strip('"')
         if value == "":
             values.append(None)
-        elif _DATE_VALUE.fullmatch(value):
+        elif transform == "identity" and _DATE_VALUE.fullmatch(value):
             values.append(value)
+        elif transform == "month" and _INT_VALUE.fullmatch(value):
+            values.append(_month_start(int(value)))
         else:
             raise ValueError(f"unexpected partition value {line!r}")
     dated = sorted({v for v in values if v is not None})
     return [*dated, *([None] if None in values else [])]
+
+
+def _utc_month_start(day: str) -> str:
+    """A ``timestamp(6) with time zone`` literal for 00:00 UTC on *day*.
+
+    Iceberg's month transform on a timestamptz column is computed in UTC, and
+    Trino enforces (pushes into the optimize) a range on the source column
+    only when both of its bounds sit on a partition boundary
+    (``IcebergUtil.canEnforceRangeWithPartitioningField``); an explicit UTC
+    literal keeps that independent of the session time zone. The precision
+    matches the column, as in Trino's own
+    ``BaseIcebergConnectorTest.testSelectWithDisjunctTimestampFilter``.
+    """
+    return f"TIMESTAMP '{day} 00:00:00.000000 UTC'"
 
 
 def build_compaction_plan(
@@ -323,40 +409,37 @@ def build_compaction_plan(
 ) -> list[str]:
     """Compaction statements for *table*.
 
-    On Trino, a table on ``_COMPACTION_PARTITION_COLUMN`` whose *partitions*
-    (from :func:`parse_partition_values`) number more than
-    ``COMPACTION_CHUNK_PARTITIONS`` is compacted in runs of at most that many
-    sorted partition values, one ``optimize ... WHERE`` per run: run n
-    covers ``col > <last value of run n-1> AND col <= <its last value>``,
-    the first is open below and the last open above, plus ``WHERE col IS
-    NULL`` when a NULL partition exists. Trino writer settings are not changed, so worker memory stays
-    where a single successful optimize already runs (raising
+    On Trino, a table on ``_COMPACTION_PARTITIONING`` whose *partitions*
+    (from :func:`parse_partition_values`) number more than its ``chunk`` is
+    compacted in runs of at most ``chunk`` sorted partition values, one
+    ``optimize ... WHERE`` per run, plus ``WHERE col IS NULL`` when a NULL
+    partition exists. Identity tables: run n covers ``col > <last value of
+    run n-1> AND col <= <its last value>``. Month tables: run n covers
+    ``col >= <its first month, 00:00 UTC> AND col < <the next run's first
+    month>``. In both the first run is open below and the last open above,
+    so every non-NULL value is in exactly one statement, including one a
+    live stream adds after the read. Trino writer settings are not changed,
+    so each partition gets the rewrite one unchunked optimize gives it (raising
     max_partitions_per_writer instead grows writer memory with the
-    partition count). Every other case, including ``partitions``
-    None (not read, or the read failed), is :func:`build_compaction_sql`.
+    partition count). Every other case, including ``partitions`` None (not
+    read, or the read failed), is :func:`build_compaction_sql`.
     """
-    column = compaction_partition_column(table)
-    if (
-        engine != "trino"
-        or column is None
-        or partitions is None
-        or len(partitions) <= COMPACTION_CHUNK_PARTITIONS
-    ):
+    spec = compaction_partitioning(table)
+    if engine != "trino" or spec is None or partitions is None or len(partitions) <= spec.chunk:
         return build_compaction_sql(engine, catalog, table, file_size_threshold)
+    column = spec.column
     dated = [p for p in partitions if p is not None]
     head = f"ALTER TABLE {table} EXECUTE optimize(file_size_threshold => '{file_size_threshold}')"
-    runs = [
-        dated[i : i + COMPACTION_CHUNK_PARTITIONS]
-        for i in range(0, len(dated), COMPACTION_CHUNK_PARTITIONS)
-    ]
+    runs = [dated[i : i + spec.chunk] for i in range(0, len(dated), spec.chunk)]
     plan: list[str] = []
     for n, run in enumerate(runs):
-        # Chunk n covers (last value of chunk n-1, its own last value], the
-        # first is open below and the last open above, so together they
-        # cover every non-NULL value, including one a live stream adds after
-        # the read, and no two overlap.
         if len(runs) == 1:
             where = f"{column} IS NOT NULL"
+        elif spec.transform == "month":
+            # Half-open months [first month of run n, first month of run n+1).
+            low = f"{column} >= {_utc_month_start(run[0])}"
+            high = f"{column} < {_utc_month_start(runs[n + 1][0])}" if n + 1 < len(runs) else ""
+            where = " AND ".join(c for c in (low if n else "", high) if c)
         elif n == 0:
             where = f"{column} <= DATE '{run[-1]}'"
         elif n == len(runs) - 1:
