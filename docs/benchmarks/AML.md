@@ -607,7 +607,7 @@ version listed a prior counterparty. A code that reads the HIGH cut
    runs in covered mode over exactly the snapshots the last completed tick
    read (section 8.4). `lakebench stop` drains the same way with a 300 s
    budget.
-   Then, whatever the gates said, `time-travel-financial` re-reads every
+   Then, on the same condition, `time-travel-financial` re-reads every
    `silver.transactions` snapshot the ticks recorded (section 8.2,
    time-travel reads). It runs with the streams stopped, outside every
    measured interval, and its check never fails the run.
@@ -976,18 +976,25 @@ Primary: `data_freshness_seconds`, lower is better.
 **Time-travel reads** (`continuous.time_travel`; reported, never gating).
 Each tick records the `silver.transactions` snapshot it read and the
 snapshot summary's record and delete counts, from metadata only. After the
-window a Spark job fingerprints each recorded snapshot still in the table
-over every column (`common.frame_fingerprint`), writes the hashes to the
-gold `scoring/<run_id>/` prefix, reads them back, and then times a full
-scan `VERSION AS OF` each snapshot with the same fingerprint:
+window a Spark job fingerprints each recorded snapshot still in the table,
+newest first, over every column (`common.frame_fingerprint`), writes the
+hashes to the gold `scoring/<run_id>/` prefix, reads them back, and then
+times a full scan `VERSION AS OF` each snapshot with the same fingerprint.
+Only ticks in the current gold-refresh driver pod's log are read (a driver
+restart leaves its earlier ticks out). `verified` shows that the snapshot
+id the tick read still holds the row count its summary gave when the tick
+read it, and reads identically twice; snapshots are immutable, so the hash
+comparison shows read determinism and an unaltered hashes file, not the
+content the tick saw:
 
 | Field | Unit | Definition |
 |---|---|---|
 | `ticks[].state` | text | `verified` (scan rows equal the recorded count and the fingerprint equals the hash), `verified_hash_only` (the recorded count is not a live-row count: no summary count, or delete files), `mismatch`, `error` (a listed snapshot could not be read), `not_read` (the job's budget ran out), `expired` with `expired_by` (the first maintenance round that ran `expire_snapshots` on the table with the snapshot committed before the round's end, on the cluster clock, minus its applied retention: round, time, configured and applied retention, reason), or `missing_unexplained` (expired, and no Lakebench round could have) |
-| `ticks[].read_s` | s | the timed full scan of that snapshot; a snapshot several ticks read is scanned once |
+| `ticks[].read_s` | s | the timed read-pass scan plus fingerprint of that snapshot (the second read of it in the job, after the hash pass); a snapshot several ticks read is read once per pass |
 | `current_read_s` | s | the same scan of the current snapshot, for comparison only |
 | `policy` | struct | the configured retention and the expiry applied while the streams ran (floored at 1 h), always stated |
-| `verdict` | text | `fail` on any `mismatch`, `missing_unexplained` or `error`, zero recorded snapshots, or none verified; `incomplete` when the budget (the per-job timeout less 120 s) ran out; `not_run` when the job could not run; else `pass` |
+| `budget` | struct | `budget_s`, the Lakebench-imposed time-travel budget (the per-job timeout less 120 s; the job starts no scan the time left cannot hold, 1.5 times its longest scan, and the hash pass gets half), with its label |
+| `verdict` | text | `fail` on any `mismatch`, `missing_unexplained`, `error` or `not_supported`, zero recorded snapshots, or no `verified` record (`verified_hash_only` alone compares nothing the tick recorded); `incomplete` when the budget ran out; `not_run` when the job could not run or the run failed its gates; else `pass` |
 
 At the default 30 min retention, older tick snapshots are expected to
 expire inside a 2 h window and the last ones to stay. Nothing is pinned:

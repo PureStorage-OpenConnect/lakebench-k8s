@@ -49,8 +49,10 @@ def _record(spark, fq, cycle):
         "snapshot": int(row["snapshot_id"]),
         "committed_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "total_records": int(row["n"]),
-        "pos_deletes": int(row["pos"] or 0),
-        "eq_deletes": int(row["eq"] or 0),
+        # Iceberg writes the delete totals into every summary; a missing one
+        # would turn the record into verified_hash_only, so it must be there.
+        "pos_deletes": int(row["pos"]),
+        "eq_deletes": int(row["eq"]),
         "count_source": "summary",
         "_committed": stamp,
     }

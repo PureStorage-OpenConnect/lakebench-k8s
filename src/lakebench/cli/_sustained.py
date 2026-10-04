@@ -1253,12 +1253,15 @@ def expire_round_record(
     applied_expire: str,
     plan: list[tuple[str, str]],
     out: dict,
+    engine: str | None = None,
 ) -> dict:
     """One entry of ``continuous.retention.rounds``: when the round ran (this
     host's clock, UTC), the expire retention it applied, and the tables
     whose ``expire_snapshots`` statement finished or timed out (a timed-out
     statement may still have run). A table whose statement failed or was
-    not attempted is not listed: that round expired nothing in it."""
+    not attempted is not listed: that round expired nothing in it.
+    ``engine`` says whose clock took the cutoff (Trino its own; Spark
+    Thrift a literal from this host)."""
     status = out.get("status") or []
     expired = [
         table
@@ -1271,6 +1274,7 @@ def expire_round_record(
         "started_at": started_at,
         "ended_at": ended_at,
         "applied_expire": applied_expire,
+        "engine": engine,
         "expired_tables": expired,
     }
 
@@ -1390,7 +1394,13 @@ def _run_iceberg_maintenance(
     if rounds is not None:
         rounds.append(
             expire_round_record(
-                len(rounds) + 1, started_at, _utc_now_iso(), retention_threshold, plan, out
+                len(rounds) + 1,
+                started_at,
+                _utc_now_iso(),
+                retention_threshold,
+                plan,
+                out,
+                engine=engine,
             )
         )
     # One row per operation with the retention it ran at: expire and orphan
@@ -4515,6 +4525,7 @@ def _run_sustained(
             from lakebench.cli._aml_post import continuous_scoring
 
             _stage = "score-financial"
+            _ns_watch.check(time.time() - start)
             _fs = continuous_scoring(
                 cfg,
                 run_id,
@@ -4538,6 +4549,9 @@ def _run_sustained(
                 from lakebench.cli._aml_post import run_time_travel
 
                 _stage = "time-travel"
+                # The namespace is still this run's before a job is submitted
+                # into it (the scorer can take up to the job timeout).
+                _ns_watch.check(time.time() - start)
                 run_time_travel(
                     cfg,
                     run_id,
@@ -4547,6 +4561,7 @@ def _run_sustained(
                     monitor,
                     timeout,
                     interrupt=_interrupt,
+                    run_failed=not pipeline_success,
                 )
             _stage = "summary"
 
@@ -4658,7 +4673,11 @@ def _run_sustained(
         settle_time_travel(
             cfg,
             collector.current_run,
-            "interrupted before the time-travel reads"
+            (
+                "interrupted during the time-travel reads"
+                if _stage == "time-travel"
+                else "interrupted before the time-travel reads"
+            )
             if _interrupted is not None
             else "the run ended before the time-travel reads",
         )

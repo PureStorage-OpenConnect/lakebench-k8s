@@ -41,7 +41,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
 - `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
-- A continuous AML run ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live), within the per-job timeout; its check is reported beside the verdict and never fails the run.
+- A continuous AML run that passed its gates ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout; its check is reported beside the verdict and never fails the run.
 - `financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
 - An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
 - `run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
@@ -639,21 +639,25 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   snapshot. See
   [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
 - **AML continuous runs re-read the snapshots their ticks read.** After
-  the score job, a `time-travel-financial` Spark job fingerprints each
-  recorded `silver.transactions` snapshot still in the table (every column,
-  order-independent), writes the hashes, reads them back, then times a full
-  scan of each snapshot and compares its rows with the count the tick
-  recorded and its fingerprint with the hash. Each tick in
+  the score job of a run that passed its gates, a `time-travel-financial`
+  Spark job fingerprints each recorded `silver.transactions` snapshot still
+  in the table, newest first (every column, order-independent), writes the
+  hashes, reads them back, then times a full scan of each snapshot (scan
+  plus fingerprint) and compares its rows with the count the tick recorded
+  and its fingerprint with the hash. Each tick in
   `continuous.time_travel.ticks[]` reads `verified`, `verified_hash_only`
-  (no comparable count), `mismatch`, `error`, or `expired` with the
-  maintenance round and retention that expired it (`expired_by`), or
-  `missing_unexplained` when no Lakebench round could have. The record
-  gains `current_read_s`, `policy` (configured and applied retention) and a
-  `verdict` (`pass`, `fail`, `incomplete` when the job's budget ran out,
+  (no comparable count), `mismatch`, `error` (a read failed), `not_read`
+  (budget), or `expired` with the earliest maintenance round and retention
+  that could have expired it (`expired_by`), or `missing_unexplained` when
+  no Lakebench round could have. The record gains `current_read_s`,
+  `policy` (configured and applied retention), `budget` (the
+  Lakebench-imposed time-travel budget, from the per-job timeout) and a
+  `verdict` (`pass` needs at least one `verified`; `fail`; `incomplete`;
   `not_run`); `continuous.retention.rounds` records when each maintenance
-  round ran and which tables it expired. The check is shown beside the run
-  verdict and never fails the run. Nothing is pinned: no tag or branch is
-  created, so destroy is unchanged.
+  round ran, on which engine and which tables it expired. Only ticks in the
+  current gold-refresh driver pod's log are read. The check is shown beside
+  the run verdict and never fails the run. Nothing is pinned: no tag or
+  branch is created, so destroy is unchanged.
 - **Each AML continuous tick records its transactions snapshot for
   time travel.** The record gains `continuous.time_travel.ticks[]`: per
   tick, the `silver.transactions` snapshot detection read, its commit time,

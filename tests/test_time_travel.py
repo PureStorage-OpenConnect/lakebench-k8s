@@ -90,7 +90,9 @@ def test_hashes_are_re_read_from_storage_and_a_tampered_fp_is_a_mismatch(job, mo
     def tamper(spark, records, uri, nonce, budget):
         done = real_hash_pass(spark, records, uri, nonce, budget)
         doc = json.loads(job.store[uri])
-        doc["hashes"][0]["fp"] = "tampered"
+        for h in doc["hashes"]:
+            if h["snapshot"] == T2:
+                h["fp"] = "tampered"
         job.store[uri] = json.dumps(doc)
         return done
 
@@ -144,7 +146,11 @@ def test_a_snapshot_read_by_two_ticks_is_scanned_once(job):
 def test_budget_spent_leaves_records_not_read(job):
     out = _run(job, [_rec(1, T1), _rec(2, T2)], budget=0)
     assert _states(out) == ["expired", "not_read"]
-    assert out["incomplete"] is True and out["current"] is None
+    assert out["incomplete"] is True
+    assert out["current"] == {
+        "table": "silver.transactions",
+        "not_read": "the time-travel budget ran out",
+    }
 
 
 def test_unreadable_live_snapshot_is_an_error(job, monkeypatch):
@@ -154,6 +160,53 @@ def test_unreadable_live_snapshot_is_an_error(job, monkeypatch):
     monkeypatch.setattr(job.mod, "fingerprint_at", boom)
     out = _run(job, [_rec(2, T2)])
     assert _states(out) == ["error"] and "no such file" in out["ticks"][0]["reason"]
+
+
+def test_a_hash_pass_read_failure_is_an_error_not_a_mismatch(job, monkeypatch):
+    """A transient failure in the hash pass is a read error, even when the
+    read pass's scan of the same snapshot succeeds."""
+    real = job.mod.fingerprint_at
+    calls = {"n": 0}
+
+    def first_fails(spark, fq, sid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("S3 503")
+        return real(spark, fq, sid)
+
+    monkeypatch.setattr(job.mod, "fingerprint_at", first_fails)
+    out = _run(job, [_rec(2, T2)])
+    assert _states(out) == ["error"] and "hash pass" in out["ticks"][0]["reason"]
+    assert json.loads(job.store["mem://tt_hashes.json"])["errors"][0]["snapshot"] == T2
+
+
+def test_a_table_that_cannot_be_read_gives_every_record_an_error(job, monkeypatch):
+    def gone(spark, fq):
+        raise RuntimeError("Table not found")
+
+    monkeypatch.setattr(job.mod, "live_snapshots", gone)
+    out = _run(job, [_rec(1, T1), _rec(2, T2)])
+    assert _states(out) == ["error", "error"]
+    assert "Table not found" in out["ticks"][0]["reason"] and out["current"] is None
+
+
+def test_the_newest_snapshot_is_read_first(job):
+    _run(job, [_rec(2, T2), _rec(3, T3)])
+    assert job.scans[:2] == [T3, T2]  # hash pass, newest first
+
+
+def test_a_scan_starts_only_when_the_time_left_can_hold_it(job):
+    clock = {"t": 100.0}
+    budget_cls = job.mod.Budget
+    bud = budget_cls(110.0, clock=lambda: clock["t"])
+    assert bud.can_start()
+    bud.took(5.0)
+    assert bud.can_start()  # 10 s left > 7.5 s
+    clock["t"] = 103.0
+    assert not bud.can_start()  # 7 s left < 7.5 s
+    half = budget_cls(110.0, clock=lambda: 100.0).split()
+    assert half.deadline == 105.0
+    assert budget_cls(None).can_start()
 
 
 def test_a_record_without_a_snapshot_id_is_a_mismatch(job):
@@ -214,7 +267,9 @@ def test_expired_snapshot_explained_by_a_covering_round():
     # Round 1 (10:30 - 1h) is before the commit; round 2 (11:05 - 1h) covers it.
     assert by == {
         "round": 2,
+        "basis": "the earliest maintenance round that could have expired it",
         "ran_at": "2026-10-03T11:05:00Z",
+        "ran_at_clock": "host",
         "configured": "30m",
         "applied": "1h",
         "reason": "live-stream floor",
@@ -287,7 +342,8 @@ def test_maintenance_skipped_leaves_every_expiry_unexplained():
         (["verified", "error"], False, "fail"),
         (["verified", "not_read"], False, "incomplete"),
         (["verified"], True, "incomplete"),
-        (["verified_hash_only"], False, "pass"),
+        (["verified_hash_only"], False, "fail"),
+        (["verified", "verified_hash_only"], False, "pass"),
         (["expired", "verified"], False, "pass"),
         (["verified", "something_new"], False, "fail"),
     ],
@@ -296,6 +352,35 @@ def test_verdict(states, incomplete, verdict):
     got, reason = tt.verdict_of([{"state": s} for s in states], incomplete)
     assert got == verdict
     assert (reason == "") == (verdict == "pass")
+
+
+def test_hash_only_alone_names_the_missing_comparison():
+    assert tt.verdict_of([{"state": "verified_hash_only"}], False) == (
+        "fail",
+        "no snapshot was compared with the count its tick recorded",
+    )
+
+
+def test_configured_retention_reason_compares_durations():
+    by = tt.expired_by(
+        _rec(1, T1, committed="2026-10-03T10:00:00Z"),
+        [_round(1, "2026-10-03T12:00:00Z", applied="1h")],
+        "60m",
+        None,
+    )
+    assert by is not None and by["reason"] == "configured retention"
+    assert by["basis"].startswith("the earliest") and by["ran_at_clock"] == "host"
+
+
+def test_spark_thrift_cutoff_is_on_the_host_clock():
+    # The cluster is 10 minutes behind; Spark Thrift's cutoff literal is the
+    # host's time, so the offset does not apply and a 09:55 commit is covered.
+    ticks = [_rec(1, T1, committed="2026-10-03T09:55:00Z"), _rec(2, T2)]
+    rounds = [{**_round(1, "2026-10-03T11:00:00Z"), "engine": "spark-thrift"}]
+    got = tt.merge(
+        _continuous(ticks, rounds, -600.0), _result([(1, "expired"), (2, "verified")]), POLICY
+    )
+    assert got["ticks"][0]["state"] == "expired"
 
 
 def test_zero_records_verdict_names_it():
@@ -311,10 +396,15 @@ def test_a_recorded_tick_with_no_result_is_an_error():
 def test_line_says_the_check_never_fails_the_run():
     got = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "mismatch")]), POLICY)
     text = tt.line(got)
-    assert text.startswith("time-travel check: FAIL (1 mismatch; retention 30m, applied 1h)")
+    assert text.startswith(
+        "time-travel check: FAIL (1 mismatch of 1 ticks in the current driver log; retention 30m, applied 1h)"
+    )
     assert text.endswith("not a run FAIL")
     ok = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "verified")]), POLICY)
-    assert tt.line(ok) == "time-travel check: pass (1 verified; retention 30m, applied 1h)"
+    assert (
+        tt.line(ok)
+        == "time-travel check: pass (1 verified of 1 ticks in the current driver log; retention 30m, applied 1h)"
+    )
 
 
 # --- the CLI step ---------------------------------------------------------------
@@ -350,7 +440,7 @@ def _drained():
     return DrainResult("drained", last_cycle=3)
 
 
-def _step(cont, s3, *, drain=None, submit_state=None, success=True):
+def _step(cont, s3, *, drain=None, submit_state=None, success=True, run_failed=False):
     from lakebench.cli import _aml_post
     from lakebench.spark.job import JobState
 
@@ -361,7 +451,17 @@ def _step(cont, s3, *, drain=None, submit_state=None, success=True):
     mon = MagicMock()
     mon.wait_for_completion.return_value = SimpleNamespace(success=success, message="timed out")
     with patch.object(_aml_post, "_s3_client", return_value=s3):
-        out = _aml_post.run_time_travel(_cfg(), "run-1", cont, drain or _drained(), jm, mon, 1200)
+        out = _aml_post.run_time_travel(
+            _cfg(),
+            "run-1",
+            cont,
+            drain or _drained(),
+            jm,
+            mon,
+            1200,
+            run_failed=run_failed,
+            wall_clock=lambda: 1_000_000.0,
+        )
     return out, jm, mon
 
 
@@ -388,9 +488,31 @@ def test_step_submits_the_job_with_the_records_and_merges_its_result():
     args = jm.submit_job.call_args
     assert args.args[0] == JobType.TIME_TRAVEL_FINANCIAL
     argv = args.kwargs["arguments"]
-    assert argv[argv.index("--budget-s") + 1] == str(1200 - 120)
+    # Deadline: submit time + (1200 - 120) s, moved to the cluster clock
+    # (_continuous's offset is 0 here).
+    assert argv[argv.index("--deadline-epoch") + 1] == f"{1_000_000.0 + 1080:.3f}"
+    assert out["budget"]["budget_s"] == 1080 and out["budget"]["label"].startswith("BOUNDED BY")
     assert args.kwargs["cycle_env"] == {"LB_RUN_ID": "run-1"}
     assert mon.wait_for_completion.call_args.kwargs["timeout_seconds"] == 1200
+
+
+def test_step_deadline_follows_the_cluster_clock():
+    cont = _continuous([_rec(2, T2)], [], offset=-30.0)
+    _out, jm, _mon = _step(cont, _S3({"nonce": "x"}))
+    argv = jm.submit_job.call_args.kwargs["arguments"]
+    assert argv[argv.index("--deadline-epoch") + 1] == f"{1_000_000.0 + 1080 - 30:.3f}"
+
+
+def test_a_wait_that_ends_first_deletes_the_job():
+    out, jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), success=False)
+    assert out["verdict"] == "not_run"
+    jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
+
+
+def test_a_failed_run_is_not_read():
+    out, jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), run_failed=True)
+    assert out["verdict"] == "not_run" and out["reason"] == "the run failed its gates"
+    jm.submit_job.assert_not_called()
 
 
 def test_step_refuses_a_result_of_another_submission():
@@ -460,12 +582,13 @@ def test_expire_round_record_lists_tables_whose_expire_ran():
         ("c.silver.accounts", "ALTER TABLE c.silver.accounts EXECUTE expire_snapshots"),
     ]
     out = {"status": ["ok", "ok", "timed_out", "failed"]}
-    rec = expire_round_record(3, "a", "b", "1h", plan, out)
+    rec = expire_round_record(3, "a", "b", "1h", plan, out, engine="trino")
     assert rec == {
         "round": 3,
         "started_at": "a",
         "ended_at": "b",
         "applied_expire": "1h",
+        "engine": "trino",
         "expired_tables": ["c.silver.transactions", "c.gold.alerts"],
     }
 
@@ -495,6 +618,7 @@ def test_a_continuous_maintenance_round_records_its_time_and_tables():
         )
     assert len(rounds) == 1 and rounds[0]["round"] == 1
     assert rounds[0]["applied_expire"] == "1h"  # the live-stream floor
+    assert rounds[0]["engine"] == "trino"
     assert "lakehouse.silver.transactions" in rounds[0]["expired_tables"]
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT[\d:.]+Z", rounds[0]["ended_at"])
     rec = continuous_retention_record(cfg, rounds=rounds)
@@ -517,7 +641,11 @@ def test_the_step_runs_after_the_scorer_with_the_streams_stopped():
     assert drain < stop < score < step
     assert "rounds=retention_rounds" in body
     assert "continuous_retention_record(cfg, rounds=retention_rounds)" in body
-    assert "settle_time_travel(" in body[body.index("finally:") :]
+    settle = body.index("_settle_financial_scoring(cfg, collector, pipeline_success, _abort)")
+    assert body.index("settle_time_travel(") > settle
+    # The namespace is checked right before each post-window job.
+    assert "_ns_watch.check(time.time() - start)\n                run_time_travel(" in body
+    assert "_ns_watch.check(time.time() - start)\n            _fs = continuous_scoring(" in body
 
 
 @pytest.mark.parametrize("schema", ["customer360", "financial"])
@@ -538,7 +666,8 @@ def test_profile_equals_the_scorer_and_one_attempt(schema):
 
 
 _PIN = re.compile(
-    r"CREATE\s+(OR\s+REPLACE\s+)?(TAG|BRANCH)|REPLACE\s+(TAG|BRANCH)|manageSnapshots|createTag|createBranch",
+    r"CREATE\s+(OR\s+REPLACE\s+)?(TAG|BRANCH)|REPLACE\s+(TAG|BRANCH)|manageSnapshots|createTag"
+    r"|createBranch|wap\.branch",
     re.IGNORECASE,
 )
 
@@ -548,7 +677,7 @@ def test_no_snapshot_pin_anywhere():
     or branch is created on a table by any script, CLI path or deploy path,
     so expiry and destroy need no unpin step."""
     found = []
-    for sub in ("spark/scripts", "cli", "deploy"):
+    for sub in ("spark/scripts", "cli", "deploy", "modules"):
         for path in sorted((SRC / sub).rglob("*.py")):
             for n, line in enumerate(path.read_text().splitlines(), 1):
                 if _PIN.search(line):
@@ -562,6 +691,7 @@ def test_the_pin_pattern_would_see_a_pin():
         "ALTER TABLE t CREATE OR REPLACE BRANCH b",
         "ALTER TABLE t REPLACE TAG x",
         "table.manageSnapshots().createTag('x', 1)",
+        "spark.conf.set('spark.wap.branch', 'audit')",
     ):
         assert _PIN.search(sql), sql
 

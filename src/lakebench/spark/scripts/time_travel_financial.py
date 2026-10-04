@@ -8,27 +8,35 @@ submits this job with those records (``--input``, written by
 ``cli/_aml_post.run_time_travel``) and reads its result.
 
 1. Hash pass: for each recorded snapshot still in the table's snapshots
-   metadata, fingerprint the raw snapshot over every column of its schema
-   (``common.frame_fingerprint``; no sealed filter) and write
-   ``tt_hashes.json``. This is the order-independent hash computed for that
-   snapshot after the window.
+   metadata, newest first, fingerprint the raw snapshot over every column
+   of its schema (``common.frame_fingerprint``; no sealed filter) and write
+   ``tt_hashes.json``, with the snapshots it could not read. This is the
+   order-independent hash computed for that snapshot after the window.
 2. Read pass, the published measurement: re-read ``tt_hashes.json`` from
    storage (not from memory, so an altered file is seen), then for each
    record either report the snapshot ``expired`` (gone from the snapshots
    metadata) or time a full scan ``VERSION AS OF`` it with the same
-   fingerprint and compare it with what the tick recorded (the summary
-   count, when it is a live-row count) and with the hash pass. Equal on
-   both is ``verified``; with no comparable count, ``verified_hash_only``;
-   either differing is ``mismatch``. A scan that fails on a snapshot still
-   listed is ``error``.
+   fingerprint (scan plus fingerprint: ``read_s``) and compare it with what
+   the tick recorded (the summary count, when it is a live-row count) and
+   with the hash pass. Equal on both is ``verified``; with no comparable
+   count, ``verified_hash_only``; either differing is ``mismatch``. A
+   snapshot still listed that either pass could not read is ``error``.
 3. The same scan of the current snapshot is timed, for comparison only.
 
+What ``verified`` proves: the snapshot id the tick read still holds as many
+rows as that snapshot's summary said when the tick read it, and reads the
+same way twice. Iceberg snapshots are immutable, so the hash comparison
+shows read determinism and an unaltered hashes file, not tick-time content.
+
 Writes ``time_travel.json`` beside the hashes and exits 0 for every
-determined outcome; a non-zero exit is a crash. A budget (``--budget-s``)
-stops starting new scans once spent: the records left read ``not_read``
-and the result says ``incomplete``. A Delta table is refused: every record
-reads ``not_supported`` (AML on Delta is refused by the config today).
-Writes no table and creates no tag, branch or other snapshot reference.
+determined outcome; a non-zero exit is a crash. A deadline
+(``--deadline-epoch``, on this driver's clock, a Lakebench-imposed bound)
+stops starting a scan that would not finish before it (the time left must
+exceed 1.5 times the longest scan so far); the hash pass gets half of the
+time: the records left read ``not_read`` and the result says
+``incomplete``. A Delta table is refused: every record reads
+``not_supported`` (AML on Delta is refused by the config today). Writes no
+table and creates no tag, branch or other snapshot reference.
 """
 
 from __future__ import annotations
@@ -151,81 +159,161 @@ def classify(record: dict, scan: dict, hashed: dict | None) -> dict:
 
 
 class Budget:
-    """Seconds left before no new scan starts."""
+    """Time left before *deadline* (epoch seconds on this driver's clock;
+    None: no limit). A scan starts only when the time left exceeds 1.5
+    times the longest scan so far, so the job ends near the deadline, not
+    one scan after it."""
 
-    def __init__(self, seconds: float | None, clock=time.monotonic) -> None:
+    def __init__(self, deadline: float | None, clock=time.time) -> None:
         self.clock = clock
-        self.end = None if seconds is None else clock() + float(seconds)
+        self.deadline = deadline
+        self.longest = 0.0
 
-    def spent(self) -> bool:
-        return self.end is not None and self.clock() >= self.end
+    def left(self) -> float | None:
+        return None if self.deadline is None else self.deadline - self.clock()
+
+    def can_start(self) -> bool:
+        left = self.left()
+        return left is None or (left > 0 and left > 1.5 * self.longest)
+
+    def took(self, seconds: float) -> None:
+        self.longest = max(self.longest, seconds)
+
+    def split(self) -> Budget:
+        """A budget ending halfway to this one's deadline (the hash pass's
+        share), sharing the longest-scan estimate."""
+        left = self.left()
+        half = Budget(None if left is None else self.clock() + left / 2, self.clock)
+        half.longest = self.longest
+        return half
 
 
 def _fq(record: dict) -> str:
     return f"{CATALOG}.{record['table']}"
 
 
-def hash_pass(spark, records: list[dict], hashes_uri: str, nonce: str, budget: Budget) -> bool:
-    """Fingerprint every recorded snapshot still listed, once per snapshot,
-    and write ``{nonce, hashes: [{table, snapshot, rows, fp, cols_sha}]}`` to
-    *hashes_uri*. Returns False when the budget stopped it early."""
-    hashes: list[dict] = []
-    done: set[tuple[str, int]] = set()
-    complete = True
-    live: dict[str, set[int]] = {}
-    for rec in records:
-        sid = rec.get("snapshot")
-        if not is_snapshot(sid):
-            continue
-        fq = _fq(rec)
-        if fq not in live:
-            live[fq] = live_snapshots(spark, fq)
-        key = (rec["table"], sid)
-        if key in done or sid not in live[fq]:
-            continue
-        if budget.spent():
-            complete = False
-            break
-        try:
-            hashes.append(
-                {"table": rec["table"], "snapshot": sid, **fingerprint_at(spark, fq, sid)}
-            )
-        except Exception as e:  # noqa: BLE001 -- the read pass reports it
-            log(f"[time-travel] hash pass: {fq} at {sid} unreadable: {one_line(e)}")
-        done.add(key)
-        log(f"[time-travel] hash pass: {fq} snapshot={sid} hashed")
-    _write_text(spark, hashes_uri, json.dumps({"nonce": nonce, "hashes": hashes}))
-    log(f"Wrote {hashes_uri} ({len(hashes)} snapshot(s))")
-    return complete
+def _key(record: dict) -> tuple[str, int]:
+    return (str(record["table"]), int(record["snapshot"]))
 
 
-def read_hashes(spark, hashes_uri: str, nonce: str) -> dict[tuple[str, int], dict]:
-    """The hash pass's entries by (table, snapshot), read back from storage.
-    A file from another submission (another nonce) reads as empty, so every
-    record is a mismatch."""
-    doc = json.loads(_read_text(spark, hashes_uri))
-    if not isinstance(doc, dict) or doc.get("nonce") != nonce:
-        log(f"[time-travel] {hashes_uri} is not this submission's; no hash is trusted")
-        return {}
-    out = {}
-    for h in doc.get("hashes") or []:
+def newest_first(records: list[dict]) -> list[tuple[str, int]]:
+    """The recorded (table, snapshot) keys, once each, from the latest tick
+    back: the snapshots most likely to be live, and the last tick's (the
+    one recall was scored on), are read first when the time runs short."""
+    keys: list[tuple[str, int]] = []
+    for rec in reversed(records):
+        if is_snapshot(rec.get("snapshot")) and _key(rec) not in keys:
+            keys.append(_key(rec))
+    return keys
+
+
+def table_state(spark, tables: list[str]) -> dict[str, dict]:
+    """Per table: ``{provider, live}`` (live snapshot ids), or ``{error}``
+    when the table cannot be described or its snapshots listed."""
+    out: dict[str, dict] = {}
+    for table in tables:
+        fq = f"{CATALOG}.{table}"
         try:
-            out[(str(h["table"]), int(h["snapshot"]))] = h
-        except (KeyError, TypeError, ValueError):
-            continue
+            provider = table_provider(spark, fq)
+            live = live_snapshots(spark, fq) if provider != "delta" else set()
+            out[table] = {"provider": provider, "live": live}
+        except Exception as e:  # noqa: BLE001 -- every record of it reads error
+            out[table] = {"error": f"{type(e).__name__}: {one_line(e)}"}
     return out
 
 
+def hash_pass(
+    spark, keys: list[tuple[str, int]], hashes_uri: str, nonce: str, budget: Budget
+) -> set[tuple[str, int]]:
+    """Fingerprint each live (table, snapshot) in *keys* order and write
+    ``{nonce, hashes: [{table, snapshot, rows, fp, cols_sha}], errors:
+    [{table, snapshot, error}]}`` to *hashes_uri*. Returns the keys it
+    reached (hashed or failed); the budget may stop it before the rest.
+    Only which keys it reached is kept in memory: their hashes are read back
+    from the file."""
+    hashes: list[dict] = []
+    errors: list[dict] = []
+    reached: set[tuple[str, int]] = set()
+    for table, sid in keys:
+        if not budget.can_start():
+            break
+        reached.add((table, sid))
+        t0 = budget.clock()
+        try:
+            hashes.append(
+                {
+                    "table": table,
+                    "snapshot": sid,
+                    **fingerprint_at(spark, f"{CATALOG}.{table}", sid),
+                }
+            )
+            log(f"[time-travel] hash pass: {table} snapshot={sid} hashed")
+        except Exception as e:  # noqa: BLE001 -- the read pass reports it as error
+            errors.append(
+                {"table": table, "snapshot": sid, "error": f"{type(e).__name__}: {one_line(e)}"}
+            )
+            log(f"[time-travel] hash pass: {table} at {sid} unreadable: {one_line(e)}")
+        budget.took(budget.clock() - t0)
+    _write_text(spark, hashes_uri, json.dumps({"nonce": nonce, "hashes": hashes, "errors": errors}))
+    log(f"Wrote {hashes_uri} ({len(hashes)} hashed, {len(errors)} unreadable)")
+    return reached
+
+
+def read_hashes(spark, hashes_uri: str, nonce: str) -> tuple[dict, dict]:
+    """``(hashes, errors)`` of the hash pass by (table, snapshot), read back
+    from storage. A file from another submission (another nonce) reads as
+    empty, so every live record is a mismatch."""
+    doc = json.loads(_read_text(spark, hashes_uri))
+    if not isinstance(doc, dict) or doc.get("nonce") != nonce:
+        log(f"[time-travel] {hashes_uri} is not this submission's; no hash is trusted")
+        return {}, {}
+    out: dict[tuple[str, int], dict] = {}
+    errors: dict[tuple[str, int], str] = {}
+    for name, target in (("hashes", out), ("errors", errors)):
+        for h in doc.get(name) or []:
+            try:
+                key = (str(h["table"]), int(h["snapshot"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            target[key] = h if name == "hashes" else str(h.get("error"))
+    return out, errors
+
+
 def read_pass(
-    spark, records: list[dict], hashed: dict, budget: Budget, clock=time.monotonic
+    spark,
+    records: list[dict],
+    tables: dict[str, dict],
+    hashed: dict,
+    hash_errors: dict,
+    budget: Budget,
+    reached: set | None = None,
 ) -> list[dict]:
     """One result per record, in record order: ``{start, cycle, table,
     snapshot, state, read_s, rows, total_records, fp_match, count_match}``.
-    A snapshot read by several ticks is scanned once and its result shared."""
-    out: list[dict] = []
+    Snapshots are scanned newest first; one several ticks read is scanned
+    once and its result shared. *reached*: the keys the hash pass reached
+    (None: all); a live key it did not reach is ``not_read``, one it reached
+    with no entry in the file read back is a ``mismatch``."""
     scans: dict[tuple[str, int], dict] = {}
-    live: dict[str, set[int]] = {}
-    stopped = False
+    for key in newest_first(records):
+        st = tables.get(key[0]) or {}
+        if "error" in st or key[1] not in st.get("live", ()) or key in hash_errors:
+            continue
+        if reached is not None and key not in reached:
+            scans[key] = {"not_read": "the hash pass's share of the time-travel budget ran out"}
+            continue
+        if not budget.can_start():
+            scans[key] = {"not_read": "the time-travel budget ran out"}
+            continue
+        t0 = budget.clock()
+        try:
+            scan = fingerprint_at(spark, f"{CATALOG}.{key[0]}", key[1])
+            scans[key] = {**scan, "read_s": round(budget.clock() - t0, 3)}
+        except Exception as e:  # noqa: BLE001 -- reported per record
+            scans[key] = {"error": f"{type(e).__name__}: {one_line(e)}"}
+        budget.took(budget.clock() - t0)
+        log(f"[time-travel] read pass: {key[0]} snapshot={key[1]} {scans[key]}")
+    out: list[dict] = []
     for rec in records:
         base = {
             "start": rec.get("start"),
@@ -238,87 +326,99 @@ def read_pass(
             "fp_match": None,
             "count_match": None,
         }
-        sid = rec.get("snapshot")
-        if not is_snapshot(sid):
+        if not is_snapshot(rec.get("snapshot")):
             out.append({**base, "state": MISMATCH, "reason": "the tick recorded no snapshot id"})
             continue
-        fq = _fq(rec)
-        if fq not in live:
-            live[fq] = live_snapshots(spark, fq)
-        if sid not in live[fq]:
+        key = _key(rec)
+        st = tables.get(key[0]) or {}
+        if "error" in st:
+            out.append(
+                {**base, "state": ERROR, "reason": f"the table could not be read: {st['error']}"}
+            )
+            continue
+        if key[1] not in st.get("live", ()):
             out.append({**base, "state": EXPIRED})
             continue
-        key = (rec["table"], sid)
-        if key not in scans:
-            if stopped or budget.spent():
-                stopped = True
-                out.append({**base, "state": NOT_READ, "reason": "the time-travel budget ran out"})
-                continue
-            t0 = clock()
-            try:
-                scan = fingerprint_at(spark, fq, sid)
-                scans[key] = {**scan, "read_s": round(clock() - t0, 3)}
-            except Exception as e:  # noqa: BLE001 -- reported per record
-                scans[key] = {"error": f"{type(e).__name__}: {one_line(e)}"}
-            log(f"[time-travel] read pass: {fq} snapshot={sid} {scans[key]}")
-        scan = scans[key]
-        if "error" in scan:
-            out.append({**base, "state": ERROR, "reason": scan["error"]})
+        if key in hash_errors:
+            out.append(
+                {
+                    **base,
+                    "state": ERROR,
+                    "reason": f"the hash pass could not read it: {hash_errors[key]}",
+                }
+            )
             continue
-        out.append(
-            {
-                **base,
-                "read_s": scan["read_s"],
-                "rows": scan["rows"],
-                **classify(rec, scan, hashed.get(key)),
-            }
-        )
+        scan = scans[key]
+        if "not_read" in scan:
+            out.append({**base, "state": NOT_READ, "reason": scan["not_read"]})
+        elif "error" in scan:
+            out.append({**base, "state": ERROR, "reason": scan["error"]})
+        else:
+            out.append(
+                {
+                    **base,
+                    "read_s": scan["read_s"],
+                    "rows": scan["rows"],
+                    **classify(rec, scan, hashed.get(key)),
+                }
+            )
     return out
 
 
-def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget, clock=time.monotonic) -> dict:
+def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget) -> dict:
     """Both passes and the current-snapshot scan: the ``time_travel.json``
     body (without the nonce)."""
     records = [r for r in inputs.get("records") or [] if isinstance(r, dict)]
-    tables = sorted({str(r.get("table")) for r in records if r.get("table")})
-    for table in tables:
-        provider = table_provider(spark, f"{CATALOG}.{table}")
-        if provider == "delta":
-            return {
-                "status": NOT_SUPPORTED,
-                "reason": f"{table} is a Delta table; time-travel reads support Iceberg only",
-                "ticks": [
-                    {
-                        "start": r.get("start"),
-                        "cycle": r.get("cycle"),
-                        "table": r.get("table"),
-                        "snapshot": r.get("snapshot"),
-                        "state": NOT_SUPPORTED,
-                    }
-                    for r in records
-                ],
-                "current": None,
-                "incomplete": False,
-            }
+    names = sorted({str(r.get("table")) for r in records if r.get("table")})
+    tables = table_state(spark, names)
+    delta = [t for t, st in tables.items() if st.get("provider") == "delta"]
+    if delta:
+        return {
+            "status": NOT_SUPPORTED,
+            "reason": f"{', '.join(delta)} is a Delta table; time-travel reads support Iceberg only",
+            "ticks": [
+                {
+                    "start": r.get("start"),
+                    "cycle": r.get("cycle"),
+                    "table": r.get("table"),
+                    "snapshot": r.get("snapshot"),
+                    "state": NOT_SUPPORTED,
+                }
+                for r in records
+            ],
+            "current": None,
+            "incomplete": False,
+        }
     nonce = str(inputs.get("nonce") or "")
-    complete = hash_pass(spark, records, hashes_uri, nonce, budget)
-    hashed = read_hashes(spark, hashes_uri, nonce)
-    ticks = read_pass(spark, records, hashed, budget, clock)
+    live_keys = [
+        k
+        for k in newest_first(records)
+        if "error" not in tables.get(k[0], {}) and k[1] in tables.get(k[0], {}).get("live", ())
+    ]
+    share = budget.split()
+    reached = hash_pass(spark, live_keys, hashes_uri, nonce, share)
+    complete = len(reached) == len(live_keys)
+    budget.took(share.longest)
+    hashed, hash_errors = read_hashes(spark, hashes_uri, nonce)
+    ticks = read_pass(spark, records, tables, hashed, hash_errors, budget, reached)
     current = None
-    if tables and not budget.spent():
-        fq = f"{CATALOG}.{tables[0]}"
+    readable = [t for t in names if "error" not in tables[t]]
+    if readable and budget.can_start():
+        fq = f"{CATALOG}.{readable[0]}"
         try:
             sid = current_snapshot(spark, fq)
-            t0 = clock()
+            t0 = budget.clock()
             scan = fingerprint_at(spark, fq, sid)
             current = {
-                "table": tables[0],
+                "table": readable[0],
                 "snapshot": sid,
                 "rows": scan["rows"],
-                "read_s": round(clock() - t0, 3),
+                "read_s": round(budget.clock() - t0, 3),
             }
         except Exception as e:  # noqa: BLE001 -- for comparison only
-            current = {"table": tables[0], "error": f"{type(e).__name__}: {one_line(e)}"}
+            current = {"table": readable[0], "error": f"{type(e).__name__}: {one_line(e)}"}
+    elif readable:
+        current = {"table": readable[0], "not_read": "the time-travel budget ran out"}
     return {
         "status": "read",
         "ticks": ticks,
@@ -333,7 +433,10 @@ def main() -> None:
     parser.add_argument("--hashes", required=True, help="S3 URI for tt_hashes.json")
     parser.add_argument("--output", required=True, help="S3 URI for time_travel.json")
     parser.add_argument(
-        "--budget-s", type=float, default=None, help="seconds after which no new scan starts"
+        "--deadline-epoch",
+        type=float,
+        default=None,
+        help="epoch seconds (this driver's clock) after which no scan starts",
     )
     args = parser.parse_args()
     from pyspark.sql import SparkSession
@@ -344,7 +447,9 @@ def main() -> None:
     log("Time-travel reads of the recorded tick snapshots")
     log("=" * 60)
     inputs = json.loads(_read_text(spark, args.input))
-    result = time_travel(spark, inputs, args.hashes, Budget(args.budget_s))
+    budget = Budget(args.deadline_epoch)
+    log(f"[time-travel] seconds left before the deadline: {budget.left()}")
+    result = time_travel(spark, inputs, args.hashes, budget)
     result["nonce"] = inputs.get("nonce")
     result["run_id"] = inputs.get("run_id")
     states: dict[str, int] = {}

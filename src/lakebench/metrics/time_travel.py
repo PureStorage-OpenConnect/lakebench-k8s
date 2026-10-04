@@ -58,18 +58,22 @@ def expired_by(
 
     A round explains it when it ran ``expire_snapshots`` on the tick's table
     (the statement finished or timed out, so it may have run) and the
-    snapshot was committed before the round's end minus the retention the
-    round applied. The round's end is on this host's clock; it is moved to
-    the cluster clock (where the commit time and the expiry cutoff were
-    taken) by *clock_offset_s* (cluster minus host), when known. The end is
-    the latest moment the statement could have taken its cutoff, so a
-    snapshot no round could have expired is never explained."""
+    snapshot was committed (writer clock, in the cluster) before the round's
+    latest possible cutoff: its end minus the retention it applied. The end
+    is on this host's clock. Trino takes the cutoff on its own clock, so the
+    end is moved to the cluster clock by *clock_offset_s* (cluster minus
+    host), when known; Spark Thrift's cutoff is a literal this host computed
+    before the round started, so it is compared on this host's clock. The
+    entry names the earliest round that could have expired the snapshot
+    (``basis``); ``ran_at`` is that round's end on this host's clock."""
     committed = _utc(tick.get("committed_at"))
     if committed is None:
         return None
     table = _bare_table(tick.get("table"))
-    shift = timedelta(seconds=clock_offset_s or 0.0)
     for r in rounds:
+        # Spark Thrift's older_than literal is this host's time; Trino's is its own.
+        on_host = r.get("engine") == "spark-thrift"
+        shift = timedelta(seconds=0.0 if on_host else (clock_offset_s or 0.0))
         if table not in {_bare_table(t) for t in r.get("expired_tables") or ()}:
             continue
         ended = _utc(r.get("ended_at"))
@@ -78,14 +82,17 @@ def expired_by(
             continue
         if committed < ended + shift - timedelta(seconds=applied_s):
             applied = r.get("applied_expire")
+            configured_s = _seconds(configured)
             return {
                 "round": r.get("round"),
+                "basis": "the earliest maintenance round that could have expired it",
                 "ran_at": r.get("ended_at"),
+                "ran_at_clock": "host",
                 "configured": configured,
                 "applied": applied,
                 "reason": (
                     "live-stream floor"
-                    if str(applied) != str(configured)
+                    if configured_s is None or applied_s > configured_s
                     else "configured retention"
                 ),
             }
@@ -95,8 +102,11 @@ def expired_by(
 def verdict_of(ticks: Sequence[Mapping[str, Any]], incomplete: bool) -> tuple[str, str]:
     """``(verdict, reason)`` of the time-travel check from the per-tick
     states (after expiry attribution): ``fail`` on any failing state, zero
-    records or zero verified; ``incomplete`` when the budget ran out before
-    every snapshot was read; else ``pass``. The check never fails the run."""
+    records, or no ``verified`` record (one whose scan was compared with
+    the count its tick recorded: ``verified_hash_only`` alone compares
+    nothing the tick recorded); ``incomplete`` when the Lakebench-imposed
+    time-travel budget ran out before every snapshot was read; else
+    ``pass``. The check never fails the run."""
     if not ticks:
         return "fail", "zero recorded snapshots"
     states = [str(t.get("state")) for t in ticks]
@@ -105,8 +115,13 @@ def verdict_of(ticks: Sequence[Mapping[str, Any]], incomplete: bool) -> tuple[st
         return "fail", "snapshot(s) " + ", ".join(f"{s} x{states.count(s)}" for s in bad)
     if incomplete or "not_read" in states:
         done = sum(1 for s in states if s != "not_read")
-        return "incomplete", f"the job budget ran out after {done} of {len(states)} records"
-    if not any(s in TT_VERIFIED_STATES for s in states):
+        return "incomplete", (
+            f"the Lakebench-imposed time-travel budget ran out after {done} of "
+            f"{len(states)} records"
+        )
+    if "verified" not in states:
+        if "verified_hash_only" in states:
+            return "fail", "no snapshot was compared with the count its tick recorded"
         return "fail", "no recorded snapshot was verified"
     unknown = sorted({s for s in states if s not in (*TT_VERIFIED_STATES, "expired")})
     if unknown:
@@ -146,6 +161,7 @@ def merge(
     continuous: dict,
     result: Mapping[str, Any],
     pol: dict[str, Any],
+    budget: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``continuous.time_travel`` from the job's ``time_travel.json``: each
     recorded tick gains its state, read time, rows and matches; an expired
@@ -188,6 +204,8 @@ def merge(
     tt["current_read_s"] = (result.get("current") or {}).get("read_s")
     tt["current"] = result.get("current")
     tt["policy"] = pol
+    if budget is not None:
+        tt["budget"] = dict(budget)
     tt["verdict"] = verdict
     if reason:
         tt["reason"] = reason
@@ -204,6 +222,9 @@ def line(tt: Mapping[str, Any]) -> str:
         s = str(t.get("state"))
         states[s] = states.get(s, 0) + 1
     counts = ", ".join(f"{n} {s}" for s, n in sorted(states.items())) or "no records"
+    if states:
+        # The ticks come from the current gold-refresh driver pod's log.
+        counts += f" of {sum(states.values())} ticks in the current driver log"
     policy = tt.get("policy") or {}
     pol = f"retention {policy.get('configured')}, applied {policy.get('applied_expire')}"
     if policy.get("skipped"):
@@ -214,6 +235,9 @@ def line(tt: Mapping[str, Any]) -> str:
     )
     if tt.get("reason"):
         text += f": {tt['reason']}"
+    budget = tt.get("budget") or {}
+    if verdict == "incomplete" and budget.get("label"):
+        text += f"; {budget['label']}"
     if verdict != "pass":
         text += "; not a run FAIL"
     return text

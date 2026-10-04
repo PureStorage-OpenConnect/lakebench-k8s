@@ -588,8 +588,8 @@
   kind: default-change
   subject: time-travel reads
   source: src/lakebench/cli/_aml_post.py:run_time_travel
-  text: 'A continuous AML run ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live), within the per-job timeout; its check is reported beside the verdict and never fails the run.'
-  fix: 'Allow for the extra job at the end of the run (seconds at scale 1; it grows with the corpus and the number of live snapshots).'
+  text: 'A continuous AML run that passed its gates ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout; its check is reported beside the verdict and never fails the run.'
+  fix: 'Allow for the extra job at the end of the run; it grows with the corpus and the number of live snapshots, and stops starting scans before the per-job timeout.'
 - id: the-datagen-generator-refuses-arguments-it-cannot-read
   title: The datagen generator refuses arguments it cannot read
   kind: refused-command

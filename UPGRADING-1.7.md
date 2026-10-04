@@ -272,9 +272,9 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 ### continuous AML runs end with time-travel reads
 
-A continuous AML run ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live), within the per-job timeout; its check is reported beside the verdict and never fails the run.
+A continuous AML run that passed its gates ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout; its check is reported beside the verdict and never fails the run.
 
-**What to do:** Allow for the extra job at the end of the run (seconds at scale 1; it grows with the corpus and the number of live snapshots).
+**What to do:** Allow for the extra job at the end of the run; it grows with the corpus and the number of live snapshots, and stops starting scans before the per-job timeout.
 
 ### financial reproduce reruns the alert's rule on what gold read
 

@@ -469,9 +469,12 @@ def stop_drain(cfg, k8s, custom_api: Any = None) -> DrainResult | None:
 
 # -- time-travel reads (after the window) -------------------------------------
 
-#: Seconds the job keeps back from the per-job budget, so it writes its
-#: partial result (``incomplete``) before the CLI stops waiting.
+#: Seconds the job's deadline keeps back from the CLI's wait, for writing
+#: its partial result (``incomplete``) and stopping. The job also starts no
+#: scan the time left could not hold (1.5 times its longest scan so far).
 _TT_BUDGET_MARGIN_S = 120
+#: How the record labels the time-travel budget (a Lakebench-imposed bound).
+TT_BUDGET_LABEL = "BOUNDED BY the Lakebench time-travel budget (the per-job timeout)"
 
 
 def run_time_travel(
@@ -484,15 +487,21 @@ def run_time_travel(
     timeout,
     *,
     interrupt=None,
+    run_failed: bool = False,
+    wall_clock: Callable[[], float] = time.time,
 ) -> dict[str, Any] | None:
     """Re-read every transactions snapshot the drained run's ticks recorded
     (``TIME_TRAVEL_FINANCIAL``) and record ``continuous.time_travel``.
 
     Runs after the covered scorer, with the streams stopped: nothing it
     does is inside a measured interval, and it writes only under the gold
-    ``scoring/<run_id>/`` prefix. Never raises and never fails the run; a
-    job that cannot run reads ``not_run``. Returns the record, or None
-    when the run has no continuous block."""
+    ``scoring/<run_id>/`` prefix. A run that failed its gates is not read
+    (as it is not scored). The job gets an absolute deadline on the
+    cluster clock: the CLI's wait (*timeout* from submit) less a margin; a
+    wait that ends first deletes the application, so no executor outlives
+    the step. Never raises and never fails the run; a job that cannot run
+    reads ``not_run``. Returns the record, or None when the run has no
+    continuous block."""
     from lakebench.metrics import time_travel as tt_mod
 
     if continuous is None:
@@ -506,6 +515,8 @@ def run_time_travel(
             return tt_mod.not_run(
                 continuous, f"the gold-refresh drain {state}: no tick records were read", policy
             )
+        if run_failed:
+            return tt_mod.not_run(continuous, "the run failed its gates", policy)
         records = list((continuous.get("time_travel") or {}).get("ticks") or [])
         if not records:
             return tt_mod.not_run(continuous, "zero recorded snapshots", policy, verdict="fail")
@@ -541,7 +552,12 @@ def run_time_travel(
             ).encode("utf-8"),
         )
         app_name = f"lakebench-{JobType.TIME_TRAVEL_FINANCIAL.value}"
-        budget = max(60, int(timeout) - _TT_BUDGET_MARGIN_S)
+        budget_s = max(60, int(timeout) - _TT_BUDGET_MARGIN_S)
+        # The driver reads the deadline on the cluster clock (cluster minus
+        # host offset, when measured).
+        offset = (continuous.get("window") or {}).get("cluster_clock_offset_seconds") or 0.0
+        deadline = wall_clock() + budget_s + float(offset)
+        budget = {"budget_s": budget_s, "label": TT_BUDGET_LABEL}
         console.print()
         console.print("[bold]Stage: time-travel reads[/bold]")
         print_info(
@@ -558,8 +574,8 @@ def run_time_travel(
                 f"s3a://{gold}/{prefix}/tt_hashes.json",
                 "--output",
                 f"s3a://{gold}/{prefix}/time_travel.json",
-                "--budget-s",
-                str(budget),
+                "--deadline-epoch",
+                f"{deadline:.3f}",
             ],
             cycle_env={"LB_RUN_ID": run_id},
         )
@@ -573,12 +589,17 @@ def run_time_travel(
         if interrupt is not None and result.success:
             interrupt.finished("SparkApplication", app_name)
         if not result.success:
+            try:
+                # A wait that ended first must not leave executors running.
+                job_manager._delete_job(app_name)
+            except Exception as e:  # noqa: BLE001 -- said; the record stands
+                print_warning(f"Could not delete {app_name}: {e}")
             return tt_mod.not_run(continuous, f"the job did not complete: {result.message}", policy)
         body = client.raw_client.get_object(Bucket=gold, Key=f"{prefix}/time_travel.json")
         out = _json.loads(body["Body"].read())
         if not isinstance(out, dict) or out.get("nonce") != nonce:
             return tt_mod.not_run(continuous, "time_travel.json is not this submission's", policy)
-        tt = tt_mod.merge(continuous, out, policy)
+        tt = tt_mod.merge(continuous, out, policy, budget)
         (print_success if tt["verdict"] == "pass" else print_warning)(tt_mod.line(tt))
         return tt
     except Exception as e:  # noqa: BLE001 -- a measurement; never fails the run
