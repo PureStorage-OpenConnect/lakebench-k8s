@@ -653,7 +653,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `policy` (configured and applied retention), `budget` (the
   Lakebench-imposed time-travel budget, from the per-job timeout) and a
   `verdict` (`pass` needs at least one `verified`; `fail`; `incomplete`;
-  `not_run`); `continuous.retention.rounds` records when each maintenance
+  `not_run`); on AML runs `continuous.retention.rounds` records when each maintenance
   round ran, on which engine and which tables it expired. Only ticks in the
   current gold-refresh driver pod's log are read. The check is shown beside
   the run verdict and never fails the run. Nothing is pinned: no tag or

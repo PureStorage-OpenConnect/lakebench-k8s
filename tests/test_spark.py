@@ -62,8 +62,10 @@ class TestJobType:
         types = list(JobType)
         # 6 medallion + 3 Financial-only operator actions (ENG-2C.3g/h/i)
         # + 1 reference detector / leakage gate (SCORE_FINANCIAL_REFERENCE, LB-130 gate)
-        assert len(types) == 10
+        # + 1 post-window time-travel read (TIME_TRAVEL_FINANCIAL)
+        assert len(types) == 11
         assert JobType.SCORE_FINANCIAL_REFERENCE in types
+        assert JobType.TIME_TRAVEL_FINANCIAL in types
 
 
 class TestJobState:

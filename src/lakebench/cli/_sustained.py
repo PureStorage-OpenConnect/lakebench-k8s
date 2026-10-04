@@ -4177,7 +4177,15 @@ def _run_sustained(
             "retention": (
                 {"skipped": "--skip-maintenance"}
                 if skip_maintenance
-                else continuous_retention_record(cfg, rounds=retention_rounds)
+                else continuous_retention_record(
+                    cfg,
+                    # The rounds serve the AML time-travel reads only.
+                    rounds=(
+                        retention_rounds
+                        if cfg.architecture.workload.schema_type.value == "financial"
+                        else None
+                    ),
+                )
             ),
         }
         if collector.current_run is not None:

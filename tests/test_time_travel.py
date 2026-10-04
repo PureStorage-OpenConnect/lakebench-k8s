@@ -640,7 +640,11 @@ def test_the_step_runs_after_the_scorer_with_the_streams_stopped():
     step = body.index("run_time_travel(\n")
     assert drain < stop < score < step
     assert "rounds=retention_rounds" in body
-    assert "continuous_retention_record(cfg, rounds=retention_rounds)" in body
+    assert "continuous_retention_record(\n                    cfg," in body
+    assert (
+        'retention_rounds\n                        if cfg.architecture.workload.schema_type.value == "financial"'
+        in body
+    )
     settle = body.index("_settle_financial_scoring(cfg, collector, pipeline_success, _abort)")
     assert body.index("settle_time_travel(") > settle
     # The namespace is checked right before each post-window job.
