@@ -536,7 +536,7 @@ def record_problems(
     exp = _exp(record)
     if exp is None:
         return ["no experiment block"]
-    from lakebench.config.datagen_seed import PROTECTED_ROLES
+    from lakebench.aml.look_guard import protected_record_reason
     from lakebench.metrics.verdict import passed
 
     problems: list[str] = []
@@ -578,9 +578,13 @@ def record_problems(
     end = prov.get("end_sample") or {}
     if end.get("code_changed_during_run") is not False:
         problems.append("lakebench code changed during the run, or the run-end sample is missing")
-    role = (exp.get("corpus") or {}).get("corpus_role")
-    if role in PROTECTED_ROLES:
-        problems.append(f"the corpus is the held-out {role} corpus")
+    # A held-out corpus is never release evidence, whether the record
+    # declares its role or only carries a seed that hashes to a held-out one.
+    # Fail closed: an unreadable held-out record, a withheld seed, or a
+    # financial record with no corpus seed is refused. Names a role, never a seed.
+    protected = protected_record_reason(record, require_identity=True, fail_closed=True)
+    if protected:
+        problems.append(f"the corpus is a protected AML corpus ({protected})")
     digest = release_digest if release_digest is not None else release_datagen_digest()
     problems += _image_problems(record, exp, digest, root)
     problems += bound_problems(record)

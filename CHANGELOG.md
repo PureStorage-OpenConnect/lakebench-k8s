@@ -973,6 +973,15 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- **The release gate refuses a record from a held-out AML corpus by its
+  seed, not only by its declared role.** `records`,
+  `support-record` and the release harness refuse a record whose recorded
+  seed hashes to a held-out seed or is withheld, and an AML record with no
+  corpus seed or whose held-out check cannot run; before, only a declared
+  `corpus_role: evaluation` or `robustness` was refused. The refusal names
+  the run id and the role, never a seed. `scripts/aml_heldout_audit.py` now
+  lists a continuous AML record with no corpus seed as unidentified, as it
+  already did a batch one.
 - **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
   Continuous AML stores edge rows per pair per micro-batch and statement
   running balances in arrival order, so FQ4 (which returned the stored

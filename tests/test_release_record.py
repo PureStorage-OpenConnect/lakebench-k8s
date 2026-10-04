@@ -291,7 +291,89 @@ def test_record_without_an_end_sample(ready):
 def test_held_out_role(ready):
     rec = _release("aml_batch")
     rec["experiment"]["corpus"]["corpus_role"] = "evaluation"
-    _fails(rec, "held-out evaluation corpus")
+    _fails(rec, "protected AML corpus (corpus_role evaluation)")
+
+
+# --- AML-12: a held-out corpus is never release evidence ---------------------
+# The held-out record is the synthetic test fixture (tests/fixtures/
+# heldout_test.json, test values), never a pre-registration value.
+
+
+@pytest.fixture
+def held(monkeypatch):
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    return pc
+
+
+def _protected(problems: list[str]) -> list[str]:
+    return [p for p in problems if "protected AML corpus" in p]
+
+
+@pytest.mark.parametrize("kind", ["aml_batch", "aml_cont"])
+@pytest.mark.parametrize("role", ["evaluation", "robustness"])
+def test_held_out_seed_without_its_role_is_refused(ready, held, kind, role):
+    """A record that declares no role but whose seed hashes to a held-out
+    seed is refused, naming the role and never the seed."""
+    seed = held.EV if role == "evaluation" else held.RB
+    rec = _release(kind)
+    rec["experiment"]["corpus"]["corpus_role"] = None
+    rec["experiment"]["corpus"]["seed"] = seed
+    problems = _protected(_problems(rec))
+    assert problems == [
+        f"the corpus is a protected AML corpus (its seed is the registered {role} seed)"
+    ]
+    assert held.seed_tokens(" ".join(_problems(rec))) == []
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        pytest.param(lambda s: str(s), id="text"),
+        pytest.param(lambda s: [s], id="list"),
+        pytest.param(lambda s: {"seed_ref": None}, id="withheld"),
+    ],
+)
+def test_held_out_seed_in_a_recorded_form_is_refused(ready, held, form):
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = form(held.EV)
+    assert _protected(_problems(rec))
+
+
+def test_calibration_record_passes_the_held_out_check(ready, held):
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = held.CALIBRATION
+    rec["experiment"]["corpus"]["corpus_role"] = "calibration"
+    assert _problems(rec) == []
+
+
+@pytest.mark.parametrize("kind", ["aml_batch", "aml_cont"])
+def test_aml_record_with_no_corpus_seed_is_unidentified(ready, held, kind):
+    rec = _release(kind)
+    rec["experiment"]["corpus"]["seed"] = None
+    assert any("unidentified" in p for p in _protected(_problems(rec)))
+
+
+def test_aml_continuous_record_with_no_corpus_block_is_unidentified(ready, held):
+    """A continuous AML record has no financial_scoring block: the workload
+    name alone marks it as AML, so a missing corpus block is refused."""
+    rec = _release("aml_cont")
+    assert "financial_scoring" not in rec
+    rec["experiment"]["corpus"] = None
+    assert any("unidentified" in p for p in _protected(_problems(rec)))
+
+
+def test_unreadable_held_out_record_refuses_an_aml_record(ready, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    def boom():
+        raise OSError("hash file missing")
+
+    monkeypatch.setattr(ds, "_heldout", boom)
+    assert any("cannot be read" in p for p in _protected(_problems(_release("aml_batch"))))
+    # A Customer 360 record is not AML data: the check does not refuse it.
+    assert _protected(_problems(_release("c360_batch"))) == []
 
 
 def test_exp1_record(ready):

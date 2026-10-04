@@ -321,7 +321,13 @@ check alone first, and a check that could not run (a storage error) exits 1.
 `scripts/aml_gate.py --registered` scores a look only when the ledger holds
 a matching `generated` entry for the corpus it reads.
 `scripts/aml_heldout_audit.py` lists this host's run records, journals,
-ledgers and ledger buckets that touch a protected corpus. `destroy` and the
+ledgers and ledger buckets that touch a protected corpus; a continuous AML
+record with no corpus seed is listed as unidentified, as a batch one is.
+The release gate never cites a record from a protected corpus as release
+evidence: its `records` and `support-record` checks refuse a held-out
+`corpus_role`, a recorded seed that hashes to a held-out seed or is
+withheld, and an AML record with no corpus seed, naming the run id and the
+role, never the seed. `destroy` and the
 read-only commands skip the load-time seed check, so a deployment that
 generated a registered corpus can still be torn down.
 

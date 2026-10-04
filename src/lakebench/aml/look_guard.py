@@ -185,7 +185,15 @@ def _hash_role(ref: str) -> str | None:
 
 
 def _financial(record: Mapping[str, Any], corpus: Mapping[str, Any]) -> bool:
-    return corpus.get("schema") == "financial" or record.get("financial_scoring") is not None
+    """Whether a record is an AML record: its corpus schema, its scoring
+    block (batch) or its workload name says so. A continuous AML record has
+    no ``financial_scoring``, so without the workload name one whose corpus
+    block is missing would not count as unidentified."""
+    if corpus.get("schema") == "financial" or record.get("financial_scoring") is not None:
+        return True
+    exp = record.get("experiment")
+    workload = exp.get("workload") if isinstance(exp, Mapping) else None
+    return isinstance(workload, Mapping) and workload.get("name") == "financial"
 
 
 #: What ``recorded_seed_role`` returns for a ``{seed_ref: None}`` form.

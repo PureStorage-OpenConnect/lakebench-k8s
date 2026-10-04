@@ -649,3 +649,29 @@ def test_release_workflow_runs_the_evidence_checks_on_full_history():
     only = set(run.split("--only", 1)[1].split()[0].split(","))
     assert {"records", "support-record", "freeze", "expected-results"} <= only
     assert "--require-all" in run
+
+
+def test_records_check_refuses_a_held_out_seed_record(frozen, monkeypatch):
+    """AML-12: a cited AML record whose seed hashes to a held-out seed (the
+    synthetic test fixture) is refused by run id and role, never by seed."""
+    import json
+
+    from tests.fixtures import protected_corpus as pc
+    from tests.fixtures import stored_records as sr
+
+    pc.use_heldout(monkeypatch)
+    repo, _sha = frozen
+    rid = "20260928-130953-f8a2cf"
+    rec = sr.load_record("130953-f8a2cf")
+    rec["experiment"]["corpus"]["seed"] = pc.EV
+    rec["experiment"]["corpus"]["corpus_role"] = None
+    (repo / "uat" / "runs" / f"run-{rid}").mkdir(parents=True)
+    (repo / "uat" / "runs" / f"run-{rid}" / "metrics.json").write_text(json.dumps(rec))
+    (repo / "uat" / "results-9.9.9.md").write_text(
+        "# UAT results 9.9.9\n\n| recipe | run |\n|---|---|\n| aml | " + rid + " |\n"
+    )
+    res = rg.check_records()
+    assert res.status == rg.FAIL
+    assert f"{rid}: " in res.detail
+    assert "protected AML corpus (its seed is the registered evaluation seed)" in res.detail
+    assert pc.seed_tokens(res.detail) == []
