@@ -1135,7 +1135,9 @@ def _run_pipeline(
     deployment_name = cfg.name
     own = uuid.uuid4().hex
     try:
-        recorded = _deploy_impl(config_file, yes=True, nonce=own, require_new=True)
+        recorded = _deploy_impl(
+            config_file, yes=True, nonce=own, require_new=True, next_steps=False
+        )
     except BaseException:
         print_warning(
             f"reproduce stopped at deploy and destroyed nothing; check "

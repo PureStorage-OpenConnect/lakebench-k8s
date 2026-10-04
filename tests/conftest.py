@@ -5,11 +5,6 @@ from __future__ import annotations
 import os
 import tempfile
 
-# The report generator binds lakebench.metrics.MetricsStorage at import, and
-# several tests patch that name while code under test imports modules
-# lazily: imported here first, the generator keeps the real class.
-import lakebench.reports.generator  # noqa: F401
-
 # Hermetic kube config. Code under test loads kube config before making
 # (mocked) API calls; on a developer machine that silently used the real
 # ~/.kube/config while CI has none, so tests passed locally and failed in CI.
@@ -81,6 +76,10 @@ from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest  # noqa: E402
 
+# The report generator binds lakebench.metrics.MetricsStorage at import, and
+# several tests patch that name while code under test imports modules
+# lazily: imported here first, the generator keeps the real class.
+import lakebench.reports.generator  # noqa: E402, F401
 from lakebench.config import LakebenchConfig  # noqa: E402
 
 # SAF-4 / DEP-3 oracle (SD-9): `recording_k8s` is available to every test.

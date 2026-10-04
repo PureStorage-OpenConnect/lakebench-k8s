@@ -1878,9 +1878,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `PYTHONPATH=src python -m lakebench` instead.
 
 ### Fixed
-- A continuous run keeps its completed datagen pods for the window plus an hour, so the fleet record is still readable at window end; they were deleted an hour after the Job finished.
-- A failed continuous gate names its problem in the run's verdict instead of "Pipeline crashed or was interrupted" (some gates still fall back to it).
-- `run --yes` no longer prints deploy's "Next: lakebench generate" steps when it deploys for you, nor a hint to deploy; a non-interactive `destroy` asks for `--yes` (it said `--force`, an alias); destroy progress shows no internal "category1" heading or negative times.
+- A continuous run keeps its completed datagen pods for its window (`--duration` or the config) plus an hour, so the fleet record is still readable at window end; they were deleted an hour after the Job finished.
+- A continuous run whose window gate fails (no data arriving, too few silver commits or gold refreshes, a stream that died or restarted) names that problem in its verdict instead of "Pipeline crashed or was interrupted". The drain, result-check, AML detection and TM gates still fall back to it.
+- `run --yes`, `run --generate-only` and `reproduce` no longer print deploy's "Next:" steps when they deploy and carry on; a plain `deploy`'s next steps name its config; `run` says the infrastructure was not checked when a flag skipped the check; a non-interactive `destroy` asks for `--yes` (it said `--force`, an alias); destroy progress shows no internal component names or negative times, and its re-deploy hint names the config.
 - Run records, the datagen fleet record and report.html never show a protected AML seed: it is recorded as its salted reference and role, and withheld when the held-out record cannot be read.
 - **A redeploy refreshes the namespace's committed-sha stamp.** A
   namespace already stamped with this deployment's identity was left as

@@ -24,13 +24,19 @@ def test_deploy_inside_run_prints_no_next_steps(monkeypatch):
     from lakebench.cli import _deploy
 
     seen = []
-    monkeypatch.setattr(_deploy, "deploy", lambda **kw: seen.append(_deploy._next_steps(_cfg())))
-    _deploy.deploy_inside_run(None)
-    # run carries on by itself: no "Next: lakebench generate" while it deploys.
-    assert seen == [""]
-    # A plain deploy still names the next steps.
-    assert "lakebench generate" in _deploy._next_steps(_cfg())
-    assert "lakebench run" in _deploy._next_steps(_cfg(cycles=3))
+    monkeypatch.setattr(_deploy, "_deploy_impl", lambda path, **kw: seen.append((path, kw)))
+    _deploy.deploy_inside_run(Path("x.yaml"))
+    # run carries on by itself: no "Next:" steps while it deploys.
+    assert seen == [(Path("x.yaml"), {"yes": True, "next_steps": False})]
+
+
+def test_plain_deploy_next_steps_name_the_config():
+    from lakebench.cli import _deploy
+
+    one = _deploy._next_steps(_cfg(), Path("conf/a.yaml"))
+    assert "lakebench run conf/a.yaml --generate" in one
+    assert "lakebench status conf/a.yaml" in one
+    assert "lakebench run conf/a.yaml" in _deploy._next_steps(_cfg(cycles=3), Path("conf/a.yaml"))
 
 
 def _destroy(monkeypatch, *args, progress=()):
@@ -60,6 +66,8 @@ def test_destroy_progress_has_no_internal_heading_or_negative_time(monkeypatch):
         monkeypatch,
         "--yes",
         progress=[
+            ("table-cleanup", DeploymentStatus.IN_PROGRESS, "Unregistering tables..."),
+            ("table-cleanup", DeploymentStatus.SUCCESS, "Iceberg tables unregistered"),
             ("category1", DeploymentStatus.IN_PROGRESS, "Removing remaining namespaced objects..."),
             ("category1", DeploymentStatus.SUCCESS, "Removed the remaining namespaced objects"),
             # Reported done with no start of its own.
@@ -68,7 +76,7 @@ def test_destroy_progress_has_no_internal_heading_or_negative_time(monkeypatch):
     )
     assert "Removed the remaining namespaced objects" in res.output, res.output
     lines = [line.strip() for line in res.output.splitlines()]
-    assert "category1" not in lines
+    assert "category1" not in lines and "table-cleanup" not in lines
     assert "-0.0s" not in res.output
     # The re-deploy hint names the config it came from.
     flat = "".join(ch for ch in res.output if not ch.isspace() and ch != "\u2502")

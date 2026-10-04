@@ -6,7 +6,6 @@ and its helper functions ``_preflight_check()`` and ``_build_component_list()``.
 
 from __future__ import annotations
 
-import contextvars
 import logging
 import time
 from pathlib import Path
@@ -40,38 +39,27 @@ from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
 
-# True while `run --yes` deploys on the user's behalf: the run carries on by
-# itself, so deploy prints no "Next:" steps.
-_INSIDE_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "lakebench_deploy_inside_run", default=False
-)
 
-
-def _next_steps(cfg) -> str:
-    """The "Next:" lines after a successful deploy; none inside ``run``."""
-    if _INSIDE_RUN.get():
-        return ""
+def _next_steps(cfg, config_file: Path) -> str:
+    """The "Next:" lines after a plain ``deploy``, naming its config."""
+    cf = esc(config_file)
     if cfg.architecture.pipeline.cycles > 1:
         return (
-            "\n\nNext: [bold]lakebench run[/bold]     to run the pipeline; each cycle "
-            "generates its data first"
-            "\n      [bold]lakebench status[/bold]  to check deployment"
+            f"\n\nNext: [bold]lakebench run {cf}[/bold]     to run the pipeline; each "
+            "cycle generates its data first"
+            f"\n      [bold]lakebench status {cf}[/bold]  to check deployment"
         )
     return (
-        "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
-        "\n      [bold]lakebench run --generate[/bold]  to generate data and run the "
-        "pipeline"
-        "\n      [bold]lakebench status[/bold]          to check deployment"
+        f"\n\nNext: [bold]lakebench run {cf} --generate[/bold]  to generate data and run "
+        "the pipeline"
+        f"\n      [bold]lakebench status {cf}[/bold]          to check deployment"
     )
 
 
-def deploy_inside_run(config_file: Path | None) -> None:
-    """Deploy for ``run --yes``, which carries on by itself: no next steps."""
-    token = _INSIDE_RUN.set(True)
-    try:
-        deploy(config_file=config_file, yes=True)
-    finally:
-        _INSIDE_RUN.reset(token)
+def deploy_inside_run(config_file: Path | None, *, yes: bool = True) -> None:
+    """Deploy for a command that carries on by itself (``run --yes``,
+    ``run --generate-only``): no "Next:" steps."""
+    _deploy_impl(resolve_config_path(config_file, None), yes=yes, next_steps=False)
 
 
 def _preflight_check(cfg) -> None:
@@ -536,6 +524,7 @@ def _deploy_impl(
     force_legacy: bool = False,
     nonce: str | None = None,
     require_new: bool = False,
+    next_steps: bool = True,
 ) -> str | None:
     """The body of ``deploy``, callable with a nonce the caller chose.
 
@@ -744,7 +733,8 @@ def _deploy_impl(
                 f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
-        success_msg += _next_steps(cfg)
+        if next_steps:
+            success_msg += _next_steps(cfg, config_file)
 
         console.print(
             Panel(

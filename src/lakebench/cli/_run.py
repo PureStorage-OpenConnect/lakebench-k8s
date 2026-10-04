@@ -2096,11 +2096,11 @@ def _run_once(
 
     # generate_only: deploy + generate and exit
     if generate_only:
-        from lakebench.cli._deploy import deploy as _deploy_cmd
+        from lakebench.cli._deploy import deploy_inside_run
         from lakebench.cli._generate import generate as _generate_cmd
 
         print_info("--generate-only: deploying and generating data...")
-        _deploy_cmd(config_file=config_file, yes=yes)
+        deploy_inside_run(config_file, yes=yes)
         _generate_cmd(
             config_file=config_file,
             timeout=timeout or 14400,
@@ -2233,7 +2233,10 @@ def _run_once(
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
     console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
-    print_success("Infrastructure verified")
+    if skip_deploy or skip_infra:
+        print_info("Infrastructure readiness not checked (skipped by flag)")
+    else:
+        print_success("Infrastructure verified")
 
     console.print(
         Panel(

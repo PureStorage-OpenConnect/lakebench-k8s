@@ -703,8 +703,12 @@ class DatagenDeployer:
         *,
         continuous: bool = False,
         stale_record: dict[str, Any] | None = None,
+        window_seconds: int | None = None,
     ):
         self.allow_stale_bronze = allow_stale_bronze
+        # A continuous run's window as it runs (`run --duration` or the
+        # config); the pods are kept until it ends.
+        self.window_seconds = window_seconds
         # The bronze gate's ``datagen.stale_bronze`` record when it allowed
         # generating over existing objects; the series marker carries it so a
         # run that reuses the corpus keeps the label.
@@ -756,7 +760,9 @@ class DatagenDeployer:
         # them: a continuous window's end, plus an hour.
         ttl_seconds = 3600
         if self.continuous:
-            ttl_seconds += int(cfg.architecture.pipeline.sustained.run_duration)
+            ttl_seconds += int(
+                self.window_seconds or cfg.architecture.pipeline.sustained.run_duration
+            )
         context.update(
             {
                 "datagen_ttl_seconds": ttl_seconds,
