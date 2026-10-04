@@ -16,7 +16,7 @@ spec:
   completions: {{ datagen_parallelism | default(4) }}
   completionMode: Indexed
   backoffLimit: 60
-  ttlSecondsAfterFinished: 3600
+  ttlSecondsAfterFinished: {{ datagen_ttl_seconds | default(3600) }}
   template:
     metadata:
       labels:

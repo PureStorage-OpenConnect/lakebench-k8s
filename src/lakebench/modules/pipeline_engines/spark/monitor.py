@@ -560,12 +560,21 @@ class SparkJobMonitor:
             logger.debug("cannot read %s init containers: %s", job_name, e)
         return None
 
-    def _get_driver_logs(self, job_name: str, tail_lines: int | None = 100) -> str | None:
+    def _get_driver_logs(
+        self,
+        job_name: str,
+        tail_lines: int | None = 100,
+        *,
+        since_seconds: int | None = None,
+        timestamps: bool = False,
+    ) -> str | None:
         """Get driver pod logs for debugging.
 
         Args:
             job_name: Name of the SparkApplication
             tail_lines: Number of lines to retrieve, or None for all logs
+            since_seconds: Only lines from the last N seconds (kubelet side)
+            timestamps: Prefix each line with its kubelet RFC 3339 timestamp
 
         Returns:
             Log content or None
@@ -592,6 +601,10 @@ class SparkJobMonitor:
             }
             if tail_lines is not None:
                 kwargs["tail_lines"] = tail_lines
+            if since_seconds is not None:
+                kwargs["since_seconds"] = since_seconds
+            if timestamps:
+                kwargs["timestamps"] = True
 
             logs = core_v1.read_namespaced_pod_log(
                 pod_name,

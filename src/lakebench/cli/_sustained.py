@@ -2705,7 +2705,9 @@ def _settle_financial_scoring(cfg, collector, pipeline_success: bool, abort) -> 
         run.financial_scoring = not_scored("the run failed its gates")
 
 
-def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_write=None):
+def drain_gold_refresh(
+    cfg, k8s, run_id, collector, *, window_end=None, before_write=None, kept_log=None
+):
     """Drain gold-refresh at window end and record it.
 
     Returns ``(drain, tick, tick_reason, problem)``: the DrainResult, the
@@ -2726,7 +2728,9 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     (``drain.ticks_scope``), and ``drain.log_from_driver_start`` is False
     when its first tick is not cycle 1 (the log was trimmed). *window_end* (naive UTC on the cluster
     clock, as the window record) gives the scored tick's
-    ``pinned_after_window_end_s``.
+    ``pinned_after_window_end_s``. *kept_log*, when given, returns the
+    driver's whole log kept across rotation (LB-270); it is parsed instead of
+    the drain's single read when it holds anything.
     """
     from lakebench.cli._aml_post import DRAIN_BUDGET_S, request_drain
     from lakebench.metrics.tick_records import (
@@ -2746,7 +2750,13 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     ticks = None
     tt_ticks = None
     if drain.state == "drained":
-        parsed = parse_tick_records(drain.logs, run_id)
+        logs = drain.logs
+        if kept_log is not None:
+            try:
+                logs = kept_log() or drain.logs
+            except Exception:  # noqa: BLE001 -- fall back to the drain's own read
+                logs = drain.logs
+        parsed = parse_tick_records(logs, run_id)
         tick, reason = scored_tick(parsed)
         ticks = tick_list(parsed["ticks"])
         tt_ticks = time_travel_ticks(parsed["ticks"])
@@ -3814,6 +3824,15 @@ def _run_sustained(
 
         start = time.time()
         check_interval = 30
+        # Every driver's whole log, kept across kubelet log rotation by
+        # reading the new lines at each health check (LB-270).
+        from lakebench.metrics.driver_log_accumulator import DriverLogAccumulator
+
+        driver_log_acc = DriverLogAccumulator(
+            lambda name, since: monitor._get_driver_logs(
+                f"lakebench-{name}", tail_lines=None, since_seconds=since, timestamps=True
+            )
+        )
         # Where the next round starts in the table list: after a timeout,
         # the table after the one that timed out (see _next_start).
         maintenance_start = 0
@@ -4027,6 +4046,11 @@ def _run_sustained(
                 message="Health check",
                 details={"elapsed_seconds": elapsed, "remaining_seconds": remaining},
             )
+            for _jt, _name in submitted:
+                try:
+                    driver_log_acc.poll(_name)
+                except Exception as e:  # noqa: BLE001 -- the end-of-window read still runs
+                    logger.debug("driver log poll for %s failed: %s", _name, e)
 
         window_end = utc_naive(datetime.now(timezone.utc)) + _shift
         _stage = "collect"
@@ -4100,10 +4124,18 @@ def _run_sustained(
         driver_logs: dict[str, str | None] = {}
         for _job_type, job_name in submitted:
             try:
-                logs = monitor._get_driver_logs(
-                    f"lakebench-{job_name}",
-                    tail_lines=None,
-                )
+                # The lines kept at every health check, plus the newest ones;
+                # one plain read only when nothing was kept (LB-270).
+                try:
+                    driver_log_acc.poll(job_name)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("final driver log poll for %s failed: %s", job_name, e)
+                logs = driver_log_acc.text(job_name)
+                if logs is None:
+                    logs = monitor._get_driver_logs(
+                        f"lakebench-{job_name}",
+                        tail_lines=None,
+                    )
                 driver_logs[job_name] = logs
                 # Diagnostic: report log capture status
                 if logs is None:
@@ -4150,6 +4182,18 @@ def _run_sustained(
                 sm.submission_failures = list(watch.failures)
             parsed[job_name] = sm
         window_problems.extend(window_gate_problems(window_stats_by_job, window_seconds))
+        # Lines rotated away before they were read: the window's figures
+        # would come from part of the log, so they are not published.
+        for _job, _gaps in sorted(driver_log_acc.gaps.items()):
+            window_problems.append(
+                f"{_job}: driver log incomplete, continuous metrics not measured ({_gaps[0]})"
+            )
+        # The verdict names what failed instead of "crashed or was
+        # interrupted" (LB-272).
+        if collector.current_run is not None:
+            for _problem in window_problems:
+                if _problem not in collector.current_run.failure_reasons:
+                    collector.current_run.failure_reasons.append(_problem)
         for _problem in window_problems:
             print_error(_problem)
         if window_problems:
@@ -4294,10 +4338,25 @@ def _run_sustained(
                 collector,
                 window_end=window_end,
                 before_write=lambda: _ns_watch.check(time.time() - start),
+                kept_log=lambda: (
+                    driver_log_acc.poll("gold-refresh"),
+                    driver_log_acc.text("gold-refresh"),
+                )[1],
             )
             if _drain_problem:
                 print_error(_drain_problem)
                 pipeline_success = False
+            _drain_gaps = driver_log_acc.gaps.get("gold-refresh") or []
+            if _drain_gaps and not any(
+                p.startswith("gold-refresh: driver log incomplete") for p in window_problems
+            ):
+                _gap_reason = (
+                    f"gold-refresh: driver log incomplete, ticks not measured ({_drain_gaps[0]})"
+                )
+                print_error(_gap_reason)
+                pipeline_success = False
+                if collector.current_run is not None:
+                    collector.current_run.failure_reasons.append(_gap_reason)
 
         # Stop streaming jobs. By name: so first make sure the namespace is
         # still this run's (a redeployment's streams have the same names).
@@ -4471,7 +4530,12 @@ def _run_sustained(
             # The measured window, not the configured run_duration.
             streaming_metrics.elapsed_seconds = window_seconds
             streaming_metrics.requested_executors = requested_executors.get(job_name)
-            streaming_metrics.success = pipeline_success
+            # A stream failed when it died or was resubmitted inside the
+            # window; a gate the run failed is the run's, not every
+            # stream's (LB-272).
+            streaming_metrics.success = not any(
+                f"lakebench-{job_name} was" in p for p in window_problems
+            )
             _rows = streaming_metrics.window_input_rows
             if streaming_metrics.elapsed_seconds > 0 and _rows:
                 streaming_metrics.throughput_rps = _rows / streaming_metrics.elapsed_seconds
