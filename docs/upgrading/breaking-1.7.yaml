@@ -583,6 +583,13 @@
   source: src/lakebench/cli/_aml_post.py:STOP_DRAIN_BUDGET_S
   text: '`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.'
   fix: 'Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.'
+- id: continuous-aml-runs-end-with-time-travel-reads
+  title: continuous AML runs end with time-travel reads
+  kind: default-change
+  subject: time-travel reads
+  source: src/lakebench/cli/_aml_post.py:run_time_travel
+  text: 'A continuous AML run ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live), within the per-job timeout; its check is reported beside the verdict and never fails the run.'
+  fix: 'Allow for the extra job at the end of the run (seconds at scale 1; it grows with the corpus and the number of live snapshots).'
 - id: the-datagen-generator-refuses-arguments-it-cannot-read
   title: The datagen generator refuses arguments it cannot read
   kind: refused-command

@@ -827,6 +827,23 @@ tables Lakebench creates, when `total_records` is the live row count), with
 table's count is never recorded in its place. A tick with no transactions
 snapshot records none.
 
+After the score job, `time-travel-financial` reads those snapshots back
+(`spark/scripts/time_travel_financial.py`). A hash pass fingerprints each
+recorded snapshot still in the table over every column, the batch stamping
+columns included, and writes `scoring/<run_id>/tt_hashes.json`; the read
+pass reads that file back from storage, times a full scan `VERSION AS OF`
+each snapshot with the same fingerprint, and compares it with the tick's
+`total_records` (when it is a live-row count) and with the hash pass. Each
+entry of `continuous.time_travel.ticks[]` gains `state`, `read_s`, `rows`,
+`fp_match` and `count_match`; an expired snapshot gains `expired_by` from
+`continuous.retention.rounds` (when each maintenance round ended, the
+expiry it applied, the tables whose `expire_snapshots` ran), or reads
+`missing_unexplained`. `continuous.time_travel.verdict` is `pass`, `fail`,
+`incomplete` or `not_run`, and the line beside the run verdict says why;
+it never fails the run. The job's budget is the per-job timeout less 120
+s, a Lakebench-imposed bound: past it no new scan starts and the result is
+`incomplete`.
+
 After the streams stop and every gate has decided, the score job reads
 those six snapshots of the drained tick and scores **`recall_covered`** per
 typology: the designated

@@ -270,6 +270,12 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 **What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
 
+### continuous AML runs end with time-travel reads
+
+A continuous AML run ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live), within the per-job timeout; its check is reported beside the verdict and never fails the run.
+
+**What to do:** Allow for the extra job at the end of the run (seconds at scale 1; it grows with the corpus and the number of live snapshots).
+
 ### financial reproduce reruns the alert's rule on what gold read
 
 `financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.

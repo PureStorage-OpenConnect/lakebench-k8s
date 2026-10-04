@@ -184,6 +184,22 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
+    # Time-travel reads after a continuous AML window: two full scans
+    # of each recorded transactions snapshot that is still live and one of
+    # the current one, each a single fingerprint aggregate. Sized as the
+    # scorer, which runs just before it on the same stopped deployment.
+    "time-travel-financial": {
+        "driver_cores": 2,
+        "driver_memory": "8g",
+        "executor_cores": 4,
+        "executor_memory": "16g",
+        "executor_memory_overhead": "4g",
+        "scratch_size": "50Gi",
+        "base_executors": 2,
+        "executors_per_100_scale": 4,
+        "max_executors": 10,
+        "base_partitions": 32,
+    },
     # The financial operations jobs (replay, reproduce, the reference
     # detector) took silver-build's profile through a fallback that is now an
     # error (MissingSizingProfile); these are literal copies of it, so their
@@ -1565,6 +1581,8 @@ class JobType(Enum):
     REPLAY_FINANCIAL = "replay-financial"
     REPRODUCE_FINANCIAL = "reproduce-financial"
     SCORE_FINANCIAL = "score-financial"
+    # Post-window re-read of the snapshots continuous AML ticks read.
+    TIME_TRAVEL_FINANCIAL = "time-travel-financial"
     # Reference detector + leakage gate: the "distribution checks do not
     # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
     # W4/W8 precision work, LB-130) must be validated against before it ships.
@@ -2170,6 +2188,7 @@ class SparkJobManager:
         script_map.setdefault(JobType.REPLAY_FINANCIAL, "replay_financial.py")
         script_map.setdefault(JobType.REPRODUCE_FINANCIAL, "reproduce_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
+        script_map.setdefault(JobType.TIME_TRAVEL_FINANCIAL, "time_travel_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
         # (projected from the lakebench-scripts-<role> ConfigMaps)
@@ -2720,9 +2739,11 @@ class SparkJobManager:
             }
         )
 
-        if job_type == JobType.REPRODUCE_FINANCIAL:
-            # One attempt: a reproduction writes one result, and a retried
-            # driver would only repeat a determined outcome or a crash.
+        if job_type in (JobType.REPRODUCE_FINANCIAL, JobType.TIME_TRAVEL_FINANCIAL):
+            # One attempt: a reproduction or a time-travel read writes one
+            # result, and a retried driver would only repeat a determined
+            # outcome or a crash (and, for time travel, scan everything again
+            # inside the same job budget).
             # Submission retries stay (they run before the driver starts).
             _restart_policy = {
                 "type": "OnFailure",

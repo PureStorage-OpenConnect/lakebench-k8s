@@ -287,8 +287,9 @@ def test_ships_the_same_bytes_as_v16():
         "aml_features.py",
         "tm_operations.py",
     ]
-    # Files v1.7 adds to the maps (none frozen): the AML reason-code vocabulary.
-    v16_scripts += ["aml_reason_codes.py"]
+    # Files v1.7 adds to the maps (none frozen): the AML reason-code vocabulary
+    # and the continuous time-travel reads.
+    v16_scripts += ["aml_reason_codes.py", "time_travel_financial.py"]
     want = {n: (PKG / "spark/scripts" / n).read_bytes() for n in v16_scripts}
     want["reference_score.py"] = (PKG / "aml/reference_score.py").read_bytes()
     want["fidelity_gate.py"] = (PKG / "aml/fidelity_gate.py").read_bytes()

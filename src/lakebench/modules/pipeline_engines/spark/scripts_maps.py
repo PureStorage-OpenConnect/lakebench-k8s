@@ -133,6 +133,7 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
         "replay_financial.py",
         "reproduce_financial.py",
         "score_financial.py",
+        "time_travel_financial.py",
     ),
     # The reference detector and the pre-registered gate. reference_score,
     # fidelity_gate and the seed guard live outside spark/scripts (they are
@@ -178,6 +179,7 @@ MOUNTS_BY_JOB_TYPE: dict[JobType, tuple[str, ...]] = {
     JobType.REPLAY_FINANCIAL: ROLES,
     JobType.REPRODUCE_FINANCIAL: ROLES,
     JobType.SCORE_FINANCIAL: ROLES,
+    JobType.TIME_TRAVEL_FINANCIAL: ROLES,
     JobType.SCORE_FINANCIAL_REFERENCE: ROLES,
 }
 

@@ -1236,7 +1236,8 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 Components: `datagen` (the datagen Job pods); each pipeline stage's Spark
 driver (`bronze-verify`, `silver-build`, `gold-finalize`, `bronze-ingest`,
 `silver-stream`, `gold-refresh`, `replay-financial`, `reproduce-financial`,
-`score-financial`, `score-financial-reference`); `spark-driver` (every Spark
+`score-financial`, `score-financial-reference`, `time-travel-financial`);
+`spark-driver` (every Spark
 driver); `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
 `polaris` and `postgres`.
 

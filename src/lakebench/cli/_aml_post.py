@@ -1,5 +1,6 @@
 """AML steps after the detection stages: recall scoring for batch and
-continuous runs, and the continuous gold-refresh drain.
+continuous runs, the continuous gold-refresh drain, and the time-travel
+reads of the snapshots the continuous ticks read.
 
 The drain: the CLI writes a marker object under the gold-refresh checkpoint
 whose body is the run id; the driver finishes its current tick, logs
@@ -464,3 +465,143 @@ def stop_drain(cfg, k8s, custom_api: Any = None) -> DrainResult | None:
         return None
     print_info("Draining gold-refresh: finishing its current tick before the stop...")
     return request_drain(cfg, k8s, STOP_DRAIN_BUDGET_S, run_id=run_id)
+
+
+# -- time-travel reads (after the window) -------------------------------------
+
+#: Seconds the job keeps back from the per-job budget, so it writes its
+#: partial result (``incomplete``) before the CLI stops waiting.
+_TT_BUDGET_MARGIN_S = 120
+
+
+def run_time_travel(
+    cfg,
+    run_id: str,
+    continuous: dict | None,
+    drain: DrainResult | None,
+    job_manager,
+    monitor,
+    timeout,
+    *,
+    interrupt=None,
+) -> dict[str, Any] | None:
+    """Re-read every transactions snapshot the drained run's ticks recorded
+    (``TIME_TRAVEL_FINANCIAL``) and record ``continuous.time_travel``.
+
+    Runs after the covered scorer, with the streams stopped: nothing it
+    does is inside a measured interval, and it writes only under the gold
+    ``scoring/<run_id>/`` prefix. Never raises and never fails the run; a
+    job that cannot run reads ``not_run``. Returns the record, or None
+    when the run has no continuous block."""
+    from lakebench.metrics import time_travel as tt_mod
+
+    if continuous is None:
+        return None
+    policy = tt_mod.policy(
+        continuous.get("retention"), cfg.architecture.pipeline.sustained.retention_threshold
+    )
+    try:
+        if drain is None or drain.state != "drained":
+            state = "did not run" if drain is None else drain.state
+            return tt_mod.not_run(
+                continuous, f"the gold-refresh drain {state}: no tick records were read", policy
+            )
+        records = list((continuous.get("time_travel") or {}).get("ticks") or [])
+        if not records:
+            return tt_mod.not_run(continuous, "zero recorded snapshots", policy, verdict="fail")
+        import json as _json
+        import uuid
+
+        from lakebench.spark.job import JobState, JobType
+
+        gold = cfg.platform.storage.s3.buckets.gold
+        prefix = f"scoring/{run_id}"
+        nonce = uuid.uuid4().hex
+        client = _s3_client(cfg)
+        fields = (
+            "start",
+            "cycle",
+            "table",
+            "snapshot",
+            "committed_at",
+            "total_records",
+            "pos_deletes",
+            "eq_deletes",
+            "count_source",
+        )
+        client.raw_client.put_object(
+            Bucket=gold,
+            Key=f"{prefix}/tt_input.json",
+            Body=_json.dumps(
+                {
+                    "run_id": run_id,
+                    "nonce": nonce,
+                    "records": [{k: r.get(k) for k in fields} for r in records],
+                }
+            ).encode("utf-8"),
+        )
+        app_name = f"lakebench-{JobType.TIME_TRAVEL_FINANCIAL.value}"
+        budget = max(60, int(timeout) - _TT_BUDGET_MARGIN_S)
+        console.print()
+        console.print("[bold]Stage: time-travel reads[/bold]")
+        print_info(
+            f"Re-reading {len(records)} recorded transactions snapshot(s) after the window..."
+        )
+        if interrupt is not None:
+            interrupt.creating("SparkApplication", app_name)
+        status = job_manager.submit_job(
+            JobType.TIME_TRAVEL_FINANCIAL,
+            arguments=[
+                "--input",
+                f"s3a://{gold}/{prefix}/tt_input.json",
+                "--hashes",
+                f"s3a://{gold}/{prefix}/tt_hashes.json",
+                "--output",
+                f"s3a://{gold}/{prefix}/time_travel.json",
+                "--budget-s",
+                str(budget),
+            ],
+            cycle_env={"LB_RUN_ID": run_id},
+        )
+        if interrupt is not None:
+            interrupt.submitted(status)
+        if status.state == JobState.FAILED:
+            return tt_mod.not_run(
+                continuous, f"the job was not submitted: {status.message}", policy
+            )
+        result = monitor.wait_for_completion(app_name, timeout_seconds=timeout, poll_interval=15)
+        if interrupt is not None and result.success:
+            interrupt.finished("SparkApplication", app_name)
+        if not result.success:
+            return tt_mod.not_run(continuous, f"the job did not complete: {result.message}", policy)
+        body = client.raw_client.get_object(Bucket=gold, Key=f"{prefix}/time_travel.json")
+        out = _json.loads(body["Body"].read())
+        if not isinstance(out, dict) or out.get("nonce") != nonce:
+            return tt_mod.not_run(continuous, "time_travel.json is not this submission's", policy)
+        tt = tt_mod.merge(continuous, out, policy)
+        (print_success if tt["verdict"] == "pass" else print_warning)(tt_mod.line(tt))
+        return tt
+    except Exception as e:  # noqa: BLE001 -- a measurement; never fails the run
+        print_warning(f"Time-travel reads failed ({e}); recorded as not run.")
+        return tt_mod.not_run(continuous, f"the time-travel step failed: {e}", policy)
+
+
+def settle_time_travel(cfg, run: Any, reason: str) -> None:
+    """A continuous AML run that ended before the time-travel step reads
+    ``not_run`` with *reason*, so the record never lacks a verdict."""
+    if run is None or cfg.architecture.workload.schema_type.value != "financial":
+        return
+    continuous = getattr(run, "continuous", None)
+    if continuous is None:
+        return
+    if (continuous.get("time_travel") or {}).get("verdict") is None:
+        from lakebench.metrics import time_travel as tt_mod
+
+        tt_mod.not_run(
+            continuous,
+            reason,
+            tt_mod.policy(
+                continuous.get("retention"),
+                cfg.architecture.pipeline.sustained.retention_threshold,
+            ),
+        )

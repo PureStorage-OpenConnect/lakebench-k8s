@@ -49,6 +49,7 @@ STAGES: tuple[str, ...] = (
     "reproduce-financial",
     "score-financial",
     "score-financial-reference",
+    "time-travel-financial",
 )
 
 

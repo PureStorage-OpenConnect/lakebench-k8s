@@ -1088,6 +1088,13 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
         # The investigators check and the load it put on the ticks: shown
         # beside the verdict, never a run FAIL.
         qualifiers["investigators"] = investigators_qualifier(sessions)
+    tt = (getattr(metrics, "continuous", None) or {}).get("time_travel")
+    if isinstance(tt, Mapping) and tt.get("verdict"):
+        # The time-travel check (continuous AML): shown beside the verdict,
+        # never a run FAIL.
+        from lakebench.metrics.time_travel import line as time_travel_line
+
+        qualifiers["time_travel"] = time_travel_line(tt)
     preflight = (getattr(metrics, "provenance", None) or {}).get("preflight") or {}
     if preflight.get("capacity") == "skipped":
         # --skip-preflight: nothing checked that the cluster could hold it.

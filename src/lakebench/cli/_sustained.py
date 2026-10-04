@@ -1217,12 +1217,14 @@ def applied_retentions(table_format: str, retention_threshold: str, live_streams
     }
 
 
-def continuous_retention_record(cfg) -> dict:
+def continuous_retention_record(cfg, rounds: list | None = None) -> dict[str, Any]:
     """What the continuous maintenance loop runs at, for the metrics record.
 
     Every continuous maintenance round runs beside live streams, so the
     applied expiry is the floored one. ``configured_by`` says whether the
-    config set retention_threshold or the default stood.
+    config set retention_threshold or the default stood. ``rounds`` (when
+    given) lists each round that ran (``expire_round_record``): when, at
+    which applied expiry, and on which tables.
     """
     sustained = cfg.architecture.pipeline.sustained
     applied = applied_retentions(
@@ -1235,6 +1237,41 @@ def continuous_retention_record(cfg) -> dict:
         ),
         "applied_expire": applied["expire"],
         "applied_orphan": applied["orphan"],
+        **({"rounds": list(rounds)} if rounds is not None else {}),
+    }
+
+
+def _utc_now_iso() -> str:
+    """Now on this host's clock, UTC, as the window record writes times."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+
+
+def expire_round_record(
+    n: int,
+    started_at: str,
+    ended_at: str,
+    applied_expire: str,
+    plan: list[tuple[str, str]],
+    out: dict,
+) -> dict:
+    """One entry of ``continuous.retention.rounds``: when the round ran (this
+    host's clock, UTC), the expire retention it applied, and the tables
+    whose ``expire_snapshots`` statement finished or timed out (a timed-out
+    statement may still have run). A table whose statement failed or was
+    not attempted is not listed: that round expired nothing in it."""
+    status = out.get("status") or []
+    expired = [
+        table
+        for i, (table, sql) in enumerate(plan)
+        if _maintenance_operation(sql) == "expire_snapshots"
+        and (status[i] if i < len(status) else "not_attempted") in ("ok", "timed_out")
+    ]
+    return {
+        "round": n,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "applied_expire": applied_expire,
+        "expired_tables": expired,
     }
 
 
@@ -1249,6 +1286,7 @@ def _run_iceberg_maintenance(
     budget: MaintenanceBudget | None = None,
     start_at: int = 0,
     outcomes: list | None = None,
+    rounds: list | None = None,
 ) -> int | None:
     """Run table maintenance (format-aware).
 
@@ -1264,6 +1302,10 @@ def _run_iceberg_maintenance(
     and a ``budget``. ``live_streams``: continuous streams are reading; Delta
     VACUUM then keeps Delta's default 7-day retention (a lagging stream
     would otherwise hit FileNotFound on a vacuumed file).
+
+    ``rounds`` (the continuous loop) gets one entry per round that ran
+    statements: ``expire_round_record``, which the time-travel reads use to
+    say which round expired a tick's snapshot.
     """
     from lakebench.deploy.iceberg import find_maintenance_engine
 
@@ -1333,6 +1375,7 @@ def _run_iceberg_maintenance(
 
     plan = [(table, sql) for table in table_names for sql in build_sql(table)]
     started = _time.monotonic()
+    started_at = _utc_now_iso()
     out = _run_statements(
         plan,
         engine=engine,
@@ -1344,6 +1387,12 @@ def _run_iceberg_maintenance(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
+    if rounds is not None:
+        rounds.append(
+            expire_round_record(
+                len(rounds) + 1, started_at, _utc_now_iso(), retention_threshold, plan, out
+            )
+        )
     # One row per operation with the retention it ran at: expire and orphan
     # removal run at different retentions (orphan removal floored at
     # 24 h 10 min), and one merged "expire" retention hid the orphan one.
@@ -3762,6 +3811,9 @@ def _run_sustained(
         # What each maintenance and compaction round actually did (the
         # experiment block's effective maintenance). [] = the loop ran none.
         maintenance_outcomes: list = []
+        # When each maintenance round ran and which tables it expired
+        # (continuous.retention.rounds), for the time-travel reads.
+        retention_rounds: list = []
         if collector.current_run is not None:
             if collector.current_run.maintenance_outcomes is None:
                 collector.current_run.maintenance_outcomes = []
@@ -3887,6 +3939,7 @@ def _run_sustained(
                             budget=maint_budget,
                             start_at=maintenance_start,
                             outcomes=maintenance_outcomes,
+                            rounds=retention_rounds,
                         )
                         if resume is not None:
                             maintenance_start = resume
@@ -4114,7 +4167,7 @@ def _run_sustained(
             "retention": (
                 {"skipped": "--skip-maintenance"}
                 if skip_maintenance
-                else continuous_retention_record(cfg)
+                else continuous_retention_record(cfg, rounds=retention_rounds)
             ),
         }
         if collector.current_run is not None:
@@ -4478,6 +4531,23 @@ def _run_sustained(
                 print_warning(f"Financial scoring: not scored ({_fs.get('reason')})")
             if collector.current_run is not None:
                 collector.current_run.financial_scoring = _fs
+            # Time-travel reads of the snapshots the ticks recorded: after
+            # the scorer, streams stopped, outside every measured interval.
+            # A measurement with its own check; it never fails the run.
+            if collector.current_run is not None:
+                from lakebench.cli._aml_post import run_time_travel
+
+                _stage = "time-travel"
+                run_time_travel(
+                    cfg,
+                    run_id,
+                    collector.current_run.continuous,
+                    _drain,
+                    job_manager,
+                    monitor,
+                    timeout,
+                    interrupt=_interrupt,
+                )
             _stage = "summary"
 
         # Summary. Only the green "completed" panel is success-gated: printing
@@ -4583,6 +4653,15 @@ def _run_sustained(
             pipeline_success = False
             _deps_check_failed = True
         _settle_financial_scoring(cfg, collector, pipeline_success, _abort)
+        from lakebench.cli._aml_post import settle_time_travel
+
+        settle_time_travel(
+            cfg,
+            collector.current_run,
+            "interrupted before the time-travel reads"
+            if _interrupted is not None
+            else "the run ended before the time-travel reads",
+        )
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
         _ns_watch.close()
