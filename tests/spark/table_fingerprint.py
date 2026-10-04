@@ -5,8 +5,10 @@ Not collected by pytest. Shared by the multi-cycle equivalence scenario
 product's ``common.frame_fingerprint`` (row count, the exact sum of one
 xxhash64 per row, and the column types) over every column but the ones
 named, so two tables with the same rows in any order and file layout match,
-and one changed value does not. Imported by Spark children, which have the
-Spark scripts on their path.
+and one changed value does not. ``table_rows`` hands a small table's rows
+to the parent instead, for gold, whose rounded DOUBLE KPIs an exact hash
+cannot compare (``c360_gold_compare``, LB-267). Imported by Spark children,
+which have the Spark scripts on their path.
 """
 
 from __future__ import annotations
@@ -50,3 +52,20 @@ def table_fingerprint(
         rows = int(n)
         parts.append(f"{fp}:{cols_sha}")
     return {"rows": rows or 0, "columns": cols, "sha256": "|".join(parts)}
+
+
+def table_rows(df: Any, excluded: frozenset[str] = NOT_BUSINESS) -> dict[str, Any]:
+    """``{columns, types, rows}`` of a small table, JSON-ready, for a parent
+    process to compare cell by cell (``c360_gold_compare``): the columns
+    sorted, as in ``table_fingerprint``; dates and timestamps as ISO text.
+    Collects every row, so only for tables of a few hundred rows."""
+    from datetime import date, datetime
+
+    cols = sorted(c for c in df.columns if c not in excluded)
+    types = {f.name: f.dataType.simpleString() for f in df.schema.fields if f.name in cols}
+
+    def cell(v: Any) -> Any:
+        return v.isoformat() if isinstance(v, (date, datetime)) else v
+
+    rows = [[cell(r[c]) for c in cols] for r in df.select(*cols).collect()]
+    return {"columns": cols, "types": types, "rows": rows}

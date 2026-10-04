@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 import pytest
+from c360_gold_compare import gold_differences, product_mismatch
 
 pytest.importorskip("pyspark")
 
@@ -61,13 +62,27 @@ def test_later_cycles_took_the_incremental_path(result, fmt):
 @pytest.mark.parametrize("layer", ["silver", "gold"])
 def test_incremental_cycles_equal_one_rebuild(result, fmt, layer):
     fp = result[fmt][layer]
-    assert fp["incremental"]["rows"] > 0
-    assert fp["incremental"] == fp["rebuild"], _why(result[fmt])
+    if layer == "silver":
+        assert fp["incremental"]["rows"] > 0
+        assert fp["incremental"] == fp["rebuild"], _why(result[fmt])
+        return
+    # Gold: counts exact, rounded DOUBLE KPIs within one quantum (LB-267).
+    assert len(fp["incremental"]["rows"]) > 0
+    assert gold_differences(fp["incremental"], fp["rebuild"]) == [], _why(result[fmt])
+    assert product_mismatch(fp["incremental"], fp["rebuild"]) is None
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("layer", ["silver", "gold"])
 def test_one_changed_amount_changes_the_fingerprint(result, fmt, layer):
     fp = result[fmt][layer]
-    assert fp["changed"]["rows"] == fp["rebuild"]["rows"]
-    assert fp["changed"]["sha256"] != fp["rebuild"]["sha256"]
+    if layer == "silver":
+        assert fp["changed"]["rows"] == fp["rebuild"]["rows"]
+        assert fp["changed"]["sha256"] != fp["rebuild"]["sha256"]
+        return
+    assert len(fp["changed"]["rows"]) == len(fp["rebuild"]["rows"])
+    problems = gold_differences(fp["changed"], fp["rebuild"])
+    # One purchase moved, so one day, and its revenue among what moved.
+    assert len({p.split()[0] for p in problems}) == 1, problems
+    assert any(" total_daily_revenue:" in p for p in problems), problems
+    assert product_mismatch(fp["changed"], fp["rebuild"]) is not None

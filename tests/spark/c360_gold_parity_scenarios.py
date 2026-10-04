@@ -17,7 +17,10 @@ Silver is the product's transform of the generator model's rows
 - changed: one silver purchase's amount changed by one cent, then
   ``gold_finalize`` again.
 
-Gold tables are compared by ``table_fingerprint`` (shared with C36-2).
+Each gold table goes back to the parent as rows (``table_rows``), which
+compares them with ``c360_gold_compare``: an exact hash of gold is not
+stable, because the two averages of a DOUBLE amount can land one cent apart
+between two correct builds (LB-267).
 
 Usage: python c360_gold_parity_scenarios.py <jars> <work_dir>
 Prints one JSON object on the last stdout line.
@@ -32,7 +35,7 @@ import sys
 from typing import Any
 
 import gold_repeat_scenarios as sc
-from table_fingerprint import table_fingerprint
+from table_fingerprint import table_rows
 
 CATALOGS = {"iceberg": "ice", "delta": "spark_catalog"}
 
@@ -106,12 +109,12 @@ def batch_gold(spark, work: str, fmt: str, gold_table: str) -> dict:
     _env(work, fmt, gold_table)
     name = "gold_finalize" if fmt == "iceberg" else "gold_finalize_delta"
     importlib.import_module(name).main()
-    return table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
+    return table_rows(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
 
 
 def stream_ticks(spark, work: str, fmt: str, parts: list, gold_table: str) -> list:
     """Three refresh ticks, silver growing by one part before each; after
-    each, ``(stream gold, batch gold over the same silver)`` fingerprints."""
+    each, ``(stream gold, batch gold over the same silver)`` rows."""
     from pyspark.sql import SparkSession
 
     name = "gold_refresh" if fmt == "iceberg" else "gold_refresh_delta"
@@ -127,7 +130,7 @@ def stream_ticks(spark, work: str, fmt: str, parts: list, gold_table: str) -> li
         _write_silver(spark, fmt, part, "overwrite" if i == 0 else "append")
         _env(work, fmt, gold_table)
         tick(None, i)
-        stream = table_fingerprint(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
+        stream = table_rows(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
         out.append((stream, batch_gold(spark, work, fmt, f"gold.parity_batch_{i}")))
     return out
 
@@ -151,6 +154,10 @@ def scenario(spark, work: str, fmt: str) -> dict:
     out = {
         "ticks": [{"stream": s, "batch": b} for s, b in ticks],
         "silver_rows": spark.table(f"{CATALOGS[fmt]}.{sc.SILVER}").count(),
+        "silver_types": {
+            f.name: f.dataType.simpleString()
+            for f in spark.table(f"{CATALOGS[fmt]}.{sc.SILVER}").schema.fields
+        },
     }
     _write_silver(spark, fmt, one_cent_changed(silver), "overwrite")
     out["changed"] = batch_gold(spark, work, fmt, "gold.parity_changed")

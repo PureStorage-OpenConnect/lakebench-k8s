@@ -15,14 +15,18 @@ Each job is the real script started as its own driver, as on the cluster:
 - rebuild: one ``silver_build`` and one ``gold_finalize`` over every file
   (``LB_BRONZE_CYCLE`` unset, the single-cycle read of the whole prefix);
 - changed: the rebuild again with one cycle-1 purchase's
-  ``transaction_amount`` changed, which the fingerprints must tell apart.
+  ``transaction_amount`` changed by one cent, which the comparisons must
+  tell apart.
 
 Every job takes ``LB_DATA_CLOCK`` = the exclusive end of the series window,
 as ``job.py`` gives every cycle of a multi-cycle Customer 360 run.
 
-The fingerprint is sha256 of the sorted rows over the business columns
-(``silver_processing_timestamp``, ``_batch_id`` and ``interaction_payload``
-left out): order-independent and exact.
+Silver is compared by ``table_fingerprint`` over its business columns
+(``silver_processing_timestamp`` left out): order-independent and exact.
+Gold goes back to the parent as rows (``table_rows``) for
+``c360_gold_compare``: its two averages of a DOUBLE amount can land one
+cent apart between two correct builds, so an exact hash of gold is not
+stable (LB-267).
 
 Usage: python c360_multicycle_equivalence_scenarios.py <jars> <work_dir>
 Prints one JSON object on the last stdout line.
@@ -42,7 +46,7 @@ from pathlib import Path
 from c360_generator_model import generate
 from c360_stream_scenarios import BRONZE_DDL
 from delta_silver_epoch_scenarios import ICEBERG_CATALOG, _submit_args
-from table_fingerprint import table_fingerprint
+from table_fingerprint import table_fingerprint, table_rows
 
 from lakebench.config.c360_run import cycle_windows
 
@@ -141,7 +145,9 @@ def _table(spark, work: str, fmt: str, layer: str):
 
 
 def fingerprint(spark, work: str, fmt: str, layer: str) -> dict:
-    return table_fingerprint(_table(spark, work, fmt, layer))
+    """Silver's exact fingerprint; gold's rows (``c360_gold_compare``)."""
+    table = _table(spark, work, fmt, layer)
+    return table_rows(table) if layer == "gold" else table_fingerprint(table)
 
 
 def _fresh(root: str, name: str) -> str:
