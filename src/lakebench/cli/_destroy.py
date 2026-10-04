@@ -29,6 +29,7 @@ from ._helpers import (
     _journal_safe,
     console,
     deprecated_short_f_force,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -546,7 +547,7 @@ def _destroy_impl(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
                 f"{left_note}"
-                f"\n\nTo re-deploy: [bold]lakebench deploy[/bold]",
+                f"\n\nTo re-deploy: [bold]lakebench deploy {esc(config_file)}[/bold]",
                 title=(
                     f"Destroy Complete; {len(left_registered)} tables left registered"
                     if left_registered

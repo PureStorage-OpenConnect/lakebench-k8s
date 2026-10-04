@@ -39,7 +39,9 @@ def _destroy(monkeypatch, *args, progress=()):
     def destroy_all(progress_callback=None, **_kw):
         for component, status, message in progress:
             progress_callback(component, status, message)
-        return [DeploymentResult(component="namespace", status=DeploymentStatus.SUCCESS)]
+        return [
+            DeploymentResult(component="namespace", status=DeploymentStatus.SUCCESS, message="")
+        ]
 
     engine.destroy_all.side_effect = destroy_all
     monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda *a, **k: engine)
@@ -68,3 +70,6 @@ def test_destroy_progress_has_no_internal_heading_or_negative_time(monkeypatch):
     lines = [line.strip() for line in res.output.splitlines()]
     assert "category1" not in lines
     assert "-0.0s" not in res.output
+    # The re-deploy hint names the config it came from.
+    flat = "".join(ch for ch in res.output if not ch.isspace() and ch != "\u2502")
+    assert f"lakebenchdeploy{FIXTURE}" in flat
