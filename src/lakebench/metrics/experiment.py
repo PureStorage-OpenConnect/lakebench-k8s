@@ -347,6 +347,12 @@ def experiment_inputs(
         "date_range_days": None,
     }
     corpus["id"] = _short_hash(corpus)
+    # The id hashes the seed itself (ids recorded before stay valid); the
+    # record keeps it in plaintext only when it is a public development seed
+    # (metrics.seed_record).
+    from lakebench.metrics.seed_record import recorded_seed
+
+    corpus["seed"] = recorded_seed(seed)
     # The id keeps hashing the declared overrides (null when unset), so ids
     # recorded before this stay valid. The record shows what ran instead:
     # the resolved customer id space for c360, and no date_range_days,
@@ -713,12 +719,18 @@ def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
         # Corpus parameters the datagen pods ran with (their container args),
         # when the fleet record carries them.
         "observed": bool(fleet) and any(fleet.get(k) is not None for k in ("seed", "scale")),
-        "seed": fleet.get("seed"),
+        "seed": _recorded_seed(fleet.get("seed")),
         "scale": fleet.get("scale"),
         "data_quality": fleet.get("data_quality"),
         "mixed_params": list(fleet.get("mixed_params") or []),
     }
     return out
+
+
+def _recorded_seed(value: Any) -> Any:
+    from lakebench.metrics.seed_record import recorded_seed
+
+    return recorded_seed(value)
 
 
 def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[dict, list[str]]:
@@ -735,15 +747,41 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
         )
     if dg.get("pod_image") and "," in str(dg["pod_image"]):
         problems.append(f"datagen pods ran different images ({dg['pod_image']})")
-    for key in ("seed", "scale"):
-        seen = dg.get(key)
-        if seen is None:
-            continue
-        declared = corpus.get(key)
+    # Both sides as a record keeps them (metrics.seed_record), also for a
+    # block rebuilt from an older record's plaintext inputs: equal seeds give
+    # equal forms, and a protected seed is never printed.
+    if corpus.get("seed") is not None:
+        out["seed"] = _recorded_seed(corpus["seed"])
+    seen_seed = _recorded_seed(dg.get("seed"))
+    if seen_seed is not None:
+        declared_seed = out.get("seed")
+        withheld = any(
+            isinstance(s, Mapping) and s.get("seed_ref") is None for s in (declared_seed, seen_seed)
+        )
+        if declared_seed is not None and withheld:
+            problems.append(
+                "the config seed and the seed the datagen pods ran cannot be checked "
+                "(the held-out record cannot be read)"
+            )
+        elif declared_seed is not None and declared_seed != seen_seed:
+            if isinstance(declared_seed, int) and isinstance(seen_seed, int):
+                problems.append(
+                    f"config seed {declared_seed!r} but the datagen pods ran {seen_seed!r}"
+                )
+            else:
+                problems.append(
+                    "the config seed is not the seed the datagen pods ran (values withheld)"
+                )
+        out["seed"] = seen_seed
+    seen_scale = dg.get("scale")
+    if seen_scale is not None:
+        declared_scale = corpus.get("scale")
         # The pods get --scale as "%.6f" (deploy/datagen.py).
-        if declared is not None and abs(float(declared) - float(seen)) > 1e-6:
-            problems.append(f"config {key} {declared!r} but the datagen pods ran {seen!r}")
-        out[key] = int(seen) if key == "seed" else float(seen)
+        if declared_scale is not None and abs(float(declared_scale) - float(seen_scale)) > 1e-6:
+            problems.append(
+                f"config scale {declared_scale!r} but the datagen pods ran {seen_scale!r}"
+            )
+        out["scale"] = float(seen_scale)
     if dg.get("pod_image") and "," not in str(dg["pod_image"]):
         if corpus.get("generator_image") and dg["pod_image"] != corpus["generator_image"]:
             problems.append(

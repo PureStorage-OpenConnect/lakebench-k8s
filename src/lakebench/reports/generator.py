@@ -28,6 +28,7 @@ from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.bounds import binding_caps as _binding_caps
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import direction_hint
+from lakebench.metrics.seed_record import seed_label as _seed_label
 from lakebench.reports import copy as _words
 
 logger = logging.getLogger(__name__)
@@ -3428,7 +3429,7 @@ class ReportGenerator:
             ("Workload", f"{w.get('name')} {w.get('version')}"),
             ("Generator model version", w.get("generator_model_version") or "none"),
             ("Corpus id", c.get("id")),
-            ("Seed", c.get("seed")),
+            ("Seed", _seed_label(c.get("seed"))),
             ("Corpus role", c.get("corpus_role") or "none"),
             ("Scale", c.get("scale")),
             ("Mode", _words.mode_label(exp.get("mode"))),

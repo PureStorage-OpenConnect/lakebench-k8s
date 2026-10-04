@@ -646,7 +646,13 @@ class PipelineMetrics:
         if self.cycles:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         if self.datagen_fleet is not None:
-            d["datagen_fleet"] = self.datagen_fleet
+            fleet = self.datagen_fleet
+            if isinstance(fleet, dict) and "seed" in fleet:
+                # A sidecar an older generate wrote kept the seed as given.
+                from lakebench.metrics.seed_record import recorded_seed
+
+                fleet = {**fleet, "seed": recorded_seed(fleet["seed"])}
+            d["datagen_fleet"] = fleet
         if self.datagen_stale_bronze is not None:
             d.setdefault("datagen", {})["stale_bronze"] = dict(self.datagen_stale_bronze)
         if self.financial_scoring is not None:

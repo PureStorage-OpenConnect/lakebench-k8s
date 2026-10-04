@@ -1877,6 +1877,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `PYTHONPATH=src python -m lakebench` instead.
 
 ### Fixed
+- Run records, the datagen fleet record and report.html never show a protected AML seed: it is recorded as its salted reference and role, and withheld when the held-out record cannot be read.
 - **A redeploy refreshes the namespace's committed-sha stamp.** A
   namespace already stamped with this deployment's identity was left as
   it was, so `lakebench.deployment/committed-sha` kept naming the code of

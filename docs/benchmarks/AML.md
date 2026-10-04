@@ -327,7 +327,12 @@ as unidentified. The release gate's `records` and `support-record` checks
 refuse a held-out `corpus_role`, a recorded seed that hashes to a held-out
 seed or is withheld, and an AML record with no corpus seed or one it cannot
 read, with that reason alone, naming the run id and the role or what could
-not be read, never the seed. The release evidence also rests on the
+not be read, never the seed. A run record, its datagen fleet record and its
+HTML report never show a protected seed (held out, spent or with a recorded
+look): it is recorded as its salted reference (`{"seed_ref": ..., "role":
+...}`, the role set for a held-out seed), and as withheld (`{"seed_ref":
+null}`) when the held-out record cannot be read. Any other seed stays in
+plaintext, so a record names its corpus; the corpus id is unchanged. The release evidence also rests on the
 expected-results corpus id and bronze-verify's in-run refusal. `destroy` and the
 read-only commands skip the load-time seed check, so a deployment that
 generated a registered corpus can still be torn down.

@@ -244,7 +244,8 @@ class FleetSummary:
         return {
             "image": self.image,
             "image_ids": list(self.image_ids),
-            "seed": self.seed,
+            # Plaintext only for a public development seed (metrics.seed_record).
+            "seed": _recorded_seed(self.seed),
             "scale": self.scale,
             "schema": self.schema,
             "pods_expected": self.pods_expected,
@@ -336,6 +337,12 @@ def collect_from_pod_logs(
             summary.mixed_params.append(f"{key} (container args)")
             summary.data_quality = "mixed"
     return summary
+
+
+def _recorded_seed(value: Any) -> Any:
+    from lakebench.metrics.seed_record import recorded_seed
+
+    return recorded_seed(value)
 
 
 def _datagen_args(pod: Any) -> dict[str, Any]:
