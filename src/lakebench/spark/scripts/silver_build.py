@@ -30,7 +30,6 @@ from common import (
     log,
     one_line,
     path_size_gb_strict,
-    reset_stream_tables,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -391,6 +390,34 @@ def tag_batch(df_bronze, cycle, appending):
     return df_bronze.withColumn("_batch_id", when(n == "", lit(0)).otherwise(n).cast("bigint"))
 
 
+def drop_if_columns_move(spark, silver_tbl, silver_df):
+    """Drop an existing silver table whose columns are not *silver_df*'s, in
+    order, just before a full build writes it.
+
+    A Hive Metastore refuses a createOrReplace whose columns change type by
+    position (a table a continuous run wrote, with _stream_id; a table a 1.7
+    dev build wrote), and each refused attempt left its data files in the
+    bucket. The drop is the catalog entry only: no file is deleted, so no
+    bucket ownership is at stake, and the old table's files stay in the
+    bucket. A table with the same columns (one 1.6 or this version wrote)
+    keeps the atomic replace, so a write that fails leaves the old table.
+    """
+    if not table_exists(spark, silver_tbl):
+        return
+    try:
+        existing = spark.table(silver_tbl).columns
+    except Exception as e:  # noqa: BLE001 -- unreadable: replace it from scratch
+        log(f"Full rebuild: cannot read {silver_tbl} columns ({one_line(e)})")
+        existing = None
+    if existing == silver_df.columns:
+        return
+    spark.sql(f"DROP TABLE IF EXISTS {silver_tbl}")
+    log(
+        f"Full rebuild: dropped {silver_tbl} (catalog entry only; its files stay in the "
+        "bucket): its columns differ"
+    )
+
+
 def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
 
@@ -428,6 +455,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
+        drop_if_columns_move(spark, silver_tbl, silver_df)
         (
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
@@ -500,6 +528,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
+        drop_if_columns_move(spark, silver_tbl, silver_df)
         writer = (
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
@@ -608,15 +637,6 @@ if not appending and _table_exists(spark, silver_tbl):
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "
             "re-run with --force-rebuild to opt in"
         )
-    # A full build drops the old table instead of replacing it in place: a
-    # Hive Metastore refuses a createOrReplace whose columns move by position
-    # (a table 1.6, a 1.7 dev build or a continuous run wrote), and each
-    # refused attempt left its data files in the bucket. Only a table whose
-    # directory this deployment's silver bucket owns loses its files.
-    _dropped = reset_stream_tables(
-        spark, [silver_tbl], owned_uris=[silver_uri], keep_uris=[], label="Full rebuild"
-    )
-    log(f"Full rebuild: dropped {', '.join(_dropped) or 'nothing'} before writing")
 
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)

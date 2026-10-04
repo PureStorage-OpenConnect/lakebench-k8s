@@ -857,7 +857,7 @@ def _delete_children(spark, location, keep=()):
     return n
 
 
-def reset_stream_tables(spark, tables, *, owned_uris, keep_uris, label="Continuous reset"):
+def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
     """Drop the tables a continuous run writes, with their data. Returns the
     tables that existed and were dropped.
 
@@ -876,21 +876,21 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris, label="Continuo
     dropped = []
     for fq in tables:
         if not table_exists(spark, fq):
-            log(f"{label}: {fq} does not exist")
+            log(f"Continuous reset: {fq} does not exist")
             continue
         try:
             location, provider = _describe_table(spark, fq)
         except Exception as e:  # noqa: BLE001
-            log(f"{label}: no location for {fq} ({one_line(e)})")
+            log(f"Continuous reset: no location for {fq} ({one_line(e)})")
             location, provider = None, None
         iceberg = (provider or "").lower() == "iceberg"
         name = fq.rsplit(".", 1)[-1]
         owned = bool(location) and owned_table_dir(location, owned_uris, keep_uris, name)
         if location and not owned:
-            log(f"{label}: kept {location} (outside this deployment or not its own dir)")
+            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
         if owned:
             n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
-            log(f"{label}: deleted {n} data entries under {location}")
+            log(f"Continuous reset: deleted {n} data entries under {location}")
         how = "DROP"
         # LB-188: PURGE deletes every file the table metadata references,
         # wherever it sits, so it runs only for a table whose directory this
@@ -903,16 +903,16 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris, label="Continuo
                 spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
                 how = "DROP PURGE"
             except Exception as e:  # noqa: BLE001
-                log(f"{label}: PURGE of {fq} refused ({one_line(e)}); plain DROP")
+                log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
         if how == "DROP":
             spark.sql(f"DROP TABLE IF EXISTS {fq}")
         dropped.append(fq)
-        log(f"{label}: {how} {fq} ({provider or 'unknown provider'})")
+        log(f"Continuous reset: {how} {fq} ({provider or 'unknown provider'})")
         if owned:
             fs, path = _hadoop_fs(spark, location)
             if fs.exists(path):
                 fs.delete(path, True)
-                log(f"{label}: deleted {location}")
+                log(f"Continuous reset: deleted {location}")
     return dropped
 
 

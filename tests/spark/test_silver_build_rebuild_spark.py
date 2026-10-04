@@ -110,3 +110,17 @@ def test_rebuilt_silver_keeps_the_batch_id_last(result, case):
     # whose columns move by position.
     c = result[case]
     assert c["columns_after_rebuild"] and c["columns_after_rebuild"][-1] == "_batch_id", _why(c)
+
+
+def test_forced_rebuild_with_the_same_columns_keeps_the_atomic_replace(result):
+    c = result["columns_iceberg"]
+    assert c["rcs"] == [0] and c["same_rc"] == 0, _why(c)
+    assert c["same_drop"] == [], _why(c)
+
+
+def test_forced_rebuild_of_a_table_with_other_columns_drops_it_first(result):
+    c = result["columns_iceberg"]
+    assert c["moved_rc"] == 0, _why(c)
+    assert any("dropped" in ln and "columns differ" in ln for ln in c["moved_drop"]), _why(c)
+    assert "_stream_id" not in c["columns_after"] and c["columns_after"][-1] == "_batch_id"
+    assert c["held_after"] == {"2:0": 9}, _why(c)

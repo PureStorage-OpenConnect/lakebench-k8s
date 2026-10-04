@@ -110,6 +110,41 @@ def failed_probe(spark, jars, root, fmt):
     }
 
 
+def full_rebuild_columns(spark, jars, root):
+    """A forced full rebuild keeps the atomic replace when the table already
+    has the frame's columns, and drops the table first when it does not (a
+    continuous run's table has _stream_id; a Hive Metastore refuses a
+    replace that moves columns)."""
+    work = _fresh(root, "columns-iceberg")
+    log = []
+    first = run(spark, jars, work, 0, [0], log=log, fmt="iceberg")
+    _clear_bronze(work)
+    stage_bronze(spark, work, 1, 0)
+    same_rc = silver_job(jars, work, 0, 0, force=True, log=log, fmt="iceberg")
+    same_drop = log[-1]["full_rebuild"]
+    cat = "icex_columns"
+    spark.conf.set(f"spark.sql.catalog.{cat}", "org.apache.iceberg.spark.SparkCatalog")
+    spark.conf.set(f"spark.sql.catalog.{cat}.type", "hadoop")
+    spark.conf.set(f"spark.sql.catalog.{cat}.warehouse", f"file://{work}/ice-wh")
+    spark.sql(
+        f"ALTER TABLE {cat}.silver.customer_interactions_enriched ADD COLUMN _stream_id string"
+    )
+    _clear_bronze(work)
+    stage_bronze(spark, work, 2, 0)
+    moved_rc = silver_job(jars, work, 0, 0, force=True, log=log, fmt="iceberg")
+    table = spark.read.format("iceberg").load(_table_dir(work, "iceberg"))
+    return {
+        "rcs": first,
+        "same_rc": same_rc,
+        "same_drop": same_drop,
+        "moved_rc": moved_rc,
+        "moved_drop": log[-1]["full_rebuild"],
+        "columns_after": table.columns,
+        "held_after": silver_cycles(spark, work, "iceberg"),
+        "log": log,
+    }
+
+
 def unreadable_iceberg_metadata(spark, jars, root):
     """The table's current metadata file cannot be read: the existence check
     itself fails, which must not count as "no table"."""
@@ -190,6 +225,7 @@ def main():
         "probe_iceberg": failed_probe(spark, jars, root, "iceberg"),
         "probe_delta": failed_probe(spark, jars, root, "delta"),
         "metadata_iceberg": unreadable_iceberg_metadata(spark, jars, root),
+        "columns_iceberg": full_rebuild_columns(spark, jars, root),
         "cleaned_delta": cleaned_delta(spark, jars, root),
         "logless_delta": logless_delta_with_files(spark, jars, root),
     }

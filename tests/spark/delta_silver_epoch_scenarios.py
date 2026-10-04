@@ -134,6 +134,8 @@ def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=Non
                 "force": force,
                 "rc": proc.returncode,
                 "tail": (proc.stdout + proc.stderr)[-3000:],
+                # silver_build.py's drop decision, wherever it fell in the output.
+                "full_rebuild": [ln for ln in proc.stdout.splitlines() if "Full rebuild:" in ln],
             }
         )
     return proc.returncode
