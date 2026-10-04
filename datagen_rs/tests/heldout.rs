@@ -135,6 +135,33 @@ fn compiled_floor_is_initialised() {
     }
 }
 
+#[test]
+fn compiled_floor_is_the_tracked_file() {
+    // Every role hash of the tracked hash file, in order, under the file's
+    // salt, is compiled in (SPEC section 10), and the production floor loads
+    // with the production file.
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/lakebench/spark/data/aml/heldout_hashes.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["salt"].as_str(), Some(FLOOR_SALT));
+    for r in Role::ALL {
+        let file: Vec<&str> = v["roles"][r.name()]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h.as_str().unwrap())
+            .collect();
+        let floor: Vec<&str> = FLOOR
+            .iter()
+            .filter(|(f, _)| *f == r)
+            .map(|(_, h)| *h)
+            .collect();
+        assert_eq!(floor, file, "{}", r.name());
+    }
+    assert!(HeldOut::from_json(&text).is_ok());
+}
+
 fn generate(env: Option<&str>) -> std::process::Output {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-heldout-gen");
     let mut c = Command::new(env!("CARGO_BIN_EXE_generate"));

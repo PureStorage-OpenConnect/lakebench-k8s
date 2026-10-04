@@ -442,9 +442,9 @@ def calibration_seed() -> int:
 # guard (QR-10) calls for every commit once it lands. Every registered hash is
 # also compiled in below (_HELDOUT_FLOOR; the owner's redraw appends to both),
 # checked under its own salt, so a stripped or re-salted file still protects
-# those seeds; tests/test_heldout.py holds the two equal. The Rust floor
-# (datagen_rs/src/heldout.rs) keeps the first hashes until the next datagen
-# image lifts the rest. The salt is public: a hash hides only a seed drawn uniformly
+# those seeds; tests/test_heldout.py holds the two equal, and equal to the
+# Rust floor (datagen_rs/src/heldout.rs): a redraw appends there too, which
+# needs a new datagen image. The salt is public: a hash hides only a seed drawn uniformly
 # from 63 bits; an 8-digit seed is recovered from its hash in seconds.
 
 HELDOUT_FILENAME = "heldout_hashes.json"

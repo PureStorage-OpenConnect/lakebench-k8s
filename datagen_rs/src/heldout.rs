@@ -4,11 +4,13 @@
 //! plaintext to anything that logs. The generator reads the hash file named by
 //! `LB_HELDOUT_HASHES` (`spark/data/aml/heldout_hashes.json`, mounted from a
 //! ConfigMap) and hashes the seed it was given:
-//! `sha256(bytes.fromhex(salt) + b":" + decimal(seed))`. The current role
-//! hashes are also compiled in as a floor under their own salt, so a stripped
-//! or re-salted file still protects them; seeds drawn later are in the file
-//! only. `src/lakebench/config/datagen_seed.py` is the Python side of the same
-//! rule; `tests/test_heldout.py` checks the two floors are equal.
+//! `sha256(bytes.fromhex(salt) + b":" + decimal(seed))`. Every registered
+//! role hash, the retired ones included, is also compiled in as a floor under
+//! its own salt, so a stripped or re-salted file still protects them. The
+//! floor is appended to only: a redraw appends to the file, to
+//! `_HELDOUT_FLOOR` in `src/lakebench/config/datagen_seed.py` (the Python side
+//! of the same rule) and to the floor here, and needs a new image.
+//! `tests/test_heldout.py` holds the three equal.
 
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
@@ -37,7 +39,7 @@ impl Role {
     }
 }
 
-// BEGIN HELDOUT FLOOR (the owner's registration; never edited)
+// BEGIN HELDOUT FLOOR (the owner's registrations, appended to only)
 pub const FLOOR_SALT: &str = "267910981b7370a7aaed163588284507373136289bfeec908df42ae15e1d75aa";
 pub const FLOOR: &[(Role, &str)] = &[
     (
@@ -45,8 +47,16 @@ pub const FLOOR: &[(Role, &str)] = &[
         "206064919eb86d06940ba8f4a66510605707e6cfe99bb2564f47dc859c2cba06",
     ),
     (
+        Role::Evaluation,
+        "e67e2ade9d5ff63721d79f5bb2aed5613fcf936a2c3e9bc80bc1697ee26e1c37",
+    ),
+    (
         Role::Robustness,
         "9d730778dff8ae49bc2eb428a83016de00a9f227e6c0a9c43f84043fe2869562",
+    ),
+    (
+        Role::Robustness,
+        "26b6c7817d64c1e6dfc853157a1c501e166cd4e5edcecab6549f5f3d34d696fc",
     ),
 ];
 // END HELDOUT FLOOR

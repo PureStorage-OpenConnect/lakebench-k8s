@@ -72,17 +72,22 @@ def test_floor_matches_file():
 
 
 def test_floor_matches_rust():
+    # The Rust floor holds every hash of the Python floor, in order, under the
+    # same salt (SPEC section 10: the current role hashes are compiled into
+    # the generator). A redraw appends to the file and _HELDOUT_FLOOR; it is
+    # not finished until heldout.rs carries the same hashes and the look image
+    # is rebuilt from it (test_aml_protocol_look_image pins the image inputs).
     src = (ROOT / "datagen_rs/src/heldout.rs").read_text()
-    salt = re.search(r'FLOOR_SALT: &str = "([0-9a-f]{64})"', src)
-    assert salt and salt.group(1) == ds._HELDOUT_FLOOR["salt"]
+    salt = re.findall(r'FLOOR_SALT: &str = "([0-9a-f]{64})"', src)
+    assert salt == [ds._HELDOUT_FLOOR["salt"]]
+    block = re.findall(r"BEGIN HELDOUT FLOOR.*?END HELDOUT FLOOR", src, re.S)
+    assert len(block) == 1
+    entries = re.findall(r'Role::(\w+),\s*"([0-9a-f]{64})"', block[0])
+    assert len(entries) == len(re.findall(r"Role::", block[0]))
+    assert {r for r, _ in entries} <= {r.capitalize() for r in ds.PROTECTED_ROLES}
     for role in ds.PROTECTED_ROLES:
-        found = re.findall(rf'Role::{role.capitalize()},\s*"([0-9a-f]{{64}})"', src)
-        # The Rust floor is a prefix of the Python one: hashes the owner
-        # appended after the image was built reach it with the next image.
-        floor = tuple(ds._HELDOUT_FLOOR["roles"][role])
-        assert found and tuple(found) == floor[: len(found)], role
-        # ...and it starts the role's list in the tracked file.
-        assert found[:1] == json.loads(PROD.read_text())["roles"][role][:1], role
+        found = tuple(h for r, h in entries if r == role.capitalize())
+        assert found == tuple(ds._HELDOUT_FLOOR["roles"][role]), role
 
 
 def test_fixture_is_not_production():

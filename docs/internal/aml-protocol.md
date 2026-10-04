@@ -36,8 +36,11 @@ log, and R-numbers to its rules.
   with `--void` and a reason naming the void decision); and appends the old seed to the hash file's `spent`. The
   append-only rule (`heldout_history_problems`) accepts that spent append
   only beside a completed look or a burn for the same role and seed. The
-  Rust floor keeps the first hashes until the next datagen image; the
-  generator reads every hash from the mounted file. The evaluation and
+  tool does not write the Rust floor (`datagen_rs/src/heldout.rs`): a lane
+  appends the new hashes there, the look image is rebuilt from that commit
+  and re-pinned, and `tests/test_heldout.py` fails until the file and both
+  floors hold the same hashes. The generator also reads every hash from the
+  mounted file. The evaluation and
   robustness seeds that appeared in public history on 2026-09-24 and
   2026-09-25 are retired this way (OA2). Every agent on the lab host runs
   as root, so the 0600 mode keeps the seed files from other accounts, not
