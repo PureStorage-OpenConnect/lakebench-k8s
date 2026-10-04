@@ -473,6 +473,22 @@ class TestFixPass:
                 commit_sha="a",
             )
 
+    def test_bound_condition_carries_no_counts(self):
+        def run(granted):
+            r = _run(_cfg(pipeline={"mode": "sustained"}))
+            r.streaming.append(
+                StreamingJobMetrics(
+                    job_name="s", job_type="silver-stream", requested_executors=granted
+                )
+            )
+            return r.to_dict()
+
+        a, b = run(1), run(2)
+        ea, eb = ex.experiment_of(a), ex.experiment_of(b)
+        assert ea["limits"]["bound"] != eb["limits"]["bound"]  # evidence keeps the counts
+        diffs = ex.condition_differences(ea, eb, a, b)
+        assert not [d for d in diffs if d.startswith("Lakebench limits")]
+
     def test_iterations_come_from_the_recorded_benchmark(self):
         r = _run(_cfg(benchmark={"iterations": 3}))
         r.benchmark.iterations = 5

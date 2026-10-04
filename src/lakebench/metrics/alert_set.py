@@ -13,14 +13,12 @@ not part of it, so two runs that raised the same alerts read equal. The
 fingerprint is per rule (``by_rule``: rows and an order-independent hash sum)
 with the totals beside it.
 
-Comparison (``diff_alert_sets``) is a results check, ladder step 5 between
-the sides and step 2 inside one: any difference in a rule's rows or hash is
-"different results". A record that should carry one and does not
-(``alert_set_missing``: an AML batch record written by 1.7, exp1 or exp2)
-has results not established, step 4, so a failed or skipped fingerprint
-never lets a pair through unchecked. A 1.6 record never had one; absent on a
-1.6 side is a note, not a refusal (and such a pair is normally refused
-earlier, on its workload version).
+Comparison (``diff_alert_sets``) is a results check: any difference in a
+rule's rows or hash is "different results". A record that should carry one
+and does not (``alert_set_missing``: an AML batch record written by 1.7,
+exp1 or exp2) cannot show its results match another run's. A 1.6 record
+never had one. The HTML report shows the alert set so a reader can compare
+two runs.
 
 The continuous alert set is a different, diagnostic value
 (``results.alert_set_continuous``, from the covered score after the drain)
@@ -172,8 +170,8 @@ def diff_alert_sets(
 ) -> list[str]:
     """One line per difference between two recorded alert sets: a refusal
     each ("different results"). Empty when they are equal, and when either
-    is absent (absence is ``alert_set_missing``'s and ``alert_set_notes``'
-    business, not a difference)."""
+    is absent (absence is ``alert_set_missing``'s business, not a
+    difference)."""
     if a is None or b is None:
         return []
     out: list[str] = []

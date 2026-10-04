@@ -3516,10 +3516,11 @@ class ReportGenerator:
         )
         return (
             "<section><h2>Experiment</h2>"
-            "<p>Two runs with equal identity digests are repeats of one experiment. Two runs "
-            "that differ in one thing (the recipe, say) can be compared when their workload, "
-            "corpus and mode match and every result fingerprint below (and, for an AML batch "
-            "run, the alert set) is equal.</p>"
+            "<p>Two runs can be compared when their workload, corpus and mode match and "
+            "every result fingerprint below (and, for an AML batch run, the alert set) is "
+            "equal. The identity digest hashes the workload, corpus, mode, execution "
+            "conditions and system; it does not include the recipe or its components, "
+            "which are listed separately.</p>"
             f"<table><tbody>{body}</tbody></table>"
             "<h3>Result fingerprints</h3>"
             f"{fp_html}{self._alert_set_html(exp)}</section>"
@@ -3529,13 +3530,16 @@ class ReportGenerator:
     def _alert_set_html(exp: dict) -> str:
         """The AML batch alert set (per rule: alerts and an order-independent
         hash), or why it is missing; "" for a run that records none."""
-        from lakebench.metrics.alert_set import alert_set_missing, alert_set_of
+        from lakebench.metrics.alert_set import alert_set_missing, alert_set_of, shape_problem
 
         e = _html_escape
         value = alert_set_of(exp)
         if value is None:
             missing = alert_set_missing(exp)
             return f"<h3>Alert set</h3><p>{e(missing)}</p>" if missing else ""
+        problem = shape_problem(value)
+        if problem is not None:
+            return f"<h3>Alert set</h3><p>malformed, not comparable: {e(problem)}</p>"
         by_rule = value.get("by_rule") or {}
         body = "".join(
             f"<tr><td>{e(str(r))}</td><td>{e(str(p.get('rows')))}</td>"

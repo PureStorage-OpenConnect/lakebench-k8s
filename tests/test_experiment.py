@@ -491,6 +491,8 @@ class TestReportCarriesWhatAReaderCompares:
             "results": {
                 "alert_set": {
                     "spec": "as1",
+                    "columns": ["rule_id", "entity_id", "alert_ts"],
+                    "cols_sha": "0123456789abcdef",
                     "rows": 7,
                     "h": "30",
                     "by_rule": {"W2": {"rows": 3, "h": "10"}, "W5": {"rows": 4, "h": "20"}},
@@ -506,3 +508,26 @@ class TestReportCarriesWhatAReaderCompares:
         from lakebench.reports.generator import ReportGenerator
 
         assert ReportGenerator._alert_set_html({"results": {}}) == ""
+
+
+def test_a_malformed_alert_set_is_flagged_not_drawn():
+    from lakebench.reports.generator import ReportGenerator
+
+    html = ReportGenerator._alert_set_html({"results": {"alert_set": {"by_rule": "x"}}})
+    assert "malformed, not comparable" in html and "<table>" not in html
+
+
+def test_the_report_does_not_claim_the_digest_covers_the_recipe(tmp_path):
+    """identity_hash leaves out the recipe and components (reviewed 10-03):
+    the report must say so, never that equal digests are repeats."""
+    import copy
+
+    from lakebench.reports.generator import ReportGenerator
+
+    a = _metrics(_cfg()).to_dict()["experiment"]
+    b = copy.deepcopy(a)
+    b["architecture"]["recipe"] = "polaris-iceberg-spark-thrift"
+    b["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
+    assert ex.identity_hash(a) == ex.identity_hash(b)
+    html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
+    assert "does not include the recipe" in html and "repeats of one experiment" not in html

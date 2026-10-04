@@ -1480,10 +1480,10 @@ fair. Check, in this order:
    to compare.
 2. **Same workload and data.** The workload and its version, the corpus id
    (the generator, seed and scale behind it), and the mode are equal. If
-   they differ, the runs are not comparable. Equal experiment identity
-   digests mean the two runs are repeats of one experiment; the digest also
-   covers the architecture and the system, so two different recipes always
-   have different digests.
+   they differ, the runs are not comparable. The report's identity digest
+   hashes the workload, corpus, mode, execution conditions and system, but
+   not the recipe or its components: two runs on different recipes can have
+   equal digests, so check the recipe and component rows too.
 3. **Same answers.** The query set and every benchmark query's result
    fingerprint are equal, and for AML batch every rule's alert count and
    hash in the Alert set table are equal. Different fingerprints mean the
