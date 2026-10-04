@@ -8,8 +8,9 @@ Kubernetes, and get evidence of how it behaved.**
 
 Deploy a complete lakehouse stack from a single YAML, generate a workload
 corpus, run its pipeline and queries at any scale, and get a scorecard that
-records exactly what produced it. Two runs are compared only when they
-returned the same workload results.
+records exactly what produced it, including a fingerprint of each query's
+result, so a reader can check that two runs returned the same answers
+before comparing their numbers.
 
 <!-- TODO: Add terminal recording / screenshot of `lakebench run` output here -->
 
@@ -60,7 +61,7 @@ pip install lakebench-k8s
 
 ```bash
 pip install lakebench-k8s
-lakebench init                                 # writes lakebench.yaml; export the two S3 key variables it names
+lakebench init                                 # writes lakebench.yaml: set its S3 endpoint, export the two key variables it names
 lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
 lakebench report lakebench.yaml                # view scorecard
