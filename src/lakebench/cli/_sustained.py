@@ -1534,7 +1534,7 @@ def _run_iceberg_compaction(
 
         def build_sql(tbl):
             partitions = _compaction_partitions(
-                engine, k8s, pod_name, namespace, tbl, budget, notes
+                engine, k8s, pod_name, namespace, tbl, budget, notes, file_size_threshold
             )
             return build_compaction_plan(engine, catalog, tbl, file_size_threshold, partitions)
 
@@ -1606,6 +1606,7 @@ def _compaction_partitions(
     table: str,
     budget: MaintenanceBudget | None,
     notes: list[str],
+    file_size_threshold: str = "128MB",
 ) -> list[str | None] | None:
     """The partition values a chunked Trino compaction of *table* needs, or None.
 
@@ -1635,7 +1636,9 @@ def _compaction_partitions(
             k8s,
             pod_name,
             namespace,
-            build_partition_values_sql(table, spec.partition_field, spec.transform),
+            build_partition_values_sql(
+                table, spec.partition_field, spec.transform, file_size_threshold
+            ),
             timeout=read_timeout,
         )
         return parse_partition_values(output, spec.transform)

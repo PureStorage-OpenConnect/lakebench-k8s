@@ -295,13 +295,14 @@ COMPACTION_CHUNK_PARTITIONS = 90
 # micro-batch files in 12 to 13 months (the main lane's diagnosis), failed
 # one unchunked optimize on "Query exceeded per-node memory limit of 2.24GB
 # [TableWriterOperator=2.06GB ...]" on its one Trino worker
-# (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a month. A
-# month holding at most one data file is not rewritten (Trino 483 skips a
-# partition's only file when it has no deletes,
-# IcebergSplitSource.processFileScanTask), so it is not counted: it shares a
-# statement with the month before it. Batch silver stays near one statement:
-# its batch s1 record counts 65 data files across silver.transactions and
-# gold.daily_dashboards over a 60-month corpus, about one a month.
+# (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a month.
+# Only months optimize rewrites count: Trino 483 drops a data file above
+# the file size threshold, then skips a partition's only remaining file when
+# it has no deletes (IcebergSplitSource.processFileScanTask), so the read
+# counts the data files at or under the threshold per month and a month
+# with fewer than two shares a statement with the month before it. A month
+# that gains its second small file between the read and its statement is
+# rewritten in its neighbour's statement: two months, not every month.
 COMPACTION_CHUNK_MONTHS = 1
 
 # Lakebench-created tables compaction chunks, from Lakebench's own DDL:
@@ -344,13 +345,47 @@ def _system_table_ref(table: str, suffix: str) -> str:
     return f'"{table}${suffix}"'
 
 
-def build_partition_values_sql(table: str, column: str, transform: str = "identity") -> str:
-    """Trino query listing *table*'s values of partition field *column*
-    (``CompactionPartitioning.partition_field``): the distinct values for
-    ``identity``, each partition's value and data file count for ``month``."""
-    ref = _system_table_ref(table, "partitions")
+_DATA_SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*(B|kB|MB|GB|TB|PB)")
+_DATA_SIZE_UNITS = {
+    "B": 1,
+    "kB": 1 << 10,
+    "MB": 1 << 20,
+    "GB": 1 << 30,
+    "TB": 1 << 40,
+    "PB": 1 << 50,
+}
+
+
+def data_size_bytes(size: str) -> int:
+    """Bytes of a Trino data size (``128MB``), in its binary units (airlift
+    ``DataSize``: MB is 2**20, units case-sensitive)."""
+    m = _DATA_SIZE.fullmatch((size or "").strip())
+    if not m:
+        raise ValueError(f"data size {size!r} is not a number and one of B, kB, MB, GB, TB, PB")
+    return int(float(m.group(1)) * _DATA_SIZE_UNITS[m.group(2)])
+
+
+def build_partition_values_sql(
+    table: str,
+    column: str,
+    transform: str = "identity",
+    file_size_threshold: str = DEFAULT_FILE_SIZE_THRESHOLD,
+) -> str:
+    """Trino query for the partitions compaction chunks *table* by, on
+    partition field *column* (``CompactionPartitioning.partition_field``).
+
+    ``identity``: the distinct values, from ``$partitions``. ``month``: per
+    month, the number of data files (``content = 0``) at or under
+    *file_size_threshold*, the files optimize may rewrite, from ``$files``.
+    """
     if transform == "month":
-        return f"SELECT partition.{column}, file_count FROM {ref} ORDER BY 1"
+        ref = _system_table_ref(table, "files")
+        limit = data_size_bytes(file_size_threshold)
+        return (
+            f"SELECT partition.{column}, count(*) FROM {ref} "
+            f"WHERE content = 0 AND file_size_in_bytes <= {limit} GROUP BY 1 ORDER BY 1"
+        )
+    ref = _system_table_ref(table, "partitions")
     return f"SELECT DISTINCT partition.{column} FROM {ref} ORDER BY 1"
 
 
@@ -367,10 +402,11 @@ def parse_partition_values(output: str, transform: str = "identity") -> list[str
     partition (the CLI prints NULL as an empty field).
 
     ``identity``: every ``YYYY-MM-DD`` date. ``month``: rows of Iceberg's
-    month transform (an integer, months since 1970-01) and a file count;
-    the counts of one month are summed, and only months holding two or more
-    data files (the ones optimize rewrites) are returned, as the month's
-    first day, ``YYYY-MM-01``; every month when a NULL month is present. Raises ``ValueError`` on any line that is
+    month transform (an integer, months since 1970-01) and a count of data
+    files under the threshold; the counts of one month are summed, and only
+    months with two or more (the ones optimize rewrites) are returned, as
+    the month's first day, ``YYYY-MM-01``; every month listed when a NULL
+    month is present. Raises ``ValueError`` on any line that is
     neither, so an unexpected format never turns into statements that miss
     partitions.
     """
@@ -404,9 +440,10 @@ def parse_partition_values(output: str, transform: str = "identity") -> list[str
     if transform == "month":
         # A NULL month is a file with a NULL timestamp or one written under
         # an older spec (days() before the move to months(), pre-1.6 dev
-        # catalogs only). With an older-spec file in range Trino rewrites
-        # every file, single ones included (IcebergSplitSource
-        # processFileScanTask), so then every month counts.
+        # catalogs only). With an older-spec file under the threshold Trino
+        # rewrites every file it has not dropped for size, single ones
+        # included (IcebergSplitSource.processFileScanTask), so then every
+        # month listed counts.
         values = [m for m, count in files.items() if count >= 2 or None in files]
     dated = sorted({v for v in values if v is not None})
     return [*dated, *([None] if None in values else [])]

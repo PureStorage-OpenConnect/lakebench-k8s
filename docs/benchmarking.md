@@ -379,8 +379,9 @@ interaction_date ...` per chunk, in batch and continuous mode alike: Trino
 refuses an `optimize` that rewrites files in more than 100 partitions, and
 continuous silver has small files in every partition. The AML tables
 `silver.transactions` and `silver.account_statements` (partitioned by
-month) are compacted with at most one month that has files to merge per
-statement (a month of one file shares its neighbour's), `optimize ... WHERE
+month) are compacted with at most one month to merge (two or more data
+files under the threshold) per statement, other months sharing a
+neighbour's, `optimize ... WHERE
 txn_timestamp >= TIMESTAMP '<month> 00:00:00.000000 UTC' AND txn_timestamp
 < ...` (`book_ts` for statements), with the first statement open below and
 the last open above: an `optimize` over every month at once ran out of

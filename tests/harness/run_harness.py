@@ -423,10 +423,10 @@ class FakeTrino:
     @staticmethod
     def aml_month_partitions() -> list[tuple[int, int]]:
         """The AML month tables' partitions as the compaction read gets them
-        (Iceberg month transform value, data file count): the 60-month
-        corpus, 2020-01 to 2024-12 (600 to 659), one file a month except the
-        last four with two, so 64 files as the silver probe answers.
-        Invented layout: the record does not store files per month."""
+        (Iceberg month transform value, data files under the threshold):
+        the 60-month corpus, 2020-01 to 2024-12 (600 to 659), one small file
+        a month except the last four with two. Invented layout: the record
+        does not store files per month."""
         return [(m, 2 if m >= 656 else 1) for m in range(600, 660)]
 
     def answer(self, sql: str) -> tuple[int, str, str]:
@@ -437,11 +437,11 @@ class FakeTrino:
         ):
             return 0, "".join(f'"{d}"\n' for d in self.silver_partitions()), ""
         if (
-            low.startswith("select partition.txn_timestamp_month, file_count from")
-            and '.silver."transactions$partitions"' in low
+            low.startswith("select partition.txn_timestamp_month, count(*) from")
+            and '.silver."transactions$files"' in low
         ) or (
-            low.startswith("select partition.book_ts_month, file_count from")
-            and '.silver."account_statements$partitions"' in low
+            low.startswith("select partition.book_ts_month, count(*) from")
+            and '.silver."account_statements$files"' in low
         ):
             rows = self.aml_month_partitions()
             return 0, "".join(f'"{m}","{n}"\n' for m, n in rows), ""

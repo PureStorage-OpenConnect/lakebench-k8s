@@ -2202,14 +2202,14 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   months, used 2.06 GB of a 2.24 GB per-node limit in its table writers and
   failed on both tables, so any AML continuous Trino run longer than about
   an hour recorded a partial compaction. Each table is now compacted with
-  at most one month that has files to merge (two or more data files) per
-  statement, after a read of its months and their file counts, with a
-  `WHERE` range on the timestamp column that starts and ends on a month
-  boundary in UTC (Trino 483 applies such a range to whole partitions).
-  Months of one file, which Trino does not rewrite, share a statement with
-  their neighbour. This also applies to batch AML runs on Trino, whose
-  pre-benchmark maintenance now runs two partition reads, plus one more
-  statement for each further month with several files, on those two tables,
+  at most one month to merge (two or more data files under the 128 MB
+  threshold) per statement, after a read of those file counts per month,
+  with a `WHERE` range on the timestamp column that starts and ends on a
+  month boundary in UTC (Trino 483 applies such a range to whole
+  partitions). Other months, which Trino does not rewrite, share a
+  statement with their neighbour. This also applies to batch AML runs on
+  Trino, whose pre-benchmark maintenance now runs two file reads on those
+  two tables, plus one more statement for each further month to merge,
   which can change the recorded maintenance time. The fix has not yet run
   live (the check is a continuous AML scale-1 Trino window over an hour),
   and it is sized at scale 1 only. Trino settings, the compaction operation

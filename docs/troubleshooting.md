@@ -687,11 +687,13 @@ tables a partition per month, about 160 MB of writer memory each at scale
 1.
 
 **Fix:** none needed on current code: these tables are compacted in
-chunks (90 days, or one month with files to merge, per statement). If it still appears, check
-the record's `detail.compaction_statements`: one statement without a
-`WHERE` for a chunked table means the partition read failed (the reason
-names it), or the table was renamed in `architecture.tables`, which the
-chunking does not follow.
+chunks (90 days, or one month with files to merge, per statement). If it
+still appears, check the record's `detail.compaction_statements` and
+`reasons`: a failed table compacted by one statement without a `WHERE`
+means the partition read failed (a reason says "partition read failed")
+or the table was renamed in `architecture.tables`, which the chunking does
+not follow. The month chunking is sized on the single scale-1 Trino
+worker; on a failure at a larger scale, report the run.
 
 Code: `src/lakebench/modules/table_formats/iceberg/maintenance.py:build_compaction_plan`,
 `src/lakebench/cli/_sustained.py:_compaction_partitions`.

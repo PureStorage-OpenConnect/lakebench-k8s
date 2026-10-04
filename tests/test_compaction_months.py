@@ -26,6 +26,7 @@ from lakebench.modules.table_formats.iceberg.maintenance import (
     build_partition_values_sql,
     compaction_operation,
     compaction_partitioning,
+    data_size_bytes,
     parse_partition_values,
 )
 
@@ -182,10 +183,26 @@ def test_partition_read_sql_names_the_month_field():
         "SELECT DISTINCT partition.txn_timestamp_month FROM "
         'lakehouse.silver."transactions$partitions" ORDER BY 1'
     )
+    # Months: data files at or under the threshold, which optimize may
+    # rewrite (Trino drops a larger one before it groups by partition).
     assert build_partition_values_sql(TXNS, spec.partition_field, spec.transform) == (
-        "SELECT partition.txn_timestamp_month, file_count FROM "
-        'lakehouse.silver."transactions$partitions" ORDER BY 1'
+        "SELECT partition.txn_timestamp_month, count(*) FROM "
+        'lakehouse.silver."transactions$files" '
+        "WHERE content = 0 AND file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1"
     )
+    assert build_partition_values_sql(TXNS, "txn_timestamp_month", "month", "256MB").endswith(
+        "file_size_in_bytes <= 268435456 GROUP BY 1 ORDER BY 1"
+    )
+
+
+def test_data_size_bytes_uses_trino_binary_units():
+    assert data_size_bytes("128MB") == 128 * 1024 * 1024
+    assert data_size_bytes("1GB") == 1 << 30
+    assert data_size_bytes("512kB") == 512 * 1024
+    assert data_size_bytes("1.5MB") == 1572864
+    for bad in ("128mb", "128", "MB", "", "-1MB"):
+        with pytest.raises(ValueError, match="data size"):
+            data_size_bytes(bad)
 
 
 def test_parse_month_values():
@@ -282,7 +299,7 @@ class _Trino:
 
     def __call__(self, pod, argv, namespace, container=None, timeout=30):
         sql = argv[2]
-        if "$partitions" in sql:
+        if "$files" in sql or "$partitions" in sql:
             self.reads.append(sql)
             if self.read_rc:
                 return self.read_rc, "", "Query failed"
@@ -327,10 +344,10 @@ def test_continuous_aml_silver_compacts_every_table():
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (7, 7, 0), rec.get("failures")
     assert rec["failures"] == []
     assert sorted(trino.reads) == [
-        'SELECT partition.book_ts_month, file_count FROM lakehouse.silver."account_statements'
-        '$partitions" ORDER BY 1',
-        'SELECT partition.txn_timestamp_month, file_count FROM lakehouse.silver."transactions'
-        '$partitions" ORDER BY 1',
+        'SELECT partition.book_ts_month, count(*) FROM lakehouse.silver."account_statements'
+        '$files" WHERE content = 0 AND file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1',
+        'SELECT partition.txn_timestamp_month, count(*) FROM lakehouse.silver."transactions'
+        '$files" WHERE content = 0 AND file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1',
     ]
     # 13 + 13 month statements and one each for the other five tables.
     assert rec["statements_total"] == len(trino.statements) == 31
@@ -355,3 +372,14 @@ def test_failed_month_read_falls_back_to_one_statement():
     assert rec["statements_total"] == 7
     assert (rec["succeeded"], rec["failed"]) == (5, 2)
     assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
+
+
+def test_unreadable_threshold_falls_back_and_says_so():
+    """A threshold the month read cannot turn into bytes is a failed read:
+    one unchunked statement per table, named in the note."""
+    trino = _Trino()
+    (rec,) = _compact(trino, live_streams=True, file_size_threshold="128mb")
+    assert trino.reads == []
+    assert rec["statements_total"] == 7
+    assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
+    assert "data size '128mb'" in rec["note"]

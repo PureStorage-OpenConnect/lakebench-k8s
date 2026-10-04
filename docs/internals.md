@@ -269,7 +269,7 @@ the run records, so a new call site must take its retentions from it.
 splits one `optimize` into several for the tables on
 `src/lakebench/modules/table_formats/iceberg/maintenance.py:_COMPACTION_PARTITIONING`,
 after `src/lakebench/cli/_sustained.py:_compaction_partitions` reads the
-table's partition values from `$partitions`. Each partition an `optimize`
+table's partitions (`$partitions` for identity, `$files` for months). Each partition an `optimize`
 rewrites keeps open Parquet writers, so what one statement can take is
 bounded by partitions, not rows:
 
@@ -284,14 +284,13 @@ bounded by partitions, not rows:
   A writer buffers up to a row group (128 MB) per partition, and 12 to 13
   months of small continuous files in one statement exceeded the 2.24 GB
   per-node query memory on the single scale-1 Trino worker, about 160 MB a
-  month. The read takes each month's data file count; a month of one file
-  is not rewritten (Trino 483 skips a partition's only file when it has no
-  deletes), so it is not counted and shares a statement with its
-  neighbour, which keeps batch silver near one statement (the batch s1
-  record counts 65 data files across `silver.transactions` and the gold
-  dashboard table over a 60-month corpus). A NULL month (a file under the pre-1.6
-  `days()` spec, or a NULL timestamp) makes Trino rewrite every file in
-  range, so then every month counts. The bound is sized at scale 1; on
+  month. Only months optimize rewrites count: Trino 483 drops a data file
+  above the threshold and then skips a partition's only remaining file
+  when it has no deletes, so the read counts, from `$files`, the data files
+  at or under the threshold per month, and a month with fewer than two
+  shares a statement with its neighbour. A NULL month (a file under the
+  pre-1.6 `days()` spec, or a NULL timestamp) makes Trino rewrite every
+  file it keeps, so then every month listed counts. The bound is sized at scale 1; on
   larger workers Trino may scale one month over more local writers, which
   has not been measured.
 
