@@ -165,9 +165,10 @@ reads a held-out seed only from `--seed-file PATH` (one integer, `chmod
 
 What this does not hide: anyone who can read the corpus bucket can recover
 the seed from the manifest's instance seeds, by design; the reference
-scorer's report records it as `corpus_seed`; and the run record
-(`metrics.json`, `report.html`) still stores the configured seed until the
-run record writes the seed's salted hash instead. Do not check in the run
+scorer's report records it as `corpus_seed` (LB-229, open: the scorer is a
+frozen script). The run record (`metrics.json`, `report.html`) stores a
+protected seed as its salted reference and role, never the value
+(`metrics/seed_record.py`). Do not check in the run
 output of a registered generate before its look is recorded. In practice
 only `lakebench generate --registered-corpus` reaches the cluster with such
 a config: `run`, `benchmark`, `query`, `reproduce` and the
