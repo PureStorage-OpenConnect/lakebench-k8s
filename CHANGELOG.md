@@ -986,9 +986,11 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   workload name, so an AML record missing its corpus block is
   unidentified. A salted hash the hash file does not name is unidentified
   too (it may be a held-out seed's hash under another salt). The perf gate
-  (`perf-baselines`, `scripts/perf_gate.py record` and `check`) refuses
-  such a run, and a baseline whose identity names a held-out seed, with
-  that reason alone; its seed difference reads `seed differs (values
+  (`perf-baselines`, `scripts/perf_gate.py record`, `compare` and `gate`)
+  refuses such a run, and a baseline whose identity names a held-out seed
+  (or, for AML, no seed it can check), with that reason alone, and never
+  picks such a run as the newest candidate. A seed difference, in the perf
+  gate and in `reproduce`'s package check, reads `seed differs (values
   withheld)`, never the values.
 - **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
   Continuous AML stores edge rows per pair per micro-batch and statement

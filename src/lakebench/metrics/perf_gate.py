@@ -836,28 +836,34 @@ def protected_run_refusal(raw: Mapping[str, Any]) -> str | None:
     why = protected_record_reason(raw, require_identity=True, fail_closed=True)
     if why is None:
         return None
-    if why.startswith("unidentified") or "cannot be read" in why:
+    if why.startswith("unidentified") or "cannot be read" in why or "withheld" in why:
         return f"the run's corpus is not shown to be outside the held-out AML corpora ({why})"
     return f"the run's corpus is a protected AML corpus ({why})"
 
 
 def baseline_seed_refusal(experiment_identity: Mapping[str, Any] | None) -> str | None:
-    """Why a stored baseline's identity names a held-out seed (or one the
-    guard cannot check, fail closed), or None. The identity keeps the corpus
-    seed under ``seed``."""
-    from lakebench.aml.look_guard import WITHHELD, recorded_seed_role
+    """Why a stored baseline's identity names a held-out seed, or None. The
+    identity keeps the corpus seed under ``seed``. As for a run: any
+    workload's seed that hashes to a held-out seed is refused; an AML
+    baseline is also refused, fail closed, when its seed is absent, withheld
+    or in no form the guard reads, or the held-out record cannot be read."""
+    from lakebench.aml.look_guard import WITHHELD, recorded_seed_role, seed_readable
 
-    seed = (experiment_identity or {}).get("seed")
+    identity = experiment_identity or {}
+    financial = identity.get("workload") == "financial"
+    seed = identity.get("seed")
     if seed is None:
-        return None
+        return "the baseline's AML corpus has no recorded seed" if financial else None
     try:
         role = recorded_seed_role(seed)
-    except Exception as e:  # noqa: BLE001 -- unreadable held-out record: refuse
-        return f"the baseline's seed cannot be checked ({type(e).__name__})"
+    except Exception as e:  # noqa: BLE001 -- unreadable held-out record
+        return f"the baseline's seed cannot be checked ({type(e).__name__})" if financial else None
     if role == WITHHELD:
         return "the baseline's seed is withheld"
     if role is not None:
         return f"the baseline's seed is the registered {role} seed"
+    if financial and not seed_readable(seed):
+        return "the baseline's AML seed is in no form the guard can check"
     return None
 
 
@@ -1638,6 +1644,9 @@ def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
         # once the perf-gate test suite fixtures carry verdict blocks.
         if (
             _record_passed(run.raw)
+            # A run from a protected corpus never gates; it must not displace
+            # the newest run that can.
+            and protected_run_refusal(run.raw) is None
             and run.mode == pinned.mode
             and fingerprint_hash(run.fingerprint) == pinned.fingerprint_hash
             # A later --skip-maintenance or --local run must not displace the

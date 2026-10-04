@@ -1790,3 +1790,46 @@ def test_release_check_line_carries_no_held_out_seed(env, held):
     assert not ok
     text = "\n".join(lines)
     assert "protected AML corpus" in text and held.seed_tokens(text) == []
+
+
+def _aml_raw(seed, *, schema="financial"):
+    exp = stub_experiment(QUERIES)
+    exp["workload"]["name"] = "financial" if schema == "financial" else "customer360"
+    exp["corpus"]["schema"] = schema
+    exp["corpus"]["seed"] = seed
+    return {"run_id": "r", "experiment": exp}
+
+
+def test_protected_run_refusal_passes_calibration_and_c360(held):
+    assert pg.protected_run_refusal(_aml_raw(held.CALIBRATION)) is None
+    assert pg.protected_run_refusal(_aml_raw(None, schema="customer360")) is None
+    assert "unidentified" in pg.protected_run_refusal(_aml_raw(None))
+    assert "registered evaluation seed" in pg.protected_run_refusal(_aml_raw(held.EV))
+
+
+def test_baseline_seed_refusal_is_fail_closed_for_aml_only(held, monkeypatch):
+    from lakebench.config import datagen_seed as ds
+
+    assert pg.baseline_seed_refusal({"workload": "financial", "seed": held.CALIBRATION}) is None
+    assert pg.baseline_seed_refusal({"workload": "financial", "seed": None})
+    assert pg.baseline_seed_refusal({"workload": "financial", "seed": "ab" * 32})
+    assert pg.baseline_seed_refusal({"workload": "customer360", "seed": None}) is None
+
+    def boom():
+        raise OSError("no hash file")
+
+    monkeypatch.setattr(ds, "_heldout", boom)
+    assert pg.baseline_seed_refusal({"workload": "customer360", "seed": 42}) is None
+    assert "cannot be checked" in pg.baseline_seed_refusal({"workload": "financial", "seed": 43})
+
+
+def test_a_newer_protected_run_never_displaces_the_gating_run(env, held):
+    snap = env.snaps["c360-batch-s10"]
+    env.write_run(_batch_run(snap, "20260924-110000-bbbbbb"))
+    env.write_run(
+        _batch_run(
+            snap, "20260924-120000-cccccc", experiment=stub_experiment(QUERIES, seed=held.EV)
+        )
+    )
+    pinned = env.store().pinned("c360-batch-s10")
+    assert pg.latest_candidate(pinned, env.runs).run_id == "20260924-110000-bbbbbb"
