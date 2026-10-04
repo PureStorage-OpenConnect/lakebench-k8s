@@ -19,6 +19,7 @@ from lakebench.cli._helpers import (
     _journal_safe,
     console,
     enforce_bronze_gate,
+    esc,
     journal_open,
     load_deps_handle,
     print_error,
@@ -1276,6 +1277,54 @@ def _behavioural_subset() -> set[str]:
     return set(data.get("behavioural_subset", []))
 
 
+def _held_out_check_only(
+    job_manager, monitor, run_id, interrupt, timeout, *, required: bool = True
+) -> None:
+    """Run bronze-verify's held-out check alone (``LB_REGISTER_TABLE=check``):
+    it reads every manifest row and stops on a corpus from a held-out or
+    spent AML seed. A refusal exits 2 (``run.protected_corpus``); a check
+    that could not run exits 1."""
+    from lakebench.aml.look_guard import refusal_in_log
+    from lakebench.spark.job import JobState, JobType
+
+    app = f"lakebench-{JobType.BRONZE_VERIFY.value}"
+    console.print()
+    console.print("[bold]Held-out check: bronze-verify, check only[/bold]")
+    if interrupt is not None:
+        interrupt.creating("SparkApplication", app)
+    status = job_manager.submit_job(
+        JobType.BRONZE_VERIFY,
+        cycle_env={
+            "LB_REGISTER_TABLE": "check",
+            "LB_RUN_ID": run_id,
+            "LB_MANIFEST_REQUIRED": "1" if required else "0",
+        },
+    )
+    if interrupt is not None:
+        interrupt.submitted(status)
+    if status.state == JobState.FAILED:
+        print_error(f"Could not submit the held-out check: {esc(status.message)}")
+        raise typer.Exit(ExitCode.FAILED)
+    result = monitor.wait_for_completion(
+        app, timeout_seconds=max(600, timeout or 0), poll_interval=15
+    )
+    if result.success:
+        if interrupt is not None:
+            interrupt.finished("SparkApplication", app)
+        print_success("Held-out check passed")
+        return
+    refused = refusal_in_log(getattr(result, "driver_logs", None))
+    if refused:
+        print_error(f"Refused: the corpus is a protected AML corpus ({esc(refused)})")
+        raise typer.Exit(ExitCode.USAGE)
+    print_error(f"The held-out check failed: {esc(result.message)}")
+    if getattr(result, "driver_logs", None):
+        console.print("[dim]Driver logs (last 20 lines):[/dim]")
+        for line in result.driver_logs.split("\n")[-20:]:
+            console.print(f"  {esc(line)}")
+    raise typer.Exit(ExitCode.FAILED)
+
+
 def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
     """(no_query_engine, skip_benchmark) for a batch run of *cfg*.
 
@@ -1852,6 +1901,12 @@ def run(
         print_error(f"{config_file} changed while it was loaded; run again")
         raise typer.Exit(ExitCode.USAGE)
 
+    # A protected AML corpus (evaluation or robustness, by role or by seed)
+    # is scored only as its registered look: refused before any cluster call.
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(cfg, "run")
+
     # Every argument and combination is checked before anything else, so a
     # refused one exits 2 with no cluster call made (cli/_run_args.py).
     from lakebench.cli._interrupt import interrupt_scope
@@ -2244,6 +2299,9 @@ def _run_once(
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
+    # The silver snapshots the last gold-finalize read ([read-snapshot]
+    # lines), fingerprinted by the scorer for financial reproduce.
+    _gold_read_snapshots: list = []
     # Set when this run's TM layer ran (verdict pass or fail); the benchmark
     # includes the investigator queries only then.
     _tm_run_id: str | None = None
@@ -2547,6 +2605,16 @@ def _run_once(
             from lakebench.cli._sustained import _stop_leftover_streams
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
+            if stages[0][0] != JobType.BRONZE_VERIFY:
+                # A stage subset runs no bronze-verify, but its stages read the
+                # corpus: its held-out check runs alone first.
+                _stage = "held-out check"
+                # A multi-cycle run generates each cycle's corpus itself, so
+                # its prefix may hold no manifest yet; one that is there is
+                # still checked (an unowned prefix is not cleared).
+                _held_out_check_only(
+                    job_manager, monitor, run_id, _interrupt, timeout, required=total_cycles == 1
+                )
 
         # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
         # ONCE per `lakebench run` invocation, before the cycle loop, so
@@ -2879,6 +2947,12 @@ def _run_once(
                     _apply_parsed_job_metrics(job_metrics, parsed)
                     _exclude_c360_check_time(job_metrics)
                     _exclude_alert_set_time(job_metrics)
+                if stage_name == "gold-finalize":
+                    # This gold-finalize's own lines, or none: an earlier
+                    # cycle's snapshots never stand for this cycle's alerts.
+                    from lakebench.metrics.read_snapshots import parse_read_snapshots
+
+                    _gold_read_snapshots = parse_read_snapshots(result.driver_logs)
 
                 # Populate resource metrics from job profile. Pass the schema so
                 # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
@@ -2986,6 +3060,25 @@ def _run_once(
                         },
                     )
                 else:
+                    from lakebench.aml.look_guard import refusal_in_log
+
+                    _protected = refusal_in_log(getattr(result, "driver_logs", None))
+                    if _protected:
+                        # bronze-verify found a corpus from a held-out or spent
+                        # AML seed and read nothing: the protected-corpus refusal.
+                        print_error(
+                            f"Refused: {stage_name} found a protected AML corpus ({esc(_protected)})"
+                        )
+                        results.append((stage_name, False, job_metrics.elapsed_seconds))
+                        _journal_safe(
+                            j.record,
+                            EventType.PIPELINE_STAGE,
+                            message=f"{stage_name} refused a protected AML corpus",
+                            success=False,
+                            details={"stage": stage_name, "success": False, "refused": True},
+                        )
+                        pipeline_success = False
+                        raise typer.Exit(ExitCode.USAGE)
                     print_error(f"{stage_name} failed: {result.message}{_retry_note(job_metrics)}")
                     if result.driver_logs:
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
@@ -3060,7 +3153,13 @@ def _run_once(
         ):
             _stage = "score-financial"
             _financial_scoring = _run_financial_scoring(
-                cfg, run_id, job_manager, monitor, timeout, interrupt=_interrupt
+                cfg,
+                run_id,
+                job_manager,
+                monitor,
+                timeout,
+                interrupt=_interrupt,
+                read_snapshots=_gold_read_snapshots,
             )
             _stage = "pipeline"
 

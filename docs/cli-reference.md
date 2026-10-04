@@ -74,7 +74,7 @@ lakebench init [OPTIONS]
 |---|---|---|---|---|
 | `--output` | `-o` | path | `lakebench.yaml` | Output file path for configuration |
 | `--name` | `-n` | text |  | Deployment name (default: lb-<user>-<4 hex>, unique per init) |
-| `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.4 GB for financial (default 1; 0.1 with --local) |
+| `--scale` | `-s` | float |  | Scale factor: 1 is about 10 GB of bronze for customer360, 8.5 GB for financial, 9.4 GB per unit from scale 10 (default 1; 0.1 with --local) |
 | `--endpoint` |  | text |  | S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443) |
 | `--credentials-env` |  | text | `LAKEBENCH_S3` | Environment variable prefix for the S3 credentials: the config references ${PREFIX_ACCESS_KEY} and ${PREFIX_SECRET_KEY} |
 | `--namespace` |  | text |  | Kubernetes namespace (default: same as deployment name) |
@@ -569,6 +569,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--yes` | `-y` | flag |  | Skip confirmation prompt |
 | `--regenerate` |  | flag |  | Clear the datagen prefix in the bronze bucket before generating, when this deployment owns the bucket. Without this flag, a non-empty bronze prefix is refused (exit 3) so existing datagen output is never overwritten silently. Never clears a bucket this deployment cannot prove it owns. |
 | `--allow-stale-bronze` |  | flag |  | Generate over objects already in the datagen prefix of a bronze bucket this deployment did not create. Rows may be over-counted; the run records it. |
+| `--registered-corpus` |  | flag |  | Generate the registered evaluation or robustness AML corpus (the config declares the role and its seed). Needs --yes; refuses --allow-stale-bronze. The attempt is recorded in ~/.lakebench/aml_corpora.jsonl (LB_AML_CORPORA_LEDGER) before the first cluster call. Without this flag a config that names a protected corpus is refused (exit 2). |
 
 Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
 
@@ -582,6 +583,20 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `--allow-stale-bronze`: `run` records the over-count in `metrics.json`
   (`datagen.stale_bronze`) and the report shows "bronze held N objects
   before generate".
+- `--registered-corpus` needs `corpora.registered_looks_open` true in the
+  pre-registration and `images.datagen` pinned by digest
+  (`repo@sha256:...`). It is refused (exit 2) for a config that names no
+  protected corpus, with `--allow-stale-bronze`, and for a seed that already
+  has a look (the look ledger, or any commit of the look record; a shallow
+  clone, a tree that is not a git checkout or a pip install cannot show that
+  history, so it is refused there too). The attempt is appended to `~/.lakebench/aml_corpora.jsonl`
+  (`LB_AML_CORPORA_LEDGER`, one ledger per host) before the first cluster
+  call, `submitting` before the datagen Job is created, then `generated` or
+  `failed`; the seed is recorded only by its salted hash. The `generated`
+  entry records the corpus fingerprint (every data file's path and size,
+  each manifest file's sha256), which `scripts/aml_gate.py --registered`
+  requires the scored corpus to match. A development config whose bronze
+  prefix is in that ledger is refused by every data command.
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. A multi-cycle config (`cycles` above 1)
@@ -597,7 +612,9 @@ exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
 prefix is non-empty and neither `--regenerate` (on a bucket this deployment
 owns) nor `--allow-stale-bronze` (on one it does not) applies, or
 `--regenerate` was passed for a bucket it does not own or with an empty
-datagen prefix, and `4` when bronze or its ownership cannot be checked;
+datagen prefix, `2` for a protected AML corpus without `--registered-corpus`
+(or the flag on a config that names none, without `--yes`, or on a seed with a
+look), and `4` when bronze or its ownership cannot be checked;
 when datagen exceeds its wait budget the datagen Job and any leftover
 streaming SparkApplication consuming the trickle are stopped before exit.
 Only the initial-pass datagen is guarded by this exit code; per-cycle
@@ -649,6 +666,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `1` `repeat.no_verified_corpus`: `run --repeat` found no verified corpus to reuse after repetition 1
 - `2` `run.args`: a `run` argument or combination is refused before any cluster call
 - `3` `run.series_mismatch`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's
+- `2` `run.protected_corpus`: a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify (or its check before a `run --stage` subset) refused the corpus: its manifest comes from a held-out or spent seed, gives back no corpus seed, is missing where one is required, or the held-out record cannot be read
 - `3` `run.deps_mismatch`: the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded
 - `3` `run.bronze_nonempty`: datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset)
 - `3` `series.corpus_changed`: the bronze corpus changed during or between repetitions of `run --repeat`
@@ -685,7 +703,8 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--repeat` below 1 or above 20;
 - `--repeat` with a continuous run;
 - `--repeat` with `cycles` above 1;
-- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`.
+- `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`;
+- `benchmark.investigator_sessions` outside an AML continuous run with TM operations on trino or spark-thrift.
 <!-- END GENERATED: cli run -->
 
 - `--timeout`, when omitted, is `max(3600, scale * 120)` seconds per job;
@@ -776,6 +795,14 @@ The refused arguments are listed with the flags above.
 does not support, are refused just after these, also before any cluster
 call. Benchmark settings `run` does not honour are refused when the config
 loads.
+
+A config naming a protected AML corpus (the evaluation or robustness role or
+seed) is refused before any cluster call (exit 2, `run.protected_corpus`).
+For the financial workload, bronze-verify reads every row of the corpus
+manifest first and stops (exit 2) on a corpus from a held-out or spent seed,
+on a manifest no corpus seed can be recovered from, and on a batch corpus
+with no manifest; `--stage silver-build` or `gold-finalize` runs that check
+alone first. A check that could not run (a storage error) exits 1.
 
 The run command executes 7 phases:
 
@@ -1273,7 +1300,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `2` `reproduce.report_required`: `reproduce` of a registered look's package without --report (a look is never rerun)
 - `3` `reproduce.existing_namespace`: `reproduce` would reuse a namespace or bucket that already exists
 - `3` `reproduce.nonce_changed`: the deployment `reproduce` created was replaced before its run or its destroy
-- `3` `reproduce.held_out`: `reproduce` would regenerate a held-out corpus (its look has not run, its seed or the look record cannot be read, or the config names one)
+- `3` `reproduce.held_out`: `reproduce` was given a package from a held-out corpus whose look has not run, or whose seed or look record cannot be read
 - `14` `reproduce.drift`: `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol
 - `14` `reproduce.commit_drift`: `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift
 - `14` `reproduce.verify_out_of_band`: `reproduce --report` of a registered look: the report does not match the look record, or the record holds no report sha256
@@ -1290,7 +1317,8 @@ namespace or buckets cannot be read; `1` when the pipeline could not run.
 A package from a registered evaluation or robustness look is never rerun:
 `--report` matching the look record exits `0`, a mismatch `14`, no
 `--report` `2`; a held-out package whose look has not run is refused with
-`3`. 1.6 used `1` for performance drift and
+`3`, and a config naming a protected AML corpus with `2` (`run.protected_corpus`).
+1.6 used `1` for performance drift and
 `2` for correctness drift.
 
 ### financial
@@ -1304,7 +1332,7 @@ whether the command waits for it.
 | `financial score` | Compute rule recall from the datagen manifest and `gold.alerts` |
 | `financial reference-score` | Run the reference detector and leakage gate over silver and the manifest |
 | `financial replay` | Rerun one detection rule against a historical Iceberg snapshot (the output defaults to the gold alerts table with an `_replay` suffix) |
-| `financial reproduce` | Reproduce one past alert via Iceberg time travel |
+| `financial reproduce` | Rerun one batch alert's rule on the snapshots its run's gold read |
 
 See [AML Scoring](aml-scoring.md).
 
@@ -1331,7 +1359,7 @@ lakebench financial replay CONFIG [OPTIONS]
 
 #### `financial reproduce`
 
-Reproduce a specific past alert via Iceberg time-travel (W10).
+Reproduce one batch alert from the snapshots its run's gold read.
 
 ```
 lakebench financial reproduce CONFIG [OPTIONS]
@@ -1343,8 +1371,16 @@ lakebench financial reproduce CONFIG [OPTIONS]
 
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|
-| `--alert-id` |  | text |  | Alert id to reproduce |
-| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
+| `--alert-id` |  | text |  | Alert id (gold.alerts.alert_id) to reproduce |
+| `--run` |  | text |  | Run id whose record holds the snapshots gold read; default: the latest AML batch run of this deployment |
+| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for the result |
+
+Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
+
+- `1` `financial.reproduce.mismatch`: `financial reproduce` ran the alert's rule on the snapshots its run's gold read and did not reproduce the alert (no match, several, different related transactions), or the rule declined to run
+- `1` `financial.reproduce.not_found`: `financial reproduce` found no such alert in gold.alerts, or one another run wrote
+- `2` `financial.reproduce.no_record`: `financial reproduce` found no AML batch run record of the deployment on this host (or none for `--run`)
+- `4` `financial.reproduce.snapshot_gone`: `financial reproduce` cannot read what the alert's run read: the run recorded no read snapshots (before 1.7), or a snapshot expired and the table's content changed
 
 #### `financial score`
 

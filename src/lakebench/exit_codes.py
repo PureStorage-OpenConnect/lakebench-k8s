@@ -231,12 +231,24 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "financial.reproduce.mismatch",
         _C.FAILED,
-        "`financial reproduce` ran but did not reproduce the alert",
-        planned=True,
+        "`financial reproduce` ran the alert's rule on the snapshots its run's gold read and "
+        "did not reproduce the alert (no match, several, different related transactions), "
+        "or the rule declined to run",
+    ),
+    ExitPath(
+        "financial.reproduce.not_found",
+        _C.FAILED,
+        "`financial reproduce` found no such alert in gold.alerts, or one another run wrote",
     ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
     ExitPath("config.validation", _C.USAGE, "the config fails to load or validate", v16_code=1),
+    ExitPath(
+        "financial.reproduce.no_record",
+        _C.USAGE,
+        "`financial reproduce` found no AML batch run record of the deployment on this host "
+        "(or none for `--run`)",
+    ),
     ExitPath(
         "config.unsupported",
         _C.USAGE,
@@ -284,8 +296,12 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.protected_corpus",
         _C.USAGE,
-        "the config names a protected AML corpus role or seed",
-        planned=True,
+        "a command that reads or scores data was given a protected AML corpus (a config "
+        "whose role or seed is the evaluation or robustness one, or a run record from one), "
+        "or `generate --registered-corpus` a config that names none; or bronze-verify (or its "
+        "check before a `run --stage` subset) refused the corpus: its manifest comes from a "
+        "held-out or spent seed, gives back no corpus seed, is missing where one is required, "
+        "or the held-out record cannot be read",
     ),
     ExitPath(
         "alias.refused",
@@ -345,8 +361,8 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "reproduce.held_out",
         _C.REFUSED,
-        "`reproduce` would regenerate a held-out corpus (its look has not run, its seed or "
-        "the look record cannot be read, or the config names one)",
+        "`reproduce` was given a package from a held-out corpus whose look has not run, "
+        "or whose seed or look record cannot be read",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
@@ -510,8 +526,9 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "financial.reproduce.snapshot_gone",
         _C.PREREQUISITE,
-        "`financial reproduce` cannot read the snapshot the alert came from",
-        planned=True,
+        "`financial reproduce` cannot read what the alert's run read: the run recorded no "
+        "read snapshots (before 1.7), or a snapshot expired and the table's content changed",
+        v16_code=1,
     ),
     ExitPath(
         "run.deps_missing",

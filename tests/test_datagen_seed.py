@@ -167,7 +167,7 @@ def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     [(EVAL, "robustness"), (ROBUST, "evaluation"), (7777, "evaluation"), (EVAL, "calibration")],
 )
 def test_role_must_match_its_registered_seed(seed, role):
-    with pytest.raises(ValidationError, match="registered for"):
+    with pytest.raises(ValidationError, match="registered for|does not match"):
         _cfg_role(seed, role)
 
 
@@ -441,6 +441,9 @@ def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypat
     # earlier look of this seed, committed predictions), so the claim decides.
     monkeypatch.setattr(g, "clean_checkout_error", lambda: None)
     monkeypatch.setattr(g, "seed_ever_recorded", lambda seed: None)
+    # The corpus is the one generate --registered-corpus wrote (its own tests
+    # are in test_registered_corpus.py).
+    monkeypatch.setattr(g, "registered_corpus_problem", lambda *a: None)
     monkeypatch.setattr(g, "predictions_error", lambda image: None)
     monkeypatch.setattr(ds, "load_predictions", lambda *a, **k: ({}, "0" * 64))
     out = tmp_path / "look.json"

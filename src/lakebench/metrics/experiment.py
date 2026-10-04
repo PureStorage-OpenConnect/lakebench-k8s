@@ -46,7 +46,10 @@ nothing measured under this one):
   the one version): AML continuous in-stream rounds run the investigator
   queries (IQ1 to IQ4) once the run has a case, so the continuous query set
   changes from 8 queries to 12; a round before the first TM pass runs the 8
-  and is labelled (2026-10-02).
+  and is labelled (2026-10-02). FQ4 recomputes its running balance in
+  ledger order and IQ3 sums its second hop per pair, so continuous silver
+  answers both as batch silver does; batch answers are unchanged, and the
+  AML query-set ids move (2026-10-03).
 - ``c360-2.dev1``: a multi-cycle run's silver jobs take one data clock, the
   exclusive end of the range its cycles cover (``data_clock_source``
   ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
@@ -463,6 +466,12 @@ def experiment_inputs(
                 workload.tm_operations.max_alerts_per_customer if schema == "financial" else None
             ),
         },
+        # Only when set, so a default config's inputs (and identity) do not move.
+        **(
+            {"investigator_sessions": arch.benchmark.investigator_sessions}
+            if arch.benchmark.investigator_sessions is not None
+            else {}
+        ),
     }
 
 
@@ -604,9 +613,13 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
 def _continuous_results(metrics: Any) -> dict[str, Any]:
     """A continuous run's results: the fingerprints of the result check the
     CLI runs once the whole corpus has passed through the pipeline and the
-    streams have stopped (cli/_sustained.py), when every table is a function
-    of the corpus alone. The in-stream rounds read tables still being
-    written and are never fingerprinted.
+    streams have stopped (cli/_sustained.py). The tables are then a function
+    of the corpus, except the layout of AML's counterparty_edges rows (one
+    per pair per micro-batch) and account_statements running balances
+    (arrival order), which no benchmark query reads raw: FQ3 and IQ3 sum the
+    edges per pair and FQ4 recomputes the balance in ledger order. The
+    in-stream rounds read tables still being written and are never
+    fingerprinted.
 
     An AML run also carries ``alert_set_continuous``: the alert-set
     fingerprint of gold.alerts at the scored tick's commit, computed once
@@ -1019,11 +1032,31 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "results": _results(metrics, mode),
         "lakebench": experiment_lakebench(metrics.provenance),
     }
+    investigators = _investigators(metrics, inputs)
+    if investigators is not None:
+        exp["investigators"] = investigators
     # Diagnostic, AML batch only: where gold-finalize's time went.
     gold_attribution = attribution(metrics) if mode == "batch" else None
     if gold_attribution is not None:
         exp["attribution"] = gold_attribution
     return exp
+
+
+def _investigators(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``experiment.investigators = {requested, run}`` when the config set
+    ``benchmark.investigator_sessions``, else None. ``run`` is the number of
+    sessions that executed (``continuous.investigators.sessions_run``), 0 when
+    the round was skipped or never recorded: the identity key ``investigator
+    sessions`` reads it (an outcome condition, so a lowered or skipped round
+    compares as not like-for-like with one that ran at N)."""
+    requested = inputs.get("investigator_sessions")
+    if requested is None:
+        return None
+    inv = (getattr(metrics, "continuous", None) or {}).get("investigators")
+    ran = inv.get("sessions_run") if isinstance(inv, Mapping) else None
+    if isinstance(ran, bool) or not isinstance(ran, int):
+        ran = 0
+    return {"requested": requested, "run": ran}
 
 
 def _requested_effective(metrics: Any, limits: Mapping[str, Any]) -> dict[str, Any]:
@@ -1543,6 +1576,25 @@ def stored_identity_refusals(
         reasons.append(
             f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
             f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
+        )
+    # The number of investigator sessions that ran may differ (an outcome),
+    # but not whether the run put investigator load on the pipeline at all
+    # (none configured, or none ran): load is never matched to no load, as
+    # an in-stream QpH median is never matched to the post-stream estimator.
+    s_ref = expected_identity.get("investigator sessions")
+    s_run = full_actual.get("investigator sessions")
+
+    def _loaded(v: Any) -> bool:
+        # 0: configured, but no session ran (skipped round): no load either.
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+    if _loaded(s_ref) != _loaded(s_run):
+        reasons.append(
+            f"investigator load differs: the {what} "
+            + ("ran no investigator sessions" if not s_ref else f"ran {s_ref} session(s)")
+            + ", the run "
+            + ("none" if not s_run else f"{s_run}")
+            + " (architecture.benchmark.investigator_sessions)"
         )
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)

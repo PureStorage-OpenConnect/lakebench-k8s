@@ -358,11 +358,17 @@ class BenchmarkRunner:
         query_class: str | None = None,
         fingerprint: bool = True,
         query_timeout: int = 300,
+        stream_queries: list[list[BenchmarkQuery]] | None = None,
+        shuffle: bool = True,
     ) -> BenchmarkResult:
         """Run throughput benchmark (N concurrent query streams).
 
         Each stream runs the full query suite independently with shuffled
-        query order to reduce correlated cache effects.
+        query order to reduce correlated cache effects. With
+        *stream_queries*, stream k runs exactly ``stream_queries[k]`` in its
+        order instead (the AML investigator sessions: one case per stream),
+        and *streams* is their number; *shuffle* False keeps the suite's
+        order in every stream.
 
         QpH = (total_queries_all_streams / wall_clock_seconds) * 3600
 
@@ -375,9 +381,13 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="throughput" and stream_results
         """
-        queries = self._queries()
-        if query_class:
-            queries = [q for q in queries if q.query_class == query_class]
+        if stream_queries is not None:
+            streams = len(stream_queries)
+            queries = [q for qs in stream_queries for q in qs]
+        else:
+            queries = self._queries()
+            if query_class:
+                queries = [q for q in queries if q.query_class == query_class]
 
         if not queries:
             return BenchmarkResult(
@@ -396,11 +406,15 @@ class BenchmarkRunner:
 
         def _run_stream(stream_id: int) -> StreamResult:
             """Execute one complete query stream with shuffled order."""
-            stream_queries = list(queries)
-            random.shuffle(stream_queries)
+            if stream_queries is not None:
+                ordered = list(stream_queries[stream_id])
+            else:
+                ordered = list(queries)
+                if shuffle:
+                    random.shuffle(ordered)
 
             results = self._run_query_stream(
-                stream_queries,
+                ordered,
                 cache="hot",
                 iterations=iterations,
                 query_timeout=query_timeout,

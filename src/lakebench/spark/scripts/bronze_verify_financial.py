@@ -86,6 +86,27 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
 REGISTER = _REGISTER_MODE == "1"
 CONTINUOUS_RESET = _REGISTER_MODE == "schema"
+# Only the held-out check, nothing else: run --stage silver-build or
+# gold-finalize on the financial schema runs this first, so a stage subset
+# never reads a protected corpus either.
+CHECK_ONLY = _REGISTER_MODE == "check"
+# A corpus from a held-out (or spent) AML seed is refused before anything is
+# read or written (refuse_protected_corpus). Every batch run reads a corpus
+# that has its manifest, so a missing manifest refuses there. The continuous
+# preflight runs while this run's datagen is still writing (the manifest
+# lands last, and the config guard checked the seed it generates with), so
+# a missing manifest passes there, unless the run generates nothing
+# (LB_MANIFEST_REQUIRED=1, set by the CLI for --skip-generate).
+# The CLI may say either way (LB_MANIFEST_REQUIRED 0 or 1): the continuous
+# preflight and run --stage's check before a multi-cycle subset, whose
+# cycles generate their own corpus.
+_REQUIRED = env("LB_MANIFEST_REQUIRED", "")
+MANIFEST_REQUIRED = _REQUIRED == "1" if _REQUIRED in ("0", "1") else not CONTINUOUS_RESET
+# Prefix of the refusal; the CLI reads it in the driver log and exits 2.
+PROTECTED_REFUSAL = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
+# Prefix when the check itself could not run (a storage or Spark error): the
+# job still stops before reading the corpus, and the CLI reports a failure.
+PROTECTED_UNCHECKED = "LAKEBENCH-PROTECTED-CORPUS-UNCHECKED"
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
@@ -364,12 +385,64 @@ def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
     )
 
 
+def protected_manifest_reason(spark, *, required: bool) -> str | None:
+    """Why the corpus under the bronze prefix may not be read, or None:
+    ``datagen_seed.manifest_protected_reason`` over every row of every
+    cycle's manifest (a held-out or spent recovered seed, a manifest the
+    corpus seed cannot be recovered from, an unreadable held-out record).
+    Only a manifest glob that matches no file counts as missing; any other
+    read error raises (the caller refuses). Names a role, never a seed."""
+    try:
+        from lakebench.config.datagen_seed import manifest_protected_reason
+    except ImportError:  # the Spark driver: the flat copy beside this script
+        from datagen_seed import manifest_protected_reason
+
+    path = BRONZE_URI + MANIFEST_PATH
+    jpath = spark._jvm.org.apache.hadoop.fs.Path(path)
+    found = jpath.getFileSystem(spark._jsc.hadoopConfiguration()).globStatus(jpath)
+    if found is None or len(found) == 0:
+        if required:
+            return (
+                "the corpus has no manifest, so it cannot be shown not to be a registered "
+                "held-out corpus"
+            )
+        log("Held-out check: no manifest yet (continuous datagen still writing); skipped")
+        return None
+    manifest = spark.read.parquet(path).select("typology_id", "seed")
+    return manifest_protected_reason(
+        (r["typology_id"], r["seed"]) for r in manifest.toLocalIterator()
+    )
+
+
+def refuse_protected_corpus(spark) -> None:
+    """Stop before any read or write when the corpus is a protected one."""
+    try:
+        reason = protected_manifest_reason(spark, required=MANIFEST_REQUIRED)
+    except Exception as e:  # noqa: BLE001 -- an unchecked corpus is not read
+        why = f"the manifest could not be checked ({type(e).__name__})"
+        log(f"ERROR: {PROTECTED_UNCHECKED}: {why}")
+        spark.stop()
+        raise SystemExit(f"{PROTECTED_UNCHECKED}: {why}") from None
+    if reason is None:
+        log("Held-out check: the corpus manifest comes from no held-out or spent seed")
+        return
+    log(f"ERROR: {PROTECTED_REFUSAL}: {reason}")
+    spark.stop()
+    raise SystemExit(f"{PROTECTED_REFUSAL}: {reason}")
+
+
 def main() -> None:
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import col
     from pyspark.sql.functions import max as max_
 
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
+    # First, before any namespace, table, ConfigMap or bronze read.
+    refuse_protected_corpus(spark)
+    if CHECK_ONLY:
+        log("Held-out check only (a stage subset follows); nothing else done")
+        spark.stop()
+        return
     # Hive does not pre-create namespaces the way the Polaris bootstrap does.
     ensure_namespaces(spark, CATALOG, (BRONZE_TABLE,))
     start_time = time.time()

@@ -1,8 +1,8 @@
 # AML (financial) Pipeline Benchmark Specification
 
 Workload version `aml-2` (as stamped in `experiment.workload.version`),
-generator model `datagen-v2-rs-0.3`, query sets `qs12-4bd2d9416abb` (batch
-with TM operations) and `qs8-32f521a57551` (FQ1 to FQ8), maintenance policy
+generator model `datagen-v2-rs-0.3`, query sets `qs12-910d16a91962` (batch
+with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8), maintenance policy
 `m2-2026-09-26`.
 
 Audience: engineers who run, reproduce or compare this benchmark, and
@@ -232,7 +232,7 @@ the generator (`datagen_rs/src/world.rs`):
 | Parties (population) | round(111,111 x scale), at least 100 in the generator (Lakebench's own estimate floors at 1) | 111,111 | 1,111,110 |
 | Base payments | population x 4 per month x 60 months | 26,666,640 | 266,666,400 |
 | Screening rows | added on top of base payments; the count depends on the seed | 5,227 (recorded, by difference) | 52,194 (recorded, by difference) |
-| Estimated pacs.008 size | 8.4 GB x scale | 8.4 GB | 84 GB |
+| Expected pacs.008 size (the `scale_ratio` denominator) | scale x GB per scale unit, measured: 8.47 at scale 1 and 9.36 at scale 10, interpolated in log10(scale) between them and held outside (`config/scale.py`) | 8.47 GB | 93.6 GB |
 | Files at 64 MiB, snappy | clamp(rows x 345 B / file size, 64, rows / 1000) | 137 | 1,371 |
 
 The entity mix is 55% person, 40% company and 5% financial institution;
@@ -271,15 +271,17 @@ start the generator refuses the robustness seed without it, and the
 evaluation seed or a calibration replicate with it. The reference scorer
 reads the perturbation from the manifest's stamp, not from the config.
 
-The held-out check runs at three points, each hashing the seed it sees and
-comparing it with the per-role hashes: config load; generator start
-(`datagen_rs/src/heldout.rs`, in images built from this release's source),
-which refuses to generate a financial corpus without the hash file Lakebench
-mounts on the datagen pod; and
-the cluster reference scorer (`spark/scripts/score_financial_reference.py`),
-which recovers the corpus seed from every manifest row and refuses a corpus
-from a spent seed, or from a held-out seed outside its registered run,
-whatever the config claims. No refusal message prints a held-out seed.
+The held-out check runs at five points, each hashing the seed it sees and
+comparing it with the per-role hashes: config load and the look guard
+after it (below); generator start (`datagen_rs/src/heldout.rs`, in images
+built from this release's source), which refuses to generate a financial
+corpus without the hash file Lakebench mounts on the datagen pod;
+bronze-verify (`spark/scripts/bronze_verify_financial.py`) and the recall
+scorer (`spark/scripts/score_financial.py`), which recover the corpus seed
+from every manifest row and refuse a held-out or spent corpus; and the
+cluster reference scorer (`spark/scripts/score_financial_reference.py`),
+which does the same and refuses a corpus from a spent seed, or from a
+held-out seed outside its registered run, whatever the config claims. No refusal message prints a held-out seed.
 
 **Registered corpora.** When a financial config declares `corpus_role:
 evaluation` or `robustness`, or names a seed whose hash matches a held-out
@@ -295,15 +297,30 @@ the held-out seed only from `--seed-file`, refuses it on `--seed`, records
 the seed as spent before any model is fitted and the report's sha256 before
 it prints a verdict. No `lakebench` command records a look.
 
-Never set `datagen.corpus_role` on a config used with `lakebench run`: such
-a run passes config load and, with an image built from this release's
-source, generates the registered corpus and scores rule recall and
-false-positive rate against its manifest, and no look is recorded (section
-12). With the default image the generator exits 2, because it never reads
-the seed from the Secret.
-<!-- PENDING look-guard: when the registered-look guard lands, `run` and the
-financial verbs refuse a protected corpus; rewrite this paragraph and the
-section 12 limitation from aml/look_guard.py. -->
+**The look guard** (`aml/look_guard.py`). `run`, `benchmark`, `query`,
+`reproduce` and the `financial` commands refuse a protected corpus right
+after the config loads, before any cluster call, with exit 2
+(`run.protected_corpus`): a config that declares `corpus_role: evaluation`
+or `robustness`, names a seed whose hash matches a held-out role, or (AML)
+points its bronze datagen prefix at one where this host generated a
+registered corpus; `compare` (which loads no config) and `financial reproduce`
+refuse a stored run record from such a corpus. `generate` writes
+a protected corpus only with `--registered-corpus --yes` and a digest-pinned
+`images.datagen`; it records the attempt in the host's corpus ledger
+(`~/.lakebench/aml_corpora.jsonl`, `LB_AML_CORPORA_LEDGER`) before its first
+cluster call, then `generated` (with the corpus fingerprint and the pod
+image ids) or `failed`, and refuses a seed whose look was already taken.
+For the financial workload bronze-verify also reads every row of the corpus
+manifest before anything else and stops (exit 2) on a corpus from a
+held-out or spent seed, on a manifest no corpus seed can be recovered from,
+and on a batch corpus with no manifest; a `run --stage` subset runs that
+check alone first, and a check that could not run (a storage error) exits 1.
+`scripts/aml_gate.py --registered` scores a look only when the ledger holds
+a matching `generated` entry for the corpus it reads.
+`scripts/aml_heldout_audit.py` lists this host's run records, journals,
+ledgers and ledger buckets that touch a protected corpus. `destroy` and the
+read-only commands skip the load-time seed check, so a deployment that
+generated a registered corpus can still be torn down.
 
 The AML protocol grants each held-out seed exactly one registered look after
 the generator freeze. The freeze covers bronze rows, the manifest,
@@ -551,7 +568,19 @@ version listed a prior counterparty. A code that reads the HIGH cut
    case of this run (an untimed query, 60 s timeout). Once a case exists the
    round runs all twelve queries; before that it runs FQ1 to FQ8 and is
    labelled (`investigator_queries`: `included`, `absent_no_cases` or
-   `probe_failed`). Rounds are not fingerprinted.
+   `probe_failed`). Rounds are not fingerprinted. With
+   `architecture.benchmark.investigator_sessions` set (1 to 32; financial,
+   TM operations on, Trino or Spark Thrift; refused otherwise), one extra
+   round right after the first round that ran the investigator queries runs
+   that many concurrent sessions, each working one case of this run: IQ1 to
+   IQ3 bound to that case and IQ4 unchanged
+   (`benchmark/investigator_sessions.py`). It is not a benchmark
+   round (QpH and the round count leave it out) and is recorded in
+   `continuous.investigators` with per-query latency, the detection ticks
+   it overlapped (`tick_delta`, `load_label`) and its Lakebench-set query
+   timeout; the number of sessions that ran is an outcome condition, so two
+   runs that ran different numbers compare as not like-for-like
+   (`docs/aml-scoring.md`).
 6. Maintains tables inside the window: expire snapshots and orphan removal
    every `retention_interval` (default `run_duration / 3`, within 300 to
    7,200 s), and compaction every `compaction_interval` (default twice
@@ -589,12 +618,24 @@ None of these is part of `lakebench run` or its verdict (`cli/_financial.py`):
   snapshot and the job exits non-zero. It writes to the gold alerts table
   name with an `_replay` suffix (`--output-alerts` to change it), replacing
   only that rule's rows.
-- `lakebench financial reproduce --alert-id <id>` looks up an alert and
-  time-travels silver, but never reports a reproduction: its driver exits 2
-  when the alert is not found, 4 when historical silver is empty and 3
-  otherwise, because rule reproduction is not packaged. The job is retried
-  twice and the command then exits 1 (0 with `--no-wait`, after
-  submission). This is a different command from `lakebench reproduce`.
+- `lakebench financial reproduce CONFIG --alert-id <id>` (`--run RUN_ID`)
+  reruns one batch alert's rule on exactly what that run's gold-finalize
+  read (`cli/_financial.py`, `spark/scripts/reproduce_financial.py`).
+  Gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, and the
+  batch scorer fingerprints each (`financial_scoring.read_snapshots`). The
+  command reads that run record (the deployment's latest AML batch record
+  on this host by default; exit 2 when there is none), refuses one from a
+  protected corpus (exit 2) or with no read snapshots (exit 4) before any
+  cluster call, reads each table at its recorded snapshot (or, once that
+  expired, the current table when its fingerprint is unchanged), filters
+  the transactions to the batches sealed when gold read them, runs the rule
+  with gold's parameters and matches the alert on rule, entity, `alert_ts`
+  and its related transactions. It exits 0 when the alert is reproduced, 1
+  when it is not or the alert is not in `gold.alerts` for that run, and 4
+  when a snapshot is gone and the content changed; the result is written
+  to `scoring/reproduce/<alert_id>/result.json`. Continuous alerts are not
+  reproduced. This is a different command from `lakebench reproduce`.
 - `lakebench financial reference-score` runs the reference detector, the
   band-leakage report and the fidelity gate, installing hash-checked
   scikit-learn wheels from the deployment's dependency set in an init
@@ -665,8 +706,8 @@ post-maintenance rounds of an AML batch run time different query sets.
 
 `query_set_id` is `qs<N>-<first 12 hex of sha256>` over the sorted query
 names and SQL of the queries actually recorded, failed ones included. In
-this release FQ1 to FQ8 plus IQ1 to IQ4 is `qs12-4bd2d9416abb`, FQ1 to FQ8 is
-`qs8-32f521a57551`, and IQ1 to IQ4 alone is `qs4-d97fd349eed5`. A `--class`
+this release FQ1 to FQ8 plus IQ1 to IQ4 is `qs12-910d16a91962`, FQ1 to FQ8 is
+`qs8-ffe2bc1a012e`, and IQ1 to IQ4 alone is `qs4-bc3b5e556bf7`. A `--class`
 subset produces its own id. Each continuous in-stream round also records the
 query set it executed; rounds that executed different sets are not combined
 into one assessed QpH (section 8.2).
@@ -678,12 +719,12 @@ into one assessed QpH (section 8.2).
 | `FQ6_structuring_scan` | Originators with 3 or more payments just under a currency's reporting threshold (the W2 shape) | silver.transactions | top 500, total order by count, originator, currency |
 | `FQ3_entity_edge_risk` | Per-entity out-degree and outbound USD | counterparty_edges, entities | top 200 by outbound USD, entity id |
 | `FQ7_cross_border_concentration` | Cross-border share of USD per corridor | silver.transactions | top 100, total order; the fifth column (`xborder_share`) at a quantum of 0.001 |
-| `FQ4_running_balance_window` | Ordered statement entries for the 50 most active accounts | account_statements | ROW_NUMBER over (book_ts, entry_seq); outer order account, entry. Returns every entry of those accounts, so its result grows with scale (1,491,153 rows recorded at scale 10, `run-20260929-214442-825153`) |
+| `FQ4_running_balance_window` | Ordered statement entries for the 50 most active accounts, with the running balance recomputed in ledger order | account_statements | balance = the account's last stored `bal_after` less the sum of its entries, plus the running sum over (book_ts, txn_id, debit first), so batch and settled continuous silver give one answer; ROW_NUMBER over (book_ts, txn_id, debit first, entry_seq); outer order account, entry. Returns every entry of those accounts, so its result grows with scale (1,491,153 rows recorded at scale 10, `run-20260929-214442-825153`) |
 | `FQ5_alert_triage` | Alerts by rule, priority and status with entity count and mean score | gold.alerts | ORDER BY alerts DESC only, no LIMIT; the fingerprint is order-independent; the sixth column (`avg_score`) at a quantum of 0.001 |
 | `FQ8_alert_to_entity_join` | 100 most recent alerts with entity and payment count | gold.alerts, entities | total order by alert_ts, entity, rule, alert_id; `alert_id` volatile (NULL-ness only). `txns_in_alert` is `cardinality(related_txn_ids)`, which the per-alert evidence caps bound (section 7.4), so it is a Lakebench-capped count |
 | `IQ1_customer_360` | 360 view of the top open case | cases, alert_dispositions, accounts, entities | case picked by status, priority, opened date, case id; TM reads scoped to the TM run id |
 | `IQ2_case_activity_12m` | Monthly activity in the 365 days before the newest escalation case | cases, silver.transactions | `allow_empty` |
-| `IQ3_counterparty_two_hop` | Counterparties and two-hop network of the oldest open case | cases, edges, entities, alert_dispositions | top 50 hop-1, top 500 overall, total order |
+| `IQ3_counterparty_two_hop` | Counterparties and two-hop network of the oldest open case | cases, edges, entities, alert_dispositions | both hops sum edge rows per pair (continuous writes one row per pair per micro-batch); top 50 hop-1, top 500 overall, total order |
 | `IQ4_open_cases_over_60_days` | Open cases older than 60 days | cases, entities | ordered by age, case id; `allow_empty` |
 
 Rules that apply to every query:
@@ -1227,25 +1268,23 @@ only.
 - **TM operations figures are simulations.** Dispositions come from
   simulated analysts and investigators with seeded accuracies (8.5). Recall
   and false-positive rate are measured from alerts against the manifest.
-- **`lakebench financial reproduce` is not functional.** Its driver exits 2,
-  3 or 4, never 0, and the command exits 1. Replay is outside the run.
+- **`lakebench financial reproduce` pins the three silver tables only.**
+  W5 and W6 read the bronze watchlist as it is now and W1 its vertex cap
+  from the current config (the result lists them as `not_pinned`), and the
+  W3 and W17 path budgets depend on the job's executor count and scratch
+  size, so a W2 or W4 alert is the clean check. Continuous alerts are not
+  reproduced.
 - **The reference-model score reads unsealed silver.**
   `lakebench financial reference-score` builds its features from silver
   tables read without the sealed-batch filter the detection rules and the
   covered scorer use (`spark/scripts/aml_features.py`), so silver rows from
   a batch whose seal marker never landed (a crash between the transaction
   commit and the marker) are counted there and nowhere else.
-- **`lakebench run` can spend a held-out look without recording it.** A run
-  config that declares `datagen.corpus_role: evaluation` or `robustness`
-  with the matching seed loads while registered looks are open, and, with
-  an image built from this release's source, `lakebench run` then generates
-  and scores that held-out corpus without verifying the manifest against
-  the seed and without recording a look. The
-  load-time refusal text for a protected seed also points at the config
-  route. Never set `datagen.corpus_role` in a run config; registered looks
-  are recorded only by `scripts/aml_gate.py --registered`.
-  <!-- PENDING look-guard: rewrite or remove once the registered-look guard
-  refuses protected corpora in run and the financial verbs. -->
+- **The look guard is per host.** The corpus ledger that records a
+  registered corpus and the bronze prefix it was written to is a local file
+  (section 3.3), so a development config on another host pointed at that
+  prefix is refused only by bronze-verify's manifest check, after the
+  deploy. Take every look from one host.
 - **The default generator image is a tag.** A registered look or
   calibration shard run through `scripts/aml_gate.py` needs
   `--generator-image` as a digest-pinned reference (`repo@sha256:<digest>`)

@@ -325,6 +325,16 @@ def _offline_deps_set(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _aml_ledgers_in_tmp(tmp_path, monkeypatch):
+    """The AML look and corpus ledgers default to ~/.lakebench, which on the
+    look host holds real entries: a test would read them (a cfg stub then
+    reaches the bronze-prefix check) or append to them. Each test starts
+    with empty per-test ledgers; tests that need one set the variable."""
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "aml-ledgers" / "looks.jsonl"))
+    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "aml-ledgers" / "corpora.jsonl"))
+
+
+@pytest.fixture(autouse=True)
 def _journal_in_tmp(tmp_path, monkeypatch):
     """CLI commands journal to ./lakebench-output/journal by default, which
     left session files in the repository after every test run. Point the

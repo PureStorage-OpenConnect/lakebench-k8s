@@ -22,7 +22,8 @@ The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 
 from lakebench.config.schema import WorkloadSchema
 
@@ -365,6 +366,14 @@ _FQ4 = BenchmarkQuery(
     name="FQ4_running_balance_window",
     display_name="Running balance for high-activity accounts",
     query_class="analytics",
+    # The running balance is recomputed in ledger order (book_ts, txn_id,
+    # debit first: batch silver's own window), from the account's opening
+    # balance (its last stored bal_after less the sum of its entries), not
+    # read from the stored bal_after: continuous silver stores bal_after in
+    # arrival order, so a late statement moves every later stored balance.
+    # On batch silver the answer is the stored bal_after row for row; on
+    # continuous silver over the same corpus it is the batch answer. One
+    # pass over the entries: the opening balance is two window aggregates.
     sql="""\
 WITH top_accts AS (
   SELECT account_id
@@ -372,18 +381,32 @@ WITH top_accts AS (
   GROUP BY account_id
   ORDER BY COUNT(*) DESC, account_id
   LIMIT 50
+),
+entries AS (
+  SELECT s.account_id, s.book_ts, s.txn_id, s.cdt_dbt_ind, s.amt, s.bal_after, s.entry_seq,
+         CASE WHEN s.cdt_dbt_ind = 'CRDT' THEN s.amt ELSE -s.amt END AS signed_amt,
+         CASE WHEN s.cdt_dbt_ind = 'DBIT' THEN 0 ELSE 1 END AS dbt_ord
+  FROM {catalog}.{silver_account_statements} s
+  JOIN top_accts t ON t.account_id = s.account_id
 )
 SELECT
-  s.account_id,
-  s.book_ts,
-  s.cdt_dbt_ind,
-  s.amt,
-  s.bal_after,
-  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts, s.entry_seq) AS entry_ord
-FROM {catalog}.{silver_account_statements} s
-JOIN top_accts t ON t.account_id = s.account_id
-ORDER BY s.account_id, entry_ord""",
+  account_id,
+  book_ts,
+  cdt_dbt_ind,
+  amt,
+  CAST(
+    MAX_BY(bal_after, entry_seq) OVER (PARTITION BY account_id)
+    - SUM(signed_amt) OVER (PARTITION BY account_id)
+    + SUM(signed_amt) OVER (PARTITION BY account_id ORDER BY book_ts, txn_id, dbt_ord)
+    AS DECIMAL(38, 2)
+  ) AS bal_after,
+  ROW_NUMBER() OVER (
+    PARTITION BY account_id ORDER BY book_ts, txn_id, dbt_ord, entry_seq
+  ) AS entry_ord
+FROM entries
+ORDER BY account_id, entry_ord""",
 )
+
 
 _FQ5 = BenchmarkQuery(
     name="FQ5_alert_triage",
@@ -493,19 +516,45 @@ ORDER BY a.alert_ts DESC, a.alert_id""",
 # unless this run's TM layer ran: otherwise they would time a stale or empty
 # table under the same query-set id.
 
+# Each subject CTE body is its own constant, so a session can bind it to one
+# case (bind_case) while the default render stays byte-identical.
+#: IQ1's queue order: open before closed, by priority, oldest first. The
+#: investigator sessions pick their cases in this order.
+IQ1_CASE_ORDER = """CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
+           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+           opened_date, case_id"""
+
+_IQ1_SUBJECT = (
+    """  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY """
+    + IQ1_CASE_ORDER
+    + """
+  LIMIT 1"""
+)
+
+_IQ2_SUBJECT = """  SELECT customer_id, opened_date
+  FROM {catalog}.{gold_cases}
+  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
+  ORDER BY opened_date DESC, case_id
+  LIMIT 1"""
+
+_IQ3_SUBJECT = """  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
+  LIMIT 1"""
+
 _IQ1 = BenchmarkQuery(
     name="IQ1_customer_360",
     display_name="Investigator: customer 360 for the top open case",
     query_class="investigator",
     sql="""\
 WITH subject AS (
-  SELECT customer_id
-  FROM {catalog}.{gold_cases}
-  WHERE base_run_id = '{tm_run_id}'
-  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
-           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
-           opened_date, case_id
-  LIMIT 1
+"""
+    + _IQ1_SUBJECT
+    + """
 ),
 alerts AS (
   SELECT d.entity_id,
@@ -551,11 +600,9 @@ _IQ2 = BenchmarkQuery(
     query_class="investigator",
     sql="""\
 WITH subject AS (
-  SELECT customer_id, opened_date
-  FROM {catalog}.{gold_cases}
-  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
-  ORDER BY opened_date DESC, case_id
-  LIMIT 1
+"""
+    + _IQ2_SUBJECT
+    + """
 )
 SELECT date_trunc('month', t.txn_timestamp) AS activity_month,
        COUNT(*) AS txns,
@@ -578,13 +625,14 @@ _IQ3 = BenchmarkQuery(
     name="IQ3_counterparty_two_hop",
     display_name="Investigator: counterparties and two-hop network of the oldest open case",
     query_class="investigator",
+    # Both hops sum the edge rows per pair: batch silver holds one row per
+    # (source, target) pair, continuous silver one per pair per micro-batch,
+    # so the sums are the same answer in both modes.
     sql="""\
 WITH subject AS (
-  SELECT customer_id
-  FROM {catalog}.{gold_cases}
-  WHERE base_run_id = '{tm_run_id}'
-  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
-  LIMIT 1
+"""
+    + _IQ3_SUBJECT
+    + """
 ),
 hop1 AS (
   SELECT cp, SUM(amount_usd) AS amount_usd, SUM(txns) AS txns
@@ -603,9 +651,10 @@ hop1 AS (
 ),
 hop2 AS (
   SELECT h.cp AS via_entity_id, e.target_entity_id AS hop2_entity_id,
-         e.cumulative_amount_usd AS amount_usd
+         SUM(e.cumulative_amount_usd) AS amount_usd
   FROM {catalog}.{silver_counterparty_edges} e
   JOIN hop1 h ON e.source_entity_id = h.cp
+  GROUP BY h.cp, e.target_entity_id
 ),
 alerted AS (
   SELECT DISTINCT entity_id FROM {catalog}.{gold_alert_dispositions}
@@ -640,6 +689,42 @@ ORDER BY age_days DESC, c.case_id""",
 )
 
 INVESTIGATOR_QUERIES: list[BenchmarkQuery] = [_IQ1, _IQ2, _IQ3, _IQ4]
+
+#: Name suffix of a query bound to one case (an investigator session's).
+SESSION_SUFFIX = "@session"
+
+#: The case ids gold.cases holds (tm_operations.case_id_for): bind_case takes
+#: nothing else, so a bound id needs no quoting.
+CASE_ID_RE = re.compile(r"case-[0-9a-f]{24}")
+
+# (subject body, the columns a bound subject selects), per query that takes a case.
+_SUBJECTS: dict[str, tuple[str, str]] = {
+    _IQ1.name: (_IQ1_SUBJECT, "customer_id"),
+    _IQ2.name: (_IQ2_SUBJECT, "customer_id, opened_date"),
+    _IQ3.name: (_IQ3_SUBJECT, "customer_id"),
+}
+
+
+def bind_case(query: BenchmarkQuery, case_id: str) -> BenchmarkQuery:
+    """*query* with its subject bound to one case, for an investigator
+    session: IQ1, IQ2 and IQ3 read that case's customer (and IQ2 its opened
+    date) instead of the top case of the queue, and the name gains
+    ``@session``. IQ4 (the open-case list) takes no case and is returned
+    unchanged. Raises ValueError on an id that is not a gold.cases case id."""
+    if not CASE_ID_RE.fullmatch(case_id or ""):
+        raise ValueError(f"not a case id: {case_id!r}")
+    subject = _SUBJECTS.get(query.name)
+    if subject is None:
+        return query
+    body, columns = subject
+    bound = (
+        f"  SELECT {columns}\n"
+        "  FROM {catalog}.{gold_cases}\n"
+        f"  WHERE base_run_id = '{{tm_run_id}}' AND case_id = '{case_id}'"
+    )
+    if query.sql.count(body) != 1:
+        raise ValueError(f"{query.name}: subject CTE not found")
+    return replace(query, name=query.name + SESSION_SUFFIX, sql=query.sql.replace(body, bound))
 
 
 _FINANCIAL_QUERIES: list[BenchmarkQuery] = [

@@ -184,78 +184,35 @@ def report_seed(seed):
 
 
 def ledger_path() -> Path:
-    """An append-only record of look claims outside the checkout, so a
-    reverted or stashed aml_registered_looks.json cannot un-spend a seed on
-    this host (LB_AML_LOOKS_LEDGER overrides the location)."""
-    return Path(
-        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
-    )
+    """The out-of-tree, append-only record of look claims
+    (``datagen_seed.looks_ledger_path``; LB_AML_LOOKS_LEDGER overrides it)."""
+    from lakebench.config.datagen_seed import looks_ledger_path
+
+    return looks_ledger_path()
 
 
 def seed_ever_recorded(seed: int) -> str | None:
-    """Why ``seed`` already has a look anywhere this host can see, or None:
-    the out-of-tree ledger, or any commit on any branch that added it to the
-    tracked record."""
-    from lakebench.config.datagen_seed import looks_path
+    """Why ``seed`` already has a look anywhere this host can see, or None
+    (``datagen_seed.seed_ever_recorded``: the look ledger, then the git
+    history of the tracked record). Never names a seed by value."""
+    from lakebench.config.datagen_seed import seed_ever_recorded as _ever
 
-    led = ledger_path()
-    if led.is_file():
-        for line in led.read_text().splitlines():
-            if line.strip() and int(json.loads(line)["seed"]) == int(seed):
-                # A claim that failed after its ledger line leaves a held-out
-                # seed unspent: name it by role then, never by value.
-                from lakebench.config.datagen_seed import heldout_role
+    return _ever(seed)
 
-                role = heldout_role(seed)
-                label = f"the registered {role} seed" if role else f"seed {seed}"
-                return f"{label} is in the look ledger {led}"
-    rec = looks_path()
-    rel = str(rec.relative_to(ROOT))
-    # Every revision of the record on any ref, read through git show: the
-    # seed never goes on a git command line, where /proc would show it.
-    revs = subprocess.run(
-        ["git", "-C", str(ROOT), "log", "--all", "--format=%H", "--", rel],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if revs.returncode != 0:
-        raise OSError(f"git log over {rec.name} failed (exit {revs.returncode})")
-    for rev in revs.stdout.split():
-        shown = subprocess.run(
-            ["git", "-C", str(ROOT), "show", f"{rev}:{rel}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if shown.returncode != 0:
-            continue  # the record does not exist at this revision
-        try:
-            looks = json.loads(shown.stdout).get("looks") or []
-        except (ValueError, AttributeError):
-            continue
-        if any(
-            isinstance(e, dict) and type(e.get("seed")) is int and e["seed"] == int(seed)
-            for e in looks
-        ):
-            # git log --all also sees stashes and unpushed branches, where a
-            # held-out seed can sit before its look: name it by role then.
-            from lakebench.config.datagen_seed import heldout_role
 
-            role = heldout_role(seed)
-            label = f"the registered {role} seed" if role else f"seed {seed}"
-            return f"{label} is recorded in {rec.name} at commit {rev}"
-    return None
+def registered_corpus_problem(role, seed, generator_image, corpus) -> str | None:
+    """The corpus must be the bytes a recorded `generate --registered-corpus`
+    wrote, on pods running --generator-image (datagen_seed's rule)."""
+    from lakebench.config.datagen_seed import registered_corpus_problem as _problem
+
+    return _problem(role, seed, generator_image, corpus)
 
 
 def append_ledger(entry: dict) -> None:
-    """Append ``entry`` to the ledger and fsync it (raises on failure)."""
-    led = ledger_path()
-    led.parent.mkdir(parents=True, exist_ok=True)
-    with open(led, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    """Append ``entry`` to the look ledger and fsync it (raises on failure)."""
+    from lakebench.config.datagen_seed import append_looks_ledger
+
+    append_looks_ledger(entry)
 
 
 def clean_checkout_error() -> str | None:
@@ -540,7 +497,13 @@ def main(argv=None) -> int:
         args.seed = file_seed
     if args.registered in ("evaluation", "robustness"):
         try:
-            err = clean_checkout_error() or seed_ever_recorded(args.seed)
+            err = (
+                clean_checkout_error()
+                or seed_ever_recorded(args.seed)
+                or registered_corpus_problem(
+                    args.registered, args.seed, args.generator_image, args.corpus
+                )
+            )
         except (OSError, ValueError) as e:
             err = f"the look history could not be checked: {e}"
         if err:
@@ -732,6 +695,9 @@ def main(argv=None) -> int:
                 err = (
                     clean_checkout_error()
                     or seed_ever_recorded(args.seed)
+                    or registered_corpus_problem(
+                        args.registered, args.seed, args.generator_image, corpus
+                    )
                     or predictions_error(args.generator_image)
                 )
                 if err:

@@ -72,6 +72,9 @@ CASES = [
     (["--continuous", "--repeat", "2"], "--repeat does not apply to a continuous run"),
     (["--repeat", "2", "--cycles"], "--repeat does not apply to a multi-cycle run"),
     (["--stage", "silver-build", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
+    # Not a flag: a batch AML config that sets benchmark.investigator_sessions
+    # (it loads; run refuses it in batch).
+    (["--investigators"], "runs only on an AML continuous run with TM operations"),
 ]
 
 
@@ -88,6 +91,7 @@ def test_every_rule_has_a_case():
             mode="continuous" if args.continuous else "batch",
             cycles=2 if "--cycles" in argv else 1,
             schema="financial" if "--financial" in argv else "customer360",
+            investigators="the run is batch" if "--investigators" in argv else None,
         )
         assert rule.broken(args, ctx), argv
         assert message in rule.text(args), (argv, rule.next)
@@ -173,6 +177,11 @@ def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, ar
     if "--financial" in argv:  # not a flag: the config's schema
         argv = [a for a in argv if a != "--financial"]
         text = text.replace("  schema: customer360\n", "  schema: financial\n")
+    if "--investigators" in argv:  # not a flag: the config's sessions key
+        argv = [a for a in argv if a != "--investigators"]
+        text = text.replace(
+            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
+        ).replace("schema: customer360", "schema: financial")
     cfg.write_text(text)
     result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
     assert result.exit_code == ExitCode.USAGE, result.output
@@ -229,6 +238,29 @@ def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatc
     monkeypatch.setattr(destroy_mod, "destroy", lambda **k: called.append("destroy"))
     with pytest.raises(UsageError, match="--timeout must be at least 1 s"):
         _run_pipeline(cfg, 0, keep=True)
+    assert called == [] and no_cluster == []
+
+
+def test_reproduce_refuses_batch_investigator_sessions_before_it_deploys(
+    tmp_path, monkeypatch, no_cluster
+):
+    """A batch AML config with investigator sessions loads, and run would
+    refuse it only after reproduce had deployed and generated: reproduce
+    checks run's rules first."""
+    import lakebench.cli._deploy as deploy_mod
+    from lakebench.cli._reproduce import _run_pipeline
+
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "runargs.yaml"
+    cfg.write_text(
+        CONFIG.replace("schema: customer360", "schema: financial").replace(
+            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
+        )
+    )
+    called: list[str] = []
+    monkeypatch.setattr(deploy_mod, "_deploy_impl", lambda *a, **k: called.append("deploy"))
+    with pytest.raises(UsageError, match="investigator_sessions runs only on an AML continuous"):
+        _run_pipeline(cfg, None, keep=True)
     assert called == [] and no_cluster == []
 
 

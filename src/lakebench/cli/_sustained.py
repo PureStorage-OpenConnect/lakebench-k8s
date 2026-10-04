@@ -26,6 +26,7 @@ from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -2019,6 +2020,102 @@ def _run_benchmark_round(
     )
 
 
+def investigator_sessions_after_round(
+    bench_runner,
+    collector,
+    console,
+    j,
+    requested: int,
+    *,
+    remaining_s: float,
+    baseline_round_s: float,
+) -> bool:
+    """After an in-stream round: run the investigator sessions when that
+    round included IQ1 to IQ4 (it is the baseline), or record them as
+    ``no_time`` when less than ``TIME_FACTOR`` baseline rounds are left.
+    Returns whether the sessions are still pending (the round had no case)."""
+    from lakebench.benchmark import investigator_sessions as inv
+
+    run = collector.current_run
+    rounds = getattr(run, "benchmark_rounds", None) or []
+    last = rounds[-1] if rounds else None
+    record_of = getattr(last, "round_record", None) or {}
+    if record_of.get("investigator_queries") != "included":
+        return True
+    if remaining_s < inv.TIME_FACTOR * baseline_round_s:
+        record = inv.skipped(
+            requested,
+            "no_time",
+            f"{remaining_s:.0f}s left in the window, under {inv.TIME_FACTOR:g} x the "
+            f"{baseline_round_s:.0f}s baseline round",
+        )
+    else:
+        print_info(f"Investigator sessions: {requested} requested...")
+        record = inv.run_sessions(
+            bench_runner,
+            requested,
+            inv.baseline_seconds(getattr(last, "queries", None) or []),
+            now=utc_now,
+            remaining_s=remaining_s,
+        )
+    if run is not None:
+        if run.continuous is None:
+            run.continuous = {}
+        run.continuous["investigators"] = record
+    print_info(
+        f"Investigator sessions: {record['status']} ({record['sessions_run']} of {requested} ran)"
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message="Investigator sessions",
+        details={
+            k: record.get(k)
+            for k in ("sessions_requested", "sessions_run", "status", "lowered_reason")
+        },
+    )
+    return False
+
+
+def finish_investigator_sessions(
+    continuous: dict,
+    requested: int,
+    *,
+    pending: bool,
+    rounds_ran: bool,
+    ticks: list,
+    clock_offset_s: float | None,
+) -> None:
+    """At window close: a sessions round that never found a case is
+    recorded as ``no_cases`` (``no_rounds`` when no in-stream round ran at
+    all, e.g. --skip-benchmark); one that ran gets the overlap of the
+    detection ticks inside the window with its own window (``tick_delta``,
+    ``load_label``)."""
+    from lakebench.benchmark import investigator_sessions as inv
+    from lakebench.metrics.tick_records import investigator_tick_overlap
+
+    if pending or "investigators" not in continuous:
+        if rounds_ran:
+            record = inv.skipped(
+                requested, "no_cases", "no in-stream round found a case of this run"
+            )
+        else:
+            record = inv.skipped(
+                requested,
+                "no_rounds",
+                "no in-stream round ran (--skip-benchmark, no query engine, or a warm-up "
+                "longer than the window)",
+            )
+        continuous["investigators"] = record
+        return
+    record = continuous["investigators"]
+    overlap = investigator_tick_overlap(
+        record, ticks, clock_offset_s, window=continuous.get("window")
+    )
+    if overlap is not None:
+        record.update(overlap)
+
+
 def _investigator_state(bench_runner, run_id: str) -> str:
     """Whether this run has a case yet, for the investigator queries: an
     untimed ``SELECT 1`` on the cases table for the run's ``base_run_id``
@@ -2561,8 +2658,10 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     that could not be written is not (nothing was asked; scoring reads
     not_scored).
 
-    Records ``continuous.drain``, ``continuous.ticks`` and
-    ``continuous.ticks_unpinned`` from the drain's full log. Only the drain
+    Records ``continuous.drain``, ``continuous.ticks``,
+    ``continuous.ticks_unpinned`` and ``continuous.time_travel.ticks`` (each
+    tick's transactions snapshot and its metadata counts) from the drain's
+    full log. Only the drain
     log is parsed: the window's log stops before the last tick. That log is
     the current driver pod's, so an earlier pod's ticks are not in it
     (``drain.ticks_scope``), and ``drain.log_from_driver_start`` is False
@@ -2576,6 +2675,7 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
         scored_tick,
         tick_list,
         ticks_unpinned,
+        time_travel_ticks,
     )
 
     print_info(f"Draining gold-refresh: finishing its current tick (up to {DRAIN_BUDGET_S}s)...")
@@ -2585,10 +2685,12 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     reason = ""
     record = drain.record()
     ticks = None
+    tt_ticks = None
     if drain.state == "drained":
         parsed = parse_tick_records(drain.logs, run_id)
         tick, reason = scored_tick(parsed)
         ticks = tick_list(parsed["ticks"])
+        tt_ticks = time_travel_ticks(parsed["ticks"])
         # The log is the current driver pod's: an earlier pod's ticks are not
         # in it. True when it still runs from its driver's first tick (not
         # trimmed by log rotation); it does not say no restart happened.
@@ -2621,6 +2723,8 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
         if ticks is not None:
             cont["ticks"] = ticks
             cont["ticks_unpinned"] = ticks_unpinned(ticks)
+        if tt_ticks is not None:
+            cont.setdefault("time_travel", {})["ticks"] = tt_ticks
         if problem:
             cont.setdefault("gate_problems", []).append(problem)
     return drain, tick, reason, problem
@@ -3385,7 +3489,11 @@ def _run_sustained(
                 JobType.BRONZE_VERIFY,
                 # Reset, not register: see bronze_verify_financial
                 # CONTINUOUS_RESET.
-                cycle_env={"LB_REGISTER_TABLE": "schema"},
+                # With --skip-generate no manifest is coming: one must exist.
+                cycle_env={
+                    "LB_REGISTER_TABLE": "schema",
+                    "LB_MANIFEST_REQUIRED": "1" if skip_generate else "0",
+                },
             )
             _interrupt.submitted(preflight_status)
             if preflight_status.state == JobState.FAILED:
@@ -3412,6 +3520,15 @@ def _run_sustained(
                 poll_interval=15,
             )
             if not preflight_result.success:
+                from lakebench.aml.look_guard import refusal_in_log
+
+                _refused = refusal_in_log(getattr(preflight_result, "driver_logs", None))
+                if _refused:
+                    print_error(
+                        f"Refused: bronze-verify found a protected AML corpus ({esc(_refused)})"
+                    )
+                    pipeline_success = False
+                    raise typer.Exit(ExitCode.USAGE)
                 print_error(f"bronze-verify preflight failed: {preflight_result.message}")
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
@@ -3672,6 +3789,10 @@ def _run_sustained(
         # rounds they can't finish.
         last_round_seconds: float = 0.0
         min_remaining_floor = 60
+        # AML investigator sessions (benchmark.investigator_sessions): one
+        # extra round after the first round that included IQ1 to IQ4.
+        sessions_requested: int | None = cfg.architecture.benchmark.investigator_sessions
+        sessions_pending = sessions_requested is not None and bench_runner_instream is not None
 
         while time.time() - start < run_duration:
             elapsed = time.time() - start
@@ -3710,6 +3831,17 @@ def _run_sustained(
                 # the next pass without a sleep.
                 _ns_watch.check(time.time() - start)
                 last_round_seconds = time.time() - round_start
+                if sessions_pending and sessions_requested is not None:
+                    sessions_pending = investigator_sessions_after_round(
+                        bench_runner_instream,
+                        collector,
+                        console,
+                        j,
+                        sessions_requested,
+                        remaining_s=run_duration - (time.time() - start),
+                        baseline_round_s=last_round_seconds,
+                    )
+                    _ns_watch.check(time.time() - start)
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
                 continue
@@ -3989,6 +4121,15 @@ def _run_sustained(
             if collector.current_run.continuous is None:
                 collector.current_run.continuous = {}
             collector.current_run.continuous.update(continuous_record)
+            if sessions_requested is not None:
+                finish_investigator_sessions(
+                    collector.current_run.continuous,
+                    sessions_requested,
+                    pending=sessions_pending,
+                    rounds_ran=round_index > 0,
+                    ticks=getattr(parsed.get("gold-refresh"), "tick_timings", None) or [],
+                    clock_offset_s=clock_offset,
+                )
         _journal_safe(
             j.record,
             EventType.STREAMING_HEALTH,

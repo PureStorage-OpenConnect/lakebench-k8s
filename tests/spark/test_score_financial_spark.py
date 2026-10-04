@@ -349,3 +349,54 @@ def test_nonplanted_alerts_are_counted_per_rule(spark):
     # A targeted rule with no alerts reads 0, not absent.
     assert s["nonplanted_alerts_by_rule"]["W8_dormant_reactivation"] == 0
     assert s["fp_rate_by_rule"]["W5_sanctions_match"] == pytest.approx(2 / 3)
+
+
+# -- the protected-corpus refusal (SAF-5), over every manifest row ------------
+
+
+def _seed_manifest(spark, rows):
+    return spark.createDataFrame(rows, "typology_id STRING, seed BIGINT")
+
+
+def test_score_refuses_a_manifest_with_held_out_rows_past_row_200(spark, monkeypatch):
+    """1,000 calibration rows, then 5 rows from the (test) evaluation seed:
+    refused, naming the role and no seed. TEST VALUES ONLY."""
+    from score_financial import refuse_protected_corpus
+
+    from tests.fixtures import heldout_test_seeds as ts
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    rows = ts.manifest_rows(pc.CALIBRATION, 1000) + ts.manifest_rows(pc.EV, 5, start=1000)
+    with pytest.raises(SystemExit) as info:
+        refuse_protected_corpus(_seed_manifest(spark, rows))
+    msg = str(info.value)
+    assert "refusing to score this corpus" in msg and "evaluation" in msg
+    assert pc.seed_tokens(msg) == []
+
+
+def test_score_accepts_a_calibration_manifest(spark, monkeypatch):
+    from score_financial import refuse_protected_corpus
+
+    from tests.fixtures import heldout_test_seeds as ts
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    refuse_protected_corpus(_seed_manifest(spark, ts.manifest_rows(pc.CALIBRATION, 300)))
+
+
+def test_score_refuses_when_the_held_out_record_is_unreadable(spark, monkeypatch):
+    from score_financial import refuse_protected_corpus
+
+    from lakebench.config import datagen_seed as ds
+    from tests.fixtures import heldout_test_seeds as ts
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+
+    def gone():
+        raise FileNotFoundError("heldout_hashes.json")
+
+    monkeypatch.setattr(ds, "_heldout", gone)
+    with pytest.raises(SystemExit, match="cannot be read"):
+        refuse_protected_corpus(_seed_manifest(spark, ts.manifest_rows(pc.CALIBRATION, 10)))

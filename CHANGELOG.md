@@ -41,6 +41,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
 - `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+- `financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
+- An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
+- `run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
 - Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
 - `benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
 - `run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
@@ -565,6 +568,27 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   beside it. The covered continuous score uses the same
   definition. See
   [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
+- **W5/W6 non-planted alerts per customer, by scale.** AML scoring records
+  two diagnostic counts, `financial_scoring.nonplanted_alerts_by_rule` and
+  `financial_scoring.customer_count`, which are not results.
+  `scripts/aml_screen_rates.py` reads stored AML batch `metrics.json`
+  records only and writes `docs/benchmarks/data/aml_screening_rates.json`
+  from seed 43's runs at scale 1 and 10, plus the calibration seed's when
+  the pre-registration's calibration seed is not 43.
+  Per seed role (`seed-43` or `calibration`, never a seed value), scale and
+  rule it gives the non-planted alerts, the customer count, the rate, the
+  run id, corpus role, generator digest and workload version, each n=1,
+  and the ratio scale 10 over scale 1 from the raw counts. It refuses, by
+  run id, a protected-corpus record (fail closed), a verdict other than
+  PASSED, a record without the counts or in which W5 or W6 did not run, a
+  record with no observed generator digest, scale and seed, any other
+  seed or a scale other than 1 or 10, a missing one of
+  those runs, a scale pair that differs in generator or workload
+  version, and fewer than 50 non-planted W5 plus W6 alerts at scale 1.
+  Where a Lakebench evidence cap cut a rule's alerts, the row carries
+  `evidence_capped_alerts` and its count is an upper bound; such a ratio is
+  marked `bounded_by_evidence_cap`. The file is not in the tree until the
+  live runs exist. W5 and W6 are unchanged.
 - **Requested and effective values.** Each run records what it asked for
   against what it did, for the gold strategy (Customer 360), the pipeline
   mode, each job's executors and the continuous trickle, in
@@ -576,6 +600,30 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   when the record is read (`experiment.requested_effective_mismatches`
   keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
   strategy (`requested.gold_strategy`).
+- **`architecture.benchmark.investigator_sessions` (AML continuous).** A
+  new optional key, 1 to 32, for concurrent investigator sessions on an AML
+  continuous run. It is refused when the config loads unless the workload
+  is `financial`, `tm_operations.enabled` is true and the query engine is
+  `trino` or `spark-thrift` (the message names each condition that fails),
+  and `run` refuses it unless the run is continuous (`run --continuous` on
+  a batch config takes it). The record gains `experiment.investigators =
+  {requested, run}`, and the identity key `investigator sessions` takes the
+  sessions that ran, not the configured number, so a run whose round was
+  lowered or skipped compares as not like-for-like with one that ran at N
+  (an outcome condition: the perf gate and `reproduce` do not refuse on the
+  number; the perf gate refuses sessions that ran against a baseline with
+  none configured or none run, and the other way round). A config without the key records and identifies exactly
+  as before. With the key, the run adds one round after its first
+  in-stream round with a case: N concurrent sessions, one case each in
+  IQ1's queue order, run IQ1 to IQ3 bound to their case and IQ4, once each,
+  with a per-query timeout that keeps the round inside the window, recorded
+  as `continuous.investigators` (sessions run, per-session rows and
+  seconds, p50 and p95 per query, the baseline round's times, status, the
+  timeout and memory bounds when hit, and the overlap of the detection ticks
+  with the session window as `tick_delta` and `load_label`); it never counts
+  as a benchmark round. The verdict shows the check and the load label as
+  its `investigators` qualifier; it never fails the run. See
+  [aml-scoring.md](docs/aml-scoring.md).
 - **AML continuous runs drain the last detection tick and score
   `recall_covered`.** At window end the CLI asks gold-refresh to finish its
   tick (a marker under its checkpoint) instead of deleting it mid-tick, then
@@ -588,6 +636,13 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   tick now filters silver through the versions table at one recorded
   snapshot. See
   [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
+- **Each AML continuous tick records its transactions snapshot for
+  time travel.** The record gains `continuous.time_travel.ticks[]`: per
+  tick, the `silver.transactions` snapshot detection read, its commit time,
+  and its record count and deleted-row counts from the Iceberg snapshot
+  summary (`count_source: "summary"`, or `"unavailable"` with a null count
+  when the summary has none). It is metadata only, so tick timings, time to
+  detect and freshness are unchanged.
 - **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
   deployment's name (OLD's, or the one 1.6 recorded in
   `.lakebench/state.json` for a nameless config) and writes the bucket names
@@ -672,6 +727,90 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   table|json|csv`. `results` is an alias of `report --format table`, with the
   same argument and `--format` passing through. `report --list` shows each
   record's kind.
+- **`financial reproduce` reproduces a real batch alert.** AML batch
+  gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, the batch
+  scorer fingerprints every column of each before maintenance, and the run
+  record keeps them as `financial_scoring.read_snapshots`. `lakebench
+  financial reproduce CONFIG --alert-id ID [--run RUN_ID]` reads that
+  record (refusing before any cluster call: exit 2 with no record on this
+  host or a protected corpus, exit 4 when the run recorded no snapshots),
+  reruns the alert's rule on those snapshots (or on content-equal current
+  tables once they expired) with gold's parameters and the batches sealed
+  when gold read, and matches the alert on rule, entity, `alert_ts` and its
+  related transactions: exit 0 reproduced, 1 not reproduced or not found,
+  4 when a snapshot is gone and the content changed. The job runs once (no
+  driver retries) and writes `scoring/reproduce/<alert_id>/result.json`
+  (with `not_pinned`: the watchlist and the W1 cap are read as they are
+  now). `financial replay` builds the rule's arguments with the same
+  function as gold-finalize.
+- **A protected AML corpus is never read or scored outside its registered
+  look.** `run`, `benchmark`, `query`, `compare`, `reproduce` and every
+  `financial` subcommand refuse a config that declares the evaluation or
+  robustness `corpus_role`, or whose `datagen.seed` hashes to a held-out
+  seed, and `compare` refuses a run record from one. Each refusal exits 2
+  on the `run.protected_corpus` path before any cluster call and names a
+  role, never a seed. A spent seed, a held-out seed under another role and a
+  role that does not match its seed are refused when the config loads
+  (exit 2, as a config error). The commands that tear down, read about or
+  show a deployment (`destroy`, `stop`, `admin`, `status`, `logs`,
+  `report`, `results`, `plan`, `info`, the `config` read commands, and
+  `compare`'s name resolution) skip that load-time check, so a registered
+  look's deployment can be torn down once its seed is spent; `clean` still
+  refuses it (use `destroy`). A financial config whose bronze prefix is one
+  this host generated a registered corpus into (the corpus ledger below) is
+  refused the same way, so a development config pointed at that bucket does
+  not read the registered corpus. The in-run scorer (`score-financial`) also
+  reads every manifest row and refuses a corpus any of whose rows come from
+  a held-out or spent seed. `compare` refuses a record only when it is shown
+  to be protected; when the held-out record cannot be read it hides every
+  integer seed instead.
+- **`lakebench generate --registered-corpus`** generates the registered
+  evaluation or robustness corpus; it is the only Lakebench command that
+  does (without it a protected config is refused, 2). It needs `--yes`,
+  refuses `--allow-stale-bronze` and a seed that already has a look (the
+  look ledger, or any commit of the look record), and appends the attempt to
+  `~/.lakebench/aml_corpora.jsonl` (`LB_AML_CORPORA_LEDGER`) before the first
+  cluster call, `submitting` before the datagen Job is created, then
+  `generated` (with the observed image digest) or `failed`; a crash leaves
+  `attempted` (and `submitting` once the Job may exist). The ledger, the
+  datagen sidecar and the journal name the seed by its salted hash only.
+  Generating the corpus is not a look and spends nothing.
+- **bronze-verify refuses a corpus from a held-out or spent AML seed** before
+  it reads or writes anything (owner decision, 10-03). It reads every row of
+  every cycle's manifest; a held-out or spent recovered seed, a manifest the
+  corpus seed cannot be recovered from (for example one with no typology row),
+  or a batch corpus with no manifest stops the run with exit 2 on
+  `run.protected_corpus`, so a development config pointed at a bucket that
+  holds a registered corpus never reaches silver. Behaviour changes: an old
+  bucket holding a corpus from a spent seed (42) now stops at bronze-verify
+  instead of running unscored, and a batch run over a corpus without a
+  manifest stops instead of warning. The continuous preflight checks the
+  manifest when it is there, and requires one with `--skip-generate`. A
+  financial `run --stage silver-build` or `gold-finalize` runs bronze-verify's
+  check alone first (a manifest is required unless the run is multi-cycle,
+  whose cycles generate their own corpus). A check that cannot run (a storage or Spark error) stops
+  the job too, but exits 1 as a failure, not 2.
+- **A registered look scores only the corpus `generate --registered-corpus`
+  wrote** (owner decision, 10-03). `scripts/aml_gate.py --registered` refuses
+  unless the corpus ledger holds a `generated` entry for that role and seed
+  whose corpus fingerprint (every data file's path and size, each manifest
+  file's sha256, recorded from S3 when the generation finishes) equals the
+  local corpus's (data files by path and size, manifests by sha256), the
+  generation was pinned to the `--generator-image` digest and every datagen pod
+  of it ran one image, and no other attempt on this host had a datagen Job in
+  that bronze prefix meanwhile (the ledger is per host; an earlier attempt
+  that failed after submitting may have left pods writing, so the corpus is
+  then generated again into a different bucket). `generate --registered-corpus`
+  now needs `images.datagen` pinned by digest, and exits 1 when it generated
+  the corpus but could not fingerprint it or read its pods' image digests.
+- **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
+  scored run it can find on this host: stored run records, the configs the
+  journals name and the held-out tokens in them, the bronze manifests and
+  gold scoring files of the deployments-ledger rows' own buckets only (a
+  scoped client refuses any other bucket), and the local look and corpus
+  ledgers, with every path searched or skipped. It is read-only and prints
+  no seed or key.
 - **Each deployment gets a dependency server.** `deploy` runs a new
   `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
   and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
@@ -833,10 +972,44 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
+  Continuous AML stores edge rows per pair per micro-batch and statement
+  running balances in arrival order, so FQ4 (which returned the stored
+  `bal_after`) and IQ3's second hop (which returned raw edge rows) answered
+  differently from batch, and between continuous runs, on one corpus. FQ4
+  now recomputes the running balance in ledger order (book time, transaction
+  id, debit first) from each account's opening balance, and IQ3 sums its
+  second hop per pair as it already did the first. Batch answers are
+  unchanged row for row; continuous answers over a settled corpus equal
+  them. FQ4 still reads the statements once (the opening balance is two
+  window aggregates over the same rows). The SQL change moves the AML
+  query-set ids: the 12-query set is now `qs12-910d16a91962` (was
+  `qs12-4bd2d9416abb`), FQ1 to FQ8 `qs8-ffe2bc1a012e` (was
+  `qs8-32f521a57551`) and IQ1 to IQ4 `qs4-bc3b5e556bf7`, so QpH from before
+  the change is not compared with QpH after it; workload version `aml-2`
+  covers it. Batch and continuous records are still never
+  compared with each other (the mode is a workload identity key).
 - **`RELEASING.md` and `make release-check`.** One release process: the
   scripted steps run in order with `make release-check VERSION=X.Y.Z`
   (`DRY=1` for the dry run, `make rc-<step>` for one step), and the
   owner-only steps are a checklist. It replaces `docs/releasing.md`.
+- **AML `scale_ratio` divides by the measured pacs.008 size.** The expected
+  bronze per scale unit was a flat 8.4 GB (scale 1), so complete scale-10 and
+  scale-100 AML batch runs read 1.114 and 1.118 and the perf gate (1.10)
+  refused them as "more data than the scale". The size is now the bytes
+  bronze-verify read at scales 1 and 10 (8.47 and 93.6 GB; bytes per row
+  grow between them), interpolated between them and held at the scale-10
+  value above; the scale-1 and scale-10 runs read 1.000 to 1.001, and the
+  two scale-100 runs on record 1.004 and 1.018. The run record keeps the
+  expected size to two decimals (`config_snapshot.approx_bronze_gb`).
+  Stored records keep the ratio they were recorded with; they are `aml-1`
+  records, which do not compare with `aml-2` ones anyway. The same size,
+  about 11% larger from scale 10, sets a continuous AML run's automatic
+  trickle (`max_files_per_trigger`: at the default 1800 s window, scale 5
+  goes from 9 to 10 files per trigger and scale 10 from 18 to 20), the
+  raw-corpus replace limit and `generate --timeout auto`. The datagen Job's
+  arguments do not change: its `--target-tb` keeps the old 8.4 GB per unit
+  (the AML generator sizes from `--scale` and ignores it).
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
   sides.** A side whose repeat runs differ only in in-stream rounds or
   investigator sessions (outcomes of the runs' speed) is now one
@@ -981,7 +1154,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   value.
 - **A registered (held-out) AML corpus's seed travels through a Kubernetes
   Secret.** For a `financial` config whose `corpus_role` is `evaluation` or
-  `robustness` (or whose seed hashes to a held-out seed), `generate` writes
+  `robustness` (or whose seed hashes to a held-out seed), `generate
+  --registered-corpus` (the only command that takes such a config) writes
   the seed into an immutable Secret in the namespace,
   `lakebench-datagen-seed-<salted-hash prefix>`, and the datagen Job and the
   reference scorer read it as `LB_DATAGEN_SEED` from that Secret instead of
@@ -1072,8 +1246,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `reproduce PACKAGE --report PATH` compares the report's sha256 with the
   look record (0 on a match, 14 on a mismatch or when the record holds no
   report sha256, 2 without `--report`). A held-out package whose look has
-  not run, a config that would generate a held-out corpus, and any
-  financial package while the look record cannot be read are refused (3).
+  not run and any financial package while the look record cannot be read
+  are refused (3); a config that names a protected AML corpus is refused
+  (2, `run.protected_corpus`).
   A package whose `pipeline_mode` is unknown or disagrees with its
   experiment identity is refused (2).
 - **Customer 360 batch runs are gated on sixteen expected-result checks.**

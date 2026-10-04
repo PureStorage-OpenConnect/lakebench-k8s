@@ -52,6 +52,8 @@ def _ref(kind: str) -> dict:
     AML batch with its alert set, AML continuous with both query sets."""
     rec = trr._release(kind)
     exp = rec["experiment"]
+    if kind.startswith("aml"):
+        _current_query_sets(rec)
     if kind == "aml_batch":
         exp["results"]["alert_set"] = copy.deepcopy(ALERTS)
     if kind == "aml_cont":
@@ -62,6 +64,33 @@ def _ref(kind: str) -> dict:
         post["executed_query_set_id"] = post["query_set_id"] = X.registry("financial")["full"]
         rounds.append(post)
     return rec
+
+
+#: The AML query-set ids the stored fixture records ran, before FQ4 and IQ3
+#: stopped reading the continuous layout raw.
+_RECORDED_AML_SETS = {"qs12-4bd2d9416abb": "full", "qs8-32f521a57551": "pre_case"}
+
+
+def _current_query_sets(rec: dict) -> None:
+    """Stand the fixture's recorded AML query-set ids in as the registry's
+    current ones, as a reference run of this tree would record them."""
+    reg = X.registry("financial")
+
+    def swap(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(v, str) and v in _RECORDED_AML_SETS:
+                    node[k] = reg[_RECORDED_AML_SETS[v]]
+                else:
+                    swap(v)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                if isinstance(v, str) and v in _RECORDED_AML_SETS:
+                    node[i] = reg[_RECORDED_AML_SETS[v]]
+                else:
+                    swap(v)
+
+    swap(rec)
 
 
 def _with(rec: dict, recipe: str | None = None, engine: str | None = None) -> dict:

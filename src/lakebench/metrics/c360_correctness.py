@@ -177,7 +177,7 @@ def expected_context(cfg) -> dict[str, Any]:
         "scale": float(dg.get_effective_scale()),
         "cycles": cycles,
         "bronze_rows_expected": {
-            codec: cycles * datagen_rows(dims.approx_bronze_gb / cycles, file_size_mb, bpr)
+            codec: cycles * datagen_rows(dims.datagen_target_gb / cycles, file_size_mb, bpr)
             for codec, bpr in BYTES_PER_ROW.items()
         },
     }

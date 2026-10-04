@@ -737,7 +737,7 @@ class DatagenDeployer:
         file_size_mb = file_size_bytes // (1024 * 1024)
 
         # Target in TB for CLI args interface
-        target_tb = dims.approx_bronze_gb / 1024.0
+        target_tb = dims.datagen_target_gb / 1024.0
 
         # Resolve effective mode (auto → batch/continuous)
         from lakebench.config.autosizer import _resolve_datagen_mode
@@ -876,7 +876,7 @@ class DatagenDeployer:
             total_scale = datagen.get_effective_scale()
             scale_per_cycle = max(1, total_scale // total_cycles)
             dims = self.config.get_scale_dimensions()
-            target_tb = (dims.approx_bronze_gb / total_cycles) / 1024.0
+            target_tb = (dims.datagen_target_gb / total_cycles) / 1024.0
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
             self.stop_previous_job()

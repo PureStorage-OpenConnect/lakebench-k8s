@@ -9,7 +9,7 @@ import re
 import statistics
 from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -2533,7 +2533,7 @@ def build_config_snapshot(
     snapshot: dict[str, Any] = {
         "name": cfg.name,
         "scale": datagen.get_effective_scale(),
-        "approx_bronze_gb": round(cfg.get_scale_dimensions().approx_bronze_gb, 1),
+        "approx_bronze_gb": round(cfg.get_scale_dimensions().approx_bronze_gb, 2),
         "processing_pattern": pipeline.pattern.value,
         "s3": {
             "endpoint": s3.endpoint,
@@ -2773,13 +2773,37 @@ _TICK_TIMING_LINE = re.compile(
 _TICK_PHASE = re.compile(r"(\w+)=(\d+(?:\.\d+)?)s\b")
 
 
+_LB_LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
+
+
 def parse_tick_timing(line: str) -> dict[str, Any] | None:
-    """{"cycle", "silver_rows", "phases"} from a tick timing line, else None."""
+    """{"cycle", "silver_rows", "phases", "started_at", "ended_at"} from a
+    tick timing line, else None. ``ended_at`` is the line's ``[lb]``
+    timestamp (UTC, the driver's clock: the tick logs the line right after
+    its ``total`` phase), and ``started_at`` is ``ended_at - total``; None
+    without a timestamp."""
     m = _TICK_TIMING_LINE.search(line.rstrip())
     if not m:
         return None
     phases = {k: float(v) for k, v in _TICK_PHASE.findall(m["phases"])}
-    return {"cycle": int(m["cycle"]), "silver_rows": int(m["rows"]), "phases": phases}
+    ts = _LB_LOG_TS.search(line)
+    ended = started = None
+    if ts:
+        ended = ts.group(1) + "Z"
+        total = phases.get("total")
+        if total is not None:
+            try:
+                begin = datetime.fromisoformat(ts.group(1)) - timedelta(seconds=total)
+                started = begin.isoformat() + "Z"
+            except ValueError:
+                started = None
+    return {
+        "cycle": int(m["cycle"]),
+        "silver_rows": int(m["rows"]),
+        "phases": phases,
+        "started_at": started,
+        "ended_at": ended,
+    }
 
 
 def ttd_percentile(bins: dict[int, int], bin_s: int, q: float, max_s: float) -> float:

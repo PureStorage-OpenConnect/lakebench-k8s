@@ -236,7 +236,7 @@ class _Pin:
 
 def test_pin_uses_the_versions_snapshot_and_names_it(gr, monkeypatch):
     p = _Pin(gr, monkeypatch, 11, 22)
-    _txns, sid, used, _rows, _newest = gr._pin_silver(mock.MagicMock())
+    _txns, sid, used, _rows, _newest, _tt = gr._pin_silver(mock.MagicMock())
     assert (sid, used) == (11, "22")
     assert p.calls == ["at:pinned@11:22"]
 
@@ -257,7 +257,7 @@ def test_pin_fallback_never_names_an_unused_snapshot(gr, monkeypatch, vsid, erro
         "type": TypeError("bad id"),
     }[error]
     p = _Pin(gr, monkeypatch, 11, vsid, filter_at_error=err)
-    _txns, sid, used, _rows, _newest = gr._pin_silver(mock.MagicMock())
+    _txns, sid, used, _rows, _newest, _tt = gr._pin_silver(mock.MagicMock())
     assert sid == 11 and used == want
     assert p.calls[-1] == "current:pinned@11"
 
@@ -265,7 +265,7 @@ def test_pin_fallback_never_names_an_unused_snapshot(gr, monkeypatch, vsid, erro
 @pytest.mark.parametrize(("sid", "want"), [(None, "none"), ("unknown", "unknown")])
 def test_pin_without_a_txns_snapshot_reads_live(gr, monkeypatch, sid, want):
     p = _Pin(gr, monkeypatch, sid, 22)
-    _txns, got, used, _rows, _newest = gr._pin_silver(mock.MagicMock())
+    _txns, got, used, _rows, _newest, _tt = gr._pin_silver(mock.MagicMock())
     assert got == sid and used == want
     assert all(c.startswith("current:") for c in p.calls), p.calls
 
@@ -322,3 +322,155 @@ def test_marker_reads_do_not_stretch_the_refresh_interval(gr, monkeypatch):
     gr.main()
     gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
     assert gaps and all(g <= 3.0 + 0.5 + 1e-9 for g in gaps), gaps
+
+
+# --- AML-9 tick record: snapshot metadata only (AM-15) -----------------------
+
+
+class _SummarySpark:
+    """A spark whose only query is the snapshot summary lookup."""
+
+    def __init__(self, row=None, error=None):
+        self.row = row
+        self.error = error
+        self.sql_seen: list[str] = []
+
+    def sql(self, text):
+        self.sql_seen.append(text)
+        if self.error is not None:
+            raise self.error
+        rows = [] if self.row is None else [self.row]
+        return SimpleNamespace(collect=lambda: rows)
+
+
+#: 2026-10-03T12:00:00.000123Z in epoch microseconds.
+_US = 1_791_028_800_000_123
+
+
+def test_tick_record_reads_the_snapshot_summary(gr, monkeypatch):
+    _Pin(gr, monkeypatch, 11, 22)
+    spark = _SummarySpark({"committed_us": _US, "n": "120", "pos": "0", "eq": "0"})
+    _txns, sid, _used, rows, _newest, tt = gr._pin_silver(spark)
+    assert sid == 11 and rows == 120
+    assert tt == {
+        "snapshot": 11,
+        "committed_at": "2026-10-03T12:00:00.000123Z",
+        "total_records": 120,
+        "pos_deletes": 0,
+        "eq_deletes": 0,
+        "count_source": "summary",
+    }
+    # One metadata query on the snapshots table, keyed on the pinned id.
+    assert len(spark.sql_seen) == 1
+    assert ".snapshots WHERE snapshot_id = 11" in spark.sql_seen[0]
+    line = gr.tt_record_line(4, "silver.transactions", tt)
+    assert line == (
+        "Cycle 4: tt-record table=silver.transactions snapshot=11 "
+        "committed_at=2026-10-03T12:00:00.000123Z total_records=120 pos_deletes=0 "
+        "eq_deletes=0 count_source=summary run=run-1"
+    )
+
+
+@pytest.mark.parametrize(
+    "spark",
+    [
+        _SummarySpark({"committed_us": _US, "n": None, "pos": None, "eq": None}),
+        _SummarySpark(None),
+        _SummarySpark(error=RuntimeError("metadata table unreadable")),
+    ],
+    ids=["no-count", "no-row", "error"],
+)
+def test_tick_record_never_takes_the_live_table_count(gr, monkeypatch, spark):
+    """A summary without a count logs null with count_source=unavailable; the
+    iceberg_table_stats fallback (5, the current table) still feeds the
+    tick's silver_rows log, and is never recorded as the snapshot's count."""
+    _Pin(gr, monkeypatch, 11, 22)
+    _txns, _sid, _used, rows, _newest, tt = gr._pin_silver(spark)
+    assert rows == 5
+    assert tt["total_records"] is None and tt["count_source"] == "unavailable"
+    # Whatever the summary does carry is kept (the commit time dates expiry).
+    want_at = "2026-10-03T12:00:00.000123Z" if spark.row is not None else None
+    assert tt["committed_at"] == want_at and tt["snapshot"] == 11
+    line = gr.tt_record_line(4, "silver.transactions", tt)
+    assert "total_records=null" in line and "count_source=unavailable" in line
+
+
+def test_tick_record_commit_time_is_utc_on_any_host_zone(gr, monkeypatch):
+    import os
+    import time
+
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Denver"
+    time.tzset()
+    try:
+        _Pin(gr, monkeypatch, 11, 22)
+        spark = _SummarySpark({"committed_us": _US, "n": "1", "pos": "0", "eq": "0"})
+        assert gr._pin_silver(spark)[5]["committed_at"] == "2026-10-03T12:00:00.000123Z"
+    finally:
+        # The process's zone is restored with the variable, not only the
+        # variable (monkeypatch would leave time.tzset() unrun).
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+@pytest.mark.parametrize("sid", [None, "unknown"])
+def test_no_tick_record_without_a_txns_snapshot(gr, monkeypatch, sid):
+    _Pin(gr, monkeypatch, sid, 22)
+    assert gr._pin_silver(mock.MagicMock())[5] is None
+
+
+def test_tick_record_round_trips_into_time_travel_ticks(gr):
+    from lakebench.metrics.tick_records import parse_tick_records, time_travel_ticks
+
+    rec = {
+        "snapshot": 11,
+        "committed_at": None,
+        "total_records": 7,
+        "pos_deletes": None,
+        "eq_deletes": 0,
+        "count_source": "summary",
+    }
+    lines = [
+        gr.tick_pinned_line(1, 11, 12, 13, "22", 1.5),
+        gr.tt_record_line(1, "silver.transactions", rec),
+        gr.tick_pinned_line(2, None, 12, 13, "none", 2.5),
+        # Another run's record in the same log is not this run's.
+        gr.tt_record_line(2, "silver.transactions", rec).replace("run=run-1", "run=run-0"),
+    ]
+    parsed = parse_tick_records("\n".join(lines), "run-1")
+    assert time_travel_ticks(parsed["ticks"]) == [
+        {"start": 0, "cycle": 1, "table": "silver.transactions", **rec, "completed": False}
+    ]
+
+
+def test_tick_path_scans_nothing_for_the_record():
+    """AML-9 silent-corruption S6: the tick records metadata only. run_tick,
+    _pin_silver and snapshot_record call no fingerprint or hash helper, and
+    their count()/collect() calls are exactly the existing ones: the alert
+    count in run_tick, the newest-ingest aggregate in _pin_silver and the one
+    snapshots-table query in snapshot_record. A per-tick scan of the
+    snapshot (d1's design) adds a call and fails here."""
+    import ast
+
+    tree = ast.parse((SCRIPTS / "gold_refresh_financial.py").read_text())
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    want = {"run_tick": (1, 0), "_pin_silver": (0, 1), "snapshot_record": (0, 1)}
+    for name, (counts, collects) in want.items():
+        calls = [n for n in ast.walk(funcs[name]) if isinstance(n, ast.Call)]
+        names = [
+            c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", "")
+            for c in calls
+        ]
+        for banned in ("frame_fingerprint", "xxhash64", "hash", "read_at_snapshot_count"):
+            assert banned not in names, (name, banned)
+        assert (names.count("count"), names.count("collect")) == (counts, collects), (
+            name,
+            names,
+        )
+    sql = ast.get_source_segment(
+        (SCRIPTS / "gold_refresh_financial.py").read_text(), funcs["snapshot_record"]
+    )
+    assert ".snapshots WHERE snapshot_id" in sql and "FROM {fq} " not in sql

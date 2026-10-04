@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 from common import env, log
 from pyspark.sql import SparkSession
@@ -184,6 +185,34 @@ def _run_subject_check(spark, manifest, status_rows, entities=None, accounts=Non
         return subject_customer_check(spark, manifest, entities, id_map, scoped)
     except Exception as e:  # noqa: BLE001 -- reported, not raised
         return {"status": "unchecked", "reason": f"{type(e).__name__}: {e}"[:300]}
+
+
+def _manifest_protected_reason():
+    """``datagen_seed.manifest_protected_reason``: the package copy in tests,
+    the flat copy (mounted beside this script) on the driver. Neither
+    importable raises, so the check is never skipped."""
+    try:
+        from lakebench.config.datagen_seed import manifest_protected_reason
+    except ImportError:
+        from datagen_seed import manifest_protected_reason
+    return manifest_protected_reason
+
+
+def refuse_protected_corpus(manifest) -> None:
+    """Refuse to score a corpus from a protected AML seed (the evaluation or
+    robustness one, or a spent seed), outside the registered look
+    (``scripts/aml_gate.py --registered``). Every manifest row's
+    (typology_id, seed) is read, never a sample: a corpus that mixes a few
+    held-out instances into a development corpus is still refused. The
+    message names a role, never a seed."""
+    check = _manifest_protected_reason()
+    rows = (
+        (r["typology_id"], r["seed"])
+        for r in manifest.select("typology_id", "seed").toLocalIterator()
+    )
+    reason = check(rows)
+    if reason is not None:
+        raise SystemExit(f"refusing to score this corpus: {reason}")
 
 
 def check_status_run(status_run_id: str, own_run_id: str) -> None:
@@ -939,6 +968,58 @@ def _write_not_scored(spark, output: str, reason: str, ids: dict | None) -> None
     log(f"Wrote recall.json sidecar: {_json_uri(output)}")
 
 
+_READ_SNAPSHOT_ARG = re.compile(
+    r"^(?P<table>[A-Za-z0-9_.]+)=(?P<snapshot>-?\d+|none|unknown):(?P<total>\d+|null)$"
+)
+
+
+def read_snapshot_fingerprints(spark, values) -> list[dict]:
+    """Fingerprint every column of each snapshot gold-finalize read
+    (``--read-snapshot <table>=<snapshot>:<records>``, metrics/read_snapshots.py),
+    for financial reproduce: ``[{table, snapshot, total_records, rows, fp,
+    cols_sha}]``, with ``error`` instead of a fingerprint when the snapshot
+    is not known or cannot be read. Runs before maintenance, so the snapshots
+    are still there; never raises. Logs one ``[read-snapshot-fp]`` line per
+    snapshot."""
+    from common import frame_fingerprint
+
+    out: list[dict] = []
+    for value in values or []:
+        m = _READ_SNAPSHOT_ARG.match(value or "")
+        if not m:
+            log(f"[read-snapshot-fp] ignored a malformed value {value!r}")
+            continue
+        snap = m["snapshot"]
+        entry = {
+            "table": m["table"],
+            "snapshot": int(snap) if snap.lstrip("-").isdigit() else snap,
+            "total_records": None if m["total"] == "null" else int(m["total"]),
+            "rows": None,
+            "fp": None,
+            "cols_sha": None,
+        }
+        if not isinstance(entry["snapshot"], int):
+            entry["error"] = f"gold read no known snapshot ({snap})"
+            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error=unknown snapshot")
+            out.append(entry)
+            continue
+        try:
+            df = spark.sql(
+                f"SELECT * FROM {CATALOG}.{m['table']} VERSION AS OF {entry['snapshot']}"
+            )
+            rows, fp, cols_sha = frame_fingerprint(df, df.columns)
+            entry.update(rows=int(rows), fp=str(fp), cols_sha=str(cols_sha))
+            log(
+                f"[read-snapshot-fp] table={m['table']} snapshot={entry['snapshot']} "
+                f"rows={rows} fp={fp} cols={cols_sha}"
+            )
+        except Exception as e:  # noqa: BLE001 -- recorded; scoring goes on
+            entry["error"] = f"{type(e).__name__}: {e}"[:300]
+            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error={entry['error']}")
+        out.append(entry)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute recall + FP rate from manifest + alerts")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
@@ -949,6 +1030,13 @@ def main() -> None:
             default=None,
             help=f"Covered mode: {table} snapshot of the last completed tick",
         )
+    parser.add_argument(
+        "--read-snapshot",
+        action="append",
+        default=[],
+        help="Batch: <table>=<snapshot>:<records> gold-finalize read; fingerprinted for "
+        "financial reproduce (repeatable)",
+    )
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial").getOrCreate()
@@ -978,6 +1066,7 @@ def main() -> None:
             "write it, or the S3 URI is wrong. Cannot compute recall without ground truth."
         )
     log(f"Manifest typology instances: {manifest_count:,}")
+    refuse_protected_corpus(manifest)
 
     try:
         ids = covered_snapshot_ids(args)
@@ -1030,6 +1119,9 @@ def main() -> None:
 
     per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
     summary["run_id"] = current_run_id
+    # What gold read, fingerprinted for financial reproduce (before the
+    # run's maintenance expires anything).
+    summary["read_snapshots"] = read_snapshot_fingerprints(spark, args.read_snapshot)
     # Loud on purpose: a subject silver does not call a customer has its
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)

@@ -145,9 +145,6 @@ def test_every_exit_code_has_a_meaning():
 PLANNED_BY = {
     "admin.version_change_in_use": "SD-10",
     "admin.version_change_needs_flag": "SD-10",
-    "financial.reproduce.mismatch": "AM-18",
-    "financial.reproduce.snapshot_gone": "AM-18",
-    "run.protected_corpus": "AM-22",
 }
 
 
@@ -541,7 +538,7 @@ def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
         platform=SimpleNamespace(kubernetes=SimpleNamespace(context=None)),
         get_namespace=lambda: "ns-x",
     )
-    monkeypatch.setattr(fin, "_load_config", lambda path: cfg)
+    monkeypatch.setattr(fin, "_load_config", lambda path, verb="financial": cfg)
 
     def unreachable(**_k):
         raise K8sConnectionError("connection refused")
@@ -550,6 +547,93 @@ def _scenario_financial_k8s_unreachable(monkeypatch, tmp_path):
     (tmp_path / "c.yaml").write_text("name: x\n")
     argv = ["financial", "score", str(tmp_path / "c.yaml"), "--manifest", "s3://m"]
     return _runner().invoke(app, [*argv, "--output", "s3://o"])
+
+
+#: The three snapshots an AML batch gold-finalize read (test values).
+_READ_SNAPSHOTS = [
+    {"table": t, "snapshot": i + 1, "total_records": 10, "rows": 10, "fp": "9", "cols_sha": "c"}
+    for i, t in enumerate(
+        ("silver.transactions", "silver.entities", "silver.silver_batch_versions")
+    )
+]
+
+
+def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, outcome=None):
+    """financial reproduce with a stubbed config, record, job and S3: the
+    record (or none) decides the refusals before any cluster call, the
+    job's result.json the outcome."""
+    import json as _json
+    from types import SimpleNamespace
+
+    import lakebench.cli._financial as fin
+
+    cfg = SimpleNamespace(
+        name="aml-x",
+        platform=SimpleNamespace(
+            kubernetes=SimpleNamespace(context=None),
+            storage=SimpleNamespace(s3=SimpleNamespace(buckets=SimpleNamespace(gold="g"))),
+        ),
+        get_namespace=lambda: "ns-x",
+    )
+    monkeypatch.setattr(fin, "_load_config", lambda path, verb="financial": cfg)
+    runs = tmp_path / "lakebench-output" / "runs"
+    if record:
+        d = runs / "run-20261003-120000-aaaaaa"
+        d.mkdir(parents=True)
+        rec = {
+            "run_id": "20261003-120000-aaaaaa",
+            "deployment_name": "aml-x",
+            "start_time": "2026-10-03T12:00:00+00:00",
+            "experiment": {"workload": {"name": "financial"}, "mode": "batch"},
+            "financial_scoring": {
+                "run_id": "20261003-120000-aaaaaa-c1",
+                "read_snapshots": _READ_SNAPSHOTS if snapshots else [],
+            },
+        }
+        (d / "metrics.json").write_text(_json.dumps(rec))
+
+    class _Jobs:
+        def submit_job(self, *a, **k):
+            return SimpleNamespace(state="SUBMITTED", message="ok")
+
+    class _S3:
+        def __init__(self):
+            self.raw_client = self
+
+        def put_object(self, **k):
+            self.nonce = _json.loads(k["Body"])["nonce"]
+
+        def delete_object(self, **k):
+            pass
+
+        def get_object(self, **k):
+            body = _json.dumps({"nonce": self.nonce, "outcome": outcome})
+            return {"Body": SimpleNamespace(read=lambda: body.encode())}
+
+    monkeypatch.setattr(fin, "_get_job_manager", lambda c: _Jobs())
+    s3 = _S3()
+    monkeypatch.setattr(fin, "_s3", lambda c: s3)
+    monkeypatch.setattr(fin, "_wait_for_sparkapp", lambda *a, **k: "COMPLETED")
+    (tmp_path / "c.yaml").write_text("name: aml-x\n")
+    return _runner().invoke(
+        app, ["financial", "reproduce", str(tmp_path / "c.yaml"), "--alert-id", "abc-123"]
+    )
+
+
+def _scenario_reproduce_no_record(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, record=False)
+
+
+def _scenario_reproduce_snapshot_gone(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, snapshots=False)
+
+
+def _scenario_reproduce_not_found(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, outcome="not_found")
+
+
+def _scenario_reproduce_mismatch(monkeypatch, tmp_path):
+    return _reproduce_scenario(monkeypatch, tmp_path, outcome="mismatch")
 
 
 def _scenario_sigint(monkeypatch, tmp_path):
@@ -1210,6 +1294,16 @@ def _scenario_reproduce_held_out(monkeypatch, tmp_path):
     return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
 
 
+def _scenario_run_protected_corpus(monkeypatch, tmp_path):
+    """A config naming the (test) evaluation seed and role, with looks open
+    so it loads: run refuses it before any cluster call."""
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
+    return _runner().invoke(app, ["run", str(cfg), "--yes"])
+
+
 def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
     import lakebench.cli._reproduce as rep
 
@@ -1563,6 +1657,10 @@ SCENARIOS = {
     "confirm.non_tty": _scenario_confirm_non_tty,
     "sigint": _scenario_sigint,
     "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
+    "financial.reproduce.no_record": _scenario_reproduce_no_record,
+    "financial.reproduce.snapshot_gone": _scenario_reproduce_snapshot_gone,
+    "financial.reproduce.not_found": _scenario_reproduce_not_found,
+    "financial.reproduce.mismatch": _scenario_reproduce_mismatch,
     "config.validation": _scenario_config_validation,
     "config.unsupported": _scenario_config_unsupported,
     "config.name_required": _scenario_config_name_required,
@@ -1611,6 +1709,7 @@ SCENARIOS = {
     "reproduce.verify_out_of_band": _scenario_reproduce_verify_out_of_band,
     "reproduce.report_required": _scenario_reproduce_report_required,
     "reproduce.held_out": _scenario_reproduce_held_out,
+    "run.protected_corpus": _scenario_run_protected_corpus,
     "reproduce.drift": _scenario_reproduce_drift,
     "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
     "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
@@ -1676,6 +1775,7 @@ EXPECTED_OUTPUT = {
     "run.args": "--force-reset only applies to a continuous run",
     "generate.multi_cycle": "does not apply to a multi-cycle config",
     "run.series_mismatch": "series incomplete: cycle(s) [0] missing",
+    "run.protected_corpus": "never runs on a protected AML corpus",
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",

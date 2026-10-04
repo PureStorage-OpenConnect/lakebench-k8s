@@ -35,10 +35,17 @@ support state records the band.
 
 These values assume the Customer360 workload schema (the default). The
 financial (AML) schema has 111,111 entities and about 26.7 M transactions per
-scale unit. Its size estimate (`src/lakebench/config/scale.py`) is about
-8.4 GB of pacs.008 Parquet per scale unit, measured on the pre-freeze
-generator; v1.6 has no size measurements on the frozen generator (deferred
-to v1.7).
+scale unit. Its size (`src/lakebench/config/scale.py`) is measured, not
+linear: with the default 64 MB files on the v1.6 generator, the pacs.008
+Parquet bronze-verify read was 8.47 GB at scale 1 (AML batch runs
+20260928-103055-de1772 and 20260929-221146-9d5345) and 93.6 GB at scale 10
+(20260929-214442-825153). Rows are linear in scale; bytes per row grow from
+about 318 to 351 between the two. Between them the size per unit is
+interpolated in log scale; below scale 1 it is the scale-1 value and above
+scale 10 the scale-10 value. Two scale-100 runs on another setup read 0.4%
+(128 MB files, 20260929-000406-85b404) and 1.8% (an earlier generator,
+20260925-104703-c02890) above that. `scale_ratio` divides the bronze a run
+read by this size.
 
 Set the scale in your config file:
 
@@ -367,7 +374,8 @@ workload:
 ```
 
 Customer360 produces approximately 10 GB of bronze data per scale unit;
-financial is estimated at about 8.4 GB (pre-freeze measurement, see above).
+financial about 8.5 GB at scale 1 and 9.4 GB per unit from scale 10 (measured
+to scale 10, see above).
 The domain dimensions (number of entities, events per entity, date range)
 vary by schema and are defined in `src/lakebench/config/scale.py`; the Arrow
 schemas are in `datagen_rs/src/schema.rs`. `schema: custom` is rejected at

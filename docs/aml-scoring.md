@@ -353,8 +353,19 @@ the pipeline does on the corpus it was developed on, not what it does
 on a corpus it has never seen. The held-out evaluation and robustness
 seeds are registered as salted hashes in `heldout_hashes.json`, next to
 `aml_preregistration.json`, and are refused at config load unless
-`workload.datagen.corpus_role` declares the matching role, so
-accidentally scoring against them is not possible. The reference job
+`workload.datagen.corpus_role` declares the matching role. Even then,
+every command that reads or scores data (`run`, `benchmark`, `query`,
+`compare`, `reproduce` and the `financial` subcommands) refuses the
+protected corpus with exit 2 before any cluster call: its corpus is
+generated only with `lakebench generate --registered-corpus --yes`, which
+records the attempt in `~/.lakebench/aml_corpora.jsonl` first, and scored
+only by `scripts/aml_gate.py --registered`, which records the look. A
+financial config whose bronze prefix this host generated a registered
+corpus into is refused the same way. So accidentally scoring against them
+is not possible from Lakebench (a hand-made datagen Job is caught by the
+scorers' manifest checks below). The in-run scorer
+(`score-financial`) reads every manifest row too and refuses a corpus any
+of whose rows come from a held-out or spent seed. The reference job
 also recovers the corpus seed from every manifest row's instance seed
 and refuses a corpus whose manifest comes, wholly or partly, from a spent
 or held-out seed it was not declared for, whatever seed the deployment
@@ -422,7 +433,21 @@ an evidence cap can still make an alert whose planted payments were cut read
 non-planted, which `evidence_capped_alerts_by_rule` shows) and
 `financial_scoring.customer_count` (customers in `silver.entities`). They
 feed the published limitation on how W5 and W6 non-planted alerts per
-customer grow with scale.
+customer grow with scale: `scripts/aml_screen_rates.py` reads stored AML
+batch records (never a bucket or a cluster) and writes
+`docs/benchmarks/data/aml_screening_rates.json` from seed 43's runs at
+scale 1 and 10, plus the calibration seed's at both when the
+pre-registration's calibration seed is not 43, each with an observed
+generator digest, scale and seed (generate in the same namespace before the
+run).
+It gives one n=1 row per seed role (`seed-43` or `calibration`), scale and
+rule, with the run id and generator digest, and the ratio scale 10 over
+scale 1 from the raw counts. It refuses a protected-corpus record, a verdict
+other than PASSED, a record that lacks the counts or in which W5 or W6 did
+not run, a scale pair from different generators or workload versions, and
+fewer than 50 non-planted W5 plus W6 alerts at scale 1. A row whose
+`evidence_capped_alerts` is above 0 is an upper bound, and a ratio with
+either side cut is marked `bounded_by_evidence_cap`.
 
 ## Per-alert evidence caps
 
@@ -561,10 +586,34 @@ Two operator-facing subcommands cover the retention-workload scenarios:
   catalogue that scenario is workload id W8, which is unrelated to
   detection rule W8_dormant_reactivation and is never a rule id passed
   to `--rule`.
-- **`lakebench financial reproduce CONFIG --alert-id <id>`** takes a single alert
-  from `gold.alerts` and reproduces it against the historical snapshot the
-  original rule ran on. Small, bounded work; used as a
-  supervisory-reproducibility smoke check, not as a scaling metric.
+- **`lakebench financial reproduce CONFIG --alert-id <id>`** (`--run RUN_ID`)
+  reruns one alert's rule on exactly what the run's gold-finalize read. A
+  batch gold-finalize logs the snapshot of `silver.transactions`,
+  `silver.entities` and `silver.silver_batch_versions` it reads, and the
+  batch scorer, before maintenance, fingerprints every column of each
+  (`financial_scoring.read_snapshots` in the run record: table, snapshot,
+  `total_records`, `rows`, `fp`, `cols_sha`). The command reads that record
+  (`--run`, or the deployment's latest AML batch run on this host; exit 2
+  when there is none here) and refuses before any cluster call when that
+  run is from a protected corpus (exit 2) or recorded no read snapshots
+  (exit 4: it predates 1.7, or it was not scored, like a `run --stage`
+  subset). The job reads each table at its recorded snapshot, or, when
+  that expired, the current table if its fingerprint is the same (content
+  and batch stamping equal: `basis: equivalent`); filters the transactions
+  to the batches the versions table had sealed when gold read it; runs the
+  rule with gold's parameters; and matches the alert on (rule, entity,
+  `alert_ts`) and the set of related transactions. It writes
+  `scoring/reproduce/<alert_id>/result.json` and the command exits 0 when
+  the alert is reproduced, 1 when it is not (no match, several, a different
+  set, or the rule declined to run) or the alert is not in `gold.alerts` for
+  that run (a rule version other than the running code's included), and 4
+  when a snapshot is gone and the content changed. The basis covers the
+  three silver tables: W5 and W6 read the bronze watchlist as it is now and
+  W1 its vertex cap from the current config, which the result lists as
+  `not_pinned`. W3 and W17 path budgets depend on the job's executor count
+  and scratch size, so reproduce a W2 or W4 alert for a clean check. A reproduction runs the
+  rule over the whole silver snapshot, and the batch scorer's fingerprints
+  read all three tables once per run.
 
 `CONFIG` in both cases is the same YAML you passed to `deploy`. Both
 verbs load it, assert `workload.schema=financial`, and dispatch a
@@ -572,12 +621,12 @@ SparkApplication.
 
 The scale factor sets bronze volume linearly. Lakebench's estimate
 (`src/lakebench/config/scale.py`) is 111,111 entities x 4 transactions a
-month x 60 months per scale unit (about 26.7M transactions) and about
-8.4 GB of pacs.008 per scale unit. The 8.4 GB figure was measured at scale 1
-on the pre-freeze generator and is superseded; v1.6 has no size
-measurements on the frozen generator (deferred to v1.7). By the estimate,
-scale 100 is about 840 GB and scale 10000, a tier-1 universal bank's AML
-retention target, about 84 TB. The Pydantic schema accepts up to scale
+month x 60 months per scale unit (about 26.7M transactions). Its size is
+measured to scale 10: 8.47 GB of pacs.008 at scale 1 and 93.6 GB at scale 10
+(bytes per row grow between the two; [data-generation.md](data-generation.md)
+has the runs, and two scale-100 runs on other setups read within 2% of the
+scale-10 size per unit). At 9.36 GB per unit, scale 10000, a tier-1
+universal bank's AML retention target, is about 94 TB. The Pydantic schema accepts up to scale
 10000, but AML datagen is banded: supported up to scale 300, unverified up
 to 800, and refused above 800, where a datagen pod would exceed the 16 GiB per-pod memory cap (a
 Lakebench-imposed cap). The pipeline has been run end to end only up to
@@ -765,6 +814,19 @@ driver that restarted leaves its earlier pod's ticks out
 `continuous.drain.log_from_driver_start` is false when log rotation trimmed
 the log's first ticks.
 
+Each tick also records the `silver.transactions` snapshot it read for the
+time-travel read after the window, from the snapshot's metadata only (no
+scan, so the tick's timings do not move): `continuous.time_travel.ticks[]`
+holds the driver start, the cycle, whether the tick completed, the snapshot
+id, its `committed_at` (UTC), and from the Iceberg snapshot summary its
+`total_records` (the record count of its live data files) and
+`pos_deletes` and `eq_deletes` (deleted-row totals, 0 on the copy-on-write
+tables Lakebench creates, when `total_records` is the live row count), with
+`count_source: "summary"`. When the summary has no record count,
+`total_records` is null and `count_source` is `"unavailable"`; the current
+table's count is never recorded in its place. A tick with no transactions
+snapshot records none.
+
 After the streams stop and every gate has decided, the score job reads
 those six snapshots of the drained tick and scores **`recall_covered`** per
 typology: the designated
@@ -945,6 +1007,71 @@ the 8-query AML set and was recorded after that set's last SQL change (so
 it stays comparable with runs over the same SQL); older records and any other
 legacy set are `unknown`. A run of an older branch recorded after that date
 is the one case this cannot tell apart.
+
+**Queries that read the mode's layout.** Continuous AML writes
+`silver.counterparty_edges` as one row per (source, target) pair per
+micro-batch, where batch writes one row per pair, and it stores
+`silver.account_statements` running balances (`bal_after`) in arrival order
+(labelled `arrival_order_running_balance` when a statement arrives late).
+The benchmark queries do not depend on either layout. FQ3 and both of IQ3's
+hops sum the edge rows per pair. FQ4 recomputes each entry's running
+balance in ledger order (book time, then transaction id, debit before
+credit, as batch silver orders it) from the account's opening balance, its
+last stored `bal_after` less the sum of its entries, instead of returning
+the stored `bal_after`. On batch silver both queries return what they did
+before, row for row; on continuous silver over the same corpus, once it has
+settled, they return the batch answer. The change moved the AML query-set
+id (12 queries and the 8 before the first TM pass), so no record from
+before it compares with one after; it is part of workload version `aml-2`.
+A batch record is still never compared with a continuous one: the mode is a
+workload identity key, so `compare` stops at "one workload on one corpus"
+before reading any result, and the perf gate and `reproduce` refuse the
+pair.
+
+**Investigators under load (`architecture.benchmark.investigator_sessions`).**
+Set to N (1 to 32) on an AML config with TM operations on Trino or Spark
+Thrift (refused at load otherwise; `run` refuses it in batch, so it needs a
+continuous run), it adds one round right after the first in-stream round
+that included the investigator queries (that round is the baseline). N
+sessions run concurrently, each working one case of this run picked in IQ1's
+queue order (open cases first, by priority, oldest first; closed cases fill
+in when fewer are open): IQ1, IQ2 and IQ3 bound to that case and IQ4
+unchanged, once each. The round is not a benchmark round, so in-stream QpH
+and the round count do not move; it takes window time, so the round count
+can be lower than without it. It runs only when at least twice the baseline
+round's time is left; the case pick's timeout is at most 120 s and a fifth of
+the time left, and each session query's timeout, taken from what is left after
+the pick, is at most 300 s and a quarter of it less a 10 s cleanup margin, so
+the round ends inside the window (`status: no_time` when that is under 30 s). `continuous.investigators` records
+`sessions_requested`, `sessions_run` (the sessions started: fewer when the
+run has fewer cases, with `lowered_reason`; a session whose queries failed
+still counts, and shows in `failed` and `status`), the `case_ids`,
+`rows_per_session`, `seconds_per_session`, the nearest-rank `latency` p50 and
+p95 per query over the sessions whose query succeeded (with `n` and the
+`failed` count), the `baseline` round's time per query, the session `window`
+(on the Lakebench host's clock, while `continuous.window` is on the cluster's),
+`query_timeout_s`, `session_sql` (a hash of each bound query's SQL), any
+`failed` or `empty` queries and a `status`: `pass`; `fail` when a session
+query failed or a session's IQ1 or IQ3 returned no rows (it fails the
+investigators check, not the run); `no_cases`; `no_rounds` (no in-stream
+round ran, for example under `--skip-benchmark`); `no_time`; or
+`case_query_failed`. It is labelled `n=1 per arm` and `shared S3
+contention`, plus `BOUNDED BY Lakebench per-query timeout (Ns)` when a
+session query timed out and the engine's Lakebench-set memory bound when one
+failed on memory. After the window, each detection tick that ended inside
+the continuous window is placed against the session window (its end from the
+log, shifted to the host clock, minus its `total`): `tick_delta` gives the
+count and median tick time of the ticks with at least half their time inside
+the sessions' window and of those entirely outside, and `load_label`
+("investigator load START-END: k of m ticks overlap") states it. The verdict
+carries the check and the label as its `investigators` qualifier, shown
+beside the verdict: time to detect and continuous throughput keep their
+values and include those ticks. `experiment.investigators` holds
+`{requested, run}`; the identity key `investigator sessions` is the number
+that ran, an outcome condition: two runs that ran different numbers compare
+as not like-for-like, and the perf gate does not refuse on the number (8
+against 3), but it refuses load against no load: sessions that ran against a
+baseline with none configured or none run, and the other way round.
 
 ## What the AML workload deliberately does not measure
 

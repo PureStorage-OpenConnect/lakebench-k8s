@@ -264,6 +264,24 @@ Jobs take every jar and wheel from the deployment's dependency server; `run` on 
 
 **What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
 
+### financial reproduce reruns the alert's rule on what gold read
+
+`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
+
+**What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
+
+### AML bronze-verify stops on a spent or unverifiable corpus
+
+An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
+
+**What to do:** Regenerate the corpus with `lakebench run CONFIG --generate --regenerate` (the calibration seed when `datagen.seed` is unset).
+
+### A protected AML corpus is refused outside its look
+
+`run`, `benchmark`, `query`, `compare`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
+
+**What to do:** Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.
+
 ### Executor overrides are bounded and counted
 
 Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
