@@ -97,3 +97,12 @@ def test_missing_version_literal(tmp_path):
     init = tmp_path / "__init__.py"
     init.write_text("from ._v import __version__\n")
     assert "no __version__ literal" in cv.check(None, init, tmp_path / "p.toml")[0]
+
+
+def test_the_tree_is_on_the_1_7_line():
+    """LB-253: the v1.7 cycle's package version is 1.7.0.dev0 until the
+    release commit sets 1.7.0 (RELEASING.md section 8), so a development
+    record stamps lakebench 1.7, never 1.6.0."""
+    from packaging.version import Version
+
+    assert Version(cv.package_version()) >= Version("1.7.0.dev0")

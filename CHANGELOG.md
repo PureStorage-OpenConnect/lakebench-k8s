@@ -954,6 +954,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `--duplicate-email-pct` (`nan`, `inf`) exits 2.
 
 ### Changed
+- The package version is 1.7.0.dev0 until the release commit sets 1.7.0, so development records stamp lakebench 1.7.0.dev0 instead of 1.6.0.
 - **The release gate refuses a record from a held-out AML corpus by its
   seed, not only by its declared role.** `records`,
   `support-record` and the release harness refuse a record whose recorded
