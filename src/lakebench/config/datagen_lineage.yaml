@@ -26,3 +26,12 @@ lineage:
   # manifest digest, equal to the pod imageID of run 20261001-091952-6d10e4).
   - digest: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
     canonical: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+  # docker.io/sillidata/lb-datagen:a592385, the v1.7 registered-look image,
+  # built from integrate a5923850 with LB_BUILD_COMMIT set; registry manifest
+  # digest from the Docker Hub tags API. Five-case byte-compare against 1.6.0
+  # equal on 2026-10-03 (podman, local MinIO, held-out hash file mounted).
+  - digest: sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1
+    canonical: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+    evidence: tests/fixtures/datagen_reference/compare-48e18a417bf8.json
+    evidence_sha256: "a5c3a577de302496b498b5059049df5826efb020e4f0250872b6d45ac9c08150"
+    build_commit: "a592385053b038d66dc491ee3c8dfb55dfab3d84"

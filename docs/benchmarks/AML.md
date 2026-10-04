@@ -190,11 +190,15 @@ Its identity has two parts:
   it with `--version`. Lakebench stamps
   `experiment.workload.generator_model_version` from a table kept equal to
   `model.rs` by a test (`metrics/experiment.py`), not from the corpus.
-- The image. `images.datagen` defaults to the tag
-  `docker.io/sillidata/lb-datagen:1.6.0`, the v1.6 release build; its
-  digest is recorded in the field's documentation (`config/schema.py`), with
-  output documented as byte-identical to the image the published records
-  used. The generator lineage that enters the
+- The image. `images.datagen` defaults to
+  `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`,
+  built from this release's `datagen_rs/` source (commit `a5923850`); the
+  runtime pulls the digest. A five-case byte-compare against the v1.6
+  release image `lb-datagen:1.6.0` (financial seed 43 with and without the
+  robustness perturbation, Customer 360 seed 42, and both at two cycles;
+  markers excluded) is equal
+  (`tests/fixtures/datagen_reference/compare-48e18a417bf8.json`). The
+  generator lineage that enters the
   corpus identity is the observed image digest, mapped through
   `config/datagen_lineage.yaml`, so an output-neutral re-pin keeps the same
   lineage (section 7.3). A registered look does not use a tag:
@@ -210,17 +214,16 @@ without writing anything. Lakebench folds the markers into corpus id v2
 does not know, an abbreviated flag, and any stray argument, so a typo never
 runs as a silent default.
 
-**The default image predates those features.** The `1.6.0` image is built
-from the v1.6 generator source, which writes no corpus markers, has no
-generator-start held-out check and does not read `LB_DATAGEN_SEED`. A run on
-the default image therefore records no corpus id v2 and stays identity v1
-(exp1), whose corpus id hashes config fields the AML generator never reads
-(section 12). A registered corpus, whose seed reaches the pod only as
-`LB_DATAGEN_SEED`, cannot be generated with it. Those need an image built
-from this release's `datagen_rs/` source.
-<!-- PENDING datagen-image: when images.datagen is re-pinned to an image
-built from this release's datagen_rs source, revise this paragraph, the
-generator-start check in 3.3, and the corpus-id limitations in section 12. -->
+The default image has those features: it writes the corpus markers, runs
+the generator-start held-out check and reads `LB_DATAGEN_SEED`. A run on it
+records corpus id v2, and its experiment block is identity v2 (exp2) when
+the other identity inputs also exist (the run-start identity version and a
+system identity with at least one observed part); otherwise it is exp1 and
+names what was missing in `v2_unavailable` (`metrics/experiment.py`). An
+image built from older source, `1.6.0` included, writes no markers, so its
+runs stay exp1, whose corpus id hashes config fields the AML generator never
+reads (section 12), and it cannot generate a registered corpus, whose seed
+reaches the pod only as `LB_DATAGEN_SEED`.
 
 ### 3.2 Scale factor
 
@@ -251,8 +254,8 @@ clusters of different size therefore produce different corpus ids unless
 ### 3.3 Seed policy
 
 A seed is mandatory for the financial schema: the generator exits 2 when it
-receives no seed (and, in images built from this release's source, when it
-receives both `--seed` and `LB_DATAGEN_SEED`).
+receives no seed (and, in the default image or any image built from this
+release's source, when it receives both `--seed` and `LB_DATAGEN_SEED`).
 Resolution and refusals run at config load (`config/datagen_seed.py`,
 called from the workload validator in `config/schema.py`); a refused config
 exits 2 before anything is deployed.
@@ -261,7 +264,7 @@ exits 2 before anything is deployed.
 |---|---|
 | Unset | resolves to the calibration seed, 43. With `corpus_role: evaluation` or `robustness` an unset seed is refused: a registered corpus names its seed, which is checked by hash. With `corpus_role: calibration` an unset seed uses 43 |
 | Development | any seed that is neither spent nor held out is accepted. The AML protocol allows generator tuning only on the calibration seed 43 and its four pre-registered replicates; Lakebench does not enforce that. Declaring `corpus_role: calibration` requires seed 43 |
-| Spent | refused for every use, including a declared role: the pre-registration's spent list (42 and 50000042), every seed with a recorded or burned look in `aml_registered_looks.json`, and the spent list in `heldout_hashes.json`. A generator built from this release's source refuses again at start the spent seeds it knows (its compiled list and the hash file's spent list), not seeds known only from a recorded look |
+| Spent | refused for every use, including a declared role: the pre-registration's spent list (42 and 50000042), every seed with a recorded or burned look in `aml_registered_looks.json`, and the spent list in `heldout_hashes.json`. The default generator refuses again at start the spent seeds it knows (its compiled list and the hash file's spent list), not seeds known only from a recorded look |
 | Held out (evaluation, robustness) | the repository stores no held-out seed, only a salted SHA-256 hash per role in `spark/data/aml/heldout_hashes.json` (append-only), with the current hashes also compiled into the guard. A config that declares the matching `corpus_role` and names a seed whose hash matches that role is accepted while the pre-registration has registered looks open; without the role, or with a seed that hashes to another role, it is refused |
 
 `datagen.robustness_perturbation` (financial only): at config load it is
@@ -273,8 +276,8 @@ reads the perturbation from the manifest's stamp, not from the config.
 
 The held-out check runs at five points, each hashing the seed it sees and
 comparing it with the per-role hashes: config load and the look guard
-after it (below); generator start (`datagen_rs/src/heldout.rs`, in images
-built from this release's source), which refuses to generate a financial
+after it (below); generator start (`datagen_rs/src/heldout.rs`, in the default image; an image
+built from older source, `1.6.0` included, has no such check), which refuses to generate a financial
 corpus without the hash file Lakebench mounts on the datagen pod;
 bronze-verify (`spark/scripts/bronze_verify_financial.py`) and the recall
 scorer (`spark/scripts/score_financial.py`), which recover the corpus seed
@@ -1258,8 +1261,8 @@ only.
   the AML generator never receives (the timestamps, `dirty_data_ratio`, the
   Customer 360 `unique_customers`) makes identical corpora NOT COMPARABLE.
   Corpus id v2 hashes what the generator applied, but only an image that
-  writes corpus markers produces it; records from an image without markers,
-  including the default `1.6.0` image, stay exp1 (section 3.1).
+  writes corpus markers produces it. The default image does; records from an
+  image without markers, `1.6.0` included, stay exp1 (section 3.1).
 - **Records from Lakebench 1.6 are not comparable** with this release's
   records (workload `aml-1`, identity v1), so the published AML records are
   reference figures only.
@@ -1285,11 +1288,15 @@ only.
   (section 3.3), so a development config on another host pointed at that
   prefix is refused only by bronze-verify's manifest check, after the
   deploy. Take every look from one host.
-- **The default generator image is a tag.** A registered look or
-  calibration shard run through `scripts/aml_gate.py` needs
-  `--generator-image` as a digest-pinned reference (`repo@sha256:<digest>`)
-  equal to the image the per-typology predictions were made from, and
-  refuses otherwise.
+- **`--generator-image` is a string, not a check of the corpus.** A
+  registered look or calibration shard run through `scripts/aml_gate.py`
+  needs `--generator-image` as a digest-pinned reference
+  (`...@sha256:<digest>`), and a registered look refuses one that is not
+  the same string the per-typology predictions were made with: the default's
+  `repo:tag@sha256:<digest>` spelling and `repo@sha256:<digest>` for the
+  same image are refused against each other. `aml_gate.py` does not check
+  that the scored corpus was written by that image; the corpus markers'
+  `build_commit` is checked against `config/datagen_lineage.yaml` by hand.
 - **A materialised MERGE source can fail a micro-batch.** An executor lost
   between materialising a silver-stream MERGE source and the MERGE fails
   that micro-batch, and the stream restarts through its replay path. No

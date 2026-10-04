@@ -46,7 +46,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:1.6.0') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -147,6 +147,11 @@ spec:
                   key: secretKey
             {% if s3_ca_cert_pem %}
             - name: S3_CA_CERT
+              value: "/etc/ssl/certs/custom-ca/ca.crt"
+            # Also the trust store of rustls-native-certs, so an image that
+            # predates S3_CA_CERT trusts the configured CA too. It replaces
+            # the system store, which is why it is set only with a CA.
+            - name: SSL_CERT_FILE
               value: "/etc/ssl/certs/custom-ca/ca.crt"
             {% elif not s3_verify_ssl %}
             - name: S3_VERIFY_SSL

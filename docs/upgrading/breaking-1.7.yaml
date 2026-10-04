@@ -544,6 +544,13 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
+- id: the-default-datagen-image-is-the-v17-look-image
+  title: The default datagen image is the v1.7 look image
+  kind: version-bump
+  subject: images.datagen docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1
+  source: src/lakebench/config/schema.py:ImagesConfig
+  text: 'The default datagen image is `lb-datagen:a592385`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.'
+  fix: 'Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.'
 - id: a-run-passes-only-when-its-record-shows-it
   title: A run passes only when its record shows it
   kind: default-change
@@ -595,8 +602,8 @@
   kind: default-change
   subject: datagen S3 transport settings
   source: datagen_rs/src/s3sink.rs:S3_PATH_STYLE
-  text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.'
-  fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA.'
+  text: 'Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.'
+  fix: 'Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA; leave `ca_cert` unset for an endpoint a public CA signs.'
 - id: multi-cycle-runs-and-reused-corpora-check-a-corpus-series-marker
   title: Multi-cycle runs and reused corpora check a corpus series marker
   kind: default-change

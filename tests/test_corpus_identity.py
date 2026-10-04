@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from lakebench import corpus_digest as cd
+from lakebench.config.schema import ImagesConfig
 from lakebench.metrics import corpus_identity as ci
 from lakebench.metrics import experiment as ex
 from tests.test_experiment import _cfg, _metrics
@@ -29,7 +30,7 @@ H2 = "b" * 64
 H3 = "c" * 64
 D = "sha256:" + "1" * 64  # the image that generated the corpus
 X = "sha256:" + "9" * 64  # another image (a stale fleet sidecar)
-TAG = "docker.io/sillidata/lb-datagen:1.6.0"
+TAG = ImagesConfig().datagen  # the configured image (the default config)
 SCOPE = "customer/interactions/"
 BUCKET = "scrubbed-bronze"
 

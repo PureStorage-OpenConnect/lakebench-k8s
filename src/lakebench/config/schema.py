@@ -476,11 +476,27 @@ class ImagesConfig(ConfigModel):
     # cargo --locked) after the docker.io repository was wiped (LB-209). Release
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    datagen: str = "docker.io/sillidata/lb-datagen:1.6.0"
-    """Data generator image. Pinned by digest
-    `sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a` for
-    provenance. Output is byte-identical to the v1.6 AML generator freeze
-    (`datagen-v2-rs-0.3`); this build cuts datagen pod memory.
+    # a592385: the v1.7 registered-look image, built from integrate a5923850 with
+    # LB_BUILD_COMMIT set: held-out seeds as salted hashes read at run time,
+    # strict argument parsing, per-node corpus markers, S3 transport settings
+    # honoured, a registered seed read from its Secret. Output-neutral: the
+    # five-case byte-compare against 1.6.0 (F0, F1, C0, F2, C2; _corpus/
+    # excluded) is equal, recorded in
+    # tests/fixtures/datagen_reference/compare-48e18a417bf8.json and named by
+    # its config/datagen_lineage.yaml row. MODEL_VERSION stays
+    # datagen-v2-rs-0.3. It is the registered-look image
+    # (docs/internal/aml-protocol.md), so the "disqualified from registered
+    # looks" note above applies to the older tags only. The default names the
+    # tag and the digest; the runtime pulls the digest, so a re-push of the tag
+    # cannot move it.
+    datagen: str = (
+        "docker.io/sillidata/lb-datagen:a592385"
+        "@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1"
+    )
+    """Data generator image, pinned by tag and digest (the digest is what is pulled).
+    Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on
+    the five byte-compare cases; this build adds the held-out seed check, strict
+    argument parsing and per-node corpus markers.
     """
     spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its

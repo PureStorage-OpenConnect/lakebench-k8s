@@ -357,9 +357,12 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """Default datagen image pins the v1.6 AML generator-freeze commit."""
+        """Default datagen image is the DAT-2 look image, pinned by digest."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:1.6.0"
+        assert config.images.datagen == (
+            "docker.io/sillidata/lb-datagen:a592385"
+            "@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1"
+        )
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""

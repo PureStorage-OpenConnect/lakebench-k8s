@@ -72,8 +72,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `compare`, `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
-- Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2.
+- Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
 - A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
+- The default datagen image is `lb-datagen:a592385`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -1010,6 +1011,34 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   raw-corpus replace limit and `generate --timeout auto`. The datagen Job's
   arguments do not change: its `--target-tb` keeps the old 8.4 GB per unit
   (the AML generator sizes from `--scale` and ignores it).
+- **Datagen pods also get `SSL_CERT_FILE` when `platform.storage.s3.ca_cert`
+  is set**, pointing at the same mounted CA as `S3_CA_CERT`, so an image
+  that predates `S3_CA_CERT` (1.6.0) trusts the configured CA through
+  rustls-native-certs. It replaces the pod's system CA store on every image,
+  the default one included: with `ca_cert` set, datagen trusts that CA alone
+  (before, the 1.7 image trusted it on top of the system CAs), so a `ca_cert`
+  for a proxy in front of a public-CA endpoint must also carry the public
+  CA.
+- **The two manual datagen Job manifests (`job-scale1.yaml` and
+  `job-scale1-8core.yaml` under `datagen_rs`) are removed**: they named the deleted
+  `lb-datagen-rs:latest` image. A unit test now fails on any tracked
+  reference to a datagen image that is not the default, 1.6.0 or an
+  allowlisted history entry. `docs/data-generation.md` drops the unsupported
+  batch-versus-continuous speed figures.
+- **The default datagen image is `lb-datagen:a592385`, pinned by digest**
+  (`ImagesConfig.datagen` is
+  `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`;
+  was `lb-datagen:1.6.0`). It is the one image built after the held-out
+  hash, strict-argument, corpus-marker, S3-transport and seed-Secret source
+  changes, from integrate `a5923850`, and the image the registered AML looks
+  pin (`docs/internal/aml-protocol.md`). The five-case byte-compare against
+  1.6.0 (financial seed 43 with and without the robustness perturbation,
+  Customer 360 seed 42, and both at two cycles; per-node markers excluded) is
+  equal, recorded in `tests/fixtures/datagen_reference/compare-48e18a417bf8.json`,
+  and `src/lakebench/config/datagen_lineage.yaml` maps the new digest to the
+  1.6.0 root, so the two images give one corpus lineage. Every perf-gate
+  config under `benchmarks/perf/` takes the same pin (they follow the
+  default; none has a baseline recorded on the 1.7 tree yet).
 - **`compare`: outcome keys inside a side, and maintenance skipped on both
   sides.** A side whose repeat runs differ only in in-stream rounds or
   investigator sessions (outcomes of the runs' speed) is now one
