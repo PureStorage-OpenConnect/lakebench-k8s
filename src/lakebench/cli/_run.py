@@ -2191,10 +2191,10 @@ def _run_once(
             )
             if not _k8s_check.namespace_exists(ns):
                 if yes and allow_auto_deploy:
-                    from lakebench.cli._deploy import deploy as _deploy_cmd
+                    from lakebench.cli._deploy import deploy_inside_run
 
                     print_info(f"Namespace '{ns}' not found -- auto-deploying...")
-                    _deploy_cmd(config_file=config_file, yes=True)
+                    deploy_inside_run(config_file)
                 else:
                     print_error(f"Namespace '{ns}' does not exist")
                     if not allow_auto_deploy:
@@ -2233,7 +2233,7 @@ def _run_once(
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
     console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
-    print_success("Infrastructure verified (deploy with 'lakebench deploy' if needed)")
+    print_success("Infrastructure verified")
 
     console.print(
         Panel(

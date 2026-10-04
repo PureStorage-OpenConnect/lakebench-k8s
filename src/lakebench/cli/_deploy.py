@@ -6,6 +6,7 @@ and its helper functions ``_preflight_check()`` and ``_build_component_list()``.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from pathlib import Path
@@ -39,14 +40,45 @@ from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
 
+# True while `run --yes` deploys on the user's behalf: the run carries on by
+# itself, so deploy prints no "Next:" steps.
+_INSIDE_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "lakebench_deploy_inside_run", default=False
+)
+
+
+def _next_steps(cfg) -> str:
+    """The "Next:" lines after a successful deploy; none inside ``run``."""
+    if _INSIDE_RUN.get():
+        return ""
+    if cfg.architecture.pipeline.cycles > 1:
+        return (
+            "\n\nNext: [bold]lakebench run[/bold]     to run the pipeline; each cycle "
+            "generates its data first"
+            "\n      [bold]lakebench status[/bold]  to check deployment"
+        )
+    return (
+        "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
+        "\n      [bold]lakebench run --generate[/bold]  to generate data and run the "
+        "pipeline"
+        "\n      [bold]lakebench status[/bold]          to check deployment"
+    )
+
+
+def deploy_inside_run(config_file: Path | None) -> None:
+    """Deploy for ``run --yes``, which carries on by itself: no next steps."""
+    token = _INSIDE_RUN.set(True)
+    try:
+        deploy(config_file=config_file, yes=True)
+    finally:
+        _INSIDE_RUN.reset(token)
+
 
 def _preflight_check(cfg) -> None:
     """Run critical pre-flight checks before deployment.
 
     Prints warnings for non-critical issues; exits on blockers.
     """
-    print_info("Tip: run 'lakebench config validate' for a full prerequisite check")
-
     # 1. S3 endpoint must be set
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
@@ -712,19 +744,7 @@ def _deploy_impl(
                 f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
-        if cfg.architecture.pipeline.cycles > 1:
-            success_msg += (
-                "\n\nNext: [bold]lakebench run[/bold]     to run the pipeline; each cycle "
-                "generates its data first"
-                "\n      [bold]lakebench status[/bold]  to check deployment"
-            )
-        else:
-            success_msg += (
-                "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
-                "\n      [bold]lakebench run --generate[/bold]  to generate data and run the "
-                "pipeline"
-                "\n      [bold]lakebench status[/bold]          to check deployment"
-            )
+        success_msg += _next_steps(cfg)
 
         console.print(
             Panel(

@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 import tempfile
 
+# The report generator binds lakebench.metrics.MetricsStorage at import, and
+# several tests patch that name while code under test imports modules
+# lazily: imported here first, the generator keeps the real class.
+import lakebench.reports.generator  # noqa: F401
+
 # Hermetic kube config. Code under test loads kube config before making
 # (mocked) API calls; on a developer machine that silently used the real
 # ~/.kube/config while CI has none, so tests passed locally and failed in CI.

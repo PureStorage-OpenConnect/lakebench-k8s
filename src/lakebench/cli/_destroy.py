@@ -356,8 +356,8 @@ def _destroy_impl(
                 raise typer.Exit(ExitCode.NOT_CONFIRMED)
         else:
             print_error(
-                "Refusing to destroy without --force in non-interactive mode. "
-                "Pass --force to skip confirmation."
+                "Refusing to destroy without --yes in non-interactive mode. "
+                "Pass --yes to skip confirmation."
             )
             raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
@@ -391,6 +391,7 @@ def _destroy_impl(
         "spark-scripts": "Removing infrastructure",
         "rbac": "Removing infrastructure",
         "scratch-sc": "Removing infrastructure",
+        "category1": "Removing infrastructure",
         "namespace": "Removing namespace",
     }
     _dg_current_group = ""
@@ -425,7 +426,8 @@ def _destroy_impl(
                     details={"component": component, "status": "skipped"},
                 )
         elif status == DeploymentStatus.SUCCESS:
-            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            # A step reported done without a start shows 0.0s, not -0.0s.
+            elapsed = max(0.0, time.time() - _dg_step_start.pop(component, time.time()))
             console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,
@@ -435,7 +437,7 @@ def _destroy_impl(
                 details={"component": component, "status": "success"},
             )
         elif status == DeploymentStatus.FAILED:
-            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            elapsed = max(0.0, time.time() - _dg_step_start.pop(component, time.time()))
             console.print(f"    [red]x[/red] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,

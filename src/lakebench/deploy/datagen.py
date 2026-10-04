@@ -753,7 +753,7 @@ class DatagenDeployer:
 
         context = dict(self.context)  # Copy base context
         # Completed pods are kept until the run has read the fleet record from
-        # them: a continuous window's end, plus an hour (LB-271).
+        # them: a continuous window's end, plus an hour.
         ttl_seconds = 3600
         if self.continuous:
             ttl_seconds += int(cfg.architecture.pipeline.sustained.run_duration)

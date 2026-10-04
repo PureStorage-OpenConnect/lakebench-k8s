@@ -32,11 +32,6 @@ from lakebench.metrics.continuous_window import (
     window_stats,
 )
 
-# Imported before any test patches lakebench.metrics.MetricsStorage: the
-# report generator binds that name at import, and a run in this file can
-# import it first, leaving later report tests a mock storage.
-import lakebench.reports.generator  # noqa: E402, F401  isort: skip
-
 W0 = datetime(2026, 9, 27, 4, 4, 0)
 W1 = W0 + timedelta(seconds=600)
 
