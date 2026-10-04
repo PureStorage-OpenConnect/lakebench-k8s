@@ -63,6 +63,7 @@ pip install lakebench-k8s
 pip install lakebench-k8s
 lakebench init                                 # writes lakebench.yaml: set its S3 endpoint, export the two key variables it names
 lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
+lakebench plan lakebench.yaml                  # what the run needs and whether the cluster has room; changes nothing
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
 lakebench report lakebench.yaml                # view scorecard
 lakebench destroy lakebench.yaml               # tear down what this deployment owns
@@ -299,6 +300,7 @@ snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
 | `config validate` | Check config and cluster connectivity |
 | `config storage` | Check the S3 backend supports what lakebench needs |
 | `config show` | Show the resolved configuration and its peak requested resources |
+| `plan` | Show what a config needs (components, sizing, prerequisites) and check the cluster has room; read-only |
 | `deploy` | Deploy all infrastructure components |
 | `generate` | Generate synthetic data at the configured scale |
 | `run` | Execute the medallion pipeline and benchmark |
