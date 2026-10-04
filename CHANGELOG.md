@@ -984,7 +984,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   names the run id and the role or what could not be read, never a seed.
   The held-out audit and the gate also count a record as AML by its
   workload name, so an AML record missing its corpus block is
-  unidentified.
+  unidentified. A salted hash the hash file does not name is unidentified
+  too (it may be a held-out seed's hash under another salt). The perf gate
+  (`perf-baselines`, `scripts/perf_gate.py record` and `check`) refuses
+  such a run, and a baseline whose identity names a held-out seed, with
+  that reason alone; its seed difference reads `seed differs (values
+  withheld)`, never the values.
 - **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
   Continuous AML stores edge rows per pair per micro-batch and statement
   running balances in arrival order, so FQ4 (which returned the stored

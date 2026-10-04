@@ -248,11 +248,13 @@ def seed_readable(value: Any) -> bool:
     """Whether *value* is a recorded seed form ``recorded_seed_role`` reads
     exactly, so a None from it means "not held out" rather than "could not
     tell": an integer in the seed range, a float or decimal text that holds
-    one exactly (no exponent, a float below 2**53), a salted hash, a
-    ``{seed_ref, role}`` mapping or a non-empty list of these. A form that
-    could round a seed (a large float, exponent text) is not readable, so
-    the release gate and the audit refuse it as unidentified. Never raises
-    and never reads the held-out record."""
+    one exactly (no exponent, a float below 2**53), a ``{seed_ref, role}``
+    mapping or a non-empty list of these. A form that could round a seed (a
+    large float, exponent text) is not readable, and neither is a salted
+    hash that names no held-out role: it may be a held-out seed's hash under
+    another salt (an older hash file, or a floor with its own salt), which
+    the guard cannot check. The release gate and the audit refuse both as
+    unidentified. Never raises and never reads the held-out record."""
     if value is None or isinstance(value, bool):
         return False
     if isinstance(value, Mapping):
@@ -268,7 +270,8 @@ def seed_readable(value: Any) -> bool:
     if isinstance(value, str):
         text = value.strip()
         if _HEX64.fullmatch(text.lower()):
-            return True
+            # A hash this hash file names is caught before this is asked.
+            return False
         if _INT_TEXT.fullmatch(text):
             return 0 <= int(text.replace("_", "")) <= _SEED_MAX
         if "e" in text.lower():

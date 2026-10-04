@@ -1346,7 +1346,12 @@ def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = No
         if key == "generator digest" and (va is None or vb is None):
             continue
         if va != vb:
-            out.append(f"{key} differs ({va!r} vs {vb!r})")
+            if key == "seed":
+                # Never a seed in a refusal: either side may be a held-out
+                # seed the caller has not checked.
+                out.append(f"{key} differs (values withheld)")
+            else:
+                out.append(f"{key} differs ({va!r} vs {vb!r})")
     return out
 
 

@@ -133,6 +133,12 @@ numbers; do not compare across clusters.
 
 A run is refused, never compared, when:
 
+- its corpus is a protected AML corpus or is not shown to be outside the
+  held-out corpora (`look_guard.protected_record_reason`, fail closed: a
+  held-out role or seed, a withheld or unreadable seed, an AML record with
+  no seed). That reason is the only one given, and a baseline whose
+  identity names such a seed refuses every run the same way. No refusal
+  prints a seed: a seed difference reads `seed differs (values withheld)`;
 - it did not succeed;
 - it is a local run (`lakebench run --local`), which the fingerprint does not
   otherwise tell apart from a cluster run;

@@ -826,9 +826,50 @@ def benchmark_sample_refusal(run: RunRecord, pinned: PinnedConfig) -> str | None
     )
 
 
+def protected_run_refusal(raw: Mapping[str, Any]) -> str | None:
+    """Why a run record is never a perf baseline or a gated run: a protected
+    AML corpus, or one not shown to be outside the held-out corpora
+    (``look_guard.protected_record_reason``, fail closed, identity
+    required). Names a role or a kind, never a seed."""
+    from lakebench.aml.look_guard import protected_record_reason
+
+    why = protected_record_reason(raw, require_identity=True, fail_closed=True)
+    if why is None:
+        return None
+    if why.startswith("unidentified") or "cannot be read" in why:
+        return f"the run's corpus is not shown to be outside the held-out AML corpora ({why})"
+    return f"the run's corpus is a protected AML corpus ({why})"
+
+
+def baseline_seed_refusal(experiment_identity: Mapping[str, Any] | None) -> str | None:
+    """Why a stored baseline's identity names a held-out seed (or one the
+    guard cannot check, fail closed), or None. The identity keeps the corpus
+    seed under ``seed``."""
+    from lakebench.aml.look_guard import WITHHELD, recorded_seed_role
+
+    seed = (experiment_identity or {}).get("seed")
+    if seed is None:
+        return None
+    try:
+        role = recorded_seed_role(seed)
+    except Exception as e:  # noqa: BLE001 -- unreadable held-out record: refuse
+        return f"the baseline's seed cannot be checked ({type(e).__name__})"
+    if role == WITHHELD:
+        return "the baseline's seed is withheld"
+    if role is not None:
+        return f"the baseline's seed is the registered {role} seed"
+    return None
+
+
 def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
-    """Reasons this run cannot stand for *pinned*. Empty means comparable."""
+    """Reasons this run cannot stand for *pinned*. Empty means comparable.
+    A run from a protected AML corpus gets that reason alone, so nothing
+    else about it (a fingerprint or identity diff) reaches the output."""
     from lakebench.metrics.verdict import passed as _record_passed
+
+    protected = protected_run_refusal(run.raw)
+    if protected:
+        return [protected]
 
     reasons: list[str] = []
     kind = run.raw.get("record_kind") or "run"
@@ -1247,6 +1288,15 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
     if not baseline.accepted:
         result.verdict = NO_BASELINE
         result.reasons.append(f"baseline is '{baseline.status}'")
+        return result
+    # A protected corpus on either side is refused with that reason alone:
+    # the comparison below would print identity differences of its corpus.
+    protected = protected_run_refusal(run.raw) or baseline_seed_refusal(
+        baseline.experiment_identity
+    )
+    if protected:
+        result.verdict = REFUSED
+        result.reasons.append(protected)
         return result
     if baseline.fingerprint_version != FINGERPRINT_VERSION:
         # Its fingerprint_hash cannot equal any version 2 hash; say why

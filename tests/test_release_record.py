@@ -677,6 +677,10 @@ def test_a_calibration_seed_in_any_readable_form_passes(ready, held, form):
         pytest.param(2**70, id="above-u64"),
         pytest.param("9" * 40, id="long-digits"),
         pytest.param(-5, id="negative"),
+        # A hash this hash file does not name may be a held-out seed's hash
+        # under another salt (LB-269).
+        pytest.param("ab" * 32, id="hash-unknown-salt"),
+        pytest.param({"seed_ref": "cd" * 32, "role": "calibration"}, id="seed-ref-unknown-salt"),
     ],
 )
 def test_a_lossy_or_out_of_range_seed_is_unidentified(ready, held, seed):

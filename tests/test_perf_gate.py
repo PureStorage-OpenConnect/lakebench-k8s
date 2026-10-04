@@ -1712,3 +1712,81 @@ def test_single_stage_run_is_refused(env):
     assert "run measured one stage only (silver-build)" in pg.run_refusals(
         run, env.store().pinned("c360-batch-s10")
     )
+
+
+# -- LB-269: a held-out corpus is never a baseline or a gated run ------------
+# The held-out record is the synthetic test fixture (tests/fixtures/
+# heldout_test.json, test values), never a pre-registration value.
+
+
+@pytest.fixture
+def held(monkeypatch):
+    from tests.fixtures import protected_corpus as pc
+
+    pc.use_heldout(monkeypatch)
+    return pc
+
+
+def test_a_held_out_seed_run_is_refused_with_that_reason_alone(env, held):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(
+        snap, "20260924-110000-bbbbbb", experiment=stub_experiment(QUERIES, seed=held.EV)
+    )
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert c.reasons == [
+        "the run's corpus is a protected AML corpus (its seed is the registered evaluation seed)"
+    ]
+    assert held.seed_tokens(" ".join(c.reasons)) == []
+
+
+def test_a_held_out_seed_run_cannot_be_recorded(env, held):
+    snap = env.snaps["c360-batch-s10"]
+    run = _batch_run(
+        snap, "20260924-100000-aaaaaa", experiment=stub_experiment(QUERIES, seed=held.RB)
+    )
+    with pytest.raises(pg.PerfGateError) as e:
+        _record(env, "c360-batch-s10", run)
+    assert "registered robustness seed" in str(e.value)
+    assert held.seed_tokens(str(e.value)) == []
+
+
+def test_a_baseline_with_a_held_out_seed_refuses_every_run(env, held):
+    snap = env.snaps["c360-batch-s10"]
+    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    store.baselines["c360-batch-s10"].experiment_identity["seed"] = held.EV
+    c = pg.compare_run(
+        store,
+        "c360-batch-s10",
+        pg.load_run(env.write_run(_batch_run(snap, "20260924-110000-bbbbbb"))),
+    )
+    assert c.verdict == pg.REFUSED
+    assert c.reasons == ["the baseline's seed is the registered evaluation seed"]
+
+
+def test_a_seed_difference_never_prints_the_seeds(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(
+        snap, "20260924-110000-bbbbbb", experiment=stub_experiment(QUERIES, seed=987654321)
+    )
+    c = _compare(env, "c360-batch-s10", run)
+    assert "seed differs (values withheld) from the baseline" in c.reasons
+    assert not any("987654321" in r for r in c.reasons)
+
+
+def test_release_check_line_carries_no_held_out_seed(env, held):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    env.write_run(
+        _batch_run(
+            snap, "20260924-110000-bbbbbb", experiment=stub_experiment(QUERIES, seed=held.EV)
+        )
+    )
+    ok, lines = pg.release_check(
+        env.store(), [env.runs], {"c360-batch-s10": "20260924-110000-bbbbbb"}
+    )
+    assert not ok
+    text = "\n".join(lines)
+    assert "protected AML corpus" in text and held.seed_tokens(text) == []
