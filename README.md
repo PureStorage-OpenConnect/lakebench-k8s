@@ -60,7 +60,7 @@ pip install lakebench-k8s
 > [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
 
 ```bash
-lakebench init                                 # writes lakebench.yaml: set its S3 endpoint, export the two key variables it names
+lakebench init                                 # writes lakebench.yaml (--workload financial for AML): set its S3 endpoint, export the two key variables it names
 lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
 lakebench plan lakebench.yaml                  # what the run needs and whether the cluster has room; changes nothing
 lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
