@@ -32,7 +32,8 @@ Writes ``time_travel.json`` beside the hashes and exits 0 for every
 determined outcome; a non-zero exit is a crash. A deadline
 (``--deadline-epoch``, on this driver's clock, a Lakebench-imposed bound)
 stops starting a scan that would not finish before it (the time left must
-exceed 1.5 times the longest scan so far); the hash pass gets half of the
+exceed 1.5 times the longest scan so far, so the first scan of a pass
+always starts); the hash pass gets half of the
 time: the records left read ``not_read`` and the result says
 ``incomplete``. A Delta table is refused: every record reads
 ``not_supported`` (AML on Delta is refused by the config today). Writes no

@@ -17,7 +17,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-#: Record states that pass the time-travel check on their own.
+#: Record states of a snapshot read back intact (``pass`` also needs at
+#: least one ``verified``).
 TT_VERIFIED_STATES = ("verified", "verified_hash_only")
 #: Record states that fail it.
 TT_FAILING_STATES = ("mismatch", "missing_unexplained", "error", "not_supported")
@@ -59,11 +60,12 @@ def expired_by(
     A round explains it when it ran ``expire_snapshots`` on the tick's table
     (the statement finished or timed out, so it may have run) and the
     snapshot was committed (writer clock, in the cluster) before the round's
-    latest possible cutoff: its end minus the retention it applied. The end
-    is on this host's clock. Trino takes the cutoff on its own clock, so the
-    end is moved to the cluster clock by *clock_offset_s* (cluster minus
-    host), when known; Spark Thrift's cutoff is a literal this host computed
-    before the round started, so it is compared on this host's clock. The
+    latest possible cutoff minus the retention it applied. Trino takes the
+    cutoff on its own clock during the round, so the latest is the round's
+    end (this host's clock) moved to the cluster clock by *clock_offset_s*
+    (cluster minus host), when known. Spark Thrift's cutoff is a literal
+    this host computed before the round started, so the latest is the
+    round's start, on this host's clock. The
     entry names the earliest round that could have expired the snapshot
     (``basis``); ``ran_at`` is that round's end on this host's clock."""
     committed = _utc(tick.get("committed_at"))
@@ -76,7 +78,7 @@ def expired_by(
         shift = timedelta(seconds=0.0 if on_host else (clock_offset_s or 0.0))
         if table not in {_bare_table(t) for t in r.get("expired_tables") or ()}:
             continue
-        ended = _utc(r.get("ended_at"))
+        ended = _utc(r.get("started_at") if on_host else r.get("ended_at"))
         applied_s = _seconds(r.get("applied_expire"))
         if ended is None or applied_s is None:
             continue
@@ -91,8 +93,10 @@ def expired_by(
                 "configured": configured,
                 "applied": applied,
                 "reason": (
-                    "live-stream floor"
-                    if configured_s is None or applied_s > configured_s
+                    "configured retention unknown"
+                    if configured_s is None
+                    else "live-stream floor"
+                    if applied_s > configured_s
                     else "configured retention"
                 ),
             }

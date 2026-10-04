@@ -734,3 +734,71 @@ def test_the_verdict_shows_the_time_travel_check_and_never_fails_on_it():
     assert text == tt.line(got) and text.startswith("time-travel check: FAIL")
     assert after.status == before.status
     assert _qualifier_lines({"time_travel": text}) == [text]
+
+
+def test_a_hash_pass_cut_short_leaves_the_rest_not_read_not_mismatched(job, monkeypatch):
+    """The hash pass reached only the newest snapshot; the read pass, with
+    time left, reads that one and leaves the other not_read (incomplete),
+    never a mismatch for a hash it never tried to take."""
+    real = job.mod.hash_pass
+
+    def first_only(spark, keys, uri, nonce, budget):
+        return real(spark, keys[:1], uri, nonce, budget)
+
+    monkeypatch.setattr(job.mod, "hash_pass", first_only)
+    out = _run(job, [_rec(2, T2), _rec(3, T3)])
+    assert _states(out) == ["not_read", "verified"]
+    assert out["incomplete"] is True
+
+
+def test_spark_thrift_rounds_use_their_start():
+    # Spark Thrift's cutoff literal was taken before the round started: a
+    # commit after start - 1h but before end - 1h is not covered.
+    tick = _rec(1, T1, committed="2026-10-03T10:02:00Z")
+    rnd = {**_round(1, "2026-10-03T11:05:00Z"), "started_at": "2026-10-03T11:00:00Z"}
+    assert tt.expired_by(tick, [rnd], "30m", None) is not None  # Trino: end - 1h
+    assert tt.expired_by(tick, [{**rnd, "engine": "spark-thrift"}], "30m", None) is None
+
+
+def test_unknown_configured_retention_is_said():
+    by = tt.expired_by(
+        _rec(1, T1, committed="2026-10-03T10:00:00Z"),
+        [_round(1, "2026-10-03T12:00:00Z")],
+        None,
+        None,
+    )
+    assert by is not None and by["reason"] == "configured retention unknown"
+
+
+def test_a_run_that_failed_after_the_reads_does_not_keep_their_verdict():
+    from lakebench.cli._aml_post import settle_time_travel
+
+    run = SimpleNamespace(continuous={"time_travel": {"verdict": "pass", "ticks": [_rec(2, T2)]}})
+    settle_time_travel(_cfg(), run, "x", pipeline_success=False)
+    tt_rec = run.continuous["time_travel"]
+    assert tt_rec["verdict"] == "not_run" and tt_rec["reason"] == "the run failed its gates"
+    assert tt_rec["ticks"] == [_rec(2, T2)]
+
+
+def test_a_wait_that_raises_deletes_the_job():
+    from lakebench.cli import _aml_post
+    from lakebench.spark.job import JobState
+
+    jm = MagicMock()
+    jm.submit_job.return_value = SimpleNamespace(state=JobState.SUBMITTED, message="m")
+    mon = MagicMock()
+    mon.wait_for_completion.side_effect = RuntimeError("status read 500")
+    with patch.object(_aml_post, "_s3_client", return_value=_S3()):
+        out = _aml_post.run_time_travel(
+            _cfg(), "run-1", _continuous([_rec(2, T2)], []), _drained(), jm, mon, 1200
+        )
+    assert out["verdict"] == "not_run" and "status read 500" in out["reason"]
+    jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
+
+
+def test_the_settle_carries_the_run_outcome_and_the_stage():
+    text = (SRC / "cli" / "_sustained.py").read_text()
+    body = text[text.index("settle_time_travel(\n") :][:600]
+    assert '"interrupted during the time-travel reads"' in body
+    assert 'if _stage == "time-travel"' in body
+    assert "pipeline_success," in body

@@ -847,8 +847,9 @@ host's), or reads
 `incomplete` or `not_run`, and the line beside the run verdict says why;
 it never fails the run. The job's budget (`continuous.time_travel.budget`)
 is the per-job timeout less 120 s, a Lakebench-imposed bound passed as a
-deadline on the cluster clock: the job starts no scan the time left cannot
-hold, the hash pass gets half of it, and the result is then `incomplete`.
+deadline on the cluster clock: after the first scan of each pass the job
+starts no scan unless the time left exceeds 1.5 times its longest scan, the
+hash pass gets half of it, and the result is then `incomplete`.
 A wait that ends before the job does deletes the job.
 
 After the streams stop and every gate has decided, the score job reads

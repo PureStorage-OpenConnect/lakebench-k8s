@@ -4680,6 +4680,7 @@ def _run_sustained(
             )
             if _interrupted is not None
             else "the run ended before the time-travel reads",
+            pipeline_success,
         )
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)

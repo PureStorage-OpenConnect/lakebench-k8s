@@ -471,7 +471,8 @@ def stop_drain(cfg, k8s, custom_api: Any = None) -> DrainResult | None:
 
 #: Seconds the job's deadline keeps back from the CLI's wait, for writing
 #: its partial result (``incomplete``) and stopping. The job also starts no
-#: scan the time left could not hold (1.5 times its longest scan so far).
+#: scan the time left could not hold (1.5 times its longest scan so far;
+#: the first scan of each pass always starts).
 _TT_BUDGET_MARGIN_S = 120
 #: How the record labels the time-travel budget (a Lakebench-imposed bound).
 TT_BUDGET_LABEL = "BOUNDED BY the Lakebench time-travel budget (the per-job timeout)"
@@ -506,6 +507,8 @@ def run_time_travel(
 
     if continuous is None:
         return None
+    submitted = False
+    app_name = ""
     policy = tt_mod.policy(
         continuous.get("retention"), cfg.architecture.pipeline.sustained.retention_threshold
     )
@@ -581,6 +584,7 @@ def run_time_travel(
         )
         if interrupt is not None:
             interrupt.submitted(status)
+        submitted = status.state != JobState.FAILED
         if status.state == JobState.FAILED:
             return tt_mod.not_run(
                 continuous, f"the job was not submitted: {status.message}", policy
@@ -589,12 +593,10 @@ def run_time_travel(
         if interrupt is not None and result.success:
             interrupt.finished("SparkApplication", app_name)
         if not result.success:
-            try:
-                # A wait that ended first must not leave executors running.
-                job_manager._delete_job(app_name)
-            except Exception as e:  # noqa: BLE001 -- said; the record stands
-                print_warning(f"Could not delete {app_name}: {e}")
+            _delete_tt_job(job_manager, app_name)
+            submitted = False
             return tt_mod.not_run(continuous, f"the job did not complete: {result.message}", policy)
+        submitted = False
         body = client.raw_client.get_object(Bucket=gold, Key=f"{prefix}/time_travel.json")
         out = _json.loads(body["Body"].read())
         if not isinstance(out, dict) or out.get("nonce") != nonce:
@@ -603,21 +605,41 @@ def run_time_travel(
         (print_success if tt["verdict"] == "pass" else print_warning)(tt_mod.line(tt))
         return tt
     except Exception as e:  # noqa: BLE001 -- a measurement; never fails the run
+        if submitted:
+            # The wait raised: the job may still run; it must not outlive the step.
+            _delete_tt_job(job_manager, app_name)
         print_warning(f"Time-travel reads failed ({e}); recorded as not run.")
         return tt_mod.not_run(continuous, f"the time-travel step failed: {e}", policy)
 
 
-def settle_time_travel(cfg, run: Any, reason: str) -> None:
-    """A continuous AML run that ended before the time-travel step reads
-    ``not_run`` with *reason*, so the record never lacks a verdict."""
+def _delete_tt_job(job_manager, app_name: str) -> None:
+    """Delete the time-travel application (best effort, said when it fails)."""
+    try:
+        job_manager._delete_job(app_name)
+    except Exception as e:  # noqa: BLE001 -- said; the record stands
+        print_warning(f"Could not delete {app_name}: {e}")
+
+
+def settle_time_travel(cfg, run: Any, reason: str, pipeline_success: bool = True) -> None:
+    """The last word on ``continuous.time_travel``, in the run's finally
+    block: a continuous AML run that ended before the time-travel step reads
+    ``not_run`` with *reason*, so the record never lacks a verdict; one that
+    failed a check after the reads (*pipeline_success* False) does not keep
+    their verdict, as it does not keep its score (the per-tick results stay
+    for diagnosis)."""
     if run is None or cfg.architecture.workload.schema_type.value != "financial":
         return
     continuous = getattr(run, "continuous", None)
     if continuous is None:
         return
-    if (continuous.get("time_travel") or {}).get("verdict") is None:
-        from lakebench.metrics import time_travel as tt_mod
+    from lakebench.metrics import time_travel as tt_mod
 
+    verdict = (continuous.get("time_travel") or {}).get("verdict")
+    if verdict is not None and verdict != "not_run" and not pipeline_success:
+        tt = continuous["time_travel"]
+        tt.update({"verdict": "not_run", "reason": "the run failed its gates"})
+        return
+    if verdict is None:
         tt_mod.not_run(
             continuous,
             reason,
