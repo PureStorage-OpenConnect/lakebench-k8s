@@ -214,11 +214,12 @@ def merge(
     tt["current_read_s"] = (result.get("current") or {}).get("read_s")
     tt["current"] = result.get("current")
     tt["policy"] = pol
-    tt["hashed_columns"] = {
-        "basis": "business columns: every column of the snapshot schema less the "
-        "batch-version sentinels",
-        "excluded": result.get("excluded_columns"),
-    }
+    if result.get("excluded_columns"):
+        tt["hashed_columns"] = {
+            "basis": "business columns: every column of the snapshot schema less the "
+            "batch-version sentinels (those it has)",
+            "excluded": result.get("excluded_columns"),
+        }
     if budget is not None:
         tt["budget"] = dict(budget)
     tt["verdict"] = verdict

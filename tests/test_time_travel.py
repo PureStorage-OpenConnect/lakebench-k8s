@@ -831,8 +831,11 @@ def test_the_job_hashes_business_columns_only(job):
     assert job.mod.business_columns(cols) == ["txn_id", "txn_amount"]
 
 
-def test_the_job_refuses_an_input_with_no_column_definition(job):
+@pytest.mark.parametrize("excluded", [None, [], [1]])
+def test_the_job_refuses_an_input_with_no_column_definition(job, excluded):
     inputs = {"run_id": "r", "nonce": "n1", "records": [_rec(2, T2)]}
+    if excluded is not None:
+        inputs["exclude_columns"] = excluded
     with pytest.raises(SystemExit, match="exclude_columns"):
         job.mod.time_travel(None, inputs, "mem://h", job.mod.Budget(None))
     assert job.scans == []
@@ -846,3 +849,6 @@ def test_the_record_says_which_columns_were_hashed():
     )
     assert got["hashed_columns"]["excluded"] == sorted(tt.SENTINEL_COLUMNS)
     assert got["hashed_columns"]["basis"].startswith("business columns")
+    # No job result names its columns: nothing claims what was hashed.
+    none = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "verified")]), POLICY)
+    assert "hashed_columns" not in none

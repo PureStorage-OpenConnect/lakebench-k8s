@@ -384,7 +384,11 @@ def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget) -> dict:
     body (without the nonce)."""
     global EXCLUDED_COLUMNS
     excluded = inputs.get("exclude_columns")
-    if not isinstance(excluded, list) or not all(isinstance(c, str) for c in excluded):
+    if (
+        not isinstance(excluded, list)
+        or not excluded
+        or not all(isinstance(c, str) for c in excluded)
+    ):
         # No business-column definition: hashing every column would publish
         # another measurement than the one defined. A crash: the CLI reads
         # not_run.
