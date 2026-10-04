@@ -1879,7 +1879,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 
 ### Fixed
 - A continuous run keeps its completed datagen pods for its window (`--duration` or the config) plus an hour, so the fleet record is still readable at window end; they were deleted an hour after the Job finished.
-- A continuous run whose window gate fails (no data arriving, too few silver commits or gold refreshes, a stream that died or restarted) names that problem in its verdict instead of "Pipeline crashed or was interrupted". The drain, result-check, AML detection and TM gates still fall back to it.
+- A continuous run whose window gate fails (no data arriving, too few silver commits or gold refreshes, a stream that died or restarted) names that problem in its verdict instead of "Pipeline crashed or was interrupted". Other gates still fall back to it, for example the drain, result check, AML detection, TM verdict, C360 zero-row, in-stream benchmark round and deps-pods gates.
 - `run --yes`, `run --generate-only` and `reproduce` no longer print deploy's "Next:" steps when they deploy and carry on; a plain `deploy`'s next steps name its config; `run` says the infrastructure was not checked when a flag skipped the check; a non-interactive `destroy` asks for `--yes` (it said `--force`, an alias); destroy progress shows no internal component names or negative times, and its re-deploy hint names the config.
 - Run records, the datagen fleet record and report.html never show a protected AML seed: it is recorded as its salted reference and role, and withheld when the held-out record cannot be read.
 - **A redeploy refreshes the namespace's committed-sha stamp.** A

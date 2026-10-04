@@ -2233,9 +2233,9 @@ def _run_once(
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
     console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
-    if skip_deploy or skip_infra:
+    if skip_deploy:
         print_info("Infrastructure readiness not checked (skipped by flag)")
-    else:
+    elif not skip_infra:
         print_success("Infrastructure verified")
 
     console.print(
