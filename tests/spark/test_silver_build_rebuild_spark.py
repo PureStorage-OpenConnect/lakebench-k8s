@@ -102,3 +102,11 @@ def test_logless_entry_with_files_left_refuses_and_keeps_them(result):
     assert c["rcs"] == [0], _why(c)
     assert c["rc"] != 0 and c["refused"], _why(c)
     assert c["files_kept"], _why(c)
+
+
+@pytest.mark.parametrize("case", ["iceberg_simple", "iceberg_streaming"])
+def test_rebuilt_silver_keeps_the_batch_id_last(result, case):
+    # Where 1.6 wrote it: a Hive Metastore refuses a rebuild of a 1.6 table
+    # whose columns move by position.
+    c = result[case]
+    assert c["columns_after_rebuild"] and c["columns_after_rebuild"][-1] == "_batch_id", _why(c)

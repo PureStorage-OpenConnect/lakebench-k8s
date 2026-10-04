@@ -15,7 +15,10 @@ the config, or the one 1.6 recorded in `.lakebench/state.json`) and its
 bucket names, writes the recipe the config resolves to, drops the removed
 keys with their fix text, moves plaintext secrets to `${VAR}` references,
 and writes nothing unless the new file loads to the same settings as the
-old one (docs/configuration.md, "Converting an older config").
+old one (docs/configuration.md, "Converting an older config"). A
+deployment whose pipeline ran under 1.6 keeps its silver and gold tables;
+its first 1.7 batch run rebuilds them, so pass `--force-rebuild` (the
+refusal names it). The bronze corpus is reused as it is.
 
 ## Removed config keys
 

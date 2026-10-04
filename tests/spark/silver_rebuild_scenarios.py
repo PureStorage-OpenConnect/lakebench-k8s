@@ -65,6 +65,11 @@ def later_cycle_rebuild(spark, jars, root, fmt, strategy):
     stage_bronze(spark, work, 0, 2)
     rebuild_rc = silver_job(jars, work, 2, 0, strategy=strategy, log=log, fmt=fmt)
     held_after_rebuild = silver_cycles(spark, work, fmt)
+    columns_after_rebuild = (
+        spark.read.format("iceberg").load(_table_dir(work, fmt)).columns
+        if fmt == "iceberg" and rebuild_rc == 0
+        else None
+    )
     retry_rc = silver_job(jars, work, 2, 0, strategy=strategy, log=log, fmt=fmt)
     held_after_retry = silver_cycles(spark, work, fmt)
     # The next cycle appends after the rebuild as after any cycle.
@@ -74,6 +79,7 @@ def later_cycle_rebuild(spark, jars, root, fmt, strategy):
         "rcs": first,
         "rebuild_rc": rebuild_rc,
         "held_after_rebuild": held_after_rebuild,
+        "columns_after_rebuild": columns_after_rebuild,
         "retry_rc": retry_rc,
         "held_after_retry": held_after_retry,
         "next_rc": next_rc,

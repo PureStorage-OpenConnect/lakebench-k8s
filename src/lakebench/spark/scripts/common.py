@@ -857,7 +857,7 @@ def _delete_children(spark, location, keep=()):
     return n
 
 
-def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
+def reset_stream_tables(spark, tables, *, owned_uris, keep_uris, label="Continuous reset"):
     """Drop the tables a continuous run writes, with their data. Returns the
     tables that existed and were dropped.
 
@@ -876,21 +876,21 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
     dropped = []
     for fq in tables:
         if not table_exists(spark, fq):
-            log(f"Continuous reset: {fq} does not exist")
+            log(f"{label}: {fq} does not exist")
             continue
         try:
             location, provider = _describe_table(spark, fq)
         except Exception as e:  # noqa: BLE001
-            log(f"Continuous reset: no location for {fq} ({one_line(e)})")
+            log(f"{label}: no location for {fq} ({one_line(e)})")
             location, provider = None, None
         iceberg = (provider or "").lower() == "iceberg"
         name = fq.rsplit(".", 1)[-1]
         owned = bool(location) and owned_table_dir(location, owned_uris, keep_uris, name)
         if location and not owned:
-            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
+            log(f"{label}: kept {location} (outside this deployment or not its own dir)")
         if owned:
             n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
-            log(f"Continuous reset: deleted {n} data entries under {location}")
+            log(f"{label}: deleted {n} data entries under {location}")
         how = "DROP"
         # LB-188: PURGE deletes every file the table metadata references,
         # wherever it sits, so it runs only for a table whose directory this
@@ -903,16 +903,16 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
                 spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
                 how = "DROP PURGE"
             except Exception as e:  # noqa: BLE001
-                log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
+                log(f"{label}: PURGE of {fq} refused ({one_line(e)}); plain DROP")
         if how == "DROP":
             spark.sql(f"DROP TABLE IF EXISTS {fq}")
         dropped.append(fq)
-        log(f"Continuous reset: {how} {fq} ({provider or 'unknown provider'})")
+        log(f"{label}: {how} {fq} ({provider or 'unknown provider'})")
         if owned:
             fs, path = _hadoop_fs(spark, location)
             if fs.exists(path):
                 fs.delete(path, True)
-                log(f"Continuous reset: deleted {location}")
+                log(f"{label}: deleted {location}")
     return dropped
 
 
@@ -1593,6 +1593,17 @@ def c360_bronze_run_path(bronze_uri):
     if len(names) == 1:
         return base + names[0]
     return base + "{" + ",".join(names) + "}"
+
+
+def batch_id_last(df):
+    """*df* with ``_batch_id`` as its last column, where 1.6 wrote it.
+
+    A Hive Metastore refuses a ``createOrReplace`` whose columns change type
+    by position, so a silver table written by 1.6 (``_batch_id`` last) could
+    not be rebuilt by a batch silver-build that tagged bronze before the
+    transformations and so placed ``_batch_id`` mid-row.
+    """
+    return df.select(*[c for c in df.columns if c != "_batch_id"], "_batch_id")
 
 
 def apply_silver_transformations_anchored(df_bronze, anchor_date):

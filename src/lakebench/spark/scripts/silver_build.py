@@ -22,6 +22,7 @@ from common import (
     SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
+    batch_id_last,
     c360_bronze_path,
     c360_bronze_run_path,
     ensure_column,
@@ -29,6 +30,7 @@ from common import (
     log,
     one_line,
     path_size_gb_strict,
+    reset_stream_tables,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -409,8 +411,8 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     # missing env here is a plumbing break, not a legitimate greenfield.
     anchor = resolve_data_clock(df_bronze, strict=True)
 
-    silver_df = apply_silver_transformations_anchored(
-        tag_batch(df_bronze, cycle, appending), anchor
+    silver_df = batch_id_last(
+        apply_silver_transformations_anchored(tag_batch(df_bronze, cycle, appending), anchor)
     )
     silver_count = silver_df.count()
 
@@ -476,8 +478,8 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     anchor = resolve_data_clock(df_bronze, strict=True)
 
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations_anchored(
-        tag_batch(df_bronze, cycle, appending), anchor
+    silver_df = batch_id_last(
+        apply_silver_transformations_anchored(tag_batch(df_bronze, cycle, appending), anchor)
     )
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
@@ -606,6 +608,15 @@ if not appending and _table_exists(spark, silver_tbl):
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "
             "re-run with --force-rebuild to opt in"
         )
+    # A full build drops the old table instead of replacing it in place: a
+    # Hive Metastore refuses a createOrReplace whose columns move by position
+    # (a table 1.6, a 1.7 dev build or a continuous run wrote), and each
+    # refused attempt left its data files in the bucket. Only a table whose
+    # directory this deployment's silver bucket owns loses its files.
+    _dropped = reset_stream_tables(
+        spark, [silver_tbl], owned_uris=[silver_uri], keep_uris=[], label="Full rebuild"
+    )
+    log(f"Full rebuild: dropped {', '.join(_dropped) or 'nothing'} before writing")
 
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
