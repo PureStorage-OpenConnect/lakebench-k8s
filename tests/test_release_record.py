@@ -308,7 +308,7 @@ def held(monkeypatch):
 
 
 def _protected(problems: list[str]) -> list[str]:
-    return [p for p in problems if "protected AML corpus" in p]
+    return [p for p in problems if "held-out AML corpora" in p or "protected AML corpus" in p]
 
 
 @pytest.mark.parametrize("kind", ["aml_batch", "aml_cont"])
@@ -320,11 +320,10 @@ def test_held_out_seed_without_its_role_is_refused(ready, held, kind, role):
     rec = _release(kind)
     rec["experiment"]["corpus"]["corpus_role"] = None
     rec["experiment"]["corpus"]["seed"] = seed
-    problems = _protected(_problems(rec))
-    assert problems == [
+    # The protected refusal is the only problem listed for the record.
+    assert _problems(rec) == [
         f"the corpus is a protected AML corpus (its seed is the registered {role} seed)"
     ]
-    assert held.seed_tokens(" ".join(_problems(rec))) == []
 
 
 @pytest.mark.parametrize(
@@ -339,6 +338,32 @@ def test_held_out_seed_in_a_recorded_form_is_refused(ready, held, form):
     rec = _release("aml_batch")
     rec["experiment"]["corpus"]["seed"] = form(held.EV)
     assert _protected(_problems(rec))
+
+
+def test_no_other_field_can_carry_the_seed_into_the_refusal(ready, held):
+    """A corpus problem quoting the seed (as the fleet observation writes
+    one) never reaches the output of a refused record."""
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = held.EV
+    rec["experiment"]["corpus"]["problems"] = [
+        f"config seed {held.EV!r} but the pods ran {held.EV!r}"
+    ]
+    problems = _problems(rec)
+    assert len(problems) == 1 and "registered evaluation seed" in problems[0]
+    assert held.seed_tokens(" ".join(problems)) == []
+
+
+@pytest.mark.parametrize(
+    "seed",
+    ["", "redacted", [], 1.5, "0x2b", float("nan"), "NaN", {"seed_ref": ""}, {"seed_ref": "zz"}],
+)
+def test_aml_record_with_an_unreadable_seed_is_unidentified(ready, held, seed):
+    rec = _release("aml_batch")
+    rec["experiment"]["corpus"]["seed"] = seed
+    assert _problems(rec) == [
+        "the corpus is not shown to be outside the held-out AML corpora (unidentified: a "
+        "financial record whose corpus seed cannot be read as a seed)"
+    ]
 
 
 def test_calibration_record_passes_the_held_out_check(ready, held):

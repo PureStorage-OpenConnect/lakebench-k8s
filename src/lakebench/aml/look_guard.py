@@ -239,6 +239,34 @@ def recorded_seed_role(value: Any) -> str | None:
     return None
 
 
+def seed_readable(value: Any) -> bool:
+    """Whether ``recorded_seed_role`` can read *value* as a seed (in any of
+    its recorded forms), so a None from it means "not held out" rather than
+    "could not tell". Never raises and never reads the held-out record."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, Mapping):
+        if value.get("role") in PROTECTED_ROLES or value.get("seed_ref") is None:
+            return True
+        return seed_readable(value.get("seed_ref"))
+    if isinstance(value, list | tuple):
+        return bool(value) and all(seed_readable(v) for v in value)
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return value.is_integer()
+    if isinstance(value, str):
+        text = value.strip()
+        if _HEX64.fullmatch(text.lower()) or _INT_TEXT.fullmatch(text):
+            return True
+        try:
+            d = Decimal(text)
+        except InvalidOperation:
+            return False
+        return d.is_finite() and d.adjusted() < 20 and d == d.to_integral_value()
+    return False
+
+
 def protected_record_reason(
     record: Any, *, require_identity: bool = True, fail_closed: bool = True
 ) -> str | None:
@@ -253,8 +281,9 @@ def protected_record_reason(
     reads as an integer seed, passes False. The release gate and the
     held-out audit are to call it with the fail-closed defaults. With ``require_identity`` (the release gate and the
     audit), a financial record with no corpus block or no seed is refused as
-    unidentified; ``compare`` passes False and shows such a record as not
-    established instead."""
+    unidentified, and so is one whose seed is in no form the guard can read
+    (``seed_readable``); ``compare`` passes False and shows such a record as
+    not established instead."""
     if not isinstance(record, Mapping):
         return "the record cannot be read"
     exp = record.get("experiment")
@@ -279,6 +308,8 @@ def protected_record_reason(
         return "its seed is withheld"
     if held is not None:
         return f"its seed is the registered {held} seed"
+    if financial and require_identity and not seed_readable(seed):
+        return "unidentified: a financial record whose corpus seed cannot be read as a seed"
     return None
 
 

@@ -539,6 +539,19 @@ def record_problems(
     from lakebench.aml.look_guard import protected_record_reason
     from lakebench.metrics.verdict import passed
 
+    # A held-out corpus is never release evidence, whether the record
+    # declares its role or only carries a seed that hashes to a held-out one.
+    # Fail closed: an unreadable held-out record, a withheld or unreadable
+    # seed, or a financial record with no corpus seed is refused. Checked
+    # first and alone: no other problem is listed for such a record, so no
+    # other field (a corpus problem quoting the seed, say) reaches the output.
+    # The reason names a role or a kind, never a seed.
+    protected = protected_record_reason(record, require_identity=True, fail_closed=True)
+    if protected:
+        if protected.startswith("unidentified") or "cannot be read" in protected:
+            return [f"the corpus is not shown to be outside the held-out AML corpora ({protected})"]
+        return [f"the corpus is a protected AML corpus ({protected})"]
+
     problems: list[str] = []
     kind = record.get("record_kind") or "run"
     if kind != "run":
@@ -578,13 +591,6 @@ def record_problems(
     end = prov.get("end_sample") or {}
     if end.get("code_changed_during_run") is not False:
         problems.append("lakebench code changed during the run, or the run-end sample is missing")
-    # A held-out corpus is never release evidence, whether the record
-    # declares its role or only carries a seed that hashes to a held-out one.
-    # Fail closed: an unreadable held-out record, a withheld seed, or a
-    # financial record with no corpus seed is refused. Names a role, never a seed.
-    protected = protected_record_reason(record, require_identity=True, fail_closed=True)
-    if protected:
-        problems.append(f"the corpus is a protected AML corpus ({protected})")
     digest = release_digest if release_digest is not None else release_datagen_digest()
     problems += _image_problems(record, exp, digest, root)
     problems += bound_problems(record)

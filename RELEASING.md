@@ -472,8 +472,9 @@ The release workflow runs all four with the repository's full history.
   freeze commit from a clean tree whose code did not change during the run;
   read a protected AML corpus (a held-out `corpus_role`, a recorded seed
   that hashes to a held-out seed or is withheld, or, for an AML record, no
-  corpus seed at all or a held-out record that cannot be read; the refusal
-  names the run id and the role, never a seed); is not
+  corpus seed, a seed the guard cannot read, or a held-out record that
+  cannot be read; such a record gets only that reason, which names the
+  run id and the role or what could not be read, never a seed); is not
   exp2 from the release datagen image (the digest `ImagesConfig.datagen`
   pins, with that image's lineage entry); or was bound by an evaluation
   sizing profile or any Lakebench limit in `limits.bound_kinds` the row does

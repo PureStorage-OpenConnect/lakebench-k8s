@@ -977,11 +977,14 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   seed, not only by its declared role.** `records`,
   `support-record` and the release harness refuse a record whose recorded
   seed hashes to a held-out seed or is withheld, and an AML record with no
-  corpus seed or whose held-out check cannot run; before, only a declared
-  `corpus_role: evaluation` or `robustness` was refused. The refusal names
-  the run id and the role, never a seed. `scripts/aml_heldout_audit.py` now
-  lists a continuous AML record with no corpus seed as unidentified, as it
-  already did a batch one.
+  corpus seed, a seed in no form the guard can read, or a held-out check
+  that cannot run; before, only a declared `corpus_role: evaluation` or
+  `robustness` was refused. Such a record gets that one reason and no
+  other, so no field of it can carry a seed into the output; the reason
+  names the run id and the role or what could not be read, never a seed.
+  The held-out audit and the gate also count a record as AML by its
+  workload name, so an AML record missing its corpus block is
+  unidentified.
 - **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
   Continuous AML stores edge rows per pair per micro-batch and statement
   running balances in arrival order, so FQ4 (which returned the stored

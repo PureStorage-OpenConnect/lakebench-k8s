@@ -673,5 +673,8 @@ def test_records_check_refuses_a_held_out_seed_record(frozen, monkeypatch):
     res = rg.check_records()
     assert res.status == rg.FAIL
     assert f"{rid}: " in res.detail
-    assert "protected AML corpus (its seed is the registered evaluation seed)" in res.detail
+    assert (
+        f"{rid}: the corpus is a protected AML corpus (its seed is the registered "
+        "evaluation seed)" in res.detail
+    )
     assert pc.seed_tokens(res.detail) == []
