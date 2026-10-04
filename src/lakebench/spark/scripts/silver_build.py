@@ -397,10 +397,13 @@ def drop_if_columns_move(spark, silver_tbl, silver_df):
     A Hive Metastore refuses a createOrReplace whose columns change type by
     position (a table a continuous run wrote, with _stream_id; a table a 1.7
     dev build wrote), and each refused attempt left its data files in the
-    bucket. The drop is the catalog entry only: no file is deleted, so no
-    bucket ownership is at stake, and the old table's files stay in the
-    bucket. A table with the same columns (one 1.6 or this version wrote)
-    keeps the atomic replace, so a write that fails leaves the old table.
+    bucket. On Hive and Polaris the drop is the catalog entry only: no file
+    is deleted, so no bucket ownership is at stake, and the old table's
+    files stay in the bucket (local mode's Hadoop catalog deletes the table
+    directory). A write that fails after the drop leaves no table; the next
+    run finds none and builds silver without --force-rebuild. A table with
+    the same columns (one 1.6 or this version wrote) keeps the atomic
+    replace, so a write that fails leaves the old table.
     """
     if not table_exists(spark, silver_tbl):
         return

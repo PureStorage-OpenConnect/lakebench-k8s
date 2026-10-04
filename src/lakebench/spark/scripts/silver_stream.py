@@ -22,8 +22,9 @@ includes the query id: a new checkpoint restarts batch ids at 0, and a bare
 batch id would delete the previous stream's batch 0.
 
 Batch silver_build writes the same table. Its full rebuild drops (catalog
-entry only) a table whose columns differ from its own (a stream-written
-table has _stream_id) and creates it without the stream columns; on startup this job adds the
+entry only on Hive and Polaris) a table whose columns differ from its own (a
+stream-written table has _stream_id) and creates it without the stream
+columns; on startup this job adds the
 two columns to a table that lacks them (ensure_column), and rows without a
 stream id are never matched by the replay delete. Startup refuses a fresh
 checkpoint over a non-empty silver table, which would re-read all of bronze
