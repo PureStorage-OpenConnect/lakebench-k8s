@@ -1635,7 +1635,7 @@ def _compaction_partitions(
             k8s,
             pod_name,
             namespace,
-            build_partition_values_sql(table, spec.partition_field),
+            build_partition_values_sql(table, spec.partition_field, spec.transform),
             timeout=read_timeout,
         )
         return parse_partition_values(output, spec.transform)

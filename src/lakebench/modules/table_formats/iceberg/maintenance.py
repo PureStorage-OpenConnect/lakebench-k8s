@@ -12,6 +12,7 @@ there would only cost time.
 
 from __future__ import annotations
 
+import csv
 import logging
 import re
 from dataclasses import dataclass
@@ -285,20 +286,22 @@ class CompactionPartitioning:
 # had 366 distinct interaction dates, c360_correctness distinct_dates.)
 COMPACTION_CHUNK_PARTITIONS = 90
 
-# Months per Trino optimize statement on a months()-partitioned AML table.
-# Each partition a statement rewrites keeps an open Parquet writer
-# that buffers up to a row group (parquet_writer_block_size, 128 MB) before
-# it flushes, so writer memory grows with the partitions written at once,
-# not with the table: continuous AML s1 silver.transactions at about 4,320 s
-# (12 to 13 months of small micro-batch files) failed one unchunked optimize
-# on "Query exceeded per-node memory limit of 2.24GB [TableWriterOperator=
-# 2.06GB ...]" (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a
-# month. One month per statement keeps a statement to one partition's
-# writers; Trino stops scaling writers past 70% of the per-node limit
-# (task.scale-writers.max-writer-memory-percentage), so this does not grow
-# with scale either. Each statement is the same per-partition rewrite as an
-# unchunked optimize (optimize compacts each partition on its own; same
-# threshold, no writer setting changed), committed as one snapshot per month.
+# Months that need a rewrite per Trino optimize statement on a
+# months()-partitioned AML table. Each partition an optimize rewrites keeps
+# open Parquet writers that buffer up to a row group
+# (parquet_writer_block_size, 128 MB) before they flush, so writer memory
+# grows with the partitions rewritten at once, not with the table:
+# continuous AML s1 silver.transactions at about 4,320 s, with small
+# micro-batch files in 12 to 13 months (the main lane's diagnosis), failed
+# one unchunked optimize on "Query exceeded per-node memory limit of 2.24GB
+# [TableWriterOperator=2.06GB ...]" on its one Trino worker
+# (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a month. A
+# month holding at most one data file is not rewritten (Trino 483 skips a
+# partition's only file when it has no deletes,
+# IcebergSplitSource.processFileScanTask), so it is not counted: it shares a
+# statement with the month before it. Batch silver stays near one statement:
+# its batch s1 record counts 65 data files across silver.transactions and
+# gold.daily_dashboards over a 60-month corpus, about one a month.
 COMPACTION_CHUNK_MONTHS = 1
 
 # Lakebench-created tables compaction chunks, from Lakebench's own DDL:
@@ -341,10 +344,13 @@ def _system_table_ref(table: str, suffix: str) -> str:
     return f'"{table}${suffix}"'
 
 
-def build_partition_values_sql(table: str, column: str) -> str:
+def build_partition_values_sql(table: str, column: str, transform: str = "identity") -> str:
     """Trino query listing *table*'s values of partition field *column*
-    (``CompactionPartitioning.partition_field``)."""
+    (``CompactionPartitioning.partition_field``): the distinct values for
+    ``identity``, each partition's value and data file count for ``month``."""
     ref = _system_table_ref(table, "partitions")
+    if transform == "month":
+        return f"SELECT partition.{column}, file_count FROM {ref} ORDER BY 1"
     return f"SELECT DISTINCT partition.{column} FROM {ref} ORDER BY 1"
 
 
@@ -360,28 +366,48 @@ def parse_partition_values(output: str, transform: str = "identity") -> list[str
     :func:`build_partition_values_sql`, sorted, with None last for a NULL
     partition (the CLI prints NULL as an empty field).
 
-    ``identity`` values are ``YYYY-MM-DD`` dates. ``month`` values are
-    Iceberg's month transform (an integer, months since 1970-01) and come
-    back as the month's first day, ``YYYY-MM-01``. Raises ``ValueError`` on
-    any line that is neither, so an unexpected format never turns into
-    statements that miss partitions.
+    ``identity``: every ``YYYY-MM-DD`` date. ``month``: rows of Iceberg's
+    month transform (an integer, months since 1970-01) and a file count;
+    the counts of one month are summed, and only months holding two or more
+    data files (the ones optimize rewrites) are returned, as the month's
+    first day, ``YYYY-MM-01``; every month when a NULL month is present. Raises ``ValueError`` on any line that is
+    neither, so an unexpected format never turns into statements that miss
+    partitions.
     """
     if transform not in ("identity", "month"):
         raise ValueError(f"unsupported partition transform {transform!r}")
     values: list[str | None] = []
+    files: dict[str | None, int] = {}
     for raw in (output or "").splitlines():
         line = raw.strip()
         if not line:
             continue
-        value = line.strip('"')
-        if value == "":
-            values.append(None)
-        elif transform == "identity" and _DATE_VALUE.fullmatch(value):
-            values.append(value)
-        elif transform == "month" and _INT_VALUE.fullmatch(value):
-            values.append(_month_start(int(value)))
+        if transform == "identity":
+            value = line.strip('"')
+            if value == "":
+                values.append(None)
+            elif _DATE_VALUE.fullmatch(value):
+                values.append(value)
+            else:
+                raise ValueError(f"unexpected partition value {line!r}")
+            continue
+        fields = next(csv.reader([line]))
+        if len(fields) != 2 or not _INT_VALUE.fullmatch(fields[1]):
+            raise ValueError(f"unexpected partition value {line!r}")
+        if fields[0] == "":
+            key = None
+        elif _INT_VALUE.fullmatch(fields[0]):
+            key = _month_start(int(fields[0]))
         else:
             raise ValueError(f"unexpected partition value {line!r}")
+        files[key] = files.get(key, 0) + int(fields[1])
+    if transform == "month":
+        # A NULL month is a file with a NULL timestamp or one written under
+        # an older spec (days() before the move to months(), pre-1.6 dev
+        # catalogs only). With an older-spec file in range Trino rewrites
+        # every file, single ones included (IcebergSplitSource
+        # processFileScanTask), so then every month counts.
+        values = [m for m, count in files.items() if count >= 2 or None in files]
     dated = sorted({v for v in values if v is not None})
     return [*dated, *([None] if None in values else [])]
 
@@ -418,9 +444,8 @@ def build_compaction_plan(
     ``col >= <its first month, 00:00 UTC> AND col < <the next run's first
     month>``. In both the first run is open below and the last open above,
     so every non-NULL value is in exactly one statement, including one a
-    live stream adds after the read. Trino writer settings are not changed,
-    so each partition gets the rewrite one unchunked optimize gives it (raising
-    max_partitions_per_writer instead grows writer memory with the
+    live stream adds after the read. Trino writer settings are not changed
+    (raising max_partitions_per_writer instead grows writer memory with the
     partition count). Every other case, including ``partitions`` None (not
     read, or the read failed), is :func:`build_compaction_sql`.
     """

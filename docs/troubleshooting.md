@@ -687,7 +687,7 @@ tables a partition per month, about 160 MB of writer memory each at scale
 1.
 
 **Fix:** none needed on current code: these tables are compacted in
-chunks (90 days, or one month, per statement). If it still appears, check
+chunks (90 days, or one month with files to merge, per statement). If it still appears, check
 the record's `detail.compaction_statements`: one statement without a
 `WHERE` for a chunked table means the partition read failed (the reason
 names it), or the table was renamed in `architecture.tables`, which the

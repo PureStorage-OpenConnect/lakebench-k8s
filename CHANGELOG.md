@@ -2201,15 +2201,20 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   compaction at about 4,320 s, with small micro-batch files in 12 to 13
   months, used 2.06 GB of a 2.24 GB per-node limit in its table writers and
   failed on both tables, so any AML continuous Trino run longer than about
-  an hour recorded a partial compaction. Each table is now compacted one
-  month per statement, after a read of its month partitions, with a
+  an hour recorded a partial compaction. Each table is now compacted with
+  at most one month that has files to merge (two or more data files) per
+  statement, after a read of its months and their file counts, with a
   `WHERE` range on the timestamp column that starts and ends on a month
   boundary in UTC (Trino 483 applies such a range to whole partitions).
-  This also applies to batch AML runs on Trino, whose pre-benchmark
-  maintenance now runs two partition reads and one statement per month on
-  those two tables where it ran one each, which can change the recorded
-  maintenance time. The rewrite settings, the compaction operation recorded
-  (`trino_optimize` at 128MB) and the maintenance ids are unchanged.
+  Months of one file, which Trino does not rewrite, share a statement with
+  their neighbour. This also applies to batch AML runs on Trino, whose
+  pre-benchmark maintenance now runs two partition reads, plus one more
+  statement for each further month with several files, on those two tables,
+  which can change the recorded maintenance time. The fix has not yet run
+  live (the check is a continuous AML scale-1 Trino window over an hour),
+  and it is sized at scale 1 only. Trino settings, the compaction operation
+  recorded (`trino_optimize` at 128MB) and the maintenance ids are
+  unchanged.
 - Continuous AML on Spark 4.1 with Iceberg no longer fails its silver
   stream with an internal error ("No plan for TableReference") on the
   entity and account MERGEs. Every MERGE in the AML silver stream whose

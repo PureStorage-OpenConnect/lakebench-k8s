@@ -44,9 +44,10 @@ MEMORY_LIMIT = (
 JAN_2024 = 648
 
 
-def _months(n: int, first: int = JAN_2024) -> list[str]:
-    """The Trino CLI's quoted CSV of *n* month-transform values."""
-    return [f'"{first + i}"' for i in range(n)]
+def _months(n: int, first: int = JAN_2024, files: int = 5) -> list[str]:
+    """The Trino CLI's quoted CSV of *n* month-transform values, each with
+    *files* data files."""
+    return [f'"{first + i}","{files}"' for i in range(n)]
 
 
 def _parsed(n: int, first: int = JAN_2024) -> list[str | None]:
@@ -145,7 +146,7 @@ def test_account_statements_chunk_on_book_ts():
 def test_gaps_between_months_read_fold_into_a_neighbour():
     """A month missing from the read (no files yet, or a day-spec partition
     on an evolved table) is still in exactly one statement."""
-    values = parse_partition_values('"648"\n"651"\n', "month")
+    values = parse_partition_values('"648","4"\n"651","4"\n', "month")
     assert values == ["2024-01-01", "2024-04-01"]
     plan = build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values)
     assert len(plan) == 2
@@ -165,7 +166,7 @@ def test_one_month_or_none_keeps_one_unchunked_statement():
 
 
 def test_null_month_partition_gets_its_own_statement():
-    values = parse_partition_values('"648"\n""\n', "month")
+    values = parse_partition_values('"648","4"\n"","2"\n', "month")
     assert values == ["2024-01-01", None]
     plan = build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values)
     assert [p.split(" WHERE ")[1] for p in plan] == [
@@ -181,22 +182,64 @@ def test_partition_read_sql_names_the_month_field():
         "SELECT DISTINCT partition.txn_timestamp_month FROM "
         'lakehouse.silver."transactions$partitions" ORDER BY 1'
     )
+    assert build_partition_values_sql(TXNS, spec.partition_field, spec.transform) == (
+        "SELECT partition.txn_timestamp_month, file_count FROM "
+        'lakehouse.silver."transactions$partitions" ORDER BY 1'
+    )
 
 
 def test_parse_month_values():
-    assert parse_partition_values('"659"\n"648"\n"0"\n"-1"\n', "month") == [
+    out = '"659","2"\n"648","3"\n"0","9"\n"-1","2"\n'
+    assert parse_partition_values(out, "month") == [
         "1969-12-01",
         "1970-01-01",
         "2024-01-01",
         "2024-12-01",
     ]
-    # A date where a month number belongs, or the other way round, is refused.
-    with pytest.raises(ValueError, match="unexpected partition value"):
-        parse_partition_values('"2024-01-01"\n', "month")
+    # A date where a month number belongs, a row without its file count, or
+    # a month number in an identity read is refused.
+    for bad in ('"2024-01-01","2"\n', '"648"\n', '"648","x"\n', '"648","2","1"\n'):
+        with pytest.raises(ValueError, match="unexpected partition value"):
+            parse_partition_values(bad, "month")
     with pytest.raises(ValueError, match="unexpected partition value"):
         parse_partition_values('"648"\n', "identity")
     with pytest.raises(ValueError, match="unsupported partition transform"):
         parse_partition_values('"648"\n', "day")
+
+
+def test_months_with_one_file_are_not_counted():
+    """Trino 483 does not rewrite a partition's only data file (no deletes),
+    so a month of one file adds no writer: it is not counted, and it falls in
+    the statement of the month before it (or the first, open below)."""
+    out = '"648","1"\n"649","7"\n"650","1"\n"651","1"\n"652","9"\n"653","1"\n'
+    values = parse_partition_values(out, "month")
+    assert values == ["2024-02-01", "2024-05-01"]
+    plan = build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values)
+    assert [p.split(" WHERE ")[1] for p in plan] == [
+        "txn_timestamp < TIMESTAMP '2024-05-01 00:00:00.000000 UTC'",
+        "txn_timestamp >= TIMESTAMP '2024-05-01 00:00:00.000000 UTC'",
+    ]
+    # The row counts of one month (several rows: one per spec's partition
+    # struct) are summed before the threshold.
+    assert parse_partition_values('"648","1"\n"648","1"\n', "month") == ["2024-01-01"]
+
+
+def test_batch_layout_keeps_one_statement():
+    """Batch AML silver holds one or two large files a month over a 60-month
+    corpus: at most one month counts, so the table keeps one statement."""
+    out = "\n".join(_months(60, first=JAN_2024 - 48, files=1)) + '\n"650","2"\n'
+    values = parse_partition_values(out, "month")
+    assert values == ["2024-03-01"]
+    assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values) == [
+        f"ALTER TABLE {TXNS} {HEAD}"
+    ]
+
+
+def test_null_month_counts_every_month():
+    """A NULL month (a NULL timestamp, or a file under an older days() spec)
+    makes Trino rewrite every file in range, so every month counts."""
+    out = '"648","1"\n"649","1"\n"","1"\n'
+    assert parse_partition_values(out, "month") == ["2024-01-01", "2024-02-01", None]
 
 
 def test_compaction_operation_is_unchanged():
@@ -226,9 +269,11 @@ def _cfg():
 
 
 class _Trino:
-    """exec_in_pod for a Trino coordinator holding 13 months of small files
-    in each AML month table: an optimize that rewrites more than one of those
-    months exceeds the per-node memory limit, as live."""
+    """exec_in_pod for a Trino coordinator whose AML month tables hold the
+    60-month corpus, 47 months of one large file each and 13 months
+    (2024-01 to 2025-01) of small micro-batch files: an optimize that
+    rewrites more than one of the 13 exceeds the per-node memory limit, as
+    live."""
 
     def __init__(self, read_rc: int = 0):
         self.read_rc = read_rc
@@ -241,7 +286,8 @@ class _Trino:
             self.reads.append(sql)
             if self.read_rc:
                 return self.read_rc, "", "Query failed"
-            return 0, "\n".join(_months(13)) + "\n", ""
+            rows = _months(47, first=JAN_2024 - 47, files=1) + _months(13, files=40)
+            return 0, "\n".join(rows) + "\n", ""
         self.statements.append(sql)
         month_table = TXNS in sql or STMTS in sql
         if month_table and (" WHERE " not in sql or self._months_in(sql) > 1):
@@ -250,7 +296,7 @@ class _Trino:
 
     @staticmethod
     def _months_in(sql: str) -> int:
-        """How many of the 13 months the statement's WHERE selects."""
+        """How many of the 13 small-file months the statement's WHERE selects."""
         column = "txn_timestamp" if TXNS in sql else "book_ts"
         mids = [datetime(2024 + (m // 12), m % 12 + 1, 15, tzinfo=timezone.utc) for m in range(13)]
         return sum(_selects(sql, column, ts) for ts in mids)
@@ -281,9 +327,9 @@ def test_continuous_aml_silver_compacts_every_table():
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (7, 7, 0), rec.get("failures")
     assert rec["failures"] == []
     assert sorted(trino.reads) == [
-        'SELECT DISTINCT partition.book_ts_month FROM lakehouse.silver."account_statements'
+        'SELECT partition.book_ts_month, file_count FROM lakehouse.silver."account_statements'
         '$partitions" ORDER BY 1',
-        'SELECT DISTINCT partition.txn_timestamp_month FROM lakehouse.silver."transactions'
+        'SELECT partition.txn_timestamp_month, file_count FROM lakehouse.silver."transactions'
         '$partitions" ORDER BY 1',
     ]
     # 13 + 13 month statements and one each for the other five tables.

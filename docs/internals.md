@@ -278,13 +278,22 @@ bounded by partitions, not rows:
   (`src/lakebench/modules/table_formats/iceberg/maintenance.py:COMPACTION_CHUNK_PARTITIONS`),
   below Trino's limit of 100 open writers.
 - **AML silver** `transactions` and `account_statements` (`months()` on
-  `txn_timestamp` and `book_ts`): one month per statement
+  `txn_timestamp` and `book_ts`): at most one month with files to merge
+  per statement
   (`src/lakebench/modules/table_formats/iceberg/maintenance.py:COMPACTION_CHUNK_MONTHS`).
   A writer buffers up to a row group (128 MB) per partition, and 12 to 13
   months of small continuous files in one statement exceeded the 2.24 GB
-  per-node query memory at scale 1. One month keeps a statement
-  to one partition's writers, and Trino stops scaling writers at 70% of
-  the per-node limit, so it does not grow with scale.
+  per-node query memory on the single scale-1 Trino worker, about 160 MB a
+  month. The read takes each month's data file count; a month of one file
+  is not rewritten (Trino 483 skips a partition's only file when it has no
+  deletes), so it is not counted and shares a statement with its
+  neighbour, which keeps batch silver near one statement (the batch s1
+  record counts 65 data files across `silver.transactions` and the gold
+  dashboard table over a 60-month corpus). A NULL month (a file under the pre-1.6
+  `days()` spec, or a NULL timestamp) makes Trino rewrite every file in
+  range, so then every month counts. The bound is sized at scale 1; on
+  larger workers Trino may scale one month over more local writers, which
+  has not been measured.
 
 Trino accepts `optimize ... WHERE` only when the connector applies the
 whole predicate to partitions; anything else fails with "Unexpected
@@ -298,11 +307,9 @@ UTC literal does not depend on the session time zone. The chunks are
 contiguous and the first and last are open-ended, so a partition written
 after the read, or missing from it, is still compacted by exactly one
 statement. A failed partition read falls back to one statement and is
-named in the record. Each statement is the same per-partition rewrite as
-one `optimize` over the table (it compacts each partition on its own, with
-the same threshold and writer settings); the commits are one snapshot per
-chunk, and the record names the operation (`trino_optimize` with its
-threshold) as before.
+named in the record. Trino settings are not changed; the commits are one
+snapshot per chunk, and the record names the operation (`trino_optimize`
+with its threshold) as before.
 
 **Where maintenance runs.** In a continuous run,
 `src/lakebench/cli/_sustained.py:_run_iceberg_maintenance` runs a round
