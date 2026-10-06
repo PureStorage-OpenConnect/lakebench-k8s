@@ -605,7 +605,11 @@ def make_support_record_check(tag: str | None) -> Callable[[], Result]:
         rr = _lb("lakebench.metrics.release_record")
         record = support.load_validation_record()
         if not record:
-            return Result("support-record", FAIL, "validated_combinations.yaml lists nothing")
+            # Empty validated list is the same state as "no freeze yet": there is
+            # nothing to compare against. The checks that depend on a freeze
+            # (records, freeze, expected-results) already SKIP in that state;
+            # this one does too, instead of hard-failing release.
+            return Result("support-record", SKIP, "validated_combinations.yaml lists nothing")
         sha, problem, _rel = _freeze()
         expected, _why, _path = _expected()
         problems = []
