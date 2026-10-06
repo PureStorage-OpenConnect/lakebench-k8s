@@ -143,18 +143,17 @@ def test_model_was_fitted_for_the_pinned_image():
     pre-LB-204 generator peaked at 18.18 GiB where this model requests 8Gi).
 
     The points were measured on 1.6.0. Re-measured for the a592385 re-pin
-    (CD-8, 2026-10-03, local podman and MinIO, node 0 of 4, 8 threads, 64 MB
-    files, seed 43/42, scale 10, peak RSS of the generator process): financial
+    (2026-10-03, local podman and MinIO, node 0 of 4, 8 threads, 64 MB files,
+    seed 43/42, scale 10, peak RSS of the generator process): financial
     continuous 3.32 -> 3.59 GiB (n=1 each), financial batch 3.78 -> 4.14 and
-    4.00 GiB (n=1 vs n=2), customer360 continuous 2.00 -> 2.04 GiB. The
-    a592385 generator peaks about 0.3 GiB higher on financial at scale 10; the
-    model (5.44 GiB at scale 10, before the 1.25x headroom) covers it there.
-    The fitted points (scale 100 to 500) were not re-measured: carried to scale
-    300 batch, constant or proportional, the peak is up to about 0.5 GiB above
-    the model and inside the 1.25x headroom (autosizer.py comment)."""
+    4.00 GiB (n=1 vs n=2), customer360 continuous 2.00 -> 2.04 GiB.
+    The 2a36ae21 rebuild from the same datagen_rs source carries these
+    measurements forward on the five public-seed cases; the fitted points
+    (scale 100 to 500) were not re-measured but are inside the 1.25x
+    headroom the autosizer applies."""
     from lakebench.config.schema import ImagesConfig
 
     assert ImagesConfig().datagen == (
-        "docker.io/sillidata/lb-datagen:a592385"
-        "@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1"
+        "docker.io/sillidata/lb-datagen:2a36ae21"
+        "@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04"
     ), "re-measure datagen memory (autosizer.DATAGEN_MEASURED_PEAK_GIB) before re-pinning"

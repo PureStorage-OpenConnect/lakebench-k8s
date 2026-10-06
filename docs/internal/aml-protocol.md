@@ -89,13 +89,13 @@ log, and R-numbers to its rules.
 The registered looks, the calibration corpora and the Level-2 predictions
 use one datagen image, named by digest:
 
-- **Digest:** `sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`,
-  tag `lb-datagen:a592385`, built from integrate
-  `a592385053b038d66dc491ee3c8dfb55dfab3d84` with `LB_BUILD_COMMIT` set
+- **Digest:** `sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`,
+  tag `lb-datagen:2a36ae21`, built from integrate
+  `2a36ae2162d0672c8a46173bc70da448cac497ae` with `LB_BUILD_COMMIT` set
   (the image's `org.opencontainers.image.revision` label and `datagen_rs
   --version` report it), MODEL_VERSION `datagen-v2-rs-0.3`. It is
   `ImagesConfig.datagen`'s default
-  (`docker.io/sillidata/lb-datagen:a592385@sha256:<digest above>`). A look
+  (`docker.io/sillidata/lb-datagen:2a36ae21@sha256:<digest above>`). A look
   config must pin `images.datagen` to that string explicitly, and the
   calibration scoring, the predictions and every look pass the same string to
   `aml_gate.py --generator-image`. What is not enforced yet: no look config
@@ -110,7 +110,7 @@ use one datagen image, named by digest:
 - **Output neutrality:** the five-case byte-compare against the v1.6 release
   image (`sha256:5fda9025...`; F0, F1, C0, F2, C2 on development seeds 43 and
   42, `_corpus/` excluded) is equal:
-  `tests/fixtures/datagen_reference/compare-48e18a417bf8.json`, the
+  `tests/fixtures/datagen_reference/compare-0502b7002999.json`, the
   evidence of the image's row in `src/lakebench/config/datagen_lineage.yaml`.
 - **Pull locations:** `docker.io/sillidata/lb-datagen@sha256:48e18a41...`
   (Docker Hub), the only location today. The second location the plan
@@ -135,8 +135,6 @@ use one datagen image, named by digest:
   `modules/pipeline_engines/spark/job.py` (numpy 2.2.6, scipy 1.15.3,
   pandas 2.3.3, scikit-learn 1.7.2, joblib 1.5.2, threadpoolctl 3.6.0,
   python-dateutil 2.9.0.post0, pytz 2025.2, tzdata 2025.2, six 1.17.0).
-  `tests/test_aml_protocol_look_image.py` fails when this section and the
-  tree disagree.
 
 ## The registered looks
 

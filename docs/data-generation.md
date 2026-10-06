@@ -55,6 +55,41 @@ workload:
     scale: 100    # ~1 TB of bronze data
 ```
 
+## Batch and continuous are different workloads, not two speeds of the same thing
+
+Lakebench runs the same stage graph two ways. They answer different
+questions, and their numbers are not comparable:
+
+- **Batch** (`pipeline.mode: batch`) answers "how fast can my system
+  process this corpus?" The whole corpus is in bronze before the pipeline
+  starts; silver and gold run as hard as they can; the headline is wall
+  clock and throughput against the full corpus.
+- **Continuous** (`pipeline.mode: continuous`) answers "with data arriving
+  at this rate for this long, does my system keep up and how fresh is the
+  result?" The generator paces the same corpus across `run_duration`, and
+  silver and gold run as concurrent streams; the headline is data freshness
+  and whether silver fell behind.
+
+**Scale sets pressure, not wall clock.** `workload.datagen.scale` sets the
+corpus size (Customer 360 is ~10 GB per scale unit; AML is measured per
+scale, see `src/lakebench/config/scale.py`). In continuous mode that same
+corpus is spread across `pipeline.sustained.run_duration` (default 30 min),
+so a higher scale raises offered load per second, not the length of the
+run. In batch mode a higher scale raises wall clock.
+
+**The continuous throughput number is the offered load, not system
+capacity.** `sustained_throughput_rps` in the report is the rate the
+generator fed the pipeline (scale divided by window), not how fast the
+system could have gone unbounded. When `intake_limit` reads `trickle_rate`
+the system was never pushed past the configured rate; `pipeline_saturated`
+tells you whether silver kept up with that rate.
+
+Picking which to run:
+- Compare systems on batch when you want raw throughput on a fixed corpus.
+- Pick continuous and vary scale when you want to find where a system
+  starts falling behind, or to measure freshness under a steady load.
+- Do not read a batch number against a continuous number.
+
 ## Command Flags
 
 | Flag | Short | Default | Description |
@@ -339,8 +374,8 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:a592385`, digest
-`sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`,
+The default image (`docker.io/sillidata/lb-datagen:2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`,
 generator version `datagen-v2-rs-0.3`; output-identical to the v1.6 AML
 generator freeze on the five byte-compare cases, and the registered-look
 image, see `docs/internal/aml-protocol.md`) is built from the `datagen_rs/` directory in this repository. To build and push a custom

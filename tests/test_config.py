@@ -357,11 +357,11 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """Default datagen image is the DAT-2 look image, pinned by digest."""
+        """Default datagen image is the v1.7 look image, pinned by digest."""
         config = LakebenchConfig(name="test")
         assert config.images.datagen == (
-            "docker.io/sillidata/lb-datagen:a592385"
-            "@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1"
+            "docker.io/sillidata/lb-datagen:2a36ae21"
+            "@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04"
         )
 
     def test_datagen_mode_defaults_auto(self):

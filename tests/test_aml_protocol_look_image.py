@@ -29,7 +29,9 @@ def _section() -> str:
 
 def _default_parts() -> tuple[str, str]:
     image = ImagesConfig().datagen
-    m = re.fullmatch(r"docker\.io/sillidata/lb-datagen:([0-9a-f]{7})@(sha256:[0-9a-f]{64})", image)
+    m = re.fullmatch(
+        r"docker\.io/sillidata/lb-datagen:([0-9a-f]{7,40})@(sha256:[0-9a-f]{64})", image
+    )
     assert m, f"the default datagen image is not <repo>:<commit tag>@sha256:<digest>: {image}"
     return m.group(1), m.group(2)
 
@@ -82,6 +84,7 @@ def test_perf_configs_pin_the_default_image():
 # and byte-compare evidence (test_default_is_pinned_by_digest_with_lineage_evidence).
 IMAGE_INPUTS_SHA256 = {
     "a592385": "3c22971237072732412f06754d64545594e334ebb6bf8b0614a1bc744a90c122",
+    "2a36ae21": "a0dcd618223390a9e14d6af5f489bdd9747cefc1791d2abaf0ec62ad47942e43",
 }
 
 # The image inputs of a tree whose image is being built and not yet pinned:
@@ -90,10 +93,7 @@ IMAGE_INPUTS_SHA256 = {
 # from before the image exists. Any other input edit still fails. The re-pin
 # commit adds the new tag to IMAGE_INPUTS_SHA256 and sets this back to None
 # (test_pending_rebuild_is_cleared_by_the_re_pin fails until it does).
-# Pending: the redrawn held-out role hashes in the compiled Rust floor.
-PENDING_REBUILD_INPUTS_SHA256: str | None = (
-    "a0dcd618223390a9e14d6af5f489bdd9747cefc1791d2abaf0ec62ad47942e43"
-)
+PENDING_REBUILD_INPUTS_SHA256: str | None = None
 
 
 def _image_inputs_sha256() -> str:

@@ -1,8 +1,8 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`docker.io/sillidata/lb-datagen:a592385`, digest
-`sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`) is built from
+The default image (`docker.io/sillidata/lb-datagen:2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`) is built from
 `datagen_rs/` (Rust) and produces both the Customer360 schema
 ([datagen-schema.md](datagen-schema.md)) and the Financial `pacs.008` schema,
 dispatched by `--schema`. You can build a custom image to add columns, change
@@ -69,8 +69,8 @@ it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
 A custom image is not the AML generator the registered looks use
-(`datagen-v2-rs-0.3`). The default image (tag `a592385`, digest
-`sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`)
+(`datagen-v2-rs-0.3`). The default image (tag `2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`)
 is that image: it is byte-identical to the v1.6 image (tag `1.6.0`) on the
 five byte-compare cases, and the registered looks pin its digest
 (`docs/internal/aml-protocol.md`). The run records the image reference you configured, and AML results from a

@@ -191,13 +191,13 @@ Its identity has two parts:
   `experiment.workload.generator_model_version` from a table kept equal to
   `model.rs` by a test (`metrics/experiment.py`), not from the corpus.
 - The image. `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`,
-  built from this release's `datagen_rs/` source (commit `a5923850`); the
+  `docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`,
+  built from this release's `datagen_rs/` source (commit `2a36ae210`); the
   runtime pulls the digest. A five-case byte-compare against the v1.6
   release image `lb-datagen:1.6.0` (financial seed 43 with and without the
   robustness perturbation, Customer 360 seed 42, and both at two cycles;
   markers excluded) is equal
-  (`tests/fixtures/datagen_reference/compare-48e18a417bf8.json`). The
+  (`tests/fixtures/datagen_reference/compare-0502b7002999.json`). The
   generator lineage that enters the
   corpus identity is the observed image digest, mapped through
   `config/datagen_lineage.yaml`, so an output-neutral re-pin keeps the same
