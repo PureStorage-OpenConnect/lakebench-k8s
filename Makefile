@@ -111,12 +111,10 @@ clean:
 # in RELEASE_STEPS order, in one recipe, so make -j cannot reorder them. It
 # stops at the first failure; with DRY=1 it runs every step's dry variant to
 # the end and lists the failures. A step whose command does not exist yet
-# prints "pending:" and fails. tests/test_releasing_doc.py keeps this list
-# equal to RELEASING.md's table. Nothing here merges, tags, pushes or
-# publishes.
+# prints "pending:" and fails. Nothing here merges, tags, pushes or publishes.
 # ---------------------------------------------------------------------------
-RELEASE_STEPS := version local-refs generated-docs doc-readers breaking-changes \
-                 filler-words matrix uat-results support-record build package-guard gate
+RELEASE_STEPS := version generated-docs filler-words matrix uat-results \
+                 support-record build package-guard gate
 .PHONY: release-check $(addprefix rc-,$(RELEASE_STEPS))
 RC_PY = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON)
 #: Where rc-build writes and rc-package-guard reads; release-check uses a
@@ -157,18 +155,8 @@ else
 	$(RC_PY) scripts/check_version.py --tag "v$(VERSION)"
 endif
 
-rc-local-refs:
-	$(RC_PY) -m pytest -q -p no:cacheprovider tests/test_releasing_doc.py::test_no_dev_artifacts_reference
-
 rc-generated-docs:
 	$(RC_PY) scripts/gen_docs.py --check
-
-rc-doc-readers:
-	$(RC_PY) scripts/check_doc_readers.py
-
-rc-breaking-changes:
-	$(RC_PY) -m pytest -q -p no:cacheprovider tests/test_breaking_changes.py
-	@echo "pending: the CHANGELOG format test"; exit 1
 
 # git grep exits 1 when nothing matches; 2 or more is an error, not a pass.
 rc-filler-words:

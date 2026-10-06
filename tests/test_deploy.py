@@ -7,9 +7,7 @@ import pytest
 from lakebench.config import LakebenchConfig
 from lakebench.deploy.engine import (
     DeploymentEngine,
-    DeploymentResult,
     DeploymentStatus,
-    TemplateRenderer,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,6 +90,7 @@ def _mock_k8s():
 class TestTemplateRenderer:
     """Tests for Jinja2 template rendering."""
 
+
 # ---------------------------------------------------------------------------
 # DeploymentResult / DeploymentStatus
 # ---------------------------------------------------------------------------
@@ -99,6 +98,7 @@ class TestTemplateRenderer:
 
 class TestDeploymentResult:
     """Tests for DeploymentResult dataclass."""
+
 
 # ---------------------------------------------------------------------------
 # DeploymentEngine
@@ -123,6 +123,7 @@ class TestDeploymentEngine:
         # Should have stopped after namespace failure
         assert len(results) == 1
         assert results[0].status == DeploymentStatus.FAILED
+
 
 # ---------------------------------------------------------------------------
 # Individual Deployers (template rendering + dry run)
@@ -150,6 +151,7 @@ class TestContextStorageVars:
 
         assert result.status == DeploymentStatus.FAILED
         assert "admin install --component scratch-storage-class" in result.message
+
 
 class TestDeployBuckets:
     """Tests for _deploy_buckets() -- S3 bucket creation during deploy."""
@@ -204,6 +206,7 @@ class TestDeployBuckets:
         assert result.status == DeploymentStatus.FAILED
         assert "init failed" in result.message
 
+
 class TestAutoSizerIntegration:
     """Tests that autosizer runs during engine construction."""
 
@@ -233,14 +236,18 @@ class TestAutoSizerIntegration:
 class TestPostgresDeployer:
     """Tests for PostgresDeployer."""
 
+
 class TestRBACDeployer:
     """Tests for RBACDeployer."""
+
 
 class TestTrinoDeployer:
     """Tests for TrinoDeployer."""
 
+
 class TestHiveDeployer:
     """Tests for HiveDeployer."""
+
 
 class TestPolarisDeployer:
     """Tests for PolarisDeployer."""
@@ -264,6 +271,7 @@ class TestPolarisDeployer:
         assert result.status == DeploymentStatus.SUCCESS
         assert "Would" in result.message
 
+
 # ---------------------------------------------------------------------------
 # Iceberg SQL builders (v1.1.0)
 # ---------------------------------------------------------------------------
@@ -272,8 +280,10 @@ class TestPolarisDeployer:
 class TestBuildCompactionSql:
     """Tests for build_compaction_sql() in deploy/iceberg.py."""
 
+
 class TestBuildTableHealthSql:
     """Tests for build_table_health_sql() in deploy/iceberg.py."""
+
 
 # ---------------------------------------------------------------------------
 # Datagen cycle timestamp range (v1.1.0)
@@ -282,6 +292,7 @@ class TestBuildTableHealthSql:
 
 class TestDatagenCycleTimestampRange:
     """Tests for DatagenDeployer._cycle_timestamp_range()."""
+
 
 # ---------------------------------------------------------------------------
 # Integration: ownership hooks actually fire in deploy + destroy

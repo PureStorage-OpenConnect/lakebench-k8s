@@ -215,6 +215,7 @@ class TestReadMarkers:
         assert any("does not match its content" in p for p in ms.problems)
         assert ms.to_dict()["cycles"][0]["nodes_found"] == [0]
 
+
 # ---------------------------------------------------------------------------
 # The corpus block
 # ---------------------------------------------------------------------------
@@ -296,6 +297,7 @@ class TestLineage:
         assert corpus["lineage"] == f"declared:{TAG}"
         assert any("cannot read" in p for p in corpus["problems"])
 
+
 ROOT_DIGEST = "sha256:" + "2" * 64
 
 
@@ -335,6 +337,7 @@ class TestSeries:
         inherited["bronze_listing_sha256"] = obs3["bronze_listing_sha256"]  # digest passed
         rep3 = corpus_of(obs=obs3, inherited=inherited)
         assert "series corpus id differs from repetition 1" in rep3["problems"]
+
 
 # ---------------------------------------------------------------------------
 # Lineage table and evidence
@@ -409,6 +412,7 @@ class TestLineageEvidence:
         errors = ci.check_lineage_evidence(table, tmp_path)
         assert any(needle in e for e in errors), errors
 
+
 class TestReviewCases:
     """One case per path the first review showed untested."""
 
@@ -437,6 +441,7 @@ class TestReviewCases:
         table = ci.load_lineage(lineage_tree(tmp_path, compare_file(**changes)))
         errors = ci.check_lineage_evidence(table, tmp_path)
         assert any(needle in e for e in errors), errors
+
 
 class TestFixPassCases:
     """Cases from the fix-pass review (series timing, C360 scale, fleet age,
@@ -469,6 +474,7 @@ class TestFixPassCases:
         body["generation"]["scale"] = 2.0
         obs, _ = observe(markers, body)
         assert "another scale" in corpus_of(obs=obs)["lineage_notes"][0]
+
 
 class TestThirdPassCases:
     @pytest.mark.parametrize(
@@ -516,8 +522,11 @@ class TestRecordObservation:
         assert obs["bronze_listing_sha256"] is None
         assert "corpus observation failed" in obs["markers"]["error"]
 
+
 class TestOwnerMarkerIsNotCorpus:
     pass
+
+
 def test_listing_digest_of_an_empty_scope_is_none():
     assert cd.listing_digest(bucket(data=()), BUCKET, SCOPE) is None
     assert cd.is_sha256_hex(cd.listing_digest(bucket(), BUCKET, SCOPE))

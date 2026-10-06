@@ -3,16 +3,9 @@
 import pytest
 
 from lakebench.config import (
-    CatalogType,
-    ConfigFileNotFoundError,
     LakebenchConfig,
-    generate_default_config,
-    load_config,
     parse_size_to_bytes,
-    parse_spark_memory,
-    save_config,
 )
-from tests.conftest import make_config
 
 
 class TestParseSize:
@@ -27,6 +20,7 @@ class TestParseSize:
 
 class TestParseSparkMemory:
     """Tests for Spark memory parsing."""
+
 
 class TestLakebenchConfig:
     """Tests for LakebenchConfig model."""
@@ -90,8 +84,10 @@ class TestLakebenchConfig:
 class TestStackableOperatorConfig:
     """Tests for StackableOperatorConfig defaults and override."""
 
+
 class TestConfigLoader:
     """Tests for configuration file loading."""
+
 
 class TestScaleConfig:
     """Tests for scale factor configuration."""
@@ -104,8 +100,10 @@ class TestScaleConfig:
             )
         assert config.architecture.workload.datagen.scale == 10
 
+
 class TestPipelineModeConfig:
     """Tests for pipeline mode configuration."""
+
 
 class TestScratchStorageConfig:
     """Tests for scratch storage configuration."""
@@ -125,11 +123,14 @@ class TestScratchStorageConfig:
             )
         assert not hasattr(config.platform.storage.scratch, "create_storage_class")
 
+
 class TestTrinoWorkerStorageConfig:
     """Tests for Trino worker storage configuration."""
 
+
 class TestGenerateConfig:
     """Tests for configuration generation."""
+
 
 class TestPerJobExecutorOverrides:
     """Tests for per-job executor count overrides."""
@@ -245,8 +246,10 @@ class TestComponentValidation:
 class TestRecipeName:
     """Tests for recipe name derivation."""
 
+
 class TestSustainedThroughputConfig:
     """Tests for sustained streaming throughput tuning fields."""
+
 
 class TestSustainedBenchmarkConfig:
     """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
@@ -316,8 +319,10 @@ class TestSustainedBenchmarkConfig:
         c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 300  # 300s >= 300s floor, matches gold_refresh
 
+
 class TestSustainedRetentionConfig:
     """Tests for retention_interval and retention_threshold on SustainedConfig."""
+
 
 class TestBenchmarkConfig:
     """Tests for BenchmarkConfig in schema."""
@@ -328,6 +333,7 @@ class TestBenchmarkConfig:
                 name="test",
                 architecture={"benchmark": {"cache": "warm"}},
             )
+
 
 # ---------------------------------------------------------------------------
 # Batch Cycles Config (v1.1.0)
@@ -344,6 +350,7 @@ class TestBatchCyclesConfig:
                 name="test",
                 architecture={"processing": {"mode": "sustained", "cycles": 3}},
             )
+
 
 # ---------------------------------------------------------------------------
 # Sustained Compaction Config (v1.1.0)
@@ -380,6 +387,7 @@ class TestFinancialW1MaxVertices:
 
         with pytest.raises(ValidationError):
             WorkloadConfig(w1_max_vertices=200_000_001)
+
 
 def test_job_injects_w1_max_vertices_env():
     """job.py must inject LB_FINANCIAL_W1_MAX_VERTICES for financial so

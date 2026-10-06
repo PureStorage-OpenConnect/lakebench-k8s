@@ -8,9 +8,7 @@ The real tools on the stock images were exercised by the SD-3 offline run
 
 from __future__ import annotations
 
-import ast
 import errno
-import fcntl
 import gzip
 import hashlib
 import http.server
@@ -24,7 +22,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 

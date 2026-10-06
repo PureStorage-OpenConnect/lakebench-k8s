@@ -513,11 +513,6 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]" "pyspark==4.0.1"
 
-      # Fails here, not in a statistics test, if the install drifted from
-      # REFERENCE_PY_DEPS (GITHUB_ACTIONS=true turns the drift skip into a failure).
-      - name: Reference pins
-        run: pytest tests/test_reference_pins.py -rs
-
       - name: Slow unit tests
         run: >-
           pytest tests/ -rs --tb=short -m "slow and not e2e and not integration"

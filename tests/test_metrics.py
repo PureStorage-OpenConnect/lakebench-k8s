@@ -9,7 +9,6 @@ import pytest
 from lakebench.metrics import (
     BenchmarkMetrics,
     BenchmarkRoundMeta,
-    CycleMetrics,
     JobMetrics,
     MetricsCollector,
     MetricsStorage,
@@ -19,7 +18,6 @@ from lakebench.metrics import (
     StageMetrics,
     StreamingJobMetrics,
     aggregate_benchmark_rounds,
-    build_config_snapshot,
     build_pipeline_benchmark,
 )
 from lakebench.reports.generator import ReportGenerator
@@ -32,6 +30,7 @@ from lakebench.reports.generator import ReportGenerator
 class TestJobMetrics:
     """Tests for JobMetrics dataclass."""
 
+
 # ---------------------------------------------------------------------------
 # QueryMetrics
 # ---------------------------------------------------------------------------
@@ -39,6 +38,7 @@ class TestJobMetrics:
 
 class TestQueryMetrics:
     """Tests for QueryMetrics dataclass."""
+
 
 # ---------------------------------------------------------------------------
 # PipelineMetrics
@@ -48,6 +48,7 @@ class TestQueryMetrics:
 class TestPipelineMetrics:
     """Tests for PipelineMetrics dataclass."""
 
+
 # ---------------------------------------------------------------------------
 # MetricsCollector
 # ---------------------------------------------------------------------------
@@ -55,6 +56,7 @@ class TestPipelineMetrics:
 
 class TestMetricsCollector:
     """Tests for MetricsCollector lifecycle."""
+
 
 # ---------------------------------------------------------------------------
 # MetricsStorage
@@ -205,6 +207,7 @@ class TestMetricsStorage:
         assert loaded.jobs[0].alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
         assert loaded.jobs[0].rules_skipped == {"W1_connected_components": "vertex-cap"}
 
+
 # ---------------------------------------------------------------------------
 # ReportGenerator
 # ---------------------------------------------------------------------------
@@ -260,6 +263,7 @@ class TestReportGenerator:
             ],
             config_snapshot={"name": "test-deploy"},
         )
+
 
 class TestSustainedReport:
     """Tests for sustained-mode HTML report rendering."""
@@ -395,6 +399,7 @@ class TestSustainedReport:
         gen = ReportGenerator(metrics_dir="/tmp/unused-cont-rg")
         return gen._generate_html(metrics or self._make_sustained_metrics())
 
+
 # ---------------------------------------------------------------------------
 # StreamingJobMetrics
 # ---------------------------------------------------------------------------
@@ -402,6 +407,7 @@ class TestSustainedReport:
 
 class TestStreamingJobMetrics:
     """Tests for StreamingJobMetrics dataclass."""
+
 
 # ---------------------------------------------------------------------------
 # Streaming log parsing
@@ -516,6 +522,7 @@ class TestStreamingLogParsing:
         # Only the strictly-lowercase key is captured.
         assert e.get("silver_valid_lowercase") == "7"
 
+
 # ---------------------------------------------------------------------------
 # Streaming storage roundtrip
 # ---------------------------------------------------------------------------
@@ -523,6 +530,7 @@ class TestStreamingLogParsing:
 
 class TestStreamingStorageRoundtrip:
     """Tests for streaming metrics persistence."""
+
 
 # ---------------------------------------------------------------------------
 # Streaming report generation
@@ -532,6 +540,7 @@ class TestStreamingStorageRoundtrip:
 class TestStreamingReportGeneration:
     """Tests for streaming section in HTML reports."""
 
+
 # ---------------------------------------------------------------------------
 # Phase 1+2: Driver log parsing with [lb] prefix
 # ---------------------------------------------------------------------------
@@ -539,6 +548,7 @@ class TestStreamingReportGeneration:
 
 class TestDriverLogParsingWithLbPrefix:
     """Tests for parse_driver_logs with realistic [lb]-prefixed output."""
+
 
 class TestDetectionRulesMetrics:
     """LB-116: per-rule AML alert counts surfaced from the driver log
@@ -604,6 +614,7 @@ class TestDetectionRulesMetrics:
         assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
         assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
 
+
 # ---------------------------------------------------------------------------
 # Phase 1+2: Streaming timing and freshness parsing
 # ---------------------------------------------------------------------------
@@ -631,6 +642,7 @@ class TestStreamingTimingAndFreshness:
         # batch durations from "refreshed ... in Xs"
         assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
 
+
 # ---------------------------------------------------------------------------
 # Phase 1: build_config_snapshot
 # ---------------------------------------------------------------------------
@@ -638,6 +650,7 @@ class TestStreamingTimingAndFreshness:
 
 class TestBuildConfigSnapshot:
     """Tests for build_config_snapshot function."""
+
 
 # ---------------------------------------------------------------------------
 # Phase 1: record_actual_sizes warning on missing bucket
@@ -667,6 +680,7 @@ class TestRecordActualSizesBucketWarning:
         assert "lb-bronze" in warnings[0].message
         assert total == 0  # Missing buckets contribute 0 objects
 
+
 # ---------------------------------------------------------------------------
 # Phase 1: throughput_rps computation
 # ---------------------------------------------------------------------------
@@ -674,6 +688,7 @@ class TestRecordActualSizesBucketWarning:
 
 class TestThroughputRpsComputation:
     """Tests for throughput_rps computation logic."""
+
 
 # ---------------------------------------------------------------------------
 # Phase 3: Cross-run comparison
@@ -683,8 +698,10 @@ class TestThroughputRpsComputation:
 class TestListRunsEnriched:
     """Tests for enriched list_runs() fields."""
 
+
 class TestExportCsvEnriched:
     """Tests for enriched export_csv() with per-job columns."""
+
 
 # ---------------------------------------------------------------------------
 # StageMetrics
@@ -693,6 +710,7 @@ class TestExportCsvEnriched:
 
 class TestStageMetrics:
     """Tests for the universal per-stage measurement dataclass."""
+
 
 # ---------------------------------------------------------------------------
 # PipelineBenchmark
@@ -789,6 +807,7 @@ class TestPipelineBenchmark:
         assert pb.time_to_value_seconds == 100.0  # wall-clock
         # Throughput uses TTV: 20 GB / 100s = 0.2, not 20/200 = 0.1
         assert pb.pipeline_throughput_gb_per_second == pytest.approx(0.2)
+
 
 # ---------------------------------------------------------------------------
 # build_pipeline_benchmark
@@ -949,6 +968,7 @@ class TestBuildPipelineBenchmark:
         assert dg.executor_count == 4
         assert dg.executor_cores == 8  # 32 / 4
 
+
 # ---------------------------------------------------------------------------
 # Pipeline benchmark storage roundtrip
 # ---------------------------------------------------------------------------
@@ -957,6 +977,7 @@ class TestBuildPipelineBenchmark:
 class TestPipelineBenchmarkStorageRoundtrip:
     """Tests for pipeline benchmark save/load through MetricsStorage."""
 
+
 # ---------------------------------------------------------------------------
 # Pipeline benchmark report generation
 # ---------------------------------------------------------------------------
@@ -964,6 +985,7 @@ class TestPipelineBenchmarkStorageRoundtrip:
 
 class TestPipelineBenchmarkReport:
     """Tests for pipeline benchmark section in HTML reports."""
+
 
 # ---------------------------------------------------------------------------
 # Sustained pipeline scoring
@@ -1144,6 +1166,7 @@ class TestSustainedPipelineScoring:
         # Backfilled from run.bronze_size_gb
         assert bronze.input_size_gb == pytest.approx(10.0)
 
+
 # ---------------------------------------------------------------------------
 # BenchmarkRoundMeta
 # ---------------------------------------------------------------------------
@@ -1152,6 +1175,7 @@ class TestSustainedPipelineScoring:
 class TestBenchmarkRoundMeta:
     """Tests for the in-stream benchmark round metadata dataclass."""
 
+
 # ---------------------------------------------------------------------------
 # BenchmarkMetrics with round_meta
 # ---------------------------------------------------------------------------
@@ -1159,6 +1183,7 @@ class TestBenchmarkRoundMeta:
 
 class TestBenchmarkMetricsRoundMeta:
     """Tests for BenchmarkMetrics with round_meta field."""
+
 
 # ---------------------------------------------------------------------------
 # aggregate_benchmark_rounds
@@ -1237,6 +1262,7 @@ class TestAggregateBenchmarkRounds:
         with pytest.raises(ValueError, match="Cannot aggregate zero"):
             aggregate_benchmark_rounds([])
 
+
 # ---------------------------------------------------------------------------
 # PipelineMetrics with benchmark_rounds
 # ---------------------------------------------------------------------------
@@ -1245,6 +1271,7 @@ class TestAggregateBenchmarkRounds:
 class TestPipelineMetricsRounds:
     """Tests for PipelineMetrics benchmark_rounds field."""
 
+
 # ---------------------------------------------------------------------------
 # MetricsCollector record_round
 # ---------------------------------------------------------------------------
@@ -1252,6 +1279,7 @@ class TestPipelineMetricsRounds:
 
 class TestRecordBenchmarkRound:
     """Tests for MetricsCollector.record_round."""
+
 
 # ---------------------------------------------------------------------------
 # PipelineBenchmark with benchmark_rounds and query_time_event_age
@@ -1327,6 +1355,7 @@ class TestPipelineBenchmarkRounds:
         pb = build_pipeline_benchmark(run)
         # Freshness values: 30, 40, 50 -- median = 40
         assert pb.query_time_event_age_seconds == pytest.approx(40.0)
+
 
 # ---------------------------------------------------------------------------
 # parse_streaming_logs freshness uses max (not average)
@@ -1561,6 +1590,7 @@ class TestSustainedScoringEdgeCases:
         # data_freshness_seconds = max(5.0, 12.0) = 12.0
         assert pb.data_freshness_seconds == pytest.approx(12.0)
 
+
 # ---------------------------------------------------------------------------
 # CycleMetrics (v1.1.0)
 # ---------------------------------------------------------------------------
@@ -1569,6 +1599,7 @@ class TestSustainedScoringEdgeCases:
 class TestCycleMetrics:
     """Tests for the CycleMetrics dataclass."""
 
+
 # ---------------------------------------------------------------------------
 # BenchmarkRoundMeta table health fields (v1.1.0)
 # ---------------------------------------------------------------------------
@@ -1576,6 +1607,7 @@ class TestCycleMetrics:
 
 class TestBenchmarkRoundMetaTableHealth:
     """Tests for table health fields on BenchmarkRoundMeta."""
+
 
 # ---------------------------------------------------------------------------
 # QpH degradation metric (v1.1.0)
@@ -1633,6 +1665,7 @@ class TestQphDegradation:
         assert pb.qph_degradation_pct is not None
         assert pb.qph_degradation_pct == pytest.approx(50.0)
 
+
 # ---------------------------------------------------------------------------
 # CycleMetrics storage roundtrip (v1.1.0)
 # ---------------------------------------------------------------------------
@@ -1640,4 +1673,3 @@ class TestQphDegradation:
 
 class TestCycleMetricsStorage:
     """Tests for CycleMetrics serialization and deserialization."""
-

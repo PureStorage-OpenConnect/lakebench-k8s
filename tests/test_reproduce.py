@@ -23,11 +23,8 @@ from lakebench.cli._reproduce import (
     SCHEMA_VERSION,
     ReproduceError,
     _build_package,
-    _classify,
     _compare,
-    _drift_pct,
     _extract_expected_numbers,
-    _is_over_band,
     _load_package,
     _resolve_config_path,
     reproduce,
@@ -113,23 +110,28 @@ class TestExtractExpectedNumbers:
         got = _extract_expected_numbers(_metrics(pipeline_benchmark=pb))
         assert got["composite_qph"] == 2000.0
 
+
 # ---------------------------------------------------------------------------
 # Classification: correctness metrics must never drop into performance band
 # ---------------------------------------------------------------------------
 
 
 class TestClassification:
-# ---------------------------------------------------------------------------
-# Drift math + banding
-# ---------------------------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Drift math + banding
+    # ---------------------------------------------------------------------------
 
     pass
+
+
 class TestDriftMath:
     pass
+
+
 class TestBandingAsymmetry:
     """Faster-than-expected is not a regression on a lower-is-better score.
     Slower-than-expected is."""
+
 
 # ---------------------------------------------------------------------------
 # Compare: exit-code shape (0 / 1 / 2)
@@ -177,6 +179,8 @@ class TestCompare:
 
 class TestBuildPackage:
     pass
+
+
 class TestLoadPackage:
     def test_wrong_schema_version_refused(self, tmp_path):
         p = tmp_path / "bad.yaml"
@@ -206,29 +210,32 @@ class TestLoadPackage:
 
 
 class TestResolveConfigPath:
-# ---------------------------------------------------------------------------
-# CLI: record mode and verify --dry-run
-# ---------------------------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # CLI: record mode and verify --dry-run
+    # ---------------------------------------------------------------------------
 
     pass
+
+
 class TestReproduceCli:
-# ---------------------------------------------------------------------------
-# Utc time on the package is timezone-aware -- silent tz drift would corrupt
-# recorded_at comparisons across machines.
-# ---------------------------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Utc time on the package is timezone-aware -- silent tz drift would corrupt
+    # recorded_at comparisons across machines.
+    # ---------------------------------------------------------------------------
 
     pass
+
+
 class TestRecordedAtTimezone:
-# ---------------------------------------------------------------------------
-# Regressions for adversarial-review findings (2026-09-21).
-# Each test names the finding number it defends. Do not delete one without
-# confirming the defect it names cannot recur.
-# ---------------------------------------------------------------------------
-
+    # ---------------------------------------------------------------------------
+    # Regressions for adversarial-review findings (2026-09-21).
+    # Each test names the finding number it defends. Do not delete one without
+    # confirming the defect it names cannot recur.
+    # ---------------------------------------------------------------------------
 
     pass
+
+
 class TestF1CorrectnessBandTwoSided:
     """Correctness band must fail on drift in EITHER direction. A scale_ratio
     of 2.0 vs expected 1.0 is just as broken as 0.5 -- both mean the pipeline
@@ -247,6 +254,7 @@ class TestF1CorrectnessBandTwoSided:
             {"ingest_ratio": 1.0}, {"ingest_ratio": 1.5}, DEFAULT_TOLERANCES
         )
         assert exit_code == 2
+
 
 class TestF2NonFiniteValuesRejected:
     """NaN and Infinity in expected_numbers or tolerance_pct would silently
@@ -307,6 +315,7 @@ class TestF2NonFiniteValuesRejected:
         with pytest.raises(ReproduceError, match="non-negative"):
             _load_package(p)
 
+
 class TestF3CommitDriftIsCorrectnessFailure:
     """A reproduce against a different commit measures a different code path.
     Refuse by default; allow only with --allow-commit-drift."""
@@ -322,6 +331,7 @@ class TestF3CommitDriftIsCorrectnessFailure:
             with pytest.raises(typer.Exit) as exc:
                 reproduce(package=pkg_path, dry_run=True)
             assert exc.value.exit_code == 14  # requirement unmet (CLI-1; 2 in 1.6)
+
 
 class TestF4RunFingerprintingSurvivesConcurrentRuns:
     """The reproduce must pick its own run, not a concurrent run that finished
@@ -441,6 +451,7 @@ class TestNoPreRunDestroy:
             _run_pipeline(cfg, timeout=None, keep=keep)
         return call_log
 
+
 class TestF6RecordRequiresCorrectnessMetric:
     """A source run without scale_ratio (batch) or ingest_ratio (sustained)
     would publish a package with no correctness gate -- every reproduce would
@@ -495,6 +506,7 @@ class TestF7DirectionTableCompleteness:
     entry. A missing entry historically silently defaulted to higher-is-better,
     which would treat a 10x latency regression as a pass."""
 
+
 class TestF8ConfigOverrideExists:
     """A --config typo used to blow up minutes later inside the deployer."""
 
@@ -548,9 +560,11 @@ class TestR3NaiveLocalTimestampsHandled:
     """MetricsCollector.start_run stores naive local datetimes. Labelling
     them as UTC shifts them by the host offset. Treat naive as local."""
 
+
 class TestR4CommitShaLengthNormalisation:
     """Package can carry a full 40-char SHA; git rev-parse returns 7-char.
     Naive equality would false-positive drift for the same commit."""
+
 
 class TestR5LegitZeroFreshnessPreserved:
     """A sustained pipeline with instant freshness (0.0) is a legitimate
@@ -567,6 +581,7 @@ class TestR5LegitZeroFreshnessPreserved:
             DEFAULT_TOLERANCES,
         )
         assert exit_code == 1
+
 
 class TestBenchmarkSampleCount:
     """A package's QpH must be verified with the same samples per query (LB-150)."""

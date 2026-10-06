@@ -34,9 +34,7 @@ DRIVER_MEMORY = "3g"
 SKIP_PREFIX = "LB-JARS missing:"
 
 JARS: list[Path] = [
-    Path(e)
-    for e in os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
-    if e.strip()
+    Path(e) for e in os.environ.get("LB_SPARK_TEST_JARS", "").split(",") if e.strip()
 ]
 
 
@@ -65,7 +63,9 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 
 def _module_jar_kinds(request: pytest.FixtureRequest) -> set[str]:
     kinds: set[str] = set()
-    for item in request.node.iter_markers("requires_jars") if hasattr(request.node, "iter_markers") else []:
+    for item in (
+        request.node.iter_markers("requires_jars") if hasattr(request.node, "iter_markers") else []
+    ):
         kinds.update(item.args)
     for item in getattr(request, "session", request).items if hasattr(request, "session") else []:
         if item.module is request.module:
@@ -75,7 +75,9 @@ def _module_jar_kinds(request: pytest.FixtureRequest) -> set[str]:
 
 
 @pytest.fixture(scope="module")
-def spark_session(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
+def spark_session(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[Any]:
     from pyspark.sql import SparkSession
 
     warehouse = tmp_path_factory.mktemp("warehouse")
@@ -168,7 +170,9 @@ def spark_subprocess() -> Callable[..., subprocess.CompletedProcess[str]]:
             timeout=timeout,
         )
         if check and proc.returncode:
-            pytest.fail(f"child exit {proc.returncode}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}")
+            pytest.fail(
+                f"child exit {proc.returncode}\nSTDOUT:\n{proc.stdout[-2000:]}\nSTDERR:\n{proc.stderr[-2000:]}"
+            )
         return proc
 
     return run

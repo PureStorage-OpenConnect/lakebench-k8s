@@ -9,7 +9,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1241,5 +1240,3 @@ def test_rehearsal_draft_refused_says_why_and_removes_an_old_one(env, monkeypatc
     assert not draft.exists()
     assert any("draft expected results not written" in s for s in env.said)
     assert any("no experiment block" in s for s in env.said)
-
-

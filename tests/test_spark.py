@@ -5,8 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lakebench.config import LakebenchConfig
-from lakebench.spark.job import JobState, JobStatus, JobType, SparkJobManager
-from lakebench.spark.monitor import JobResult, SparkJobMonitor
+from lakebench.spark.job import JobType, SparkJobManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,8 +52,10 @@ def _mock_k8s(**overrides):
 class TestJobType:
     """Tests for JobType enum values."""
 
+
 class TestJobState:
     """Tests for JobState enum values."""
+
 
 # ---------------------------------------------------------------------------
 # JobStatus dataclass
@@ -63,6 +64,7 @@ class TestJobState:
 
 class TestJobStatus:
     """Tests for JobStatus dataclass."""
+
 
 # ---------------------------------------------------------------------------
 # SparkJobManager - manifest building
@@ -127,6 +129,7 @@ class TestSparkJobManager:
         assert "trustStore" in spark_conf.get("spark.driver.extraJavaOptions", "")
         assert "trustStore" in spark_conf.get("spark.executor.extraJavaOptions", "")
 
+
 # ---------------------------------------------------------------------------
 # JobResult dataclass
 # ---------------------------------------------------------------------------
@@ -135,11 +138,14 @@ class TestSparkJobManager:
 class TestPerJobExecutorOverridesInManifest:
     """Tests for per-job executor count overrides in SparkJobManager manifests."""
 
+
 class TestDriverResourceOverrides:
     """Tests for driver memory/cores overrides in SparkJobManager manifests."""
 
+
 class TestMaxResultSizeScaling:
     """Tests for dynamic spark.driver.maxResultSize based on executor count."""
+
 
 class TestMaxExecutorsCaps:
     """Tests for max_executors limits in _JOB_PROFILES."""
@@ -169,6 +175,7 @@ class TestMaxExecutorsCaps:
 class TestJobResult:
     """Tests for JobResult dataclass."""
 
+
 # ---------------------------------------------------------------------------
 # SparkJobMonitor - basic init
 # ---------------------------------------------------------------------------
@@ -176,6 +183,7 @@ class TestJobResult:
 
 class TestSparkJobMonitor:
     """Tests for SparkJobMonitor initialisation."""
+
 
 # ---------------------------------------------------------------------------
 # Streaming concurrent budget
@@ -227,6 +235,7 @@ class TestStreamingConcurrentBudget:
         # But at least 2 (minimum)
         assert actual >= 2
 
+
 # ---------------------------------------------------------------------------
 # Phase 1: Monitor returns driver_logs on success
 # ---------------------------------------------------------------------------
@@ -234,6 +243,7 @@ class TestStreamingConcurrentBudget:
 
 class TestMonitorDriverLogsOnSuccess:
     """Tests that wait_for_completion returns driver_logs for successful jobs."""
+
 
 # ---------------------------------------------------------------------------
 # Streaming env vars: throughput tuning fields
@@ -325,6 +335,7 @@ class TestStreamingThroughputEnvVars:
         env = self._get_env_dict(manifest)
 
         assert env.get("LB_FINANCIAL_GOLD_REFRESH_S") == "120"
+
 
 # ---------------------------------------------------------------------------
 # Spark Operator Namespace Watching
@@ -496,6 +507,7 @@ class TestSparkOperatorNamespaceWatching:
         status = mgr.ensure_namespace_watched(can_heal=True)
         assert status.watching_namespace is True
 
+
 # ---------------------------------------------------------------------------
 # Polaris Spark Manifest Tests
 # ---------------------------------------------------------------------------
@@ -511,8 +523,10 @@ _POLARIS_ARCH = {
 class TestPolarisSparkManifest:
     """Tests that Polaris catalog config is correctly injected into Spark manifests."""
 
+
 class TestCycleEnv:
     """Tests for cycle_env parameter in _build_manifest (v1.1.0)."""
+
 
 # ---------------------------------------------------------------------------
 # ConfigMap includes Delta scripts (v1.2)
@@ -521,6 +535,7 @@ class TestCycleEnv:
 
 class TestScriptsConfigMapDeltaScripts:
     """The scripts ConfigMaps ship the Delta script files (v1.2)."""
+
 
 class TestFinancialScriptDispatch:
     """schema=financial routes JobType -> *_financial.py scripts (ENG-2C.3c+)."""
@@ -745,7 +760,7 @@ class TestReferencePyDeps:
             v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
         )
 
+
 class TestSparkDriverPushgatewayEnv:
     """Gate 2: the Spark driver gets LB_PUSHGATEWAY_URL + LB_RUN_ID only when
     observability + the pushgateway are enabled (drives common.py stage push)."""
-
