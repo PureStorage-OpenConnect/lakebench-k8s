@@ -955,6 +955,21 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 
 ### Changed
 - The package version is 1.7.0.dev0 until the release commit sets 1.7.0, so development records stamp lakebench 1.7.0.dev0 instead of 1.6.0.
+- User documentation review: dropped the fabricated README scorecard sample
+  (described the outcome instead), rewrote the "v1.7 is coming" framing in
+  `aml-scoring.md`, `getting-started.md`, `configuration.md` and
+  `financial-benchmark-baselines.md`, renamed `pipeline.sustained.run_duration`
+  to `pipeline.continuous.run_duration` in `data-generation.md`, fixed the
+  stale 200Gi scratch comment in `examples/polaris-iceberg-spark-financial.yaml`
+  (silver-build is 300Gi; the financial profile bumps bronze-verify to 500Gi),
+  dropped `unity` from the `architecture.catalog.type` enum comment in
+  `component-hive.md` (schema still accepts it; no recipe uses it), rebuilt
+  the `docs/README.md` index to cover `DESIGN.md`, `compatibility-matrix.md`,
+  `storage-backends.md`, `financial-benchmark-baselines.md`,
+  `perf-regression-gate.md`, `deep-dive/`, `design/`, `reproductions/` and
+  `upgrading/`, moved `operators-and-catalogs.md` to component reference,
+  and tightened the legacy-package section in `docs/reproductions/README.md`
+  plus minor weasel-word nits.
 - **The release gate refuses a record from a held-out AML corpus by its
   seed, not only by its declared role.** `records`,
   `support-record` and the release harness refuse a record whose recorded

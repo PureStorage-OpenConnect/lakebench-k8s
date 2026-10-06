@@ -9,11 +9,35 @@ loaded `iceberg-spark-runtime-4.0` and the jobs `iceberg-spark-runtime-4.1`.
 
 from __future__ import annotations
 
+import re
+from unittest.mock import MagicMock
+from urllib.parse import unquote
+
 import pytest
 
+from lakebench.deploy.engine import TemplateRenderer
 from lakebench.deps import manifest as m
+from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 from tests.conftest import make_config
-from tests.test_thrift_and_jobs_share_iceberg_runtime import job_jars, thrift_classpath
+
+
+def thrift_classpath(cfg, handle) -> list[str]:
+    from lakebench.deploy.engine import DeploymentEngine
+
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = None
+    engine = DeploymentEngine(config=cfg, k8s_client=k8s, dry_run=True)
+    ctx = {**engine.context, **m.consumer_context(handle)}
+    text = TemplateRenderer().render("spark-thrift/sparkapplication.yaml.j2", ctx)
+    (cp,) = re.findall(r'--conf "spark\.driver\.extraClassPath=([^"]+)"', text)
+    return cp.split(":")
+
+
+def job_jars(cfg, handle) -> list[str]:
+    mgr = SparkJobManager(cfg, MagicMock())
+    mgr.deps = handle
+    conf = mgr._build_manifest(JobType.BRONZE_VERIFY)["spec"]["sparkConf"]
+    return [unquote(u.rsplit("/", 1)[1]) for u in conf["spark.jars"].split(",")]
 
 
 def _cfg(image: str, iceberg: str):

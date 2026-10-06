@@ -73,7 +73,7 @@ questions, and their numbers are not comparable:
 **Scale sets pressure, not wall clock.** `workload.datagen.scale` sets the
 corpus size (Customer 360 is ~10 GB per scale unit; AML is measured per
 scale, see `src/lakebench/config/scale.py`). In continuous mode that same
-corpus is spread across `pipeline.sustained.run_duration` (default 30 min),
+corpus is spread across `pipeline.continuous.run_duration` (default 30 min),
 so a higher scale raises offered load per second, not the length of the
 run. In batch mode a higher scale raises wall clock.
 

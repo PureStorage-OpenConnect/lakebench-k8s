@@ -14,7 +14,14 @@ recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query
 Polaris recipes need no `client_secret`: `deploy` generates one per
 deployment and stores it in the namespace.
 
-Recipe defaults are merged without overwriting: images, versions and engine resources you set always take precedence. The four components a recipe sets (`architecture.catalog.type`, `architecture.table_format.type`, `architecture.pipeline_engine`, `architecture.query_engine.type`) may be left out or written with the recipe's value; a different value is refused at load, naming both keys. A config with no `recipe:`, or `recipe: default`, still resolves to `hive-iceberg-spark-trino` (or to the components it sets) with a deprecation note; v1.8 requires `recipe:`. Available recipe names: `hive-iceberg-spark-trino` (`default` is a deprecated alias), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
+Recipe defaults merge without overwriting: images, versions and engine
+resources set in the config always take precedence. The four components a
+recipe sets (`architecture.catalog.type`, `architecture.table_format.type`,
+`architecture.pipeline_engine`, `architecture.query_engine.type`) may be
+left out or written with the recipe's value; a different value is refused
+at load, naming both keys. A config with no `recipe:`, or `recipe: default`,
+still resolves to `hive-iceberg-spark-trino` with a deprecation note; v1.8
+requires `recipe:`. The 11 recipe names are listed in the table below.
 
 ## Quick Reference
 

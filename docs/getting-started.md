@@ -9,8 +9,6 @@ pipeline with Spark, Iceberg, and Trino -- all from a single YAML file.
 
 ## Prerequisites
 
-Before you begin, make sure your environment has the following.
-
 If you are the **cluster admin** setting up Lakebench on a shared cluster for the first time, the fastest path is:
 
 ```bash
@@ -205,7 +203,12 @@ kubectl get storageclass -o wide
 
 Look for `(default)` next to one of the class names.
 
-**Scratch StorageClass**: if you enable `platform.storage.scratch` (Portworx-backed shuffle volumes on OpenShift, for example), the named `StorageClass` must exist before `deploy` runs. `deploy` will refuse with an actionable error rather than create it -- a `StorageClass` is shared infrastructure and a create-race between parallel deploys could strip it out from under an in-flight run. A cluster admin installs it once with:
+**Scratch StorageClass**: when `platform.storage.scratch` is enabled
+(Portworx-backed shuffle volumes on OpenShift, for example), the named
+`StorageClass` must exist before `deploy` runs. `deploy` refuses with an
+actionable error rather than creating it: a `StorageClass` is shared
+infrastructure, and a create-race between parallel deploys could strip it
+out from under an in-flight run. A cluster admin installs it once with:
 
 ```bash
 lakebench admin install --component scratch-storage-class lakebench.yaml
@@ -538,7 +541,7 @@ the re-run needs `--regenerate` (`lakebench generate lakebench.yaml
 --regenerate`), which clears the datagen prefix first. Without it `generate`
 exits 3 (refused) and names the non-empty prefix.
 
-**A pipeline stage fails:** Re-run just that stage:
+**A pipeline stage fails:** Re-run that stage:
 
 ```bash
 lakebench run lakebench.yaml --stage silver-build
@@ -830,10 +833,10 @@ detection.
 `workload.datagen.seed = 43` is the calibration corpus the generator,
 the rule thresholds and the reference features were tuned against, and
 it is the default when `seed` is unset for `financial`. Recall and
-precision from a seed-43 run are in-sample. v1.6 publishes no held-out
-result, so AML recall in v1.6 is uncalibrated; the held-out looks are
-deferred to v1.7. Numbers meant for comparison with other stacks should
-cite the seed and, when it is 43, say so.
+precision from a seed-43 run are in-sample; no held-out result is
+published, so AML recall is uncalibrated and the held-out looks remain
+deferred. Numbers meant for comparison with other stacks should cite the
+seed and, when it is 43, say so.
 
 See [AML Scoring](aml-scoring.md) for the full explanation
 of what the metrics measure, the band leakage report, the reference

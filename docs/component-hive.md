@@ -96,7 +96,7 @@ refused by the commands that change data.
 ```yaml
 architecture:
   catalog:
-    type: hive                       # hive | polaris | unity | none
+    type: hive                       # hive | polaris | none  (unity is accepted but has no supported recipe)
     hive:
       resources:
         cpu_min: "500m"              # CPU request

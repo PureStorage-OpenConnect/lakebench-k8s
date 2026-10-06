@@ -187,43 +187,22 @@ or `lakebench init --recipe <name>`.
 
 ## What You Get
 
-After `lakebench run` completes, the terminal prints a scorecard (the
-numbers below are illustrative, not a measurement):
-
-```
- ─ Pipeline Complete ──────────────────────────────
-  bronze-verify         142.0 s
-  silver-build          891.0 s
-  gold-finalize         234.0 s
-  benchmark              87.0 s
-
-  Scores
-    Time to Value:        1354.0 s
-    Throughput:           0.782 GB/s
-    Efficiency:           3.41 GB/core-hr
-    Scale:                100.0% verified
-    QpH:                  2847.3
-
-  Full report: lakebench report
- ──────────────────────────────────────────────────
-```
-
-Each run writes `lakebench-output/runs/run-<id>/report.html`; `lakebench
-report` prints the run's summary and points at it (`--render` writes a fresh
-copy). The report shows per-query latencies,
-bottleneck analysis, and optional platform metrics (CPU, memory, S3 I/O per
-pod). Every run's `metrics.json` carries an `experiment` block: workload and
-generator version, seed, recipe and component versions, scale, mode, the
-maintenance that actually ran, the Lakebench-imposed limits that applied
-and whether they bound, the support state, and a fingerprint of each
-query's result.
+Each `lakebench run` prints a scorecard summary (per-stage seconds and the
+run's scores) and writes `lakebench-output/runs/run-<id>/report.html` with
+per-query latencies, bottleneck analysis and, when observability is enabled,
+pod-level CPU, memory and S3 I/O. `lakebench report` prints the summary and
+points at the HTML; `--render` writes a fresh copy. Every run's
+`metrics.json` carries an `experiment` block: workload and generator
+version, seed, recipe and component versions, scale, mode, the maintenance
+that actually ran, the Lakebench-imposed limits that applied and whether
+they bound, the support state, and a fingerprint of each query's result.
 
 Upgrading from 1.6: every change that can break a 1.6 config, command line
 or script, with what to do, is in
 [UPGRADING-1.7.md](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/UPGRADING-1.7.md);
-redeploy each deployment once after upgrading. Upgrading from 1.5: most
-earlier numbers are not comparable with 1.6 (for example, no Iceberg
-snapshot expiry or Delta VACUUM ever ran before 1.6.0). See the
+redeploy each deployment once after upgrading. Numbers from 1.5 and earlier
+are not comparable with 1.7: no Iceberg snapshot expiry or Delta VACUUM ran
+before 1.6, and the v1.7 datagen image changes the corpus. See the
 [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
 
 ## How It Works

@@ -1,8 +1,8 @@
 # Supported Components
 
 Lakebench deploys and manages the following components. The versions listed
-below are **defaults** -- every component image and library version can be
-overridden in your YAML config. See [Overriding Versions](#overriding-versions)
+below are **defaults**. Every component image and library version can be
+overridden in the YAML config; see [Overriding Versions](#overriding-versions)
 at the bottom of this page, or the [Configuration](configuration.md) reference
 for the full YAML schema.
 

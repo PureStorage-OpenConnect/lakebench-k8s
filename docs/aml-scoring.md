@@ -10,12 +10,12 @@ to run one end-to-end.
 
 ## What you get on the scorecard
 
-**v1.6 recall is uncalibrated.** v1.6 publishes no held-out Level-2 result.
-Recall and precision are not calibrated against a held-out corpus. On the
-default seed (43, the calibration corpus the generator, rule thresholds and
-reference features were developed on) they are in-sample: they say what the
-pipeline does on that corpus, not how the rules generalise. The
-registered held-out evaluation and robustness looks are deferred to v1.7.
+**Recall and precision are uncalibrated.** No held-out Level-2 result is
+published. On the default seed (43, the calibration corpus the generator,
+rule thresholds and reference features were developed on) they are
+in-sample: they say what the pipeline does on that corpus, not how the
+rules generalise. The registered held-out evaluation and robustness looks
+remain deferred.
 
 The two headline numbers are per-typology **recall** and per-rule
 **precision** against the planted typology set. The authoritative

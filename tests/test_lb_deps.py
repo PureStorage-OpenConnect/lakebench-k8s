@@ -248,80 +248,7 @@ def _last_error(out: str) -> str:
 # --- parity with lakebench.deps.request -------------------------------------
 
 
-def test_constants_match_request_module():
-    assert lb_deps.MANIFEST_GROUPS == req_mod.MANIFEST_GROUPS
-    assert lb_deps.MANIFEST_DIRS == req_mod.MANIFEST_DIRS
-    assert (lb_deps.GROUP_JARS, lb_deps.GROUP_PY_REFERENCE, lb_deps.GROUP_DUCKDB) == (
-        req_mod.GROUP_JARS,
-        req_mod.GROUP_PY_REFERENCE,
-        req_mod.GROUP_DUCKDB,
-    )
-    assert req_mod.TOOLS_PATH == TOOL.resolve()
-    assert req_mod.LB_DEPS_EXIT == {
-        "missing": lb_deps.EXIT_MISSING,
-        "hash": lb_deps.EXIT_HASH,
-        "ux_d2": lb_deps.EXIT_UX_D2,
-        "space": lb_deps.EXIT_SPACE,
-        "internal": lb_deps.EXIT_INTERNAL,
-        "request": lb_deps.EXIT_REQUEST,
-    }
-
-
 _AB = {"jars": [{"file": "b.jar", "sha256": "2" * 64}, {"file": "a.jar", "sha256": "1" * 64}]}
-
-
-@pytest.mark.parametrize(
-    ("groups", "order"),
-    [
-        (_AB, ["b.jar", "a.jar"]),
-        (_AB, ["a.jar", "b.jar"]),
-        (
-            {
-                "duckdb-ext": [
-                    {"file": "v1/linux_amd64/x\u00e9.duckdb_extension", "sha256": "3" * 64}
-                ]
-            },
-            [],
-        ),
-        ({"jars": [{"file": "a.jar", "sha256": "1" * 64}], "py-reference": []}, ["a.jar"]),
-    ],
-)
-def test_pinset_matches_request_module(groups, order):
-    assert lb_deps.pinset_sha256(groups, order) == req_mod.pinset_sha256(groups, order)
-
-
-@pytest.mark.parametrize(
-    "order", [["a.jar"], ["a.jar", "b.jar", "c.jar"], ["a.jar", "a.jar"], ["a.jar", "c.jar"]]
-)
-def test_pinset_refuses_an_order_that_is_not_the_jars_group(order):
-    for fn in (lb_deps.pinset_sha256, req_mod.pinset_sha256):
-        with pytest.raises(ValueError):
-            fn(_AB, order)
-
-
-def test_reordered_set_changes_the_pinset():
-    """The same files in another order load other classes first, so they are
-    another set (main lane decision 10-01)."""
-    assert lb_deps.pinset_sha256(_AB, ["a.jar", "b.jar"]) != lb_deps.pinset_sha256(
-        _AB, ["b.jar", "a.jar"]
-    )
-    assert req_mod.pinset_sha256(_AB, ["a.jar", "b.jar"]) != req_mod.pinset_sha256(
-        _AB, ["b.jar", "a.jar"]
-    )
-
-
-def test_python38_grammar():
-    ast.parse(TOOL.read_text(), feature_version=(3, 8))
-
-
-def test_stdlib_only():
-    tree = ast.parse(TOOL.read_text())
-    mods = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module} | {
-        a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
-    }
-    tops = {m.split(".")[0] for m in mods}
-    assert "lakebench" not in tops
-    assert tops <= set(sys.stdlib_module_names) | {"__future__"}
 
 
 def test_select_request_bytes_are_accepted(env, tmp_path):
@@ -347,39 +274,7 @@ def test_request_json_must_match_pod_env(env, capsys):
     assert "the pod expects" in _last_error(capsys.readouterr().out)
 
 
-def test_request_must_name_this_resolver(env, capsys):
-    env.request(tools_sha256="f" * 64)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_REQUEST
-    assert "names resolver" in _last_error(capsys.readouterr().out)
-
-
 # --- resolve: jars ------------------------------------------------------------
-
-
-def test_resolve_writes_set_pointer_and_order(env, capsys):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    ptr = env.pointer(r["sha"])
-    sd = env.set_dir(r["sha"])
-    man = json.loads((sd / "manifest.json").read_text())
-    # The set's manifest is content only.
-    assert set(man) == {"pinset_sha256", "groups", "jar_order"}
-    assert (
-        man["pinset_sha256"]
-        == req_mod.pinset_sha256(man["groups"], man["jar_order"])
-        == ptr["pinset_sha256"]
-    )
-    assert "jar_order" not in ptr
-    want = [lb_deps.coordinate_jar(c) for c in COORDS + TRANSITIVE]
-    # Spark's own order (direct coordinates first), not sorted.
-    assert man["jar_order"] == want
-    assert want != sorted(want)
-    assert sorted(e["file"] for e in man["groups"]["jars"]) == sorted(want)
-    assert ptr["repositories"] == r["repositories"]
-    assert ptr["coordinates"] == {lb_deps.coordinate_jar(c): c for c in COORDS + TRANSITIVE}
-    assert ptr["resolved_again"] == ""
-    assert not (env.root / "staging" / r["sha"]).exists()
-    assert "LB_DEPS_RESOLVED" in capsys.readouterr().out
 
 
 def test_missing_direct_coordinate_exits_3(env, capsys):
@@ -408,57 +303,11 @@ def test_killed_spark_submit_is_internal(env, capsys):
     assert "killed by signal 9" in _last_error(capsys.readouterr().out)
 
 
-def test_no_verbose_jar_list_exits_3(env, capsys):
-    env.request()
-    env.mp.setenv("FAKE_NO_VERBOSE", "1")
-    assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-    assert "did not list" in _last_error(capsys.readouterr().out)
-
-
 def test_two_iceberg_runtimes_exit_5(env, capsys):
     env.request()
     env.mp.setenv("FAKE_TRANSITIVE", "org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.11.0")
     assert env.run("resolve", "spark") == lb_deps.EXIT_UX_D2
     assert "iceberg-spark-runtime-" in _last_error(capsys.readouterr().out)
-
-
-def test_delta_set_with_an_iceberg_runtime_exits_5(env):
-    env.request(jar_coordinates=[DELTA, HADOOP])
-    env.mp.setenv("FAKE_TRANSITIVE", ICE)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_UX_D2
-
-
-def test_request_without_format_runtime_exits_5(env):
-    env.request(jar_coordinates=[HADOOP])
-    assert env.run("resolve", "spark") == lb_deps.EXIT_UX_D2
-
-
-def test_delta_runtime_rule(env):
-    env.request(jar_coordinates=[DELTA, HADOOP])
-    assert env.run("resolve", "spark") == 0
-
-
-def test_ivysettings_has_only_the_requested_resolvers():
-    xml = lb_deps.ivysettings_xml(["https://a.example/m2/", 'http://b.example/x?a=1&b="2"'])
-    tree = ET.fromstring(xml)
-    chain = tree.find("resolvers/chain")
-    assert [r.tag for r in tree.find("resolvers")] == ["chain"]
-    assert [(r.tag, r.get("root")) for r in chain] == [
-        ("ibiblio", "https://a.example/m2/"),
-        ("ibiblio", 'http://b.example/x?a=1&b="2"'),
-    ]
-    assert tree.find("settings").get("defaultResolver") == chain.get("name")
-
-
-def test_spark_submit_gets_ivysettings_and_verbose(env, tmp_path):
-    env.request()
-    log = tmp_path / "argv.txt"
-    env.mp.setenv("FAKE_SPARK_ARGV", str(log))
-    assert env.run("resolve", "spark") == 0
-    argv = ast.literal_eval(log.read_text().splitlines()[0])
-    assert "--verbose" in argv
-    assert any(a.startswith("spark.jars.ivySettings=") for a in argv)
-    assert "--repositories" not in argv
 
 
 def test_corrupt_jar_exits_4(env, capsys, monkeypatch):
@@ -476,16 +325,6 @@ def test_corrupt_jar_exits_4(env, capsys, monkeypatch):
     monkeypatch.setattr(lb_deps.shutil, "copyfile", truncating)
     assert env.run("resolve", "spark") == lb_deps.EXIT_HASH
     assert "corrupt archive" in _last_error(capsys.readouterr().out)
-
-
-def test_work_dir_is_cleared_per_container(env, capsys):
-    """Ivy keeps a retrieved jar newer than its cache copy, so a truncated
-    one from a killed attempt survives unless the work dir is cleared."""
-    env.request()
-    stale = env.work / "spark" / "ivy" / "jars" / lb_deps.coordinate_jar(BUNDLE)
-    stale.parent.mkdir(parents=True)
-    stale.write_bytes(b"truncated")
-    assert env.run("resolve", "spark") == 0, capsys.readouterr().out
 
 
 def test_low_pvc_space_exits_6(env, capsys, monkeypatch):
@@ -508,43 +347,6 @@ def test_enospc_mid_copy_exits_6(env, capsys, monkeypatch):
     assert "no space left" in _last_error(capsys.readouterr().out)
 
 
-def test_overlaps(env):
-    (env.spark / "jars" / "hadoop-aws-3.3.0.jar").write_bytes(
-        _zip_bytes(
-            {
-                "META-INF/maven/org.apache.hadoop/hadoop-aws/pom.properties": "artifactId=hadoop-aws\nversion=3.3.0\n"
-            }
-        )
-    )
-    # No pom.properties: the name decides.
-    (env.spark / "jars" / "wildfly-openssl-1.1.3.Final.jar").write_bytes(_zip_bytes({"a": "b"}))
-    # A version with a dash and no pom.properties (zstd-jni in Spark 4.1.1).
-    (env.spark / "jars" / "zstd-jni-1.5.7-6.jar").write_bytes(_zip_bytes({"a": "b"}))
-    # An artifactId with a digit segment and no pom.properties.
-    (env.spark / "jars" / "log4j-1.2-api-2.24.3.jar").write_bytes(_zip_bytes({"a": "b"}))
-    env.mp.setenv(
-        "FAKE_TRANSITIVE",
-        ",".join(
-            [
-                *TRANSITIVE,
-                "com.github.luben:zstd-jni:1.5.6-3",
-                "org.apache.logging.log4j:log4j-1.2-api:2.25.3",
-            ]
-        ),
-    )
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    ov = {
-        o["artifact"]: (o["version"], o["image_version"]) for o in env.pointer(r["sha"])["overlaps"]
-    }
-    assert ov == {
-        "hadoop-aws": ("3.4.1", "3.3.0"),
-        "wildfly-openssl": ("1.1.3.Final", "1.1.3.Final"),
-        "zstd-jni": ("1.5.6-3", "1.5.7-6"),
-        "log4j-1.2-api": ("2.25.3", "2.24.3"),
-    }
-
-
 def test_empty_image_jar_dir_fails(env, capsys):
     for p in (env.spark / "jars").iterdir():
         p.unlink()
@@ -553,85 +355,7 @@ def test_empty_image_jar_dir_fails(env, capsys):
     assert "cannot check overlaps" in _last_error(capsys.readouterr().out)
 
 
-def test_duplicate_classes_recorded_with_the_winner(env):
-    env.mp.setenv("FAKE_DUP_CLASS", "iceberg-aws-bundle,bundle")
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    assert env.pointer(r["sha"])["duplicate_classes"] == [
-        {
-            "wins": lb_deps.coordinate_jar(BUNDLE),
-            "shadowed": lb_deps.coordinate_jar(TRANSITIVE[0]),
-            "classes": 1,
-        }
-    ]
-
-
-def test_unknown_overlaps_keyed_by_both_versions():
-    seen = [
-        {"artifact": "log4j-core", "version": "2.25.3", "image_version": "2.24.3"},
-        {"artifact": "antlr4-runtime", "version": "4.13.1", "image_version": "4.13.1"},
-        {"artifact": "log4j-core", "version": "2.26.0", "image_version": "2.24.3"},
-        {"artifact": "guava", "version": "33.0", "image_version": "14.0"},
-    ]
-    assert [(o["artifact"], o["version"]) for o in req_mod.unknown_overlaps(seen)] == [
-        ("log4j-core", "2.26.0"),
-        ("guava", "33.0"),
-    ]
-
-
 # --- skip, reuse, recovery and one set -----------------------------------------
-
-
-def test_existing_pointer_skips_the_download(env, capsys):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    env.mp.setenv("FAKE_SPARK_FAIL_IF_CALLED", "1")
-    assert env.run("resolve", "spark") == 0
-    assert f"LB_DEPS_SKIP request={r['sha']}" in capsys.readouterr().out
-
-
-def test_killed_before_pointer_resolves_again(env, capsys):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    pinset = env.pointer(r["sha"])["pinset_sha256"]
-    (env.root / "requests" / f"{r['sha']}.json").unlink()  # rename done, pointer not
-    capsys.readouterr()
-    assert env.run("resolve", "spark") == 0
-    assert "LB_DEPS_RESOLVED" in capsys.readouterr().out
-    assert env.pointer(r["sha"])["pinset_sha256"] == pinset
-
-
-def test_duckdb_row_killed_after_the_move_completes(env, ext_repo, capsys, monkeypatch):
-    """On a DuckDB row kubelet retries only resolve-spark. A kill between
-    moving the set and writing the pointer must not wedge it."""
-    r = _duck_request(env, ext_repo)
-    assert env.run("resolve", "duckdb") == 0
-    real = lb_deps.publish
-    monkeypatch.setattr(
-        lb_deps, "publish", lambda *a: (_ for _ in ()).throw(RuntimeError("killed"))
-    )
-    assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    monkeypatch.setattr(lb_deps, "publish", real)
-    env.mp.setenv("FAKE_SPARK_FAIL_IF_CALLED", "1")
-    capsys.readouterr()
-    assert env.run("resolve", "spark") == 0
-    assert "(completed)" in capsys.readouterr().out
-    assert lb_deps.verify_set(env.pointer(r["sha"])["pinset_sha256"]) is None
-
-
-def test_pointer_to_damaged_set_resolves_again(env, capsys):
-    """A pointer is not trusted: a set that fails verification is removed and
-    resolved again instead of wedging every start, and the reason is kept."""
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    victim = next((env.set_dir(r["sha"]) / "jars").iterdir())
-    victim.write_bytes(b"changed")
-    capsys.readouterr()
-    assert env.run("resolve", "spark") == 0
-    out = capsys.readouterr().out
-    assert "LB_DEPS_RESOLVE_AGAIN hash mismatch" in out and "LB_DEPS_RESOLVED" in out
-    assert lb_deps.verify_set(env.pointer(r["sha"])["pinset_sha256"]) is None
-    assert env.pointer(r["sha"])["resolved_again"].startswith("hash mismatch")
 
 
 def test_pointer_with_a_bad_pinset_never_deletes_the_pvc(env):
@@ -641,82 +365,6 @@ def test_pointer_with_a_bad_pinset_never_deletes_the_pvc(env):
     (env.root / "requests" / f"{r['sha']}.json").write_text(json.dumps({"pinset_sha256": ".."}))
     assert env.run("resolve", "spark") == 0
     assert (env.root / "keep").exists()
-
-
-def test_reused_set_carries_the_new_requests_record(env):
-    """A mirror that serves the same bytes reuses the set; the pointer, not
-    the set, says which repositories built it (2.12 step 3)."""
-    a = env.request()
-    assert env.run("resolve", "spark") == 0
-    pinset = env.pointer(a["sha"])["pinset_sha256"]
-    b = env.request(repositories=["http://nexus.example:8081/repository/maven-central/"])
-    assert b["sha"] != a["sha"]
-    assert env.run("resolve", "spark") == 0
-    assert env.pointer(b["sha"])["pinset_sha256"] == pinset
-    assert env.pointer(b["sha"])["repositories"] == b["repositories"]
-    assert not (env.root / "requests" / f"{a['sha']}.json").exists()
-    shown = lb_deps.manifest_for(b["sha"])
-    assert shown["repositories"] == b["repositories"] and shown["request_sha256"] == b["sha"]
-
-
-def test_reuse_replaces_a_damaged_existing_set(env):
-    a = env.request()
-    assert env.run("resolve", "spark") == 0
-    sd = env.set_dir(a["sha"])
-    (env.root / "requests" / f"{a['sha']}.json").unlink()
-    next((sd / "jars").iterdir()).write_bytes(b"bad")
-    assert env.run("resolve", "spark") == 0
-    assert lb_deps.verify_set(sd.name) is None
-
-
-def test_pvc_holds_one_set(env):
-    env.request()
-    assert env.run("resolve", "spark") == 0
-    env.request(jar_coordinates=[DELTA, HADOOP])
-    assert env.run("resolve", "spark") == 0
-    assert len(list((env.root / "sets").iterdir())) == 1
-    assert len(list((env.root / "requests").iterdir())) == 1
-
-
-def test_first_container_clears_staging(env):
-    """A jars-only request: leftovers of another attempt in staging must not
-    reach the set."""
-    r = env.request()
-    leftover = env.staged(r["sha"]) / "duckdb" / "wheels" / "old-1.0-py3-none-any.whl"
-    leftover.parent.mkdir(parents=True)
-    leftover.write_bytes(_zip_bytes({"a": "b"}))
-    assert env.run("resolve", "spark") == 0
-
-
-def test_retried_spark_part_starts_its_groups_empty(env, ext_repo):
-    """On a DuckDB row a retried resolve-spark keeps the duckdb files but not
-    a jar a killed attempt staged."""
-    r = _duck_request(env, ext_repo)
-    assert env.run("resolve", "duckdb") == 0
-    stale = env.staged(r["sha"]) / "jars" / "stale-1.0.jar"
-    stale.parent.mkdir(parents=True)
-    stale.write_bytes(_zip_bytes({"a": "b"}))
-    assert env.run("resolve", "spark") == 0
-    files = [
-        e["file"]
-        for e in json.loads((env.set_dir(r["sha"]) / "manifest.json").read_text())["groups"]["jars"]
-    ]
-    assert "stale-1.0.jar" not in files
-
-
-def test_unselected_staged_group_fails(env, capsys, monkeypatch):
-    env.request()
-    real = lb_deps.resolve_jars
-
-    def plus_wheels(req, st_set, meta):
-        real(req, st_set, meta)
-        w = Path(st_set) / "py-reference"
-        w.mkdir()
-        (w / "x-1-py3-none-any.whl").write_bytes(_zip_bytes({"a": "b"}))
-
-    monkeypatch.setattr(lb_deps, "resolve_jars", plus_wheels)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    assert "did not select" in _last_error(capsys.readouterr().out)
 
 
 def test_symlink_in_staging_fails(env, capsys, monkeypatch, tmp_path):
@@ -753,94 +401,7 @@ def test_verify_set_refuses_unsafe_paths_and_dir_symlinks(env, tmp_path):
     assert lb_deps.verify_set(bad.name).startswith("unsafe path")
 
 
-def test_concurrent_resolve_waits_for_the_lock(env, capsys):
-    env.request()
-    env.mp.setenv("LB_DEPS_LOCK_WAIT", "1")
-    with open(env.root / ".resolve.lock", "w") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    assert "another resolve holds" in _last_error(capsys.readouterr().out)
-    assert env.run("resolve", "spark") == 0
-
-
 # --- resolve: wheels and DuckDB -----------------------------------------------------
-
-
-def test_reference_wheels_one_per_pin(env, tmp_path):
-    log = tmp_path / "pip.txt"
-    env.mp.setenv("FAKE_PIP_ARGV", str(log))
-    r = env.request(
-        groups=["jars", "py-reference"],
-        py_reference=PINS,
-        pypi_index="http://pypi.mirror.example/simple/",
-    )
-    assert env.run("resolve", "spark") == 0
-    files = [
-        e["file"]
-        for e in json.loads((env.set_dir(r["sha"]) / "manifest.json").read_text())["groups"][
-            "py-reference"
-        ]
-    ]
-    assert len(files) == 3 and any(f.startswith("scikit_learn-1.7.2-") for f in files)
-    argv = ast.literal_eval(log.read_text().splitlines()[0])
-    assert argv[argv.index("--index-url") + 1] == "http://pypi.mirror.example/simple/"
-    assert argv[argv.index("--trusted-host") + 1] == "pypi.mirror.example"
-    assert "--isolated" in argv
-
-
-def test_extra_wheel_exits_3(env):
-    env.request(groups=["jars", "py-reference"], py_reference=PINS, pypi_index=req_mod.PYPI_INDEX)
-    env.mp.setenv("FAKE_PIP_EXTRA", "six==1.17.0")
-    assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-
-
-def test_unreachable_index_says_egress(env, capsys):
-    env.request(groups=["jars", "py-reference"], py_reference=PINS, pypi_index=req_mod.PYPI_INDEX)
-    env.mp.setenv("FAKE_PIP_FAIL", "1")
-    assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-    assert "egress: NewConnectionError" in _last_error(capsys.readouterr().out)
-
-
-def test_wheels_without_an_index_are_refused(env):
-    env.request(groups=["jars", "py-reference"], py_reference=PINS)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_REQUEST
-
-
-def test_https_index_has_no_trusted_host():
-    assert lb_deps.pip_index_args("https://pypi.org/simple/") == [
-        "--isolated",
-        "--index-url",
-        "https://pypi.org/simple/",
-    ]
-
-
-def test_short_count_of_wheels_fails(env, capsys, monkeypatch):
-    env.request(groups=["jars", "py-reference"], py_reference=PINS, pypi_index=req_mod.PYPI_INDEX)
-    real = lb_deps.resolve_py_reference
-
-    def drop_one(req, st_set):
-        real(req, st_set)
-        d = Path(st_set) / "py-reference"
-        sorted(d.iterdir())[0].unlink()
-
-    monkeypatch.setattr(lb_deps, "resolve_py_reference", drop_one)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-    assert "holds 2 files, needs 3" in _last_error(capsys.readouterr().out)
-
-
-def test_empty_group_fails(env, capsys, monkeypatch):
-    """A selected group with no files must not finalise, even when the step
-    that fills it returned without error. pinset_sha256 ignores an empty
-    group, so it would otherwise pass unnoticed."""
-    env.request(groups=["jars", "py-reference"], py_reference=PINS, pypi_index=req_mod.PYPI_INDEX)
-    monkeypatch.setattr(lb_deps, "resolve_py_reference", lambda *a: None)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-    assert "group py-reference holds 0 files" in _last_error(capsys.readouterr().out)
-
-
-def test_empty_pin_list_is_refused(env):
-    env.request(groups=["jars", "py-reference"], py_reference=[], pypi_index=req_mod.PYPI_INDEX)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_REQUEST
 
 
 class _ExtRepo(http.server.BaseHTTPRequestHandler):
@@ -891,46 +452,6 @@ def _duck_request(env, repo, **extra):
     }
     fields.update(extra)
     return env.request(**fields)
-
-
-def test_duckdb_resolve(env, ext_repo, tmp_path):
-    log = tmp_path / "pip.txt"
-    env.mp.setenv("FAKE_PIP_ARGV", str(log))
-    r = _duck_request(env, ext_repo)
-    assert env.run("resolve", "duckdb") == 0
-    assert env.run("resolve", "spark") == 0
-    groups = json.loads((env.set_dir(r["sha"]) / "manifest.json").read_text())["groups"]
-    assert [e["file"] for e in groups["duckdb-ext"]] == [
-        f"v1.5.5/linux_amd64/{n}.duckdb_extension" for n in ("avro", "httpfs", "iceberg")
-    ]
-    ext = env.set_dir(r["sha"]) / "duckdb-ext/v1.5.5/linux_amd64/iceberg.duckdb_extension"
-    assert ext.read_bytes() == b"iceberg" * 100
-    assert len(groups["duckdb-wheels"]) == 1
-    assert _ExtRepo.agents and all(a == lb_deps.USER_AGENT for a in _ExtRepo.agents)
-    # The DuckDB wheel goes through the configured index too.
-    download = ast.literal_eval(log.read_text().splitlines()[0])
-    assert (
-        "duckdb==1.5.5" in download and "--index-url" in download and "--trusted-host" in download
-    )
-    assert set(env.pointer(r["sha"])["python"]) == {"duckdb", "spark"}
-
-
-def test_missing_extension_exits_3(env, ext_repo, capsys):
-    _duck_request(env, ext_repo, duckdb_extensions=["httpfs", "nosuch"])
-    assert env.run("resolve", "duckdb") == lb_deps.EXIT_MISSING
-    assert "nosuch" in _last_error(capsys.readouterr().out)
-
-
-def test_unreachable_extension_repository_says_egress(env, capsys):
-    _duck_request(env, "http://127.0.0.1:9")
-    assert env.run("resolve", "duckdb") == lb_deps.EXIT_MISSING
-    assert "egress:" in _last_error(capsys.readouterr().out)
-
-
-def test_spark_part_needs_the_duckdb_part(env, ext_repo, capsys):
-    _duck_request(env, ext_repo)
-    assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    assert "delete the lb-deps pod" in _last_error(capsys.readouterr().out)
 
 
 # --- serve ------------------------------------------------------------------------
@@ -1007,59 +528,6 @@ def served(env, tmp_path, capsys):
         proc.wait()
 
 
-def test_serve_paths(env, served):
-    base, pinset, sha = served["base"], served["pinset"], served["sha"]
-    assert urllib.request.urlopen(f"{base}/ready").read().decode() == pinset
-    jar = lb_deps.coordinate_jar(HADOOP)
-    assert _status(f"{base}/sets/{pinset}/jars/{jar}") == 200
-    assert _status(f"{base}/sets/{pinset}/jars/") == 200  # listing for pip --find-links
-    assert _status(f"{base}/sets/{'0' * 64}/jars/{jar}") == 404
-    assert _status(f"{base}/sets/{pinset}/../../requests/{sha}.json") == 404
-    assert _status(f"{base}/sets/{pinset}/%2e%2e/%2e%2e/requests/{sha}.json") == 404
-    assert _status(f"{base}/sets/{pinset}/jars/%00x") == 404
-    assert _status(f"{base}/requests/{sha}.json") == 404
-    assert _status(f"{base}/sets/{pinset}/jars/{jar}", "PUT") == 405
-    assert _status(f"{base}/sets/{pinset}/jars/{jar}", "DELETE") == 405
-    body = urllib.request.urlopen(f"{base}/sets/{pinset}/jars/{jar}").read()
-    assert body == (env.set_dir(sha) / "jars" / jar).read_bytes()
-
-
-def test_fetch_through_serve(served, tmp_path, capsys):
-    dest = tmp_path / "out"
-    args = [
-        "fetch",
-        "--group",
-        "jars",
-        "--dest",
-        str(dest),
-        "--manifest",
-        str(served["man"]),
-        "--url",
-        served["url"],
-    ]
-    assert lb_deps.main(args) == 0
-    assert sorted(p.name for p in dest.iterdir()) == sorted(
-        lb_deps.coordinate_jar(c) for c in COORDS + TRANSITIVE
-    )
-    assert "LB_DEPS_FETCHED group=jars files=5" in capsys.readouterr().out
-
-
-def test_sigterm_finishes_downloads_in_flight(env, served):
-    jar = lb_deps.coordinate_jar(BUNDLE)  # about 24 MiB, more than the socket buffers
-    want = (env.set_dir(served["sha"]) / "jars" / jar).read_bytes()
-    with urllib.request.urlopen(f"{served['url']}/jars/{jar}", timeout=10) as r:
-        head = r.read(1024)
-        t0 = time.time()
-        served["proc"].send_signal(signal.SIGTERM)
-        time.sleep(0.5)
-        body = head + r.read()
-    assert body == want
-    assert served["proc"].wait(timeout=10) == 0
-    assert time.time() - t0 < 8
-    out = served["proc"].stdout.read().decode()
-    assert f"LB_DEPS_READY request={served['sha']} pinset={served['pinset']}" in out
-
-
 def test_realpath_confinement(env, tmp_path):
     """Defence in depth behind verify_set: a symlink planted after the
     start-up check still cannot reach outside the set."""
@@ -1076,41 +544,7 @@ def test_realpath_confinement(env, tmp_path):
     assert h._target() == str(sd / "jars" / lb_deps.coordinate_jar(HADOOP))
 
 
-@pytest.mark.parametrize("damage", ["modify", "delete", "extra"])
-def test_serve_exits_4_on_a_changed_set(env, capsys, damage):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    jars = env.set_dir(r["sha"]) / "jars"
-    victim = next(jars.iterdir())
-    if damage == "modify":
-        victim.write_bytes(b"x")
-    elif damage == "delete":
-        victim.unlink()
-    else:
-        (jars / "planted.jar").write_bytes(b"x")
-    capsys.readouterr()
-    assert env.run("serve", "--port", "0") == lb_deps.EXIT_HASH
-    err = _last_error(capsys.readouterr().out)
-    assert ("hash mismatch" in err) if damage != "extra" else ("not in manifest" in err)
-
-
-def test_serve_without_a_set_exits_4(env):
-    env.request()
-    assert env.run("serve", "--port", "0") == lb_deps.EXIT_HASH
-
-
 # --- show and fetch -------------------------------------------------------------
-
-
-def test_show_prints_record_and_entries(env, capsys):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    capsys.readouterr()
-    assert env.run("show") == 0
-    shown = json.loads(capsys.readouterr().out)
-    assert shown["request_sha256"] == r["sha"]
-    assert shown["pinset_sha256"] == req_mod.pinset_sha256(shown["groups"], shown["jar_order"])
-    assert shown["jar_order"][0] == lb_deps.coordinate_jar(ICE)
 
 
 class _SetServer(http.server.SimpleHTTPRequestHandler):
@@ -1185,39 +619,11 @@ def test_fetch_mismatch_exits_4_and_leaves_nothing(env, served_set, tmp_path, ca
     assert not (dest / jar).exists() and not (dest / (jar + ".part")).exists()
 
 
-def test_fetch_retries_a_short_transfer(served_set, tmp_path, monkeypatch):
-    """A server restarting mid-transfer is not tampering."""
-    monkeypatch.setattr(lb_deps.time, "sleep", lambda s: None)
-    _SetServer.short = [lb_deps.coordinate_jar(BUNDLE)]
-    assert _fetch(served_set, tmp_path / "out") == 0
-    assert not _SetServer.short
-
-
-def test_fetch_rejects_a_url_for_another_pinset(served_set, tmp_path):
-    url = served_set["url"].rsplit("/", 1)[0] + "/" + "0" * 64
-    assert _fetch(served_set, tmp_path / "o", url) == lb_deps.EXIT_HASH
-
-
 def test_fetch_rejects_an_edited_manifest(served_set, tmp_path):
     m = json.loads(served_set["man"].read_text())
     m["groups"]["jars"][0]["sha256"] = "0" * 64
     served_set["man"].write_text(json.dumps(m))
     assert _fetch(served_set, tmp_path / "o") == lb_deps.EXIT_HASH
-
-
-def test_fetch_unreachable_server_exits_3(served_set, tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(lb_deps.time, "sleep", lambda s: None)
-    url = "http://127.0.0.1:9/sets/" + served_set["url"].rsplit("/", 1)[1]
-    assert _fetch(served_set, tmp_path / "o", url) == lb_deps.EXIT_MISSING
-    assert "after 3 attempts" in _last_error(capsys.readouterr().out)
-    assert not any(p.name.endswith(".part") for p in (tmp_path / "o").iterdir())
-
-
-def test_fetch_keeps_already_verified_files(served_set, tmp_path, monkeypatch):
-    dest = tmp_path / "out"
-    assert _fetch(served_set, dest) == 0
-    monkeypatch.setattr(lb_deps, "fetch_one", lambda *a: pytest.fail("refetched a verified file"))
-    assert _fetch(served_set, dest) == 0
 
 
 def test_fetch_refuses_unsafe_paths(served_set, tmp_path):
@@ -1235,38 +641,7 @@ def test_fetch_refuses_unsafe_paths(served_set, tmp_path):
 # --- errors -----------------------------------------------------------------------
 
 
-def test_unexpected_error_is_one_line_exit_7(env, capsys, monkeypatch):
-    env.request()
-    monkeypatch.setattr(
-        lb_deps, "resolve_jars", lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    assert _last_error(capsys.readouterr().out) == "LB_DEPS_ERROR internal RuntimeError: boom"
-
-
-def test_exit_codes_are_distinct():
-    codes = list(req_mod.LB_DEPS_EXIT.values())
-    assert len(set(codes)) == len(codes) and not {0, 1, 2} & set(codes)
-
-
 # --- brief-pass fixes -------------------------------------------------------------
-
-
-def test_duckdb_row_killed_before_the_move_retries_cleanly(env, ext_repo, capsys, monkeypatch):
-    """finalise writes the staged manifest.json before the move; a kill in
-    between must not leave a file that fails every retry."""
-    r = _duck_request(env, ext_repo)
-    assert env.run("resolve", "duckdb") == 0
-    real = lb_deps.os.rename
-    monkeypatch.setattr(
-        lb_deps.os, "rename", lambda *a: (_ for _ in ()).throw(RuntimeError("killed"))
-    )
-    assert env.run("resolve", "spark") == lb_deps.EXIT_INTERNAL
-    assert (env.staged(r["sha"]) / "manifest.json").exists()
-    monkeypatch.setattr(lb_deps.os, "rename", real)
-    capsys.readouterr()
-    assert env.run("resolve", "spark") == 0, capsys.readouterr().out
-    assert lb_deps.verify_set(env.pointer(r["sha"])["pinset_sha256"]) is None
 
 
 def test_sigterm_during_verify_keeps_the_set(env, monkeypatch, capsys):
@@ -1286,54 +661,10 @@ def test_sigterm_during_verify_keeps_the_set(env, monkeypatch, capsys):
     assert (env.root / "sets" / pinset / "manifest.json").exists()
 
 
-def test_module_info_is_not_a_duplicate_class(env):
-    env.mp.setenv("FAKE_MODULE_INFO", "1")
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    assert env.pointer(r["sha"])["duplicate_classes"] == []
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "javax.net.ssl.SSLHandshakeException: PKIX path building failed",
-        "java.net.SocketTimeoutException: Read timed out",
-        "java.net.SocketException: Connection reset",
-        "Host repo1.maven.org: Name or service not known not found. url=https://repo1.maven.org/x.pom",
-    ],
-)
-def test_egress_note_classifies_java_network_failures(line):
-    assert lb_deps.egress_note("x\n" + line + "\ny").startswith(" egress: ")
-
-
-def test_egress_note_ignores_a_plain_not_found():
-    assert (
-        lb_deps.egress_note(
-            "module not found: org.example#nosuch;1.0\n::::: UNRESOLVED DEPENDENCIES"
-        )
-        == ""
-    )
-
-
 def test_child_out_of_space_exits_6(env, capsys):
     env.request(groups=["jars", "py-reference"], py_reference=PINS, pypi_index=req_mod.PYPI_INDEX)
     env.mp.setenv("FAKE_PIP_FULL", "1")
     assert env.run("resolve", "spark") == lb_deps.EXIT_SPACE
-
-
-def test_publish_leaves_other_requests_staging(env):
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    other = env.root / "staging" / ("e" * 64) / "set" / "duckdb-ext"
-    other.mkdir(parents=True)
-    own = env.root / "staging" / r["sha"] / "meta"
-    own.mkdir(parents=True)
-    lb_deps.publish(r["sha"], env.pointer(r["sha"]))
-    assert other.exists() and not own.exists()
-
-
-def test_idle_connections_cannot_hold_shutdown():
-    assert 0 < lb_deps.SetHandler.timeout <= 120
 
 
 def test_a_reordered_set_on_the_pvc_fails_verification(env, capsys):

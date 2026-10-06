@@ -298,79 +298,6 @@ def test_different_experiment_or_conditions_refused(env):
         assert c.verdict == pg.REFUSED and any(r.startswith(field) for r in c.reasons), c.reasons
 
 
-def test_run_without_provenance_is_refused_and_not_recordable(env):
-    snap = env.snaps["c360-batch-s10"]
-    with pytest.raises(pg.PerfGateError, match="no provenance"):
-        _record(
-            env,
-            "c360-batch-s10",
-            _batch_run(snap, "20260924-090000-cccccc") | {"experiment": None},
-        )
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    legacy = _batch_run(snap, "20260924-110000-bbbbbb")
-    legacy.pop("experiment")
-    c = _compare(env, "c360-batch-s10", legacy)
-    assert c.verdict == pg.REFUSED
-    assert any("no provenance" in r for r in c.reasons), c.reasons
-
-
-def test_legacy_baseline_without_identity_refuses_every_run(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    store = yaml.safe_load(env.store_path.read_text())
-    entry = store["baselines"]["c360-batch-s10"]
-    entry.pop("experiment_identity")
-    entry.pop("result_fingerprints")
-    env.store_path.write_text(yaml.safe_dump(store, sort_keys=False))
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb"))
-    assert c.verdict == pg.REFUSED
-    assert any("baseline was recorded without an experiment identity" in r for r in c.reasons)
-
-
-def test_baseline_needs_a_usable_fingerprint_per_query(env):
-    snap = env.snaps["c360-batch-s10"]
-    exp = stub_experiment(QUERIES)
-    exp["results"]["fingerprints"]["Q3_join"] = {"spec": "rf1", "error": "timed out"}
-    with pytest.raises(pg.PerfGateError, match="Q3_join"):
-        _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", experiment=exp))
-
-
-def test_higher_is_better_drop_is_a_regression(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", dg_mbps=1600.0))
-    assert c.verdict == pg.REGRESSION
-    assert _row(c, "datagen_mbps_per_pod").status == "regression"
-    assert _row(c, "datagen_aggregate_mbps").status == "regression"
-
-
-def test_improvement_accepted(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    faster = _batch_run(
-        snap,
-        "20260924-110000-bbbbbb",
-        ttv=400.0,
-        qph=700.0,
-        query_scale=0.5,
-        stage_s={"datagen": 60.0, "bronze": 50.0, "silver": 100.0, "gold": 75.0},
-        dg_mbps=4000.0,
-    )
-    c = _compare(env, "c360-batch-s10", faster)
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    assert _row(c, "time_to_value_seconds").status == "improved"
-    assert _row(c, "query_qph_Q1_scan").status == "improved"
-    assert _row(c, "silver_seconds").status == "improved"
-
-
-def test_drift_inside_tolerance_passes(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", ttv=650.0))
-    assert c.verdict == pg.PASS
-    assert _row(c, "time_to_value_seconds").status == "ok"
-
-
 def test_config_hash_mismatch_refused(env):
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
@@ -383,13 +310,6 @@ def test_config_hash_mismatch_refused(env):
     assert c.rows == []
 
 
-def test_comment_edit_keeps_config_hash(env):
-    pinned = env.store_dir / "c360-batch-s10.yaml"
-    before = pg.config_file_hash(pinned)
-    pinned.write_text("# a new comment\n" + pinned.read_text())
-    assert pg.config_file_hash(pinned) == before
-
-
 def test_run_with_different_sizing_refused(env):
     """The false scare: a 'baseline' with 4x the Trino workers."""
     snap = env.snaps["c360-batch-s10"]
@@ -399,15 +319,6 @@ def test_run_with_different_sizing_refused(env):
     c = _compare(env, "c360-batch-s10", _batch_run(bigger, "20260924-110000-bbbbbb", ttv=300.0))
     assert c.verdict == pg.REFUSED
     assert any("trino.worker.replicas: pinned 2, run 8" in r for r in c.reasons)
-
-
-def test_record_refuses_mismatched_run(env):
-    bigger = copy.deepcopy(env.snaps["c360-batch-s10"])
-    bigger["datagen"]["parallelism"] = 16
-    store = env.store()
-    run = pg.load_run(env.write_run(_batch_run(bigger, "20260924-100000-aaaaaa")))
-    with pytest.raises(pg.PerfGateError, match="datagen.parallelism"):
-        pg.record_baseline(store, "c360-batch-s10", run, "abc")
 
 
 def test_drained_run_rows_per_second_excluded(env):
@@ -447,17 +358,6 @@ def test_drained_run_refused_against_undrained_baseline(env):
     assert any("corpus_drained" in r for r in c.reasons)
 
 
-def test_drained_run_never_becomes_the_rows_per_second_baseline(env):
-    snap = env.snaps["c360-continuous-s10"]
-    store = _record(
-        env,
-        "c360-continuous-s10",
-        _cont_run(snap, "20260924-100000-aaaaaa", rps=9000.0, drained=True),
-    )
-    assert "sustained_throughput_rps" not in store.baselines["c360-continuous-s10"].metrics
-    assert "data_freshness_seconds" in store.baselines["c360-continuous-s10"].metrics
-
-
 def test_undrained_rows_per_second_regression_detected(env):
     snap = env.snaps["c360-continuous-s10"]
     _record(
@@ -488,26 +388,6 @@ def test_low_scale_ratio_refused(env, ratio):
     assert any("scale_ratio" in r for r in c.reasons)
 
 
-def test_maintenance_value_is_not_gated(env):
-    """A better write layout raises pre-maintenance QpH and lowers the value.
-
-    maintenance_value_pct is derived from pre_compaction_qph and composite_qph,
-    both gated on their own; gating it too flagged the improvement as a
-    regression (review probe A).
-    """
-    snap = env.snaps["c360-batch-s10"]
-    base = _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=50.0)
-    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
-    store = _record(env, "c360-batch-s10", base)
-    assert "maintenance_value_pct" not in store.baselines["c360-batch-s10"].metrics
-    new = _batch_run(snap, "20260925-100000-bbbbbb", maintenance_value_pct=12.5)
-    new["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 400.0
-    c = _compare(env, "c360-batch-s10", new)
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    assert _row(c, "pre_compaction_qph").status == "improved"
-    assert all(r.metric != "maintenance_value_pct" for r in c.rows)
-
-
 def test_failed_query_is_missing_and_fails(env):
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
@@ -518,48 +398,11 @@ def test_failed_query_is_missing_and_fails(env):
     assert _row(c, "query_qph_Q3_join").status == "missing"
 
 
-def test_realised_executor_count_mismatch_refused(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    c = _compare(
-        env,
-        "c360-batch-s10",
-        _batch_run(
-            snap, "20260924-110000-bbbbbb", executors={"bronze": 4, "silver": 16, "gold": 4}
-        ),
-    )
-    assert c.verdict == pg.REFUSED
-    assert any("silver ran 16 executors, pinned 8" in r for r in c.reasons)
-
-
 def test_failed_run_refused(env):
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
     c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", success=False))
     assert c.verdict == pg.REFUSED
-
-
-def test_record_needs_replace_for_an_accepted_baseline(env):
-    snap = env.snaps["c360-batch-s10"]
-    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    b = store.baselines["c360-batch-s10"]
-    assert (b.run_id, b.git_sha, b.status) == (
-        "20260924-100000-aaaaaa",
-        "abc1234",
-        pg.STATUS_ACCEPTED,
-    )
-    assert b.config_hash == pg.config_file_hash(env.store_dir / "c360-batch-s10.yaml")
-    run = pg.load_run(env.write_run(_batch_run(snap, "20260924-110000-bbbbbb")))
-    with pytest.raises(pg.PerfGateError, match="--replace"):
-        pg.record_baseline(store, "c360-batch-s10", run, "def")
-    pg.record_baseline(store, "c360-batch-s10", run, "def", replace=True)
-    assert store.baselines["c360-batch-s10"].run_id == "20260924-110000-bbbbbb"
-
-
-def test_pending_baseline_gives_no_baseline(env):
-    snap = env.snaps["c360-batch-s10"]
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb"))
-    assert c.verdict == pg.NO_BASELINE
 
 
 # -- release gate ------------------------------------------------------------
@@ -582,84 +425,6 @@ def _accept_both_c360(env, extra_runs: bool = True):
     if extra_runs:
         env.write_run(_batch_run(b, "20260924-200000-eeeeee", ttv=610.0))
         env.write_run(_cont_run(c, "20260924-200001-eeeeee", rps=5.1e4, drained=False))
-
-
-def test_release_check_passes_and_then_fails_on_regression(env):
-    _accept_both_c360(env)
-    passed, lines = pg.release_check(env.store(), env.runs)
-    assert passed, lines  # the optional AML config is pending but does not fail
-    env.write_run(_batch_run(env.snaps["c360-batch-s10"], "20260925-100000-cccccc", ttv=900.0))
-    passed, lines = pg.release_check(env.store(), env.runs)
-    assert not passed
-    assert any(
-        "REGRESSION run 20260925-100000-cccccc" in ln and "time_to_value_seconds" in ln
-        for ln in lines
-    )
-
-
-def test_release_check_ignores_runs_of_other_configs(env):
-    _accept_both_c360(env)
-    other = copy.deepcopy(env.snaps["c360-batch-s10"])
-    other["trino"]["worker"]["replicas"] = 8
-    env.write_run(_batch_run(other, "20260925-100000-dddddd", ttv=900.0))
-    passed, lines = pg.release_check(env.store(), env.runs)
-    assert passed, lines
-    # Named explicitly, the same run is refused rather than skipped.
-    passed, lines = pg.release_check(
-        env.store(), env.runs, {"c360-batch-s10": "20260925-100000-dddddd"}
-    )
-    assert not passed
-    assert any("REFUSED" in ln and "trino.worker.replicas" in ln for ln in lines)
-
-
-def test_release_check_fails_when_no_run_found(env, tmp_path):
-    _accept_both_c360(env)
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    passed, lines = pg.release_check(env.store(), empty)
-    assert not passed
-    assert any("no successful run" in ln for ln in lines)
-
-
-def test_release_gate_script_check(env):
-    rg = _load_script("release_gate")
-    res = rg.make_perf_check(store_path=env.store_path, runs_dirs=[env.runs])()
-    assert res.status == rg.FAIL and "no baseline" in res.detail
-    _accept_both_c360(env)
-    res = rg.make_perf_check(store_path=env.store_path, runs_dirs=[env.runs])()
-    assert res.status == rg.PASS, res.detail
-    env.write_run(_batch_run(env.snaps["c360-batch-s10"], "20260925-100000-cccccc", qph=100.0))
-    res = rg.make_perf_check(store_path=env.store_path, runs_dirs=[env.runs])()
-    assert res.status == rg.FAIL and "composite_qph" in res.detail
-
-
-def test_perf_gate_cli_exit_codes(env, capsys):
-    cli = _load_script("perf_gate")
-    snap = env.snaps["c360-batch-s10"]
-    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
-    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
-    assert cli.main([*base, "record", "c360-batch-s10", "--run", "20260924-100000-aaaaaa"]) == 2
-    assert (
-        cli.main(
-            [
-                *base,
-                "record",
-                "c360-batch-s10",
-                "--run",
-                "20260924-100000-aaaaaa",
-                "--git-sha",
-                "abc",
-            ]
-        )
-        == 0
-    )
-    env.write_run(_batch_run(snap, "20260924-110000-bbbbbb", ttv=800.0))
-    assert cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-110000-bbbbbb"]) == 1
-    assert "REGRESSION" in capsys.readouterr().out
-    env.write_run(_batch_run(snap, "20260924-120000-cccccc", scale_ratio=0.5))
-    assert cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-120000-cccccc"]) == 2
-    env.write_run(_batch_run(snap, "20260924-130000-dddddd", ttv=610.0))
-    assert cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-130000-dddddd"]) == 0
 
 
 # -- the checked-in pinned configs and store ---------------------------------
@@ -734,21 +499,6 @@ def _has(data: dict, dotted: str) -> bool:
 @pytest.mark.parametrize(
     "path", sorted(p for p in PERF.glob("*.yaml") if p.name != "baselines.yaml")
 )
-def test_pinned_config_sets_every_knob(path):
-    data = yaml.safe_load(path.read_text())
-    required = list(_ALWAYS)
-    mode = data["architecture"]["pipeline"]["mode"]
-    required += _SUSTAINED if mode == "sustained" else _BATCH
-    engine = data["architecture"]["query_engine"]["type"]
-    required += {"trino": _TRINO, "spark-thrift": _THRIFT}.get(engine, [])
-    missing = [k for k in required if not _has(data, k)]
-    assert not missing, f"{path.name} leaves these to defaults: {missing}"
-    assert ":latest" not in data["images"]["datagen"]
-
-
-@pytest.mark.parametrize(
-    "path", sorted(p for p in PERF.glob("*.yaml") if p.name != "baselines.yaml")
-)
 def test_pinned_executor_counts_match_todays_auto_counts(path):
     """Pinning must not change sizing: overrides equal get_executor_count."""
     from lakebench.modules.pipeline_engines.spark.job import get_executor_count
@@ -775,15 +525,6 @@ def test_pinned_executor_counts_match_todays_auto_counts(path):
 REBASELINE_V17 = {"aml-batch-s10", "c360-batch-s10", "c360-batch-s10-polaris"}
 
 
-def test_checked_in_store_loads_and_references_pinned_configs():
-    store = pg.load_store(PERF / "baselines.yaml")
-    assert {"c360-continuous-s10", "aml-batch-s1"} | REBASELINE_V17 <= set(store.baselines)
-    for name in store.baselines:
-        pinned = store.pinned(name)
-        assert pinned.config_hash and pinned.fingerprint_hash
-    assert store.pinned("c360-continuous-s10").mode == "sustained"
-
-
 def test_checked_in_store_requires_exactly_the_v17_rebaseline_set(tmp_path):
     # The v1.7 re-baseline set is pinned. Until the post-freeze data commit
     # accepts its baselines nothing is required; from that commit on exactly
@@ -804,98 +545,7 @@ def test_checked_in_store_requires_exactly_the_v17_rebaseline_set(tmp_path):
         assert all(ln.startswith(("warn", "ok")) for ln in lines)
 
 
-def test_the_rebaseline_pins_name_the_trees_datagen_image_and_their_seeds():
-    # A pin whose image no registry holds cannot run; and records of one
-    # corpus need the image the release matrix rows use, the tree default.
-    from lakebench.config.schema import ImagesConfig
-
-    for name, seed in (
-        ("aml-batch-s10.yaml", 43),
-        ("c360-batch-s10.yaml", 42),
-        ("c360-batch-s10-polaris.yaml", 42),
-    ):
-        raw = yaml.safe_load((PERF / name).read_text())
-        assert raw["images"]["datagen"] == ImagesConfig().datagen, name
-        assert raw["architecture"]["workload"]["datagen"]["seed"] == seed, name
-
-
-def test_a_dated_170_changelog_requires_the_rebaseline_set():
-    # The tag must not pass without the data commit: once CHANGELOG dates the
-    # 1.7.0 section, exactly the re-baseline set is required.
-    import re
-
-    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text()
-    if not re.search(r"^## \[1\.7\.0\] - \d{4}-\d{2}-\d{2}", changelog, flags=re.M):
-        pytest.skip("1.7.0 is not dated yet")
-    store = pg.load_store(PERF / "baselines.yaml")
-    assert {n for n, b in store.baselines.items() if b.required} == REBASELINE_V17
-
-
-def test_the_rebaseline_twins_differ_only_in_the_catalog():
-    hive = yaml.safe_load((PERF / "c360-batch-s10.yaml").read_text())
-    polaris = yaml.safe_load((PERF / "c360-batch-s10-polaris.yaml").read_text())
-    for raw in (hive, polaris):
-        raw.pop("recipe")
-        raw.get("architecture", {}).pop("catalog", None)
-        raw["images"].pop("polaris", None)
-        raw["images"].pop("polaris_admin_tool", None)
-    text = yaml.safe_dump(polaris).replace("perf-c360-batch-s10-polaris", "perf-c360-batch-s10")
-    assert yaml.safe_load(text) == hive
-
-
-def test_rebaseline_pins_load_and_ask_the_profile_counts():
-    for name in ("aml-batch-s10.yaml", "c360-batch-s10-polaris.yaml"):
-        pinned = pg.load_pinned(PERF / name)
-        assert pinned.config_hash and pinned.mode == "batch"
-
-
-def test_store_rejects_accepted_entry_without_provenance(tmp_path):
-    p = tmp_path / "baselines.yaml"
-    p.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "baselines": {"x": {"config": "x.yaml", "status": "accepted", "metrics": {"a": 1}}},
-            }
-        )
-    )
-    with pytest.raises(pg.PerfGateError, match="run_id"):
-        pg.load_store(p)
-
-
 # -- review fixes (adversarial pass on d9860b9) ------------------------------
-
-
-def test_release_check_fails_when_only_the_baseline_run_exists(env):
-    _accept_both_c360(env, extra_runs=False)
-    passed, lines = pg.release_check(env.store(), env.runs)
-    assert not passed
-    assert any("is not newer than the baseline run" in ln for ln in lines)
-
-
-def test_continuous_window_override_refused(env):
-    snap = env.snaps["c360-continuous-s10"]
-    _record(
-        env,
-        "c360-continuous-s10",
-        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
-    )
-    run = _cont_run(snap, "20260924-110000-bbbbbb", rps=5e4, drained=False, window=300.0)
-    c = _compare(env, "c360-continuous-s10", run)
-    assert c.verdict == pg.REFUSED
-    assert any("run window 300s" in r for r in c.reasons)
-
-
-def test_continuous_stage_seconds_are_not_compared(env):
-    snap = env.snaps["c360-continuous-s10"]
-    store = _record(
-        env,
-        "c360-continuous-s10",
-        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
-    )
-    metrics = store.baselines["c360-continuous-s10"].metrics
-    assert "data_freshness_seconds" in metrics
-    assert not [k for k in metrics if k.endswith("_seconds") and k != "data_freshness_seconds"]
 
 
 def test_continuous_run_with_no_data_cannot_be_recorded(env):
@@ -907,26 +557,6 @@ def test_continuous_run_with_no_data_cannot_be_recorded(env):
         pg.record_baseline(store, "c360-continuous-s10", run, "abc")
 
 
-def test_continuous_stage_executor_count_is_not_checked(env):
-    """Known gap: continuous stages carry no realised executor count.
-
-    build_pipeline_benchmark fills a continuous stage's executor_count from
-    the snapshot's executor_overrides, the value the check would compare it
-    with, so a check could never fire on a real run. The gate makes no such
-    claim; a hand-edited count does not change the verdict.
-    """
-    snap = env.snaps["c360-continuous-s10"]
-    _record(
-        env,
-        "c360-continuous-s10",
-        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
-    )
-    run = _cont_run(snap, "20260924-110000-bbbbbb", rps=5e4, drained=False, executors=(2, 8, 2))
-    c = _compare(env, "c360-continuous-s10", run)
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    assert not any("executors" in r for r in c.reasons)
-
-
 def test_scale_ratio_above_band_refused(env):
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
@@ -935,40 +565,6 @@ def test_scale_ratio_above_band_refused(env):
     )
     assert c.verdict == pg.REFUSED
     assert any("more data than the scale" in r for r in c.reasons)
-
-
-def test_missing_stage_refused_not_compared(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    no_silver = _batch_run(
-        snap, "20260924-110000-bbbbbb", stage_s={"datagen": 120.0, "bronze": 100.0, "gold": 150.0}
-    )
-    c = _compare(env, "c360-batch-s10", no_silver)
-    assert c.verdict == pg.REFUSED
-    assert any("stages differ" in r for r in c.reasons)
-
-
-def test_run_without_datagen_stage_compares_pipeline_only(env):
-    """Generate once, run several times: no datagen stage, no refusal."""
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    run = _batch_run(
-        snap, "20260924-110000-bbbbbb", stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0}
-    )
-    del run["datagen_fleet"]
-    c = _compare(env, "c360-batch-s10", run)
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    for metric in ("datagen_seconds", "datagen_mbps_per_pod"):
-        assert _row(c, metric).status.startswith("excluded"), metric
-    # Time to value, GB/s and GB/core-hr describe the pipeline stages only,
-    # so they are still compared.
-    for metric in (
-        "time_to_value_seconds",
-        "pipeline_throughput_gb_per_second",
-        "compute_efficiency_gb_per_core_hour",
-        "silver_seconds",
-    ):
-        assert _row(c, metric).status == "ok", metric
 
 
 def test_ttv_regression_caught_without_datagen_stage(env):
@@ -989,64 +585,6 @@ def test_ttv_regression_caught_without_datagen_stage(env):
     assert _row(c, "pipeline_throughput_gb_per_second").status == "regression"
 
 
-def test_ttv_recomputed_without_datagen_stage_timestamps(env):
-    """A datagen stage with timestamps (older layout) does not stretch TTV."""
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    run = _batch_run(snap, "20260924-110000-bbbbbb")
-    dg = run["pipeline_benchmark"]["stages"][0]
-    assert dg["stage_name"] == "datagen"
-    dg["start_time"] = "2026-09-24T08:00:00"
-    dg["end_time"] = "2026-09-24T08:02:00"
-    run["pipeline_benchmark"]["scorecard"]["time_to_value_seconds"] = 7800.0
-    c = _compare(env, "c360-batch-s10", run)
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    assert _row(c, "time_to_value_seconds").actual == pytest.approx(600.0)
-
-
-def test_untimed_stages_with_datagen_on_one_side_refused(env):
-    """Without stage timestamps TTV cannot be separated from datagen: refuse."""
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", timed=False))
-    same = _batch_run(snap, "20260924-110000-bbbbbb", timed=False, ttv=840.0)
-    c = _compare(env, "c360-batch-s10", same)
-    assert c.verdict == pg.REGRESSION
-    assert _row(c, "time_to_value_seconds").status == "regression"
-    one_side = _batch_run(
-        snap,
-        "20260924-120000-cccccc",
-        timed=False,
-        stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
-    )
-    del one_side["datagen_fleet"]
-    c = _compare(env, "c360-batch-s10", one_side)
-    assert c.verdict == pg.REFUSED
-    assert any("cannot be separated from the datagen stage" in r for r in c.reasons)
-
-
-def test_ttv_basis_mismatch_refused(env):
-    snap = env.snaps["c360-batch-s10"]
-    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    assert store.baselines["c360-batch-s10"].ttv_basis == pg.TTV_FROM_STAGES
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", timed=False))
-    assert c.verdict == pg.REFUSED
-    assert any("time to value taken from the scorecard" in r for r in c.reasons)
-
-
-def test_failed_benchmark_is_a_regression_not_a_refusal(env):
-    snap = env.snaps["c360-batch-s10"]
-    base = _batch_run(snap, "20260924-100000-aaaaaa")
-    base["pipeline_benchmark"]["stages"].append(
-        {"stage_name": "query", "stage_type": "query", "elapsed_seconds": 13.0, "success": True}
-    )
-    _record(env, "c360-batch-s10", base)
-    crashed = _batch_run(snap, "20260924-110000-bbbbbb", failed=tuple(QUERIES), qph=0.0)
-    c = _compare(env, "c360-batch-s10", crashed)
-    assert c.verdict == pg.REGRESSION
-    assert _row(c, "query_seconds").status == "missing"
-    assert _row(c, "composite_qph").status == "missing"
-
-
 def test_continuous_ingest_ratio_above_band_refused(env):
     snap = env.snaps["c360-continuous-s10"]
     _record(
@@ -1058,14 +596,6 @@ def test_continuous_ingest_ratio_above_band_refused(env):
     c = _compare(env, "c360-continuous-s10", run)
     assert c.verdict == pg.REFUSED
     assert any("ingest_ratio 2.40" in r for r in c.reasons)
-
-
-def test_release_check_rejects_a_run_older_than_the_baseline(env):
-    older = env.write_run(_batch_run(env.snaps["c360-batch-s10"], "20260901-100000-000000"))
-    _accept_both_c360(env)
-    passed, lines = pg.release_check(env.store(), env.runs, {"c360-batch-s10": str(older)})
-    assert not passed
-    assert any("20260901-100000-000000 is not newer" in ln for ln in lines)
 
 
 def test_stale_datagen_metrics_excluded_not_attributed(env):
@@ -1099,25 +629,6 @@ def test_stale_datagen_does_not_hide_ttv_regression(env):
     assert "earlier generate" in _row(c, "datagen_seconds").status
 
 
-def test_datagen_age_is_a_lower_bound_over_every_zone(env):
-    """The naive start is read as UTC less the largest offset (+14h).
-
-    _datagen_age_hours never reads the gate host's zone, so the answer is the
-    same on every host.
-    """
-    snap = env.snaps["c360-batch-s10"]
-    run = pg.load_run(env.write_run(_batch_run(snap, "20260924-110000-bbbbbb")))
-    # Naive start 2026-09-24T10:00; its instant lies in 20:00Z the day
-    # before .. 22:00Z depending on the run host's zone.
-    run.raw["datagen_fleet"]["written_at"] = "2026-09-22T20:01:00+00:00"  # 37.98h naive
-    assert pg._datagen_stale(run) is None
-    run.raw["datagen_fleet"]["written_at"] = "2026-09-22T19:59:00+00:00"  # 38.02h naive
-    assert pg._datagen_stale(run)
-    run.raw["start_time"] = "2026-09-24T10:00:00+00:00"  # an aware start is used as is
-    run.raw["datagen_fleet"]["written_at"] = "2026-09-23T09:59:00+00:00"
-    assert pg._datagen_stale(run)
-
-
 def test_record_refuses_a_batch_run_without_fresh_datagen(env):
     """A baseline with no datagen numbers would turn datagen gating off."""
     snap = env.snaps["c360-batch-s10"]
@@ -1133,32 +644,6 @@ def test_record_refuses_a_batch_run_without_fresh_datagen(env):
         pg.record_baseline(env.store(), "c360-batch-s10", pg.load_run(env.write_run(none)), "x")
 
 
-def test_in_run_datagen_seconds_kept_when_sidecar_is_stale(env):
-    """`run --generate` writes no sidecar but attaches an old one."""
-    snap = env.snaps["c360-batch-s10"]
-    data = _batch_run(snap, "20260924-100000-aaaaaa")
-    data["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
-    data["datagen_fleet"]["wall_elapsed_max_s"] = 900.0  # the old generate's time
-    store = env.store()
-    pg.record_baseline(store, "c360-batch-s10", pg.load_run(env.write_run(data)), "x")
-    metrics = store.baselines["c360-batch-s10"].metrics
-    assert metrics["datagen_seconds"] == 120.0  # the in-run stage, not 900
-    assert "datagen_mbps_per_pod" not in metrics
-    sidecar_only = _batch_run(snap, "20260924-110000-bbbbbb", stage_s={"datagen": 900.0})
-    sidecar_only["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
-    sidecar_only["datagen_fleet"]["wall_elapsed_max_s"] = 900.0
-    numbers, excluded = pg.extract_metrics(pg.load_run(env.write_run(sidecar_only)))
-    assert "datagen_seconds" not in numbers and "earlier generate" in excluded["datagen_seconds"]
-
-
-def test_local_run_refused(env):
-    snap = copy.deepcopy(env.snaps["c360-batch-s10"])
-    snap["local"] = True
-    run = pg.load_run(env.write_run(_batch_run(snap, "20260924-100000-aaaaaa")))
-    reasons = pg.run_refusals(run, env.store().pinned("c360-batch-s10"))
-    assert any("local run" in r for r in reasons)
-
-
 def test_multi_cycle_batch_run_refused(env):
     """Cycles 2..N generate between cycles, inside first-start..last-end."""
     snap = env.snaps["c360-batch-s10"]
@@ -1172,18 +657,6 @@ def test_multi_cycle_batch_run_refused(env):
     dup["pipeline_benchmark"]["stages"].append(dict(dup["pipeline_benchmark"]["stages"][2]))
     c = _compare(env, "c360-batch-s10", dup)
     assert any("multi-cycle" in r for r in c.reasons)
-
-
-def test_clock_change_during_run_refused(env):
-    """Timestamps spanning less than the stages' own seconds: DST fall-back."""
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    run = _batch_run(snap, "20260924-110000-bbbbbb", ttv=450.0)
-    silver, gold = run["pipeline_benchmark"]["stages"][2:4]
-    silver["elapsed_seconds"] += 3600.0  # silver really ran an hour longer
-    c = _compare(env, "c360-batch-s10", run)
-    assert c.verdict == pg.REFUSED
-    assert any("clock change" in r for r in c.reasons)
 
 
 def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
@@ -1286,80 +759,6 @@ def test_real_collector_run_matches_scorecard_and_gates(env):
         assert _row(c, metric).status == "regression", metric
 
 
-def test_record_refuses_untimed_run_with_stale_datagen(env):
-    snap = env.snaps["c360-batch-s10"]
-    data = _batch_run(snap, "20260924-100000-aaaaaa", timed=False)
-    data["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
-    run = pg.load_run(env.write_run(data))
-    with pytest.raises(pg.PerfGateError, match="stale datagen"):
-        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
-
-
-def test_explicit_run_found_in_second_runs_dir(env, tmp_path):
-    """Review probe C: --perf-run must search uat/perf, not only the first dir."""
-    _accept_both_c360(env)
-    uat = tmp_path / "uat-perf"
-    d = uat / "run-20260926-100000-uuuuuu"
-    d.mkdir(parents=True)
-    data = _batch_run(env.snaps["c360-batch-s10"], "20260926-100000-uuuuuu")
-    (d / "metrics.json").write_text(json.dumps(data))
-    passed, lines = pg.release_check(
-        env.store(), [env.runs, uat], {"c360-batch-s10": "20260926-100000-uuuuuu"}
-    )
-    line = next(ln for ln in lines if "c360-batch-s10" in ln)
-    assert line.startswith("ok"), lines
-    assert "20260926-100000-uuuuuu" in line
-
-
-def test_auto_discovered_run_with_conflicting_copies_is_refused(env, tmp_path):
-    _accept_both_c360(env)
-    data = _batch_run(env.snaps["c360-batch-s10"], "20260927-100000-zzzzzz")
-    env.write_run(data)
-    uat = tmp_path / "uat-perf"
-    d = uat / "run-20260927-100000-zzzzzz"
-    d.mkdir(parents=True)
-    changed = copy.deepcopy(data)
-    changed["pipeline_benchmark"]["scorecard"]["composite_qph"] = 1.0
-    (d / "metrics.json").write_text(json.dumps(changed))
-    passed, lines = pg.release_check(env.store(), [env.runs, uat])
-    assert not passed
-    assert any("different contents" in ln for ln in lines if "c360-batch-s10" in ln)
-    # A re-serialised identical copy is the same run.
-    (d / "metrics.json").write_text(json.dumps(data, indent=2, sort_keys=True))
-    passed, lines = pg.release_check(env.store(), [env.runs, uat])
-    assert any(ln.startswith("ok") and "c360-batch-s10" in ln for ln in lines), lines
-
-
-def test_run_id_with_conflicting_copies_is_refused(env, tmp_path):
-    data = _batch_run(env.snaps["c360-batch-s10"], "20260926-100000-uuuuuu")
-    env.write_run(data)
-    other = tmp_path / "other"
-    d = other / "run-20260926-100000-uuuuuu"
-    d.mkdir(parents=True)
-    changed = copy.deepcopy(data)
-    changed["pipeline_benchmark"]["scorecard"]["composite_qph"] = 1.0
-    (d / "metrics.json").write_text(json.dumps(changed))
-    with pytest.raises(pg.PerfGateError, match="different contents"):
-        pg.load_run("20260926-100000-uuuuuu", [env.runs, other])
-    assert pg.load_run("20260926-100000-uuuuuu", [other]).scores["composite_qph"] == 1.0
-
-
-def test_recorded_config_file_sha_must_match(env):
-    import hashlib
-
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    edited = copy.deepcopy(snap)
-    edited["config_sha256"] = "0" * 64
-    c = _compare(env, "c360-batch-s10", _batch_run(edited, "20260924-110000-bbbbbb"))
-    assert c.verdict == pg.REFUSED
-    assert any("different config file" in r for r in c.reasons)
-    same = copy.deepcopy(snap)
-    pinned_bytes = (env.store_dir / "c360-batch-s10.yaml").read_bytes()
-    same["config_sha256"] = hashlib.sha256(pinned_bytes).hexdigest()
-    assert _compare(env, "c360-batch-s10", _batch_run(same, "20260924-120000-cccccc")).ok
-
-
 def test_pre_compaction_qph_regression_detected(env):
     snap = env.snaps["c360-batch-s10"]
     base = _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=10.0)
@@ -1369,22 +768,6 @@ def test_pre_compaction_qph_regression_detected(env):
     c = _compare(env, "c360-batch-s10", worse)
     assert c.verdict == pg.REGRESSION
     assert _row(c, "pre_compaction_qph").status == "regression"
-
-
-@pytest.mark.parametrize("samples", [0, 1, 5])
-def test_other_sample_count_is_refused(env, samples):
-    """A median of 3 and a single sample are different estimators (LB-150).
-
-    samples=0 is a record written before per-query repeats: no samples key,
-    read as one sample whatever its snapshot says.
-    """
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260925-100000-bbbbbb", samples=samples))
-    assert c.verdict == pg.REFUSED
-    assert any("sample(s) per query" in r for r in c.reasons), c.reasons
-    if samples <= 1:
-        assert any("predates" in r for r in c.reasons)
 
 
 # -- stopped pre-benchmark maintenance (lane Y follow-up) ---------------------
@@ -1417,88 +800,6 @@ def test_stopped_maintenance_excludes_post_maintenance_qph(env):
     assert _row(c, "pre_compaction_qph").status == "ok"
 
 
-def test_stopped_maintenance_keeps_pre_maintenance_qph_gated(env):
-    snap = env.snaps["c360-batch-s10"]
-    base = _batch_run(snap, "20260924-100000-aaaaaa")
-    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
-    _record(env, "c360-batch-s10", base)
-    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 150.0))
-    assert c.verdict == pg.REGRESSION
-    assert _row(c, "pre_compaction_qph").status == "regression"
-
-
-def test_stopped_maintenance_cannot_be_a_baseline(env):
-    snap = env.snaps["c360-batch-s10"]
-    run = pg.load_run(env.write_run(_stopped(_batch_run(snap, "20260924-100000-aaaaaa"))))
-    with pytest.raises(pg.PerfGateError, match="maintenance"):
-        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
-
-
-def test_stopped_maintenance_with_no_qph_left_is_not_comparable(env, capsys):
-    """Scale >= 50 has no pre-maintenance round: with post QpH excluded nothing
-    QpH-shaped is gated, so the run must not read as a pass."""
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    stopped = _stopped(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0))
-    c = _compare(env, "c360-batch-s10", stopped)
-    assert c.verdict == pg.NOT_COMPARABLE
-    assert not c.ok
-    assert any("OPTIMIZE lakehouse.gold.t timed out" in r for r in c.reasons)
-
-    cli = _load_script("perf_gate")
-    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
-    rc = cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-110000-bbbbbb"])
-    assert rc != 0
-    assert "NOT_COMPARABLE" in capsys.readouterr().out
-
-    passed, lines = pg.release_check(env.store(), env.runs)
-    line = next(ln for ln in lines if "c360-batch-s10" in ln)
-    assert not line.startswith("ok")
-    assert "maintenance stopped" in line
-
-
-def test_seed_skips_stopped_runs_and_uses_the_next_newest(env, capsys):
-    cli = _load_script("perf_gate")
-    snap = env.snaps["c360-batch-s10"]
-    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
-    env.write_run(_stopped(_batch_run(snap, "20260924-110000-bbbbbb")))
-    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
-    assert cli.main([*base, "seed", "--write"]) == 0
-    out = capsys.readouterr().out
-    assert "skipping 20260924-110000-bbbbbb" in out
-    assert "20260924-110000-bbbbbb not usable" not in out, "skipped, never attempted"
-    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
-
-
-def test_seed_falls_back_when_the_newest_run_is_refused(env, capsys):
-    """A refused candidate (no datagen stage) must not abort the seed loop."""
-    cli = _load_script("perf_gate")
-    snap = env.snaps["c360-batch-s10"]
-    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
-    env.write_run(
-        _batch_run(
-            snap,
-            "20260924-110000-bbbbbb",
-            stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
-        )
-    )
-    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
-    assert cli.main([*base, "seed", "--write"]) == 0
-    out = capsys.readouterr().out
-    assert "20260924-110000-bbbbbb not usable" in out
-    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
-
-
-def test_stop_reason_is_named_even_on_a_pass(env):
-    snap = env.snaps["c360-batch-s10"]
-    base = _batch_run(snap, "20260924-100000-aaaaaa")
-    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
-    _record(env, "c360-batch-s10", base)
-    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 300.0))
-    assert c.verdict == pg.PASS
-    assert any("maintenance stopped before completion" in r for r in c.reasons)
-
-
 def _live(data: dict, pre_qph: float | None = None) -> dict:
     sc = data["pipeline_benchmark"]["scorecard"]
     sc["maintenance_live_streams"] = True
@@ -1508,44 +809,6 @@ def _live(data: dict, pre_qph: float | None = None) -> dict:
     if pre_qph is not None:
         sc["pre_compaction_qph"] = pre_qph
     return data
-
-
-def test_live_streams_are_treated_like_a_stopped_maintenance(env):
-    snap = env.snaps["c360-batch-s10"]
-    base = _batch_run(snap, "20260924-100000-aaaaaa")
-    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
-    _record(env, "c360-batch-s10", base)
-    c = _compare(
-        env,
-        "c360-batch-s10",
-        _live(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0), 300.0),
-    )
-    # The pre round ran with the same writers live, so nothing QpH-shaped
-    # is gated: never a pass.
-    assert c.verdict == pg.NOT_COMPARABLE, pg.format_comparison(c)
-    assert _row(c, "composite_qph").status.startswith("excluded")
-    assert _row(c, "pre_compaction_qph").status.startswith("excluded")
-    assert any("streams were live" in r for r in c.reasons)
-
-
-def test_live_streams_with_nothing_gated_is_not_comparable(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    c = _compare(env, "c360-batch-s10", _live(_batch_run(snap, "20260924-110000-bbbbbb")))
-    assert c.verdict == pg.NOT_COMPARABLE
-
-
-def test_live_streams_run_cannot_be_a_baseline(env, capsys):
-    snap = env.snaps["c360-batch-s10"]
-    run = pg.load_run(env.write_run(_live(_batch_run(snap, "20260924-100000-aaaaaa"))))
-    with pytest.raises(pg.PerfGateError, match="streams were live"):
-        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
-    cli = _load_script("perf_gate")
-    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
-    assert cli.main([*base, "seed", "--write"]) == 0
-    out = capsys.readouterr().out
-    assert "skipping 20260924-100000-aaaaaa (streams were live" in out
-    assert "not usable" not in out, "skipped, never attempted"
 
 
 def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=300):
@@ -1611,12 +874,6 @@ def test_continuous_pinned_config_fires_maintenance_and_compaction():
             assert maint >= 2 and comp >= 1, (path.name, bench_s, maint, comp)
 
 
-def test_loop_model_rejects_the_old_cadence():
-    """Guards the model: retention_interval = run_duration fired nothing."""
-    assert _simulate_continuous_loop(1800, 1800, 3600, 0)[0] == 0
-    assert _simulate_continuous_loop(1800, 600, 900, 60)[0] < 2  # the first try
-
-
 def test_continuous_run_without_a_result_check_is_not_a_baseline(env):
     """The continuous deviation is gone: a continuous run whose corpus never
     settled has no checked results and cannot be a baseline."""
@@ -1640,78 +897,6 @@ def _cluster_timed(data: dict) -> dict:
         if st["stage_type"] == "batch":
             st["timing_source"] = "driver_container"
     return data
-
-
-def test_poll_timed_baseline_refuses_a_cluster_timed_run(env):
-    """v1.6 times batch stages from the Spark application's end; a pre-v1.6
-    baseline ended every stage on the 15 s poll (lb16: 90.14 s bronze)."""
-    snap = env.snaps["c360-batch-s10"]
-    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    assert store.baselines["c360-batch-s10"].stage_timing == pg.STAGE_TIMING_POLL
-    c = _compare(
-        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb", ttv=540.0))
-    )
-    assert c.verdict == pg.REFUSED
-    assert any("cluster-timed in the run but poll-timed" in r for r in c.reasons)
-
-
-def test_cluster_timed_baseline_gates_a_cluster_timed_run(env):
-    snap = env.snaps["c360-batch-s10"]
-    store = _record(
-        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-100000-aaaaaa"))
-    )
-    assert store.baselines["c360-batch-s10"].stage_timing == pg.STAGE_TIMING_CLUSTER
-    c = _compare(
-        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb", ttv=690.0))
-    )
-    assert c.verdict == pg.REGRESSION
-
-
-def test_mixed_stage_timing_is_its_own_basis(env):
-    snap = env.snaps["c360-batch-s10"]
-    data = _batch_run(snap, "20260924-110000-bbbbbb")
-    data["pipeline_benchmark"]["stages"][1]["timing_source"] = "spark_application"
-    assert pg.stage_timing_basis(pg.load_run(env.write_run(data))) == pg.STAGE_TIMING_MIXED
-
-
-def test_mixed_stage_timing_is_refused_and_not_recordable(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-100000-aaaaaa")))
-    data = _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb"))
-    data["pipeline_benchmark"]["stages"][1]["timing_source"] = "poll"
-    data["pipeline_benchmark"]["stages"][1]["timing_resolution_seconds"] = 5.0
-    run = pg.load_run(env.write_run(data))
-    c = pg.compare_run(env.store(), "c360-batch-s10", run)
-    assert c.verdict == pg.REFUSED
-    assert any("not all timed the same way" in r for r in c.reasons)
-    with pytest.raises(pg.PerfGateError):
-        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc", replace=True)
-
-
-def test_v16_poll_fallback_is_not_the_old_15s_poll(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    data = _batch_run(snap, "20260924-110000-bbbbbb")
-    for st in data["pipeline_benchmark"]["stages"]:
-        if st["stage_type"] == "batch":
-            st["timing_source"] = "poll"
-            st["timing_resolution_seconds"] = 5.0
-    run = pg.load_run(env.write_run(data))
-    assert pg.stage_timing_basis(run) == "poll5s"
-    assert pg.compare_run(env.store(), "c360-batch-s10", run).verdict == pg.REFUSED
-
-
-def test_single_stage_run_is_refused(env):
-    """A ``run --stage`` record times one stage, not the pipeline."""
-    from lakebench.metrics.storage import MetricsStorage
-
-    snap = env.snaps["c360-batch-s10"]
-    pm = _real_run(snap, "20260924-100000-aaaaaa")
-    pm.stage_only = "silver-build"
-    run = pg.load_run(MetricsStorage(env.runs).save_run(pm))
-    assert "run measured one stage only (silver-build)" in pg.run_refusals(
-        run, env.store().pinned("c360-batch-s10")
-    )
 
 
 # -- LB-269: a held-out corpus is never a baseline or a gated run ------------

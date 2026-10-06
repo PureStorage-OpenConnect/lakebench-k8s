@@ -96,8 +96,8 @@ refused by the commands that change data.
 
 ### Catalog Comparison
 
-Lakebench supports Hive Metastore and Apache Polaris. The others are listed
-for ecosystem context only -- they are not supported.
+Lakebench supports Hive Metastore and Apache Polaris. The others appear
+for context; no Lakebench recipe uses them.
 
 | Catalog | Format Support | Governance | Lakebench Status |
 |---------|---------------|------------|-----------------|
@@ -107,10 +107,11 @@ for ecosystem context only -- they are not supported.
 | Nessie | Iceberg | Git-style versioning | Not implemented |
 
 ### Choosing Between Hive and Polaris
-- Both are fully supported and tested
-- Hive is the default -- well-established, broad compatibility
-- Polaris is the modern option -- pure REST, better for multi-cloud setups
-- See [quickstart-polaris.md](quickstart-polaris.md) for Polaris setup
+- Hive is the default: broad compatibility and the only catalog Lakebench
+  supports for Delta.
+- Polaris is Iceberg-only, pure REST, and the choice when multiple engines
+  need to share tables.
+- See [quickstart-polaris.md](quickstart-polaris.md) for Polaris setup.
 
 ---
 

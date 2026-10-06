@@ -14,7 +14,7 @@ lakebench deploy my-config.yaml
 lakebench run my-config.yaml
 ```
 
-## Minimum Viable Config (v1.3)
+## Minimum viable config
 
 The smallest working config:
 
@@ -1146,7 +1146,7 @@ openssl s_client -connect 10.0.1.50:443 -showcerts </dev/null 2>/dev/null \
 For corporate CAs, your infrastructure team can provide the PEM file.
 
 **AWS S3 and public endpoints** use well-known CAs that are already trusted
-by the system CA bundle. No `ca_cert` is needed -- just use the HTTPS endpoint:
+by the system CA bundle. No `ca_cert` is needed; set the HTTPS endpoint:
 
 ```yaml
 platform:

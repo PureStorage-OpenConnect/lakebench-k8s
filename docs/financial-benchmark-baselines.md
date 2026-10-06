@@ -5,11 +5,11 @@ at each scale point. Referenced by ENG-2C.4.8 verification (W8 replay
 timeout budget), by release regression detection, and by external
 narratives that need quotable numbers.
 
-**v1.6 publishes no numbers here.** The frozen-generator performance and
-size measurements are deferred to v1.7, with the performance re-baseline.
-Earlier measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were
-taken on a generator and rule set that have since changed and are void; see
-History. The tables below will be filled from post-freeze runs, each with
+**No numbers are published here yet.** The frozen-generator performance
+and size measurements wait on the performance re-baseline. Earlier
+measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were taken
+on a generator and rule set that have since changed and are void; see
+History. The tables below are filled from post-freeze runs, each with
 its run id.
 
 ## How to read this table
