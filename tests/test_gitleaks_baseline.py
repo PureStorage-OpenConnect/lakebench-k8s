@@ -26,6 +26,8 @@ IGNORE = ROOT / ".gitleaksignore"
 BASELINE = {
     "6cc98444611411953c72fb394941a11ab98043c3:src/lakebench/_constants.py:generic-api-key:8",
     "e51bd922f17484aead6318536f8c1929b94be8fd:src/lakebench/deploy/engine.py:generic-api-key:260",
+    "58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:48",
+    "58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:49",
 }
 
 _FINGERPRINT = re.compile(r"^[0-9a-f]{40}:[^:\s]+:[a-z0-9-]+:[0-9]+$")

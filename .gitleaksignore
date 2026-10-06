@@ -14,3 +14,12 @@
 
 # The same default secret, passed to the deploy templates in the same releases.
 e51bd922f17484aead6318536f8c1929b94be8fd:src/lakebench/deploy/engine.py:generic-api-key:260
+
+# The fixed v1.6 in-cluster Hive and Polaris database passwords, public in the
+# 1.6.0 release. 1.7 generates a password per deployment and keeps these only
+# to reach a database a v1.6 deployment created; neither guards anything
+# outside that deployment's own namespace.
+58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:48
+
+# The Polaris half of the same pair, on the next line of the same commit.
+58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:49
