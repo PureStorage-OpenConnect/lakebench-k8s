@@ -525,13 +525,9 @@ def _save_local_metrics(
 # Repeatable-fix contract: adding a field to JobMetrics does not need a
 # corresponding edit to _apply_parsed_job_metrics. The only decision the
 # author has to make is "is this field cluster-owned or parser-owned"
-# and if cluster-owned, add it here.
-#
-# The original LB-123 defect (three detection dicts silently dropped)
-# and the two live-caught silver-plan-r3 omissions (silver_tables +
-# extra_metrics at 87feefd, streaming per-batch labels at e31514d) were
-# all the same shape: a hand-written field-by-field copy that lagged
-# behind the dataclass. Iterating fields removes that shape.
+# and if cluster-owned, add it here. Hand-written field-by-field copies
+# have silently dropped new fields three times; iterating fields removes
+# that shape.
 _CLUSTER_OWNED_JOB_METRICS_FIELDS: frozenset[str] = frozenset(
     {
         "job_name",
@@ -558,11 +554,8 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     """Copy every parser-owned field from parsed onto job_metrics.
 
     Iterates the dataclass so a new field lands automatically as long as
-    it is not in _CLUSTER_OWNED_JOB_METRICS_FIELDS. See the set docstring
-    for the rationale; the LB-123 detection-dict defect and the two
-    silver-plan-r3 live-caught omissions (silver_tables + extra_metrics,
-    streaming per-batch labels) were three instances of the same
-    hand-copy drift.
+    it is not in _CLUSTER_OWNED_JOB_METRICS_FIELDS. Hand-copy drift has
+    silently dropped new fields more than once.
     """
     import dataclasses
 
@@ -776,9 +769,7 @@ def _exclude_alert_set_time(job_metrics) -> float:
 
 # Upstream failures a benchmark may carry without failing the run, as
 # (table format, query engine, query name). Each must be a documented bug
-# outside lakebench. Delta + Thrift Q2 (LB-034, Delta MIN/MAX on date partitions) left
-# this list with LB-148: the metadata-query rewrite that crashes it is now
-# disabled, so a Q2 failure there is a regression, not an upstream bug.
+# outside lakebench. Empty today; no known upstream failures are tolerated.
 _KNOWN_QUERY_FAILURES: set[tuple[str, str, str]] = set()
 
 
@@ -838,12 +829,12 @@ def _maintenance_value(
     reduced the data file count. With the file count unchanged the two rounds
     differ only in what compaction did not change, and the difference is
     run-to-run noise: on 2026-09-24 four runs with the same file count before
-    and after read -12.4%, -8.9%, +31.2% and +46.8% (LB-141).
+    and after read -12.4%, -8.9%, +31.2% and +46.8%.
 
     *settle* is the ``SettleResult`` of the wait before the post round, or
     None when the wait was disabled. A wait that did not settle leaves the
     value None: the post round measured storage still working off the
-    maintenance burst (LB-150).
+    maintenance burst.
 
     *stopped_reason* is set when pre-benchmark maintenance was stopped (a
     statement timed out or the overall cap hit). A timed-out statement may
@@ -999,7 +990,7 @@ def _settle_after_maintenance(
     sleep=None,
     trigger: str = "",
 ):
-    """Probe until storage settles after batch maintenance (LB-150).
+    """Probe until storage settles after batch maintenance.
 
     Returns the ``SettleResult``, or None when the wait is disabled. Raises
     ValueError when the configured probe query is not in the query set. *started_at* is ``time.monotonic()`` at
