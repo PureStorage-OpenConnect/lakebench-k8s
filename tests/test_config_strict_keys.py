@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from lakebench.config import load_config
-from lakebench.config.loader import ConfigValidationError, generate_example_config_yaml
+from lakebench.config.loader import ConfigValidationError
 from lakebench.config.schema import ConfigModel, LakebenchConfig, PipelineMode
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +69,7 @@ def test_unknown_key_is_rejected_and_named(tmp_path, data, bad_loc):
     with pytest.raises(ConfigValidationError) as exc:
         load_config(_write(tmp_path, data))
     assert bad_loc in str(exc.value)
-    assert "Extra inputs are not permitted" in str(exc.value)
+    assert "unknown key" in str(exc.value)
 
 
 def test_every_schema_model_forbids_extras():
@@ -101,7 +101,14 @@ def _load_quiet(tmp_path, data):
 
 def test_mode_continuous_is_canonical(tmp_path):
     # D18: 'continuous' is the product's name and loads without a warning.
-    cfg = _load_quiet(tmp_path, {"name": "t", "architecture": {"pipeline": {"mode": "continuous"}}})
+    cfg = _load_quiet(
+        tmp_path,
+        {
+            "name": "t",
+            "recipe": "hive-iceberg-spark-trino",
+            "architecture": {"pipeline": {"mode": "continuous"}},
+        },
+    )
     assert cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
     assert cfg.architecture.pipeline.mode.value == "continuous"
 
@@ -118,7 +125,11 @@ def test_mode_sustained_is_the_deprecated_alias(tmp_path):
 def test_pipeline_continuous_key_is_canonical(tmp_path):
     cfg = _load_quiet(
         tmp_path,
-        {"name": "t", "architecture": {"pipeline": {"continuous": {"run_duration": 600}}}},
+        {
+            "name": "t",
+            "recipe": "hive-iceberg-spark-trino",
+            "architecture": {"pipeline": {"continuous": {"run_duration": 600}}},
+        },
     )
     assert cfg.architecture.pipeline.sustained.run_duration == 600
 
@@ -151,11 +162,16 @@ def test_processing_key(tmp_path):
 
 
 def test_scratch_create_storage_class_is_dropped_with_warning(tmp_path):
-    cfg = _load_warns(
-        tmp_path,
-        {"name": "t", "platform": {"storage": {"scratch": {"create_storage_class": False}}}},
-    )
+    # Dropped with a warning for the read and teardown commands; refused by
+    # the commands that change data (CFG-1, LoadPurpose).
+    from lakebench.config.loader import LoadPurpose
+
+    data = {"name": "t", "platform": {"storage": {"scratch": {"create_storage_class": False}}}}
+    with pytest.warns(DeprecationWarning):
+        cfg = load_config(_write(tmp_path, data), purpose=LoadPurpose.TEARDOWN)
     assert not hasattr(cfg.platform.storage.scratch, "create_storage_class")
+    with pytest.raises(ConfigValidationError, match="'create_storage_class' was removed"):
+        load_config(_write(tmp_path, data))
 
 
 def test_flat_top_level_fields_still_promote(tmp_path):
@@ -177,7 +193,11 @@ def test_dump_roundtrip_revalidates():
     assert again == cfg
 
 
-def test_init_template_validates(tmp_path):
+def test_init_template_validates(tmp_path, monkeypatch):
+    from lakebench.cli._init import first_day_config
+
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "a")
+    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "b")
     p = tmp_path / "init.yaml"
-    p.write_text(generate_example_config_yaml())
-    assert load_config(p).name
+    p.write_text(first_day_config(name="init-t"))
+    assert load_config(p).name == "init-t"

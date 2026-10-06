@@ -359,7 +359,7 @@ def generate_local(
     dims = get_dimensions(
         cfg.architecture.workload.schema_type, cfg.architecture.workload.datagen.scale
     )
-    target_tb = max(dims.approx_bronze_gb / 1024.0, 0.0001)
+    target_tb = max(dims.datagen_target_gb / 1024.0, 0.0001)
     datagen = cfg.architecture.workload.datagen
 
     cmd = [
@@ -378,6 +378,10 @@ def generate_local(
         "-e",
         f"AWS_REGION={deployment.credentials.region}",
         cfg.images.datagen,
+        # The entrypoint defaults to the financial schema, which needs the
+        # held-out hash file mounted; local mode runs Customer 360 only.
+        "--schema",
+        cfg.architecture.workload.schema_type.value,
         "--bucket",
         cfg.platform.storage.s3.buckets.bronze,
         "--target-tb",

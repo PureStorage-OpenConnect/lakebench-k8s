@@ -7,47 +7,24 @@ The pinned Iceberg snapshot may include ghost rows from a batch whose
 transactions committed but whose versions row never landed; the semi-join
 must hide those.
 
-Runs in a child process because Iceberg jars must be on the driver
-classpath at JVM launch.
+Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
+``LB_SPARK_TEST_JARS`` on the driver classpath at JVM launch.
 """
 
 from __future__ import annotations
 
-import glob
 import json
-import os
-import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_pin_silver_and_fallback_hide_ghost_rows():
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_pin_silver_and_fallback_hide_ghost_rows(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # 2 sealed batches (10 rows) + 1 unsealed batch (5 rows).
     assert out["raw_row_count"] == 15, out
@@ -55,6 +32,7 @@ def test_pin_silver_and_fallback_hide_ghost_rows():
     assert out["pinned_row_count"] == 10, out
     # Fallback path (snapshot lookup returns None) also semi-joins.
     assert out["fallback_row_count"] == 10, out
+    assert out["versions_used_is_vsid"], out
 
 
 _TXNS_DDL = """
@@ -75,7 +53,7 @@ CREATE TABLE lh.silver.silver_batch_versions (
 """
 
 
-def _run(jar):
+def _run(jars):
     from datetime import datetime
 
     from pyspark.sql import SparkSession
@@ -84,7 +62,7 @@ def _run(jar):
         spark = (
             SparkSession.builder.master("local[1]")
             .config("spark.ui.enabled", "false")
-            .config("spark.jars", jar)
+            .config("spark.jars", jars)
             .config("spark.sql.shuffle.partitions", "2")
             .config(
                 "spark.sql.extensions",
@@ -129,7 +107,8 @@ def _run(jar):
         raw_row_count = spark.table("lh.silver.transactions").count()
 
         # Pinned-snapshot path.
-        txns_pinned, _sid, _rows, _newest = gr._pin_silver(spark)
+        txns_pinned, _sid, versions_used, _rows, _newest, _tt = gr._pin_silver(spark)
+        vsid = gr._current_snapshot(spark, "lh.silver.silver_batch_versions")
         pinned_row_count = txns_pinned.count()
 
         # Force the fallback path by pointing gr at a table that has no
@@ -138,9 +117,10 @@ def _run(jar):
         real_current_snapshot = gr._current_snapshot
         gr._current_snapshot = lambda _s, _fq: None
         try:
-            txns_fallback, sid_fb, _rows_fb, _newest_fb = gr._pin_silver(spark)
+            txns_fallback, sid_fb, versions_fb, _rows_fb, _newest_fb, _tt_fb = gr._pin_silver(spark)
             fallback_row_count = txns_fallback.count()
             assert sid_fb is None, sid_fb
+            assert versions_fb == "none", versions_fb
         finally:
             gr._current_snapshot = real_current_snapshot
 
@@ -148,12 +128,14 @@ def _run(jar):
             "raw_row_count": int(raw_row_count),
             "pinned_row_count": int(pinned_row_count),
             "fallback_row_count": int(fallback_row_count),
+            # AML-6: the pinned path names the versions snapshot it read.
+            "versions_used_is_vsid": versions_used == str(vsid),
         }
         print(json.dumps(out))
         spark.stop()
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(SCRIPTS)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
+    # is the comma-separated jar classpath.
     _run(sys.argv[1])

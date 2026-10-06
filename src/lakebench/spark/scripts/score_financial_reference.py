@@ -1,7 +1,7 @@
 """Score (Financial, reference) -- leakage gate + the pre-registered AML fidelity gate.
 
-The cluster half of the AML fidelity gate (AML-GOALS D9, and A6 against the
-local harness scripts/aml_gate.py). Two independent things this script does:
+The cluster half of the AML fidelity gate (the local half is the harness
+scripts/aml_gate.py). Two independent things this script does:
 
 1. **Band leakage gate** -- compares baseline transaction density against
    typology density inside each currency-specific structuring band. If
@@ -457,7 +457,9 @@ def run_fidelity_gate(
             report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}
         except Exception as e:  # noqa: BLE001
             report["secondary_lifetime"] = {"gated": False, "verdict": "error", "note": str(e)}
-    seed_ok = seed_check["matched_share"] == 1
+    # Checked over every manifest row by the corpus verdict; a provenance
+    # without it is not verified (the 200-row sample never decides).
+    seed_ok = provenance.get("corpus_seed_matches_claim") is True
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
@@ -470,17 +472,19 @@ def run_fidelity_gate(
     return report
 
 
-def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
-    """AML-GOALS R3: refuse, before anything is computed or written, a corpus
-    from a spent seed, or from the evaluation or robustness seed outside its
-    declared registered run, whatever seed the deployment claims (a bucket can
-    hold a corpus from a manual Job). A registered run must also be verified:
-    the manifest has to come from the claimed seed."""
+def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> tuple:
+    """Refuse, before anything is computed or written, a corpus from a spent
+    seed, or from the evaluation or robustness seed outside its declared
+    registered run, whatever seed the deployment claims (a bucket can hold a
+    corpus from a manual Job). A registered run must also be verified: every
+    manifest row has to come from the claimed seed. Returns the robustness
+    stamp and the corpus verdict."""
     try:
         from lakebench.config.datagen_seed import (
             MANIFEST_KEYS,
-            PROTECTED_ROLES,
+            CorpusSeedError,
             aml_seed_error,
+            corpus_verdict,
             perturbation_stamp_error,
             spent_from,
             summarise_stamp,
@@ -489,8 +493,9 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
     except ImportError:  # flat on the driver
         from datagen_seed import (
             MANIFEST_KEYS,
-            PROTECTED_ROLES,
+            CorpusSeedError,
             aml_seed_error,
+            corpus_verdict,
             perturbation_stamp_error,
             spent_from,
             summarise_stamp,
@@ -501,22 +506,27 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
     # Seeds in aml_registered_looks.json (mounted next to this script) are
     # spent too: a recorded look refuses any second look.
     corpora = with_recorded_looks(load_preregistration()[0]["corpora"])
-    guarded = sorted(spent_from(corpora) | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES})
-    matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
     raw = os.environ.get("LB_DATAGEN_SEED")
     claimed = int(raw) if raw not in (None, "") else None
-    verified = (
-        af.corpus_seed_check(manifest, claimed)["matched_share"] == 1
-        if claimed is not None
-        else False
+    # The corpus seed is recovered from every manifest row's instance seed and
+    # checked against heldout_hashes.json (mounted next to this script), so a
+    # held-out seed behind any one manifest file is found. The verdict names a
+    # role and a count, never a seed.
+    rows = (
+        (r["typology_id"], r["seed"])
+        for r in manifest.select("typology_id", "seed").toLocalIterator()
     )
+    try:
+        verdict = corpus_verdict(rows, claimed=claimed, spent=spent_from(corpora))
+    except (CorpusSeedError, OSError, ValueError) as e:
+        raise SystemExit(f"refusing to score this corpus: {e}") from None
     err = aml_seed_error(
         corpora,
         claimed,
         os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
-        matched,
+        [verdict.role] if verdict.role is not None else [],
         counts_only,
-        claim_verified=verified,
+        claim_verified=verdict.matches_claim is True,
     )
     if err:
         raise SystemExit(f"refusing to score this corpus: {err}")
@@ -532,7 +542,7 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
     )
     if err:
         raise SystemExit(f"refusing to score this corpus: {err}")
-    return stamp
+    return stamp, verdict
 
 
 def main() -> None:
@@ -589,11 +599,11 @@ def main() -> None:
     manifest_src = af.manifest_glob(args.manifest)
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
-    stamp = _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
+    stamp, verdict = _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
     if os.environ.get("LB_DATAGEN_CORPUS_ROLE") in ("evaluation", "robustness") and not (
         args.counts_only
     ):
-        # AML-GOALS R3 / #46: a registered look must record its seed before
+        # A registered look must record its seed before
         # any model exists and its report hash before any verdict is seen, in
         # the tracked aml_registered_looks.json, and must hash the committed
         # Level-2 predictions. The driver can do none of that (and its outputs
@@ -640,6 +650,8 @@ def main() -> None:
         "robustness_perturbation": stamp["n_instances"] > 0
         and stamp["n_stamped"] == stamp["n_instances"],
         "robustness_stamp": stamp,
+        # Every manifest row comes from the claimed seed (None: no claim).
+        "corpus_seed_matches_claim": verdict.matches_claim,
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }

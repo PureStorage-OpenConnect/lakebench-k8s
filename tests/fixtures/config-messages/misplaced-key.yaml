@@ -1,0 +1,4 @@
+name: t
+platform:
+  storage:
+    scale: 5

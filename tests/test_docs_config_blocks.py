@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lakebench.config import load_config
+from lakebench.config import LoadPurpose, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -79,4 +79,12 @@ def test_docs_config_block_loads(data, env, tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump(data))
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
-        load_config(path)
+        # As `lakebench run` loads it: a documented config must also pass the
+        # run-only refusals (benchmark mode, cache, streams). Most blocks are
+        # fragments that show one section, so a missing recipe (the
+        # default-recipe note) is allowed; a block that names a recipe must
+        # still agree with it, or the load fails.
+        warnings.filterwarnings(
+            "ignore", message=r"(no recipe|recipe 'default'): ", category=DeprecationWarning
+        )
+        load_config(path, purpose=LoadPurpose.RUN)

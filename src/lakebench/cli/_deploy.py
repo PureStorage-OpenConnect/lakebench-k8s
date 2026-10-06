@@ -14,25 +14,52 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
+from lakebench.cli._exit import note_exit_paths, refusal_paths, refused_result_code
 from lakebench.cli._helpers import (
     _journal_safe,
     check_datagen_scale,
     console,
+    esc,
     journal_open,
     print_error,
     print_info,
+    print_warning,
     resolve_config_path,
 )
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode, LakebenchError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
+
+
+def _next_steps(cfg, config_file: Path) -> str:
+    """The "Next:" lines after a plain ``deploy``, naming its config."""
+    cf = esc(config_file)
+    if cfg.architecture.pipeline.cycles > 1:
+        return (
+            f"\n\nNext: [bold]lakebench run {cf}[/bold]     to run the pipeline; each "
+            "cycle generates its data first"
+            f"\n      [bold]lakebench status {cf}[/bold]  to check deployment"
+        )
+    return (
+        f"\n\nNext: [bold]lakebench run {cf} --generate[/bold]  to generate data and run "
+        "the pipeline"
+        f"\n      [bold]lakebench status {cf}[/bold]          to check deployment"
+    )
+
+
+def deploy_inside_run(config_file: Path | None, *, yes: bool = True) -> None:
+    """Deploy for a command that carries on by itself (``run --yes``,
+    ``run --generate-only``): no "Next:" steps."""
+    _deploy_impl(resolve_config_path(config_file, None), yes=yes, next_steps=False)
 
 
 def _preflight_check(cfg) -> None:
@@ -40,23 +67,33 @@ def _preflight_check(cfg) -> None:
 
     Prints warnings for non-critical issues; exits on blockers.
     """
-    print_info("Tip: run 'lakebench config validate' for a full prerequisite check")
-
     # 1. S3 endpoint must be set
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
         print_error("S3 endpoint not configured (platform.storage.s3.endpoint)")
         print_info("Run 'lakebench config validate' for detailed diagnostics")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
-    # 2. S3 credentials must be present (inline or secret_ref)
-    has_inline = bool(s3.access_key and s3.secret_key)
-    has_ref = bool(getattr(s3, "secret_ref", None))
-    if not has_inline and not has_ref:
-        print_error("S3 credentials not configured (set access_key/secret_key or secret_ref)")
-        raise typer.Exit(1)
+    # 2. Inline S3 credentials must be present (secret_ref is not consumed
+    # and a secret_ref-only config is refused at load)
+    if not (s3.access_key and s3.secret_key):
+        print_error("S3 credentials not configured (set access_key and secret_key)")
+        raise typer.Exit(ExitCode.USAGE)
 
-    # 3. Check Stackable CRDs if catalog=hive
+    # 3. The cluster can hold the config's peak (read-only; run's check).
+    from lakebench.cli._prerequisites import deploy_capacity_check
+
+    capacity = deploy_capacity_check(cfg)
+    if not capacity.passed:
+        print_error(f"cluster-capacity: {esc(capacity.message)}")
+        for line in (capacity.hint or "").split("\n"):
+            if line:
+                console.print(f"  [dim]{esc(line)}[/dim]")
+        print_info("Nothing was created.")
+        raise typer.Exit(ExitCode.PREREQUISITE)
+    print_info(f"cluster-capacity: {esc(capacity.message)}")
+
+    # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
         _missing_stackable: list[str] = []
         try:
@@ -75,35 +112,34 @@ def _preflight_check(cfg) -> None:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
 
         if _missing_stackable:
-            op_install = getattr(
-                getattr(getattr(cfg.architecture.catalog, "hive", None), "operator", None),
-                "install",
-                False,
+            print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
+            print_info(
+                "A cluster admin installs them once:\n"
+                "  lakebench admin install --component stackable <config>\n"
+                "Or switch to a Polaris recipe (no operators needed):\n"
+                "  Set recipe: polaris-iceberg-spark-trino in your config"
             )
-            if op_install:
-                print_info(
-                    f"Stackable operators missing ({', '.join(_missing_stackable)}) "
-                    "-- will be auto-installed during deploy (install: true)"
-                )
-            else:
-                print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
-                print_info("Install operators first:")
-                for op in [
-                    "commons-operator",
-                    "listener-operator",
-                    "secret-operator",
-                    "hive-operator",
-                ]:
-                    console.print(
-                        f"  helm install {op} "
-                        f"oci://oci.stackable.tech/sdp-charts/{op} "
-                        f"--version 25.7.0 --namespace stackable --create-namespace"
-                    )
-                print_info(
-                    "Or switch to a Polaris recipe (no operators needed):\n"
-                    "  Set recipe: polaris-iceberg-spark-trino in your config"
-                )
-                raise typer.Exit(1)
+            raise typer.Exit(ExitCode.PREREQUISITE)
+
+    # 4. The shared observability stack, when this deploy uses it: deploy
+    # never installs it, so stop before creating anything rather than at the
+    # last step. An unreadable answer is left to the observability step.
+    if cfg.observability.enabled:
+        release_ns: str | None = ""
+        try:
+            from lakebench.deploy.observability import find_observability_release
+
+            release_ns = find_observability_release(cfg.platform.kubernetes.context or None)
+        except Exception:
+            logger.debug("Preflight observability check skipped", exc_info=True)
+        if release_ns is None:
+            print_error("The shared observability stack (kube-prometheus-stack) is not installed")
+            print_info(
+                "A cluster admin installs it once:\n"
+                "  lakebench admin install --component observability <config>\n"
+                "Or set observability.enabled: false"
+            )
+            raise typer.Exit(ExitCode.PREREQUISITE)
 
 
 def _build_component_list(cfg) -> str:
@@ -122,11 +158,13 @@ def _build_component_list(cfg) -> str:
     elif engine == "duckdb":
         parts.append("DuckDB")
     parts.append("Spark RBAC")
-    if cfg.platform.compute.spark.operator.install:
-        parts.append("Spark Operator")
+    # The operator step always runs: it verifies the shared operator and adds
+    # this namespace to its watch list. Deploy never installs it.
+    parts.append("Spark Operator watch list")
+    parts.append("Dependency server")
     if cfg.observability.enabled:
-        if cfg.observability.prometheus_stack_enabled:
-            parts.append("Prometheus")
+        # observability.enabled always installs or reuses the full stack.
+        parts.append("Prometheus")
         if cfg.observability.dashboards_enabled:
             parts.append("Grafana")
     return ", ".join(parts)
@@ -154,7 +192,7 @@ def _deploy_local_mode(
         check_local_supported(cfg)
     except LocalModeError as e:
         print_error(str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     resolved_workdir = workdir or default_workdir(cfg.name)
     print_local_plan(cfg, resolved_workdir)
@@ -180,11 +218,11 @@ def _deploy_local_mode(
     except LocalModeError as e:
         print_error(str(e))
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
         print_error(f"Local deploy failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     elapsed = int(time.time() - started)
     _journal_safe(
@@ -209,6 +247,153 @@ def _deploy_local_mode(
     )
 
 
+def _namespace_identity(cfg):
+    """One read of the namespace's UID and lakebench annotations (or None)."""
+    from kubernetes import client
+
+    from lakebench.config.deploy_state import read_namespace_identity
+    from lakebench.exit_codes import PrerequisiteError
+
+    try:
+        return read_namespace_identity(client.CoreV1Api(), cfg.get_namespace())
+    except Exception as e:  # noqa: BLE001
+        raise PrerequisiteError(
+            f"cannot read namespace {cfg.get_namespace()}: {e}",
+            why="deploy reconciles its recorded nonces with the namespace before any change",
+            path="deploy.state_unrecordable",
+        ) from e
+
+
+def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | None) -> str | None:
+    """Lock, reconcile, choose and record the nonce this deploy stamps.
+
+    Under the directory's state lock: read the state, read the namespace and
+    mark the entry it carries confirmed, prepend the new nonce as pending
+    (never evicting the carried entry), write the state atomically. Returns
+    the nonce. A dry run reads the namespace, prints which entry it carries
+    and writes nothing (no lock, no ``.lakebench/``). A state that cannot be
+    written stops the deploy with exit 4 before any cluster change.
+    """
+    import uuid
+
+    from lakebench.config import deploy_state as ds
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
+
+    name = cfg.name
+    try:
+        path = ds.state_path(config_file, name)
+    except ds.StateError as e:
+        raise PrerequisiteError(
+            str(e),
+            why="deploy records the nonce in <config dir>/.lakebench/<name>.json",
+            next="give the config a name without '/', a leading '.', or the value 'state'",
+            path="deploy.state_unrecordable",
+        ) from e
+    if dry_run:
+        ident = _namespace_identity(cfg)
+        try:
+            state = ds.read_state_file(path)
+        except ds.StateError as e:
+            print_warning(f"State: {e}; a real deploy stops here (exit 4)")
+            return None
+        why_not = ds.not_here(state, config_file) if state is not None else None
+        if why_not is not None:
+            print_warning(f"State: {path}: {why_not}; a real deploy stops here (exit 3)")
+            return None
+        carries = state is not None and ident is not None and ident.nonce in state.kept_nonces()
+        print_info(
+            f"State: {path} "
+            + (
+                "(none yet)"
+                if state is None
+                else f"keeps {len(state.nonces)} nonce(s); namespace carries "
+                + ("one of them" if carries else "none of them")
+            )
+            + "; a dry run writes nothing"
+        )
+        return None
+    chosen = nonce or uuid.uuid4().hex
+    try:
+        with ds.state_lock(config_file, name):
+            state = ds.read_state_file(path)
+            if state is not None and state.moved_to:
+                raise SafetyRefusal(
+                    f"this deployment's state moved to {state.moved_to}; deploy from there",
+                    where=str(path),
+                    path="nameless.moved",
+                )
+            if state is not None:
+                why_not = ds.not_here(state, config_file)
+                if why_not is not None:
+                    raise SafetyRefusal(
+                        f"{path}: {why_not}",
+                        why="a copied directory would add its nonces to another "
+                        "directory's record of the deployment",
+                        where=str(path),
+                        next=(
+                            "this directory was renamed: run `python -m "
+                            "lakebench.config.deploy_state relocate CONFIG NEWDIR` from it"
+                            if ds.moved_with_its_directory(state, config_file)
+                            else "deploy from the directory that wrote it; if this copy is "
+                            f"meant to be a new deployment directory, remove only {path}"
+                        ),
+                        path="deploy.state_copied",
+                    )
+                if ds.retarget(state, cfg.get_namespace()):
+                    print_warning(
+                        f"State: the config now targets namespace {state.namespace}; "
+                        "the nonces recorded for the old one are dropped"
+                    )
+                if state.config_dir_id is None:
+                    state.config_dir_id = ds.new_state(
+                        config_file, name, state.namespace
+                    ).config_dir_id
+            else:
+                state = ds.new_state(config_file, name, cfg.get_namespace())
+            ident = _namespace_identity(cfg)
+            carried = ds.reconcile(state, ident)
+            ds.record_pending(state, chosen, carried)
+            from lakebench.k8s.target import active_target
+
+            pinned = active_target()
+            state.api_server = pinned.api_server if pinned is not None else state.api_server
+            ds.write_state(path, state)
+    except (OSError, ds.StateError) as e:
+        raise PrerequisiteError(
+            f"cannot record the deploy nonce in {path}: {e}",
+            why="deploy records the nonce before the namespace gets it",
+            where=str(path),
+            next=(
+                "check or move the state file aside, then deploy again"
+                if isinstance(e, ds.StateError)
+                else "make the config's directory writable, or deploy from a local disk"
+            ),
+            path="deploy.state_unrecordable",
+        ) from e
+    return chosen
+
+
+def _confirm_deploy_nonce(cfg, config_file: Path, nonce: str) -> None:
+    """Step 7: once the namespace carries ``nonce``, mark it confirmed.
+
+    Runs whether the deploy succeeded or failed. Best effort: an entry left
+    pending is still accepted by the nameless checks and confirmed by the
+    next deploy's reconcile.
+    """
+    from lakebench.config import deploy_state as ds
+
+    try:
+        with ds.state_lock(config_file, cfg.name):
+            path = ds.state_path(config_file, cfg.name)
+            state = ds.read_state_file(path)
+            if state is None:
+                return
+            if ds.confirm(state, nonce, _namespace_identity(cfg)):
+                ds.write_state(path, state)
+    except Exception as e:  # noqa: BLE001 -- the entry stays pending
+        logger.debug("could not confirm deploy nonce %s: %s", nonce, e)
+
+
 def deploy(
     config_file: Annotated[
         Path | None,
@@ -231,13 +416,6 @@ def deploy(
             help="Show what would be deployed without making changes",
         ),
     ] = False,
-    include_observability: Annotated[
-        bool,
-        typer.Option(
-            "--include-observability",
-            help="Deploy Prometheus and Grafana monitoring stack",
-        ),
-    ] = False,
     yes: Annotated[
         bool,
         typer.Option(
@@ -251,7 +429,7 @@ def deploy(
         typer.Option(
             "--timeout",
             "-t",
-            help="Global deployment timeout in seconds (0 = no timeout)",
+            help="Global deployment timeout in seconds (0 = no timeout); bounds the waits in every step",
         ),
     ] = 3600,
     local: Annotated[
@@ -283,50 +461,117 @@ def deploy(
             ),
         ),
     ] = False,
+    require_new: Annotated[
+        bool,
+        typer.Option(
+            "--require-new",
+            hidden=True,
+            help=(
+                "Refuse (exit 3) instead of adopting a namespace or bucket that "
+                "already exists, including one created while this deploy runs. For "
+                "harnesses that destroy only what they deployed; it only adds a refusal."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
     Deploys all components in this order:
     1. Namespace, secrets and S3 buckets
     2. Scratch StorageClass check (it must already exist; a cluster admin
-       installs it with `lakebench admin install-scratch-storage-class`)
+       installs it with `lakebench admin install --component scratch-storage-class`)
     3. PostgreSQL
     4. Catalog (Hive Metastore or Polaris)
     5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
     6. Spark Operator check and watch-list entry for the namespace (always
-       runs; operator.install: true also installs a missing operator)
-    7. Query Engine (Trino / Spark Thrift / DuckDB)
-    8. Observability (if enabled)
+       runs; deploy never installs shared operators, `lakebench admin install
+       --component` does)
+    7. Dependency server (lb-deps): resolves the jars and wheels this
+       deployment needs onto its own PVC once, then serves them in the
+       namespace
+    8. Query Engine (Trino / Spark Thrift / DuckDB)
+    9. Observability (if enabled)
+    """
+    if require_new and (local or force_legacy):
+        from lakebench.exit_codes import UsageError
+
+        raise UsageError(
+            "--require-new does not combine with "
+            + ("--local: a local stack has no namespace" if local else "--force-legacy")
+            + "; it refuses anything that already exists",
+            path="cli.bad_argument",
+        )
+    _deploy_impl(
+        resolve_config_path(config_file, file_option),
+        dry_run=dry_run,
+        yes=yes,
+        timeout=timeout,
+        local=local,
+        workdir=workdir,
+        force_legacy=force_legacy,
+        require_new=require_new,
+    )
+
+
+def _deploy_impl(
+    config_file: Path,
+    *,
+    dry_run: bool = False,
+    yes: bool = False,
+    timeout: int = 3600,
+    local: bool = False,
+    workdir: Path | None = None,
+    force_legacy: bool = False,
+    nonce: str | None = None,
+    require_new: bool = False,
+    next_steps: bool = True,
+) -> str | None:
+    """The body of ``deploy``, callable with a nonce the caller chose.
+
+    ``reproduce`` passes its own ``nonce``, so it destroys only what it made,
+    and ``require_new`` so an existing namespace or bucket is refused (exit
+    3), not adopted. Returns the nonce this deploy recorded and stamped, or
+    None for a dry run or local mode.
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file, file_option)
-
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
-    # Enable observability if flag is set
-    if include_observability:
-        cfg.observability.enabled = True
+    if not local:
+        # A name the deploy state cannot record stops here, before the
+        # prompt and preflight, not after them.
+        from lakebench.config import deploy_state as _ds
+        from lakebench.exit_codes import PrerequisiteError
+
+        try:
+            _ds.state_path(config_file, cfg.name)
+        except _ds.StateError as e:
+            raise PrerequisiteError(
+                str(e),
+                why="deploy records the nonce in <config dir>/.lakebench/<name>.json",
+                next="give the config a name without '/', a leading '.', or the value 'state'",
+                path="deploy.state_unrecordable",
+            ) from e
 
     # Local mode has its own path: no namespace, no operator, no preflight
     # against a cluster that is not there.
     if local:
         _deploy_local_mode(cfg, config_file, workdir, dry_run, yes, timeout)
-        return
+        return None
 
     check_datagen_scale(cfg)
 
@@ -335,6 +580,14 @@ def deploy(
     # Pre-flight validation (BUG-012)
     if not dry_run:
         _preflight_check(cfg)
+    else:
+        from lakebench.cli._prerequisites import deploy_capacity_check
+
+        preview = deploy_capacity_check(cfg)
+        print_info(
+            f"cluster-capacity: {esc(preview.message)}"
+            + ("" if preview.passed else " (deploy would refuse it, exit 4)")
+        )
 
     # Confirmation prompt (mirrors destroy command pattern)
     if not yes and not dry_run:
@@ -368,8 +621,14 @@ def deploy(
 
     # Deploy
     deploy_start = time.time()
+    recorded: str | None = None
     try:
-        engine = DeploymentEngine(cfg, dry_run=dry_run)
+        engine = DeploymentEngine(cfg, dry_run=dry_run, require_new=require_new)
+        # Record the nonce in the directory's state before the
+        # namespace gets it, so a crash between the two cannot orphan the
+        # deployment. A dry run only reads.
+        recorded = _record_deploy_nonce(cfg, config_file, dry_run=dry_run, nonce=nonce)
+        engine.deploy_nonce = recorded
 
         # Progress callback -- columnar output with version info
         _step_start: dict[str, float] = {}
@@ -397,11 +656,15 @@ def deploy(
                 elapsed = time.time() - _step_start.pop(component, time.time())
                 console.print(_fmt_deploy_line("x", "red", elapsed))
 
-        results = engine.deploy_all(
-            progress_callback=on_progress,
-            timeout=timeout,
-            force_legacy=force_legacy,
-        )
+        try:
+            results = engine.deploy_all(
+                progress_callback=on_progress,
+                timeout=timeout,
+                force_legacy=force_legacy,
+            )
+        finally:
+            if recorded:
+                _confirm_deploy_nonce(cfg, config_file, recorded)
 
         # Record each component result in journal
         for r in results:
@@ -419,7 +682,10 @@ def deploy(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
+    except LakebenchError as e:
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise
 
     # Summary
     console.print()
@@ -462,15 +728,13 @@ def deploy(
             success_msg += (
                 f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
                 f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
-                f"\n  Grafana login: admin / lakebench"
+                f"\n  Grafana login: admin, password from [cyan]kubectl get secret -n {obs_ns} "
+                "lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
                 f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
-        success_msg += (
-            "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
-            "\n      [bold]lakebench run --generate[/bold]  to generate data and run the pipeline"
-            "\n      [bold]lakebench status[/bold]          to check deployment"
-        )
+        if next_steps:
+            success_msg += _next_steps(cfg, config_file)
 
         console.print(
             Panel(
@@ -482,11 +746,18 @@ def deploy(
     else:
         failed_component = next((r for r in results if r.status == DeploymentStatus.FAILED), None)
         guidance = "Check the errors above, then re-run 'lakebench deploy'."
-        if failed_component:
+        if failed_component and require_new:
+            # A re-run would refuse the namespace this deploy may have made.
+            guidance = (
+                f"Failed at: {failed_component.component}\n"
+                "Nothing that existed was adopted. If this deploy created the "
+                f"namespace, `lakebench destroy {esc(config_file)}` removes it; then deploy again."
+            )
+        elif failed_component:
             guidance = (
                 f"Failed at: {failed_component.component}\n"
                 "Fix the issue above, then re-run 'lakebench deploy'.\n"
-                "Successful steps will be skipped on retry."
+                "Re-running deploy re-applies every step; existing resources are kept."
             )
         console.print(
             Panel(
@@ -495,4 +766,7 @@ def deploy(
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        # An ownership refusal (deploy.identity_foreign) is 3, any other failed step 1.
+        note_exit_paths(refusal_paths(results))
+        raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)
+    return recorded

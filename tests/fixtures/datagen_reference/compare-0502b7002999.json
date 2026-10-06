@@ -1,0 +1,436 @@
+{
+ "format": 1,
+ "image_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+ "image_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+ "cases": [
+  {
+   "case": "F0",
+   "seed_ref": "43",
+   "argv_canonical": [
+    [
+     "--schema",
+     "financial",
+     "--scale",
+     "1.000000",
+     "--target-tb",
+     "0.008203",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "pacs008",
+     "--seed",
+     "43",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0"
+    ]
+   ],
+   "digest_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+   "digest_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+   "objects": 141,
+   "sha256_a": "53967422c60ae12a53c5454ff6a10fe05be5f10e1bfb0c004578c85363dcd740",
+   "sha256_b": "53967422c60ae12a53c5454ff6a10fe05be5f10e1bfb0c004578c85363dcd740",
+   "equal": true,
+   "bytes_equal": true,
+   "argv_rendered_equal": true,
+   "rendered_runs": null,
+   "threads_a": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_b": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_equal": true,
+   "differences": [],
+   "excluded": [
+    "_corpus/"
+   ],
+   "excluded_objects_a": 0,
+   "excluded_objects_b": 4
+  },
+  {
+   "case": "F1",
+   "seed_ref": "43",
+   "argv_canonical": [
+    [
+     "--schema",
+     "financial",
+     "--scale",
+     "1.000000",
+     "--target-tb",
+     "0.008203",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "pacs008",
+     "--seed",
+     "43",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0",
+     "--robustness-perturbation"
+    ]
+   ],
+   "digest_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+   "digest_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+   "objects": 141,
+   "sha256_a": "80b1e2bc75ccc0276d7c61b1bc5fa5fe05dcaa01e4d7b4984700ec291185861e",
+   "sha256_b": "80b1e2bc75ccc0276d7c61b1bc5fa5fe05dcaa01e4d7b4984700ec291185861e",
+   "equal": true,
+   "bytes_equal": true,
+   "argv_rendered_equal": true,
+   "rendered_runs": null,
+   "threads_a": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_b": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_equal": true,
+   "differences": [],
+   "excluded": [
+    "_corpus/"
+   ],
+   "excluded_objects_a": 0,
+   "excluded_objects_b": 4
+  },
+  {
+   "case": "C0",
+   "seed_ref": "42",
+   "argv_canonical": [
+    [
+     "--schema",
+     "customer360",
+     "--target-tb",
+     "0.009766",
+     "--customer-id-max",
+     "100000",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "customer/interactions",
+     "--seed",
+     "42",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0"
+    ]
+   ],
+   "digest_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+   "digest_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+   "objects": 160,
+   "sha256_a": "118aef9b5432fe13890a9d76df484498bfe384603f972d8201f7b5e8c03f49b0",
+   "sha256_b": "118aef9b5432fe13890a9d76df484498bfe384603f972d8201f7b5e8c03f49b0",
+   "equal": true,
+   "bytes_equal": true,
+   "argv_rendered_equal": true,
+   "rendered_runs": null,
+   "threads_a": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_b": [
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_equal": true,
+   "differences": [],
+   "excluded": [
+    "_corpus/"
+   ],
+   "excluded_objects_a": 0,
+   "excluded_objects_b": 4
+  },
+  {
+   "case": "F2",
+   "seed_ref": "43",
+   "argv_canonical": [
+    [
+     "--schema",
+     "financial",
+     "--scale",
+     "1.000000",
+     "--target-tb",
+     "0.004102",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "pacs008",
+     "--seed",
+     "43",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0",
+     "--timestamp-start",
+     "2024-01-01",
+     "--timestamp-end",
+     "2024-12-31",
+     "--cycle",
+     "0",
+     "--cycles",
+     "2"
+    ],
+    [
+     "--schema",
+     "financial",
+     "--scale",
+     "1.000000",
+     "--target-tb",
+     "0.004102",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "pacs008",
+     "--seed",
+     "43",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0",
+     "--timestamp-start",
+     "2024-12-31",
+     "--timestamp-end",
+     "2025-12-31",
+     "--cycle",
+     "1",
+     "--cycles",
+     "2"
+    ]
+   ],
+   "digest_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+   "digest_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+   "objects": 143,
+   "sha256_a": "024a543d175003c8498fcb28db864ad092aedfa19856c7cff43e0e8a8054c207",
+   "sha256_b": "024a543d175003c8498fcb28db864ad092aedfa19856c7cff43e0e8a8054c207",
+   "equal": true,
+   "bytes_equal": true,
+   "argv_rendered_equal": true,
+   "rendered_runs": null,
+   "threads_a": [
+    [
+     8,
+     8,
+     8,
+     8
+    ],
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_b": [
+    [
+     8,
+     8,
+     8,
+     8
+    ],
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_equal": true,
+   "differences": [],
+   "excluded": [
+    "_corpus/"
+   ],
+   "excluded_objects_a": 0,
+   "excluded_objects_b": 8
+  },
+  {
+   "case": "C2",
+   "seed_ref": "42",
+   "argv_canonical": [
+    [
+     "--schema",
+     "customer360",
+     "--target-tb",
+     "0.004883",
+     "--customer-id-max",
+     "100000",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "customer/interactions",
+     "--seed",
+     "42",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0",
+     "--timestamp-start",
+     "2024-01-01",
+     "--timestamp-end",
+     "2024-12-31",
+     "--cycle",
+     "0",
+     "--cycles",
+     "2"
+    ],
+    [
+     "--schema",
+     "customer360",
+     "--target-tb",
+     "0.004883",
+     "--customer-id-max",
+     "100000",
+     "--mode",
+     "all",
+     "--delivery-mode",
+     "continuous",
+     "--file-size-mb",
+     "64",
+     "--bucket",
+     "lbref",
+     "--prefix",
+     "customer/interactions",
+     "--seed",
+     "42",
+     "--dirty-ratio",
+     "0.08",
+     "--total-nodes",
+     "4",
+     "--workers",
+     "0",
+     "--timestamp-start",
+     "2024-12-31",
+     "--timestamp-end",
+     "2025-12-31",
+     "--cycle",
+     "1",
+     "--cycles",
+     "2"
+    ]
+   ],
+   "digest_a": "sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a",
+   "digest_b": "sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04",
+   "objects": 160,
+   "sha256_a": "17642acf349b1ae529317411f104b0b676e4f58221a6a2f41baab42eba099c92",
+   "sha256_b": "17642acf349b1ae529317411f104b0b676e4f58221a6a2f41baab42eba099c92",
+   "equal": true,
+   "bytes_equal": true,
+   "argv_rendered_equal": true,
+   "rendered_runs": null,
+   "threads_a": [
+    [
+     8,
+     8,
+     8,
+     8
+    ],
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_b": [
+    [
+     8,
+     8,
+     8,
+     8
+    ],
+    [
+     8,
+     8,
+     8,
+     8
+    ]
+   ],
+   "threads_equal": true,
+   "differences": [],
+   "excluded": [
+    "_corpus/"
+   ],
+   "excluded_objects_a": 0,
+   "excluded_objects_b": 8
+  }
+ ]
+}

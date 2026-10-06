@@ -12,14 +12,15 @@ Support is judged in four layers:
 Passing all four is ``supported``; passing 1 to 3 only is ``unverified``;
 failing any of 1 to 3 is ``unsupported`` and refused before a run. This module
 is the one place that computes the state: the metrics ``experiment`` block,
-``lakebench config show``, ``lakebench config recipes``, the report, compare
-and the docs tables all read it from here.
+``lakebench config show``, ``lakebench config recipes``, the report and
+the docs tables all read it from here.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -116,13 +117,29 @@ class ValidationRecordError(ValueError):
     that is not valid for its workload and mode."""
 
 
+#: (workload, recipe, mode, Spark minor, table format version): a validation
+#: entry stands for one set of component versions, not for every Spark and
+#: format version a recipe can run on.
+ValidationKey = tuple[str, str, str, str, str]
+
+_ENTRY_KEYS = ("workload", "recipe", "mode", "spark", "table_format_version", "tree", "runs")
+_SPARK_MINOR = re.compile(r"^\d+\.\d+$")
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
 @dataclass(frozen=True)
 class Validation:
     workload: str
     recipe: str
     mode: str
+    spark: str
+    table_format_version: str
     tree: str
     runs: tuple[str, ...]
+
+    @property
+    def key(self) -> ValidationKey:
+        return (self.workload, self.recipe, self.mode, self.spark, self.table_format_version)
 
 
 def canonical_mode(mode: object) -> str:
@@ -201,6 +218,138 @@ def compatibility_problem(
     return workload_compatibility_problem(workload, table_format, canonical_mode(mode))
 
 
+# ---------------------------------------------------------------------------
+# Component versions: the Spark minor and table format version of a key
+# ---------------------------------------------------------------------------
+
+
+#: The image repository release validation runs use, after any registry
+#: prefix (a mirror of it is the same image name), and the tag suffixes the
+#: job builder strips (job._parse_spark_major_minor).
+SPARK_REPOSITORY = "apache/spark"
+_SPARK_TAG = re.compile(
+    r"^(\d+)\.(\d+)\.\d+(?:-python3|-java21|-java17|-java11|-scala2\.12|-scala2\.13)*$"
+)
+
+
+def spark_minor(image: object) -> str | None:
+    """``"4.1"`` for ``apache/spark:4.1.1-python3``: the Spark minor of an
+    ``apache/spark`` image (under any registry prefix) whose tag is a plain
+    release version with the job builder's suffixes. None for anything
+    else (another repository, a custom tag such as
+    ``4.1.1-python3-patched``, any digest reference, which the job builder
+    cannot read a version from either): its Spark build is not the one
+    validated, so a run on it is never stamped supported."""
+    if not isinstance(image, str) or not image or "@" in image:
+        return None
+    repo, sep, tag = image.rpartition(":")
+    if not sep or "/" in tag:
+        return None
+    if not (repo == SPARK_REPOSITORY or repo.endswith("/" + SPARK_REPOSITORY)):
+        return None
+    m = _SPARK_TAG.match(tag)
+    return f"{int(m.group(1))}.{int(m.group(2))}" if m else None
+
+
+def format_version_problem(spark: str, table_format: str, version: str) -> str:
+    """Why *version* of *table_format* cannot run on Spark minor *spark*
+    (the job builder's compatibility table), or ''."""
+    from lakebench.modules.pipeline_engines.spark.job import resolve_format_version
+
+    try:
+        resolve_format_version(f"apache/spark:{spark}.0", table_format, version)
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+def resolved_format_version(cfg: Any) -> str | None:
+    """The table format version a config's Spark jobs use
+    (``job.resolve_format_version`` over the config's Spark image and
+    requested version), or None when it does not resolve. The run record's
+    ``experiment.architecture.table_format.version`` is this value."""
+    arch = cfg.architecture
+    table_format = arch.table_format.type.value
+    try:
+        from lakebench.modules.pipeline_engines.spark.job import resolve_format_version
+
+        requested = (
+            arch.table_format.iceberg.version
+            if table_format == "iceberg"
+            else arch.table_format.delta.version
+        )
+        return resolve_format_version(cfg.images.spark, table_format, requested) or None
+    except Exception:  # noqa: BLE001 -- recorded as unknown, never raised
+        return None
+
+
+def config_versions(cfg: Any) -> tuple[str | None, str | None]:
+    """(Spark minor, table format version) a loaded config runs: the same
+    reading ``record_versions`` makes of the run record, which holds the
+    config's Spark image and ``resolved_format_version``."""
+    return spark_minor(cfg.images.spark), resolved_format_version(cfg)
+
+
+def record_versions(record: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """(Spark minor, table format version) a run record says it ran:
+    ``experiment.architecture.pipeline_engine.image`` and
+    ``.table_format.version``."""
+    from lakebench.metrics.experiment import experiment_of
+
+    exp = experiment_of(dict(record))
+    arch = (exp or {}).get("architecture") if isinstance(exp, Mapping) else None
+    if not isinstance(arch, Mapping):
+        return None, None
+    engine = arch.get("pipeline_engine")
+    fmt = arch.get("table_format")
+    image = engine.get("image") if isinstance(engine, Mapping) else None
+    version = fmt.get("version") if isinstance(fmt, Mapping) else None
+    return spark_minor(image), version if isinstance(version, str) and version else None
+
+
+def validation_key_of(record: Mapping[str, Any]) -> ValidationKey | None:
+    """The validation key a run record belongs to, or None when the record
+    does not name every part of it."""
+    from lakebench.metrics.experiment import experiment_of
+
+    exp = experiment_of(dict(record))
+    if not isinstance(exp, Mapping):
+        return None
+    workload = (exp.get("workload") or {}).get("name")
+    recipe = (exp.get("architecture") or {}).get("recipe")
+    spark, version = record_versions(record)
+    if not (isinstance(workload, str) and isinstance(recipe, str) and spark and version):
+        return None
+    return (workload, recipe, canonical_mode(exp.get("mode")), spark, version)
+
+
+def versions_label(spark: str, table_format: str, version: str) -> str:
+    """``Spark 4.1, Iceberg 1.11.0``."""
+    return f"Spark {spark}, {_FORMAT_LABELS.get(table_format, table_format)} {version}"
+
+
+def matrix_versions_problem(
+    workload: str, mode: str, recipe: str, spark: str, version: str
+) -> str | None:
+    """Why (workload, mode, recipe) at Spark *spark* and format *version*
+    cannot be a validation entry, or None: it must be a release-matrix row
+    (``release_record.RELEASE_MATRIX_VERSIONS``, SPEC section 11) at that
+    row's versions. A valid tuple outside the matrix is published
+    unverified, so an entry for it is refused rather than stamped."""
+    from lakebench.metrics.release_record import RELEASE_MATRIX_VERSIONS
+
+    fmt = (components_of(recipe) or ("", ""))[1]
+    want = RELEASE_MATRIX_VERSIONS.get((workload, canonical_mode(mode), recipe))
+    if want is None:
+        return f"{workload} {recipe} {canonical_mode(mode)} is not a release-matrix row"
+    if (spark, version) != want:
+        return (
+            f"the release matrix runs {workload} {recipe} {canonical_mode(mode)} on "
+            f"{versions_label(want[0], fmt, want[1])}, not {versions_label(spark, fmt, version)}"
+        )
+    return None
+
+
 def _as_str(entry: Mapping[str, Any], key: str, where: str) -> str:
     value = entry.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -208,13 +357,17 @@ def _as_str(entry: Mapping[str, Any], key: str, where: str) -> str:
     return value.strip()
 
 
-def load_validation_record(path: Path | None = None) -> dict[tuple[str, str, str], Validation]:
-    """Parse the release validation record, keyed by (workload, recipe, mode).
+def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Validation]:
+    """Parse the release validation record, keyed by (workload, recipe,
+    mode, Spark minor, table format version).
 
     Refuses (ValidationRecordError) a record that lists anything layers 1 to
-    3 refuse, an unknown recipe, an entry with no run ids, or the same
-    combination twice. A record that lists an unsupported combination would
-    otherwise stamp it "supported".
+    3 refuse, an unknown recipe, a row without its Spark minor or table
+    format version, a version pair the job builder cannot run, a row that is
+    not a release-matrix row at that row's versions, a tree that is not a
+    40-hex commit, an entry with no run ids, or the same key twice.
+    A record that lists an unsupported combination would otherwise stamp it
+    "supported".
     """
     import yaml
 
@@ -228,17 +381,23 @@ def load_validation_record(path: Path | None = None) -> dict[tuple[str, str, str
     entries = data.get("validated") or []
     if not isinstance(entries, list):
         raise ValidationRecordError(f"{p.name}: 'validated' must be a list")
-    out: dict[tuple[str, str, str], Validation] = {}
+    out: dict[ValidationKey, Validation] = {}
     for i, entry in enumerate(entries):
         where = f"{p.name} entry {i + 1}"
         if not isinstance(entry, Mapping):
             raise ValidationRecordError(f"{where}: must be a mapping")
-        unknown = set(entry) - {"workload", "recipe", "mode", "tree", "runs"}
+        unknown = set(entry) - set(_ENTRY_KEYS)
         if unknown:
             raise ValidationRecordError(f"{where}: unknown keys {sorted(unknown)}")
+        if "spark" not in entry or "table_format_version" not in entry:
+            raise ValidationRecordError(
+                f"{where}: rows need spark and table_format_version since 1.7"
+            )
         workload = _as_str(entry, "workload", where)
         recipe = _as_str(entry, "recipe", where)
         mode = _as_str(entry, "mode", where)
+        spark = _as_str(entry, "spark", where)
+        version = _as_str(entry, "table_format_version", where)
         tree = _as_str(entry, "tree", where)
         if mode not in MODES:
             raise ValidationRecordError(f"{where}: mode must be one of {', '.join(MODES)}")
@@ -252,6 +411,15 @@ def load_validation_record(path: Path | None = None) -> dict[tuple[str, str, str
             raise ValidationRecordError(
                 f"{where}: {workload} x {recipe} x {mode} is refused: {problem}"
             )
+        if not _SPARK_MINOR.match(spark):
+            raise ValidationRecordError(f"{where}: spark must be a Spark minor such as 4.1")
+        version_problem = format_version_problem(
+            spark, comps[1], version
+        ) or matrix_versions_problem(workload, mode, recipe, spark, version)
+        if version_problem:
+            raise ValidationRecordError(f"{where}: {version_problem}")
+        if not _SHA40.match(tree):
+            raise ValidationRecordError(f"{where}: tree must be the 40-hex freeze commit")
         runs = entry.get("runs")
         if (
             not isinstance(runs, list)
@@ -259,11 +427,25 @@ def load_validation_record(path: Path | None = None) -> dict[tuple[str, str, str
             or not all(isinstance(r, str) and r.strip() for r in runs)
         ):
             raise ValidationRecordError(f"{where}: 'runs' must list at least one run id")
-        key = (workload, recipe, mode)
-        if key in out:
-            raise ValidationRecordError(f"{where}: {workload} x {recipe} x {mode} is listed twice")
-        out[key] = Validation(workload, recipe, mode, tree, tuple(r.strip() for r in runs))
+        v = Validation(workload, recipe, mode, spark, version, tree, tuple(r.strip() for r in runs))
+        if v.key in out:
+            raise ValidationRecordError(
+                f"{where}: {workload} x {recipe} x {mode} on "
+                f"{versions_label(spark, comps[1], version)} is listed twice"
+            )
+        out[v.key] = v
     return out
+
+
+def validations_for(
+    record: Mapping[ValidationKey, Validation], workload: str, recipe: str, mode: str
+) -> list[Validation]:
+    """Every entry of one workload x recipe x mode, whatever its versions,
+    sorted by version pair."""
+    return sorted(
+        (v for k, v in record.items() if k[:3] == (workload, recipe, mode)),
+        key=lambda v: (v.spark, v.table_format_version),
+    )
 
 
 def local_problem(workload: str | None, mode: object) -> str:
@@ -290,18 +472,23 @@ def support_state(
     mode: object,
     *,
     system: str = "cluster",
-    record: Mapping[tuple[str, str, str], Validation] | None = None,
+    record: Mapping[ValidationKey, Validation] | None = None,
     provenance: Mapping[str, Any] | None = None,
     scale: float | None = None,
+    spark: str | None = None,
+    table_format_version: str | None = None,
 ) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of one workload x architecture x mode.
+    """The DESIGN 6.5 support state of one workload x architecture x mode
+    at one Spark minor (*spark*) and table format version.
 
     Returns ``{"state", "basis", ...}``. ``supported`` only when the release
-    validation record lists the combination with run ids and lakebench is not
-    running from a modified tree (*provenance* ``git_dirty``); an unreadable
-    record never promotes anything. With *scale*, a cluster run outside the
-    workload's datagen scale band is refused above the ceiling and at most
-    unverified above the supported maximum (``DATAGEN_SCALE_BANDS``).
+    validation record lists the combination at these versions with run ids
+    and lakebench is not running from a modified tree (*provenance*
+    ``git_dirty``); without both versions nothing is supported, and an
+    unreadable record never promotes anything. With *scale*, a cluster run
+    outside the workload's datagen scale band is refused above the ceiling
+    and at most unverified above the supported maximum
+    (``DATAGEN_SCALE_BANDS``).
     """
     out = _support_state(
         workload,
@@ -313,6 +500,7 @@ def support_state(
         system=system,
         record=record,
         provenance=provenance,
+        versions=(spark, table_format_version),
     )
     band = None if system == "local" else datagen_scale_problem(workload, scale)
     if band is None or out["state"] == UNSUPPORTED:
@@ -335,8 +523,9 @@ def _support_state(
     mode: object,
     *,
     system: str,
-    record: Mapping[tuple[str, str, str], Validation] | None,
+    record: Mapping[ValidationKey, Validation] | None,
     provenance: Mapping[str, Any] | None,
+    versions: tuple[str | None, str | None],
 ) -> dict[str, Any]:
     wl, m = str(workload), canonical_mode(mode)
     comps = (str(catalog), str(table_format), str(pipeline_engine), str(query_engine))
@@ -369,7 +558,23 @@ def _support_state(
         except ValidationRecordError as e:
             out.update(state=UNVERIFIED, basis=f"release validation record unreadable ({e})")
             return out
-    v = record.get((wl, str(recipe), m))
+    spark, version = versions
+    v = record.get((wl, str(recipe), m, str(spark), str(version))) if spark and version else None
+    listed = validations_for(record, wl, str(recipe), m)
+    if v is None and listed:
+        validated = "; ".join(
+            versions_label(e.spark, comps[1], e.table_format_version) for e in listed
+        )
+        ran = (
+            versions_label(spark, comps[1], version)
+            if spark and version
+            else "a Spark minor or table format version that is not known"
+        )
+        out.update(
+            state=UNVERIFIED,
+            basis=f"validated on {validated} only; this run uses {ran}",
+        )
+        return out
     if v is not None and v.runs:
         # A checkout whose status is unknown (git status failed or timed out)
         # is not proven clean; a wheel install has no sha and no status.
@@ -388,14 +593,45 @@ def _support_state(
             return out
         out.update(
             state=SUPPORTED,
-            basis=f"validated on release tree {v.tree} by {', '.join(v.runs)}",
+            basis=(
+                f"validated on {versions_label(v.spark, comps[1], v.table_format_version)}, "
+                f"release tree {v.tree[:12]}, by {', '.join(v.runs)}"
+            ),
             validation_runs=list(v.runs),
             validation_tree=v.tree,
         )
-        return out
+        return withdraw_if_code_changed(out, provenance)
     out.update(
         state=UNVERIFIED,
         basis=f"valid for this workload and mode; no validation run is listed in {_RECORD_NAME}",
+    )
+    return out
+
+
+def withdraw_if_code_changed(
+    support: Mapping[str, Any], provenance: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """*support*, made unverified when the run's end sample saw other
+    lakebench code than its start (``provenance.end_sample``,
+    metrics/provenance.py): the release validation then says nothing about
+    the code that produced part of the run. Never promotes."""
+    out = dict(support)
+    end = (provenance or {}).get("end_sample")
+    if (
+        out.get("state") != SUPPORTED
+        or not isinstance(end, Mapping)
+        or not end.get("code_changed_during_run")
+    ):
+        return out
+    for k in ("validation_runs", "validation_tree"):
+        out.pop(k, None)
+    out.update(
+        state=UNVERIFIED,
+        basis=(
+            "listed as validated, but the lakebench code changed during the run "
+            f"(commit {(provenance or {}).get('git_sha') or 'unknown'} at start, "
+            f"{end.get('git_sha') or 'unknown'} at end)"
+        ),
     )
     return out
 
@@ -410,6 +646,7 @@ def support_state_for_config(
     """Support state of a loaded config. *mode* overrides the config's mode
     (``run --continuous`` does not write the mode back to the config)."""
     arch = cfg.architecture
+    spark, version = config_versions(cfg)
     return support_state(
         arch.workload.schema_type.value,
         arch.catalog.type.value,
@@ -420,34 +657,76 @@ def support_state_for_config(
         system=system,
         provenance=provenance,
         scale=float(arch.workload.datagen.get_effective_scale()),
+        spark=spark,
+        table_format_version=version,
     )
 
 
+def _matrix_cell(
+    record: Mapping[ValidationKey, Validation], recipe: str, workload: str, mode: str
+) -> dict[str, Any]:
+    """One cell of the support matrix. A cell is not a run, so it has no
+    versions of its own: it is ``supported`` when the record lists the
+    recipe x workload x mode at any version pair, and lists the pairs
+    (``versions``); a run at another pair is unverified (``support_state``).
+    An unverified cell says why in ``basis``."""
+    comps = components_of(recipe)
+    assert comps is not None
+    s = support_state(workload, *comps, mode, record=record)
+    row: dict[str, Any] = {"recipe": recipe, **s}
+    if s["state"] == UNSUPPORTED:
+        return row
+    listed = validations_for(record, workload, recipe, mode)
+    if listed:
+        row.update(
+            state=SUPPORTED,
+            versions=[(v.spark, v.table_format_version) for v in listed],
+            basis="validated on "
+            + "; ".join(
+                f"{versions_label(v.spark, comps[1], v.table_format_version)} "
+                f"(release tree {v.tree[:12]}, {', '.join(v.runs)})"
+                for v in listed
+            )
+            + "; any other Spark minor or table format version is unverified",
+        )
+        return row
+    from lakebench.metrics.release_record import RELEASE_MATRIX
+
+    in_matrix = any(r[:3] == (workload, mode, recipe) for r in RELEASE_MATRIX)
+    row["basis"] = (
+        "in this release's validation matrix; no validation run is listed yet"
+        if in_matrix
+        else NOT_IN_MATRIX
+    )
+    return row
+
+
+#: Why a valid cell outside the release matrix is unverified.
+NOT_IN_MATRIX = "not in this release's validation matrix"
+
+
 def support_matrix(
-    record: Mapping[tuple[str, str, str], Validation] | None = None,
+    record: Mapping[ValidationKey, Validation] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every recipe x workload x mode with its computed state. A record that
-    does not load leaves every row unverified with the error as its basis
-    (the same as a run's stamp), rather than failing the caller."""
+    """Every recipe x workload x mode with its computed state
+    (``_matrix_cell``). A record that does not load leaves every row
+    unverified with the error as its basis (the same as a run's stamp),
+    rather than failing the caller."""
     rows = []
     if record is None:
         try:
             record = load_validation_record()
         except ValidationRecordError as e:
-            record = {}
             error = f"release validation record unreadable ({e})"
-            for row in support_matrix(record):
+            for row in support_matrix({}):
                 if row["state"] == UNVERIFIED:
                     row["basis"] = error
                 rows.append(row)
             return rows
     for recipe in recipe_names():
-        comps = components_of(recipe)
-        assert comps is not None
         for wl in workloads():
             for m in MODES:
-                s = support_state(wl, *comps, m, record=record)
-                rows.append({"recipe": recipe, **s})
+                rows.append(_matrix_cell(record, recipe, wl, m))
     return rows
 
 
@@ -457,7 +736,7 @@ def support_matrix(
 
 _BEGIN = "<!-- BEGIN GENERATED: {name} -->"
 _REGEN = (
-    "<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; "
+    "<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; "
     "do not edit by hand. -->"
 )
 _END = "<!-- END GENERATED: {name} -->"
@@ -473,19 +752,43 @@ _QUERY_LABELS = {
 }
 
 
-def render_support_table(record: Mapping[tuple[str, str, str], Validation] | None = None) -> str:
-    """Markdown: one row per recipe, one column per workload x mode."""
+#: The general version rule under the support table (SPEC 13 item 8).
+VERSION_NOTE = (
+    "A supported cell names the Spark minor and table format version its validation "
+    "runs used; the same cell on any other Spark minor or format version is unverified. "
+    "Spark 3.5 is unverified and gets no v1.7 features."
+)
+
+
+def _cell_text(row: Mapping[str, Any], fmt: str, notes: dict[str, int]) -> str:
+    if row["state"] == SUPPORTED:
+        pairs = "; ".join(versions_label(s, fmt, v) for s, v in row.get("versions") or [])
+        return f"supported ({pairs})" if pairs else SUPPORTED
+    if row["state"] == UNVERIFIED:
+        n = notes.setdefault(str(row["basis"]), len(notes) + 1)
+        return f"unverified [{n}]"
+    return str(row["state"])
+
+
+def render_support_table(record: Mapping[ValidationKey, Validation] | None = None) -> str:
+    """Markdown: one row per recipe, one column per workload x mode. A
+    supported cell lists its validated version pairs; an unverified cell
+    carries a note number, and each distinct reason is written once under
+    the table."""
     rows = support_matrix(record)
-    cells = {(r["recipe"], r["workload"], r["mode"]): r["state"] for r in rows}
+    by_cell = {(r["recipe"], r["workload"], r["mode"]): r for r in rows}
     cols = [(wl, m) for wl in workloads() for m in MODES]
     head = "| Recipe | " + " | ".join(f"{WORKLOAD_LABELS[wl]} {m}" for wl, m in cols) + " |"
     sep = "|---|" + "---|" * len(cols)
     lines = [head, sep]
+    notes: dict[str, int] = {}
     for recipe in recipe_names():
-        lines.append(
-            f"| `{recipe}` | " + " | ".join(cells[(recipe, wl, m)] for wl, m in cols) + " |"
-        )
+        fmt = (components_of(recipe) or ("", ""))[1]
+        cells = [_cell_text(by_cell[(recipe, wl, m)], fmt, notes) for wl, m in cols]
+        lines.append(f"| `{recipe}` | " + " | ".join(cells) + " |")
     lines.append("")
+    for basis, n in notes.items():
+        lines.append(f"- [{n}] unverified: {basis}.")
     refused: dict[tuple[str, str], list[str]] = {}
     for r in rows:
         if r["state"] == UNSUPPORTED:
@@ -501,6 +804,7 @@ def render_support_table(record: Mapping[tuple[str, str, str], Validation] | Non
         "- Any catalog, table format and query engine combination that is not a recipe "
         "above is refused at config load for every workload."
     )
+    lines.append(f"- {VERSION_NOTE}")
     for (wl, m), note in sorted(MODE_NOTES.items()):
         lines.append(f"- {WORKLOAD_LABELS[wl]} {m}: {note}")
     return "\n".join(lines)
@@ -577,8 +881,268 @@ def regenerate_docs(root: Path) -> list[str]:
     return changed
 
 
-if __name__ == "__main__":  # python -m lakebench.config.support <repo root>
+# ---------------------------------------------------------------------------
+# The record, generated from release-matrix run records
+# ---------------------------------------------------------------------------
+
+#: The comment block at the top of validated_combinations.yaml; the writer
+#: emits it and a test holds the checked-in file to it.
+RECORD_HEADER = """\
+# Release validation record (DESIGN.md section 6.5, layer 4).
+#
+# Generated from release-matrix run records, never edited by hand:
+#
+#   PYTHONPATH=src python -m lakebench.config.support . --from-records uat/runs \\
+#       --tree <freeze commit> --expected uat/expected-results-<version>.json --write
+#
+# One entry per workload x recipe x mode x Spark minor x table format
+# version that release-evidence runs (metrics/release_record.py
+# record_problems: passed, rows in every layer, expected stages, rules and
+# results, the freeze commit, a clean tree, the release datagen image)
+# completed on the freeze tree. Only a run of a listed combination at the
+# listed versions is stamped "supported"; a valid combination that is not
+# listed, or runs at other versions, is "unverified". Only release-matrix
+# rows at the matrix's versions (metrics/release_record.py
+# RELEASE_MATRIX_VERSIONS) can be listed, and a combination that fails the
+# architecture, workload or mode checks never can: lakebench refuses to
+# load a record that lists one. The list starts empty for every release.
+#
+# Entry shape:
+#
+#   - workload: customer360          # customer360 | financial
+#     recipe: hive-iceberg-spark-trino
+#     mode: batch                    # batch | continuous
+#     spark: "4.1"                   # Spark minor of the run's Spark image
+#     table_format_version: 1.11.0   # experiment.architecture.table_format.version
+#     tree: <40-hex freeze commit>
+#     runs: [20261105-011500-abcdef]
+"""
+
+
+@dataclass
+class FromRecords:
+    """What ``rows_from_records`` kept and refused. *read* counts the
+    metrics.json files read, *kept* the runs that fill an entry (a
+    byte-equal copy of a kept run is counted once), *duplicates* the
+    byte-equal copies skipped."""
+
+    entries: list[dict[str, Any]]
+    refused: list[tuple[Path, list[str]]]
+    read: int
+    kept: int = 0
+    duplicates: int = 0
+    uncovered: list[str] = field(default_factory=list)
+
+
+def _matrix_problem(record: Mapping[str, Any], key: ValidationKey) -> str | None:
+    """Why a record that is release evidence still cannot fill a row: its
+    workload x mode x recipe x scale is not a release-matrix row, or it ran
+    other versions than the row names (``matrix_versions_problem``)."""
+    from lakebench.metrics.release_record import RELEASE_MATRIX, record_key
+
+    rkey = record_key(record)
+    if rkey is None or rkey not in {(w, m, r, float(s)) for w, m, r, s in RELEASE_MATRIX}:
+        where = f"{rkey[0]} {rkey[2]} {rkey[1]} at scale {rkey[3]:g}" if rkey else "it"
+        return f"{where} is not a release-matrix row"
+    return matrix_versions_problem(key[0], key[2], key[1], key[3], key[4])
+
+
+def rows_from_records(
+    dirs: list[Path],
+    tree: str,
+    expected: Mapping[str, Any] | None,
+    *,
+    root: Path | None = None,
+    release_digest: str | None = None,
+) -> FromRecords:
+    """The validation entries the release-matrix records under *dirs*
+    (each ``run-<id>/metrics.json``) fill: records with no
+    ``record_problems`` for freeze *tree* and *expected*, on a
+    release-matrix row at that row's versions, grouped by key and sorted.
+    Every other record is refused with its reasons. A run id found with two
+    different records is refused in every copy, whichever passes; a record
+    whose directory is not ``run-<its run_id>`` is refused."""
+    import json
+
+    from lakebench.metrics.release_record import RELEASE_MATRIX, record_key, record_problems
+
+    refused: list[tuple[Path, list[str]]] = []
+    copies: dict[str, list[tuple[Path, bytes, dict[str, Any]]]] = {}
+    read = 0
+    for d in dirs:
+        for path in sorted(d.glob("run-*/metrics.json")):
+            read += 1
+            try:
+                raw = path.read_bytes()
+                record = json.loads(raw)
+            except (OSError, ValueError) as e:
+                refused.append((path, [f"unreadable: {e}"]))
+                continue
+            run_id = record.get("run_id") if isinstance(record, dict) else None
+            if not isinstance(run_id, str) or not run_id.removeprefix("run-"):
+                refused.append((path, ["not a run record with a run_id"]))
+                continue
+            rid = run_id.removeprefix("run-")
+            if path.parent.name != f"run-{rid}":
+                refused.append((path, [f"its directory is not run-{rid}"]))
+                continue
+            copies.setdefault(rid, []).append((path, raw, record))
+
+    grouped: dict[ValidationKey, list[str]] = {}
+    keys_run: set[tuple[str, str, str, float]] = set()
+    kept = duplicates = 0
+    for rid, found in sorted(copies.items()):
+        if len({raw for _p, raw, _r in found}) > 1:
+            where = ", ".join(str(p) for p, _raw, _r in found)
+            refused += [(p, [f"run {rid} has different records ({where})"]) for p, _, _ in found]
+            continue
+        path, _raw, record = found[0]
+        problems = record_problems(record, tree, expected, release_digest=release_digest, root=root)
+        key = validation_key_of(record)
+        if key is None:
+            problems.append(
+                "the record names no Spark minor (an apache/spark X.Y.Z image) or no table "
+                "format version"
+            )
+        elif not problems:
+            matrix = _matrix_problem(record, key)
+            if matrix:
+                problems.append(matrix)
+        if problems or key is None:
+            refused += [(p, problems) for p, _raw, _r in found]
+            continue
+        kept += 1
+        duplicates += len(found) - 1
+        grouped.setdefault(key, []).append(rid)
+        rkey = record_key(record)
+        if rkey is not None:
+            keys_run.add(rkey)
+    entries = [
+        {
+            "workload": k[0],
+            "recipe": k[1],
+            "mode": k[2],
+            "spark": k[3],
+            "table_format_version": k[4],
+            "tree": tree,
+            "runs": sorted(runs),
+        }
+        for k, runs in sorted(grouped.items())
+    ]
+    uncovered = [
+        f"{w} {r} {m} at scale {s:g}"
+        for w, m, r, s in RELEASE_MATRIX
+        if (w, m, r, float(s)) not in keys_run
+    ]
+    return FromRecords(entries, refused, read, kept, duplicates, uncovered)
+
+
+def record_text(entries: list[dict[str, Any]]) -> str:
+    """The validation record file for *entries*: the header, then the YAML."""
+    import yaml
+
+    body = yaml.safe_dump({"validated": entries}, sort_keys=False, default_flow_style=None)
+    return RECORD_HEADER + body
+
+
+def write_record(entries: list[dict[str, Any]], path: Path) -> None:
+    """Write *entries* to *path* atomically, after checking that the text
+    loads (``load_validation_record``): a file the loader refuses is never
+    written."""
+    import os
+    import tempfile
+
+    text = record_text(entries)
+    fd, tmp = tempfile.mkstemp(prefix=".validated-", suffix=".yaml", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        # mkstemp makes the file 0600; the record is package data every
+        # user of a build reads.
+        os.chmod(tmp, 0o644)
+        loaded = load_validation_record(Path(tmp))
+        if len(loaded) != len(entries):
+            raise ValidationRecordError(f"wrote {len(entries)} entries, read {len(loaded)}")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _record_path(root: Path) -> Path:
+    return root / "src" / "lakebench" / "config" / VALIDATION_RECORD.name
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m lakebench.config.support [ROOT]`` rewrites the docs'
+    generated blocks under ROOT (default ``.``). With ``--from-records
+    DIR...`` it builds the validation record from the run records instead
+    and prints it, or with ``--write`` writes it to ROOT's
+    ``src/lakebench/config/validated_combinations.yaml``; it touches no
+    other file. Both forms refuse unless this lakebench is imported from
+    ROOT's ``src`` (the tables, the record rules and the release image all
+    come from the imported code). Exit 0 when the work was done, 1 when no
+    record is release evidence (nothing is written), 2 on a usage error."""
+    import argparse
     import sys
 
-    for f in regenerate_docs(Path(sys.argv[1] if len(sys.argv) > 1 else ".")):
-        print(f"updated {f}")
+    ap = argparse.ArgumentParser(prog="python -m lakebench.config.support")
+    ap.add_argument("root", nargs="?", default=".", type=Path, help="repository root")
+    ap.add_argument("--from-records", nargs="+", type=Path, metavar="DIR")
+    ap.add_argument("--tree", help="the 40-hex freeze commit")
+    ap.add_argument("--expected", type=Path, help="uat/expected-results-<version>.json")
+    ap.add_argument("--write", action="store_true", help="write the record file")
+    ap.add_argument("--output", type=Path, help=argparse.SUPPRESS)
+    args = ap.parse_args(argv)
+
+    root = args.root.resolve()
+    if not args.from_records and (args.tree or args.expected or args.write):
+        ap.error("--tree, --expected and --write need --from-records")
+    if args.from_records:
+        if not args.tree or not _SHA40.match(args.tree):
+            ap.error("--tree must be the 40-hex freeze commit")
+        if args.expected is None:
+            ap.error("--expected is required with --from-records")
+        missing = [str(d) for d in args.from_records if not d.is_dir()]
+        if missing:
+            ap.error(f"not a directory: {', '.join(missing)}")
+    here = Path(__file__).resolve()
+    if not here.is_relative_to(root / "src"):
+        ap.error(
+            f"this lakebench is imported from {here.parent.parent}, not {root / 'src'}; "
+            f"run it as PYTHONPATH={root / 'src'} python -m lakebench.config.support {args.root}"
+        )
+    if not args.from_records:
+        for f in regenerate_docs(args.root):
+            print(f"updated {f}")
+        return 0
+    from lakebench.metrics.release_record import load_expected
+
+    try:
+        expected = load_expected(args.expected)
+    except (OSError, ValueError) as e:
+        ap.error(f"cannot read {args.expected}: {e}")
+    result = rows_from_records(args.from_records, args.tree, expected, root=root)
+    for path, problems in result.refused:
+        print(f"refused {path}: {'; '.join(problems)}", file=sys.stderr)
+    print(
+        f"{result.read} records read: {result.kept} runs kept, {len(result.refused)} refused, "
+        f"{result.duplicates} identical copies skipped; {len(result.entries)} entries",
+        file=sys.stderr,
+    )
+    for row in result.uncovered:
+        print(f"not covered: {row} (the release gate refuses the tag)", file=sys.stderr)
+    if not result.entries:
+        print("no record is release evidence; nothing written", file=sys.stderr)
+        return 1
+    if args.write:
+        output = args.output or _record_path(root)
+        write_record(result.entries, output)
+        print(f"wrote {output}", file=sys.stderr)
+    else:
+        sys.stdout.write(record_text(result.entries))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

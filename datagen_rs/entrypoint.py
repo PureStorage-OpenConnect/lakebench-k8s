@@ -60,7 +60,7 @@ def detect_cpu_quota() -> int:
 
 
 # Peak-memory model, mirrored from lakebench.config.autosizer (a unit test keeps
-# the two copies equal; see autosizer.py for the measurement basis, LB-204):
+# the two copies equal; see autosizer.py for the measurement basis):
 #   peak = BASE + GIB_PER_SCALE * scale + max(0, threads - 8) * GIB_PER_EXTRA_THREAD
 # at the fixed 64 MB file size, for the busiest pod. A limit below the 8-thread
 # peak drops one thread per GIB_PER_EXTRA_THREAD short (user override only).
@@ -100,7 +100,14 @@ def max_threads_for_memory(schema: str, scale: float, limit_bytes: int) -> int:
     return max(1, BASE_THREADS - math.ceil(-spare / extra))
 
 
+BINARY = "/app/datagen_rs"
+
+
 def main() -> int:
+    # `<image> --version` is passed straight to the generator before any
+    # parsing (only as the first argument, so a value is never read as it).
+    if sys.argv[1:2] == ["--version"]:
+        os.execvp(BINARY, [BINARY, "--version"])
     # No prefix matching: an abbreviation such as --rob must not turn on
     # --robustness-perturbation (or any other flag).
     ap = argparse.ArgumentParser(allow_abbrev=False)
@@ -171,7 +178,7 @@ def main() -> int:
     ap.add_argument("--customer-id-max", type=int, default=None)
     # --payload-kb was a CLI knob that had only ever been calibrated at 2 KiB;
     # the Rust binary refused any other value, and no shipped template passed
-    # anything else. Dropped 2026-09-28 (LB-191 companion). Accepted here as
+    # anything else. Dropped 2026-09-28. Accepted here as
     # a silently-ignored back-compat arg so older K8s Job templates still parse.
     ap.add_argument("--payload-kb", type=int, default=None)
     ap.add_argument("--dirty-ratio", type=float, default=0.08)
@@ -182,11 +189,13 @@ def main() -> int:
     # it as an alias for `--threads` so the Rust rayon pool sizes correctly
     # even if the template hasn't been updated to pass --threads explicitly.
     ap.add_argument("--workers", type=int, default=None)
-    # Ignore any other args silently (e.g. --payload-kb=0 which some templates
-    # pass): argparse handles unknown args by erroring, so we let it.
-    args, unknown = ap.parse_known_args()
-    if unknown:
-        print(f"[entrypoint] ignoring unknown args: {unknown}", file=sys.stderr)
+    # Parse exactly as for a Job, then let the generator print the resolved
+    # corpus arguments (canonical JSON on stdout) instead of generating.
+    ap.add_argument("--print-resolved-args", action="store_true")
+    # Strict: an unknown flag exits 2 (argparse), so a typo or a flag from a
+    # newer Lakebench never runs as a silent default. --payload-kb stays
+    # declared above because a v1.6 template may still pass it.
+    args = ap.parse_args()
 
     if args.schema not in SUPPORTED_SCHEMAS:
         print(
@@ -194,7 +203,36 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.seed is None:
+    # A registered (held-out) corpus's seed arrives in LB_DATAGEN_SEED from
+    # a Secret, never in the Job's args. It is passed on in the environment
+    # (the Rust generator reads it), so it is in no command line either; it
+    # is never printed. Given twice, or not an integer, is refused.
+    env_seed = os.environ.get("LB_DATAGEN_SEED")
+    seed_from_env = False
+    if env_seed is not None:
+        if args.seed is not None:
+            print(
+                "[entrypoint] the seed is given both as --seed and in LB_DATAGEN_SEED; "
+                "pass it once",
+                file=sys.stderr,
+            )
+            return 2
+        if args.schema != "financial":
+            print(
+                "[entrypoint] LB_DATAGEN_SEED applies to the financial schema only", file=sys.stderr
+            )
+            return 2
+        try:
+            if int(env_seed.strip()) < 0:
+                raise ValueError
+        except ValueError:
+            print(
+                "[entrypoint] LB_DATAGEN_SEED is not a non-negative integer (value not shown)",
+                file=sys.stderr,
+            )
+            return 2
+        seed_from_env = True
+    if args.seed is None and not seed_from_env:
         if args.schema == "financial":
             print(
                 "[entrypoint] --seed is required for the financial schema (AML seeds are "
@@ -259,13 +297,12 @@ def main() -> int:
     # Schema-conditional argv. --schema first so the Rust binary can dispatch
     # before parsing the shared args.
     common = [
-        "/app/datagen_rs",
+        BINARY,
         "--schema",
         args.schema,
         "--bucket",
         args.bucket,
-        "--seed",
-        str(args.seed),
+        *([] if seed_from_env else ["--seed", str(args.seed)]),
         "--file-size-mb",
         str(args.file_size_mb),
         "--node-id",
@@ -299,7 +336,7 @@ def main() -> int:
     delivery = args.delivery_mode
     if delivery == "auto":
         delivery = "continuous"
-    # Always forwarded (LB-196): the Rust default is continuous, so dropping
+    # Always forwarded: the Rust default is continuous, so dropping
     # "batch" here silently ran every batch request as continuous.
     common += ["--delivery-mode", delivery]
 
@@ -329,7 +366,7 @@ def main() -> int:
         if args.robustness_perturbation:
             summary += " robustness_perturbation=on"
     else:  # customer360
-        # --payload-kb dropped 2026-09-28 (LB-191 companion); Rust hardcodes 2.
+        # --payload-kb dropped 2026-09-28; Rust hardcodes 2.
         # Any --payload-kb from an older template arrives on args.payload_kb
         # (default None here) and is silently discarded when we do not forward it.
         cmd = common + [
@@ -356,9 +393,13 @@ def main() -> int:
             f"ts=[{args.timestamp_start},{args.timestamp_end})"
         )
 
+    if args.print_resolved_args:
+        cmd.append("--print-resolved-args")
     print(
         f"[entrypoint] schema={args.schema} node {node_id}/{args.total_nodes} "
         f"threads={threads} cycle={args.cycle} -> s3://{args.bucket}/{args.prefix} :: {summary}",
+        # stdout carries only the generator's JSON under --print-resolved-args.
+        file=sys.stderr if args.print_resolved_args else sys.stdout,
         flush=True,
     )
     # execvp replaces this process, so the Rust binary is PID 1 of the pod and

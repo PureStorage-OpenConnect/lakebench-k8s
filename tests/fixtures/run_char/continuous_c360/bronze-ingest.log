@@ -1,0 +1,172 @@
+[lb] 2026-10-01T15:05:58.280383 - ============================================================
+[lb] 2026-10-01T15:05:58.280466 - Bronze Ingest (Structured Streaming)
+[lb] 2026-10-01T15:05:58.280492 - ============================================================
+[lb] 2026-10-01T15:05:58.280507 - Landing zone: s3a://runchar-bronze/customer/interactions/
+[lb] 2026-10-01T15:05:58.280522 - Target table: lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:05:58.280537 - Checkpoint:   s3a://runchar-bronze/checkpoints/bronze-ingest/
+[lb] 2026-10-01T15:05:58.280552 - Trigger:      30 seconds
+[lb] 2026-10-01T15:05:58.280567 - Namespace location: s3a://runchar-bronze/warehouse/default.db/
+[lb] 2026-10-01T15:05:59.889176 - Created namespace lakehouse.default
+[lb] 2026-10-01T15:06:04.109131 - Inferred schema with 41 columns (waited 0s)
+[lb] 2026-10-01T15:06:05.401038 - Streaming query started, awaiting termination...
+[lb] 2026-10-01T15:06:11.415983 - Batch 0: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:06:11.421896 - Batch 0: creating bronze table lakehouse.default.bronze_raw at s3a://runchar-bronze/warehouse/default.db/bronze_raw
+[lb] 2026-10-01T15:06:18.021842 - Batch 0: committed in 11.2s
+[lb] 2026-10-01T15:06:31.499999 - Batch 1: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:06:36.312871 - Batch 1: committed in 5.9s
+[lb] 2026-10-01T15:07:01.288270 - Batch 2: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:07:03.352874 - Batch 2: committed in 3.0s
+[lb] 2026-10-01T15:07:31.048266 - Batch 3: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:07:32.744111 - Batch 3: committed in 2.5s
+[lb] 2026-10-01T15:08:00.942129 - Batch 4: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:08:03.154034 - Batch 4: committed in 2.9s
+[lb] 2026-10-01T15:08:30.875401 - Batch 5: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:08:32.903281 - Batch 5: committed in 2.7s
+[lb] 2026-10-01T15:09:00.816350 - Batch 6: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:09:02.265695 - Batch 6: committed in 2.0s
+[lb] 2026-10-01T15:09:30.972207 - Batch 7: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:09:33.085568 - Batch 7: committed in 2.8s
+[lb] 2026-10-01T15:10:00.971124 - Batch 8: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:10:02.542389 - Batch 8: committed in 2.2s
+[lb] 2026-10-01T15:10:30.810043 - Batch 9: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:10:32.401182 - Batch 9: committed in 2.1s
+[lb] 2026-10-01T15:11:00.803004 - Batch 10: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:11:02.691852 - Batch 10: committed in 2.5s
+[lb] 2026-10-01T15:11:30.778557 - Batch 11: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:11:32.273833 - Batch 11: committed in 2.1s
+[lb] 2026-10-01T15:12:00.944328 - Batch 12: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:12:02.589921 - Batch 12: committed in 2.4s
+[lb] 2026-10-01T15:12:30.805379 - Batch 13: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:12:32.318718 - Batch 13: committed in 2.0s
+[lb] 2026-10-01T15:13:00.689736 - Batch 14: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:13:02.157583 - Batch 14: committed in 2.0s
+[lb] 2026-10-01T15:13:30.750344 - Batch 15: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:13:32.145444 - Batch 15: committed in 1.9s
+[lb] 2026-10-01T15:14:00.714438 - Batch 16: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:14:02.388932 - Batch 16: committed in 2.2s
+[lb] 2026-10-01T15:14:30.692415 - Batch 17: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:14:32.140300 - Batch 17: committed in 1.9s
+[lb] 2026-10-01T15:15:00.738934 - Batch 18: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:15:02.132275 - Batch 18: committed in 1.9s
+[lb] 2026-10-01T15:15:30.865355 - Batch 19: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:15:32.374074 - Batch 19: committed in 2.0s
+[lb] 2026-10-01T15:16:00.654529 - Batch 20: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:16:02.230414 - Batch 20: committed in 2.0s
+[lb] 2026-10-01T15:16:30.760058 - Batch 21: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:16:32.327207 - Batch 21: committed in 2.1s
+[lb] 2026-10-01T15:17:00.675760 - Batch 22: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:17:02.061743 - Batch 22: committed in 1.9s
+[lb] 2026-10-01T15:17:30.723166 - Batch 23: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:17:32.113903 - Batch 23: committed in 1.9s
+[lb] 2026-10-01T15:18:00.865374 - Batch 24: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:18:02.362562 - Batch 24: committed in 2.0s
+[lb] 2026-10-01T15:18:30.619050 - Batch 25: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:18:31.965830 - Batch 25: committed in 1.8s
+[lb] 2026-10-01T15:19:00.673068 - Batch 26: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:19:01.962323 - Batch 26: committed in 1.8s
+[lb] 2026-10-01T15:19:30.724041 - Batch 27: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:19:32.265666 - Batch 27: committed in 2.1s
+[lb] 2026-10-01T15:20:00.636079 - Batch 28: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:20:01.963819 - Batch 28: committed in 1.8s
+[lb] 2026-10-01T15:20:30.874695 - Batch 29: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:20:32.247258 - Batch 29: committed in 1.9s
+[lb] 2026-10-01T15:21:00.760403 - Batch 30: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:21:02.147476 - Batch 30: committed in 1.8s
+[lb] 2026-10-01T15:21:30.622628 - Batch 31: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:21:31.919743 - Batch 31: committed in 1.7s
+[lb] 2026-10-01T15:22:00.723164 - Batch 32: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:22:02.328520 - Batch 32: committed in 2.2s
+[lb] 2026-10-01T15:22:30.643887 - Batch 33: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:22:32.089260 - Batch 33: committed in 1.9s
+[lb] 2026-10-01T15:23:00.712609 - Batch 34: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:23:02.191827 - Batch 34: committed in 2.0s
+[lb] 2026-10-01T15:23:30.758633 - Batch 35: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:23:32.293520 - Batch 35: committed in 2.0s
+[lb] 2026-10-01T15:24:00.628971 - Batch 36: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:24:01.998330 - Batch 36: committed in 1.8s
+[lb] 2026-10-01T15:24:30.630477 - Batch 37: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:24:32.050515 - Batch 37: committed in 1.9s
+[lb] 2026-10-01T15:25:00.620972 - Batch 38: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:25:02.122403 - Batch 38: committed in 1.9s
+[lb] 2026-10-01T15:25:30.687952 - Batch 39: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:25:32.027635 - Batch 39: committed in 1.8s
+[lb] 2026-10-01T15:26:00.723756 - Batch 40: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:26:02.022592 - Batch 40: committed in 1.8s
+[lb] 2026-10-01T15:26:30.803882 - Batch 41: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:26:32.335424 - Batch 41: committed in 2.0s
+[lb] 2026-10-01T15:27:00.709788 - Batch 42: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:27:02.169774 - Batch 42: committed in 2.0s
+[lb] 2026-10-01T15:27:30.651054 - Batch 43: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:27:31.919834 - Batch 43: committed in 1.7s
+[lb] 2026-10-01T15:28:00.600940 - Batch 44: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:28:01.925265 - Batch 44: committed in 1.8s
+[lb] 2026-10-01T15:28:30.702224 - Batch 45: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:28:32.005899 - Batch 45: committed in 1.8s
+[lb] 2026-10-01T15:29:00.745325 - Batch 46: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:29:02.058908 - Batch 46: committed in 1.8s
+[lb] 2026-10-01T15:29:30.590202 - Batch 47: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:29:31.939276 - Batch 47: committed in 1.8s
+[lb] 2026-10-01T15:30:00.704934 - Batch 48: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:30:01.978326 - Batch 48: committed in 1.8s
+[lb] 2026-10-01T15:30:30.656838 - Batch 49: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:30:32.198492 - Batch 49: committed in 2.0s
+[lb] 2026-10-01T15:31:00.583823 - Batch 50: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:31:01.924856 - Batch 50: committed in 1.8s
+[lb] 2026-10-01T15:31:30.705676 - Batch 51: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:31:32.062364 - Batch 51: committed in 1.9s
+[lb] 2026-10-01T15:32:00.792749 - Batch 52: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:32:02.110528 - Batch 52: committed in 1.8s
+[lb] 2026-10-01T15:32:30.622810 - Batch 53: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:32:32.256278 - Batch 53: committed in 2.1s
+[lb] 2026-10-01T15:33:00.581228 - Batch 54: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:33:02.030001 - Batch 54: committed in 1.9s
+[lb] 2026-10-01T15:33:30.653501 - Batch 55: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:33:31.941784 - Batch 55: committed in 1.8s
+[lb] 2026-10-01T15:34:00.630505 - Batch 56: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:34:01.971794 - Batch 56: committed in 1.8s
+[lb] 2026-10-01T15:34:30.767938 - Batch 57: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:34:32.311580 - Batch 57: committed in 2.0s
+[lb] 2026-10-01T15:35:00.596353 - Batch 58: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:35:02.081656 - Batch 58: committed in 1.9s
+[lb] 2026-10-01T15:35:30.691954 - Batch 59: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:35:32.135619 - Batch 59: committed in 1.9s
+[lb] 2026-10-01T15:36:00.679989 - Batch 60: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:36:01.952056 - Batch 60: committed in 1.7s
+[lb] 2026-10-01T15:36:30.608489 - Batch 61: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:36:32.091554 - Batch 61: committed in 1.9s
+[lb] 2026-10-01T15:37:00.669694 - Batch 62: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:37:02.181037 - Batch 62: committed in 2.0s
+[lb] 2026-10-01T15:37:30.729962 - Batch 63: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:37:32.196873 - Batch 63: committed in 1.9s
+[lb] 2026-10-01T15:38:00.593303 - Batch 64: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:38:01.872064 - Batch 64: committed in 1.7s
+[lb] 2026-10-01T15:38:30.762580 - Batch 65: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:38:32.023189 - Batch 65: committed in 1.7s
+[lb] 2026-10-01T15:39:00.639031 - Batch 66: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:39:01.977690 - Batch 66: committed in 1.8s
+[lb] 2026-10-01T15:39:30.594463 - Batch 67: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:39:31.930886 - Batch 67: committed in 1.8s
+[lb] 2026-10-01T15:40:00.722374 - Batch 68: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:40:01.967986 - Batch 68: committed in 1.7s
+[lb] 2026-10-01T15:40:30.674777 - Batch 69: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:40:32.289892 - Batch 69: committed in 2.1s
+[lb] 2026-10-01T15:41:00.760689 - Batch 70: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:41:02.069307 - Batch 70: committed in 1.8s
+[lb] 2026-10-01T15:41:30.576021 - Batch 71: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:41:31.892404 - Batch 71: committed in 1.7s
+[lb] 2026-10-01T15:42:00.729746 - Batch 72: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:42:01.998271 - Batch 72: committed in 1.8s
+[lb] 2026-10-01T15:42:30.723660 - Batch 73: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:42:32.022152 - Batch 73: committed in 1.7s
+[lb] 2026-10-01T15:43:00.615861 - Batch 74: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:43:01.844007 - Batch 74: committed in 1.7s
+[lb] 2026-10-01T15:43:30.747863 - Batch 75: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:43:31.995500 - Batch 75: committed in 1.7s
+[lb] 2026-10-01T15:44:00.637409 - Batch 76: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:44:02.022951 - Batch 76: committed in 1.9s
+[lb] 2026-10-01T15:44:30.738401 - Batch 77: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:44:32.271402 - Batch 77: committed in 2.0s
+[lb] 2026-10-01T15:45:00.569985 - Batch 78: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:45:01.842384 - Batch 78: committed in 1.7s
+[lb] 2026-10-01T15:45:30.741952 - Batch 79: writing 30,982 rows to lakehouse.default.bronze_raw
+[lb] 2026-10-01T15:45:32.205894 - Batch 79: committed in 2.0s

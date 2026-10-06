@@ -10,40 +10,24 @@ snapshot pinned against a concurrent stream commit, the not-run and disabled
 paths, the Polaris PURGE fallback, and each read-back invariant failing when
 the written tables are inconsistent.
 
-Needs the Iceberg Spark runtime jar (LB_TEST_ICEBERG_JAR or
-LB_SPARK_TEST_JARS); skipped otherwise.
+Needs the Iceberg Spark runtime jar in LB_SPARK_TEST_JARS (see
+tests/spark/conftest.py).
 """
 
 from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def _find_jar() -> str | None:
-    cands = [os.environ.get("LB_TEST_ICEBERG_JAR", "")]
-    cands += os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
-    for c in (c.strip() for c in cands):
-        if c and "iceberg-spark-runtime" in Path(c).name and Path(c).is_file():
-            return c
-    return None
-
-
-_JAR = _find_jar()
-pytestmark = pytest.mark.skipif(
-    _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
-)
-sys.path.insert(0, str(_SCRIPTS))
-
-
-def _session(warehouse):
+def _session(warehouse, jars):
+    """*jars*: the comma-separated test jar classpath."""
     from pyspark.sql import SparkSession
 
     return (
@@ -51,7 +35,7 @@ def _session(warehouse):
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars", _JAR)
+        .config("spark.jars", jars)
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -63,22 +47,12 @@ def _session(warehouse):
     )
 
 
-def test_tm_operations_end_to_end(tmp_path):
-    """Fresh interpreter: spark.jars only applies to a JVM not yet started.
-    The scripts directory goes on PYTHONPATH so executor Python workers can
-    import tm_operations (the per-customer replay runs there)."""
-    import subprocess
-
-    env = dict(os.environ, PYSPARK_PYTHON=sys.executable)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(_SCRIPTS), env.get("PYTHONPATH")) if p)
-    proc = subprocess.run(
-        [sys.executable, __file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=900,
-    )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+def test_tm_operations_end_to_end(tmp_path, spark_subprocess, spark_jars):
+    """Fresh interpreter: a JVM with its own static Spark conf.
+    spark_subprocess puts the scripts directory on PYTHONPATH, so executor
+    Python workers can import tm_operations (the per-customer replay runs
+    there)."""
+    proc = spark_subprocess(__file__, tmp_path, spark_jars.classpath, timeout=900)
     assert "CHECK OK" in proc.stdout
 
 
@@ -252,6 +226,7 @@ def _alerts(spark, run_id, specs=None):
             None,
             None,
             datetime(*ts),
+            ["X_CODE"],
         )
         for a, r, e, ts, rel in (specs or _BASE_SPECS)
     ]
@@ -303,10 +278,46 @@ def _check(spark):
 
     txns, n_rows = _setup(spark)
     _alerts(spark, "run-x-c1")
-    inv = tm.run_tm_operations(
-        spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
-    )
+    logged = []
+    real_log = tm.log
+    tm.log = lambda m: (logged.append(m), real_log(m))
+    try:
+        inv = tm.run_tm_operations(
+            spark, txns, "run-x-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+    finally:
+        tm.log = real_log
     status = {n: (s, d) for n, s, d in inv}
+
+    # AML-1: the [tm-ops] summary times each stage of the pass, and the
+    # phases account for the pass's elapsed time.
+    import json as _json
+
+    ops = [_json.loads(m[len("[tm-ops] ") :]) for m in logged if m.startswith("[tm-ops] ")]
+    assert len(ops) == 1, logged
+    phases = ops[0]["phases"]
+    # The summary is logged with sorted keys, so compare as a set.
+    assert set(phases) == {
+        "pin",
+        "reconcile",
+        "prior_state",
+        "plan",
+        "inputs",
+        "simulate",
+        "write_ledger",
+        "write_dispositions",
+        "write_cases",
+        "coverage",
+        "read_back",
+        "recon_write",
+        "invariants",
+    }, phases
+    assert all(v >= 0 for v in phases.values()), phases
+    total, elapsed = sum(phases.values()), ops[0]["elapsed_seconds"]
+    # elapsed_seconds is rounded to 0.1 s and also covers the invariant log
+    # lines after the last phase.
+    assert abs(total - elapsed) <= 0.05 * elapsed + 0.1, (total, elapsed, phases)
+
     assert all(s == "pass" for s, _ in status.values()), status
     assert {
         "monitored_population",
@@ -346,7 +357,9 @@ def _check(spark):
     assert cov[("gather_scatter", "W1_connected_components")]["rule_status"] == "skipped"
     assert cov[("fan_in", None)]["coverage"] == "gap"
     assert ("random", None) not in cov
-    assert cov[(None, "W5_sanctions_match")]["coverage"] == "attribute"
+    # W5 has a target typology (RULE_TARGET_TYPOLOGY), so its coverage row is
+    # designated under it; the (None, W5) attribute row predates the target.
+    assert cov[("sanctions_match", "W5_sanctions_match")]["coverage"] == "designated"
 
     # Stage 6: dispositions, one per alert, none NULL.
     d = _disp(spark)
@@ -769,6 +782,57 @@ def _check(spark):
     counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
     assert _st(tm.evaluate_invariants(counts))["one_row_per_alert_identity"] == "fail"
 
+    # The two persisted frames (alert inputs, the per-customer replay) are
+    # materialised at their own phase boundaries, after the cycle is taken:
+    # a replay that fails there fails the pass, as it did when the
+    # dispositions write first triggered it.
+    _alerts(spark, "run-ph-c1")
+    counted = []
+
+    class _Watch:
+        def __init__(self, df, name, fail=False):
+            self._df, self._name, self._fail = df, name, fail
+
+        def persist(self, *a, **k):
+            return _Watch(self._df.persist(*a, **k), self._name, self._fail)
+
+        def count(self):
+            counted.append(self._name)
+            if self._fail:
+                raise RuntimeError("replay lost")
+            return self._df.count()
+
+        def __getattr__(self, attr):
+            return getattr(self._df, attr)
+
+    real_inputs, real_simulate = tm.build_alert_inputs, tm.simulate
+
+    def watched(fail):
+        tm.build_alert_inputs = lambda *a, **k: _Watch(real_inputs(*a, **k), "inputs")
+
+        def sim(*a, **k):
+            d, c, tagged = real_simulate(*a, **k)
+            return d, c, _Watch(tagged, "simulate", fail)
+
+        tm.simulate = sim
+
+    try:
+        watched(fail=False)
+        inv = tm.run_tm_operations(
+            spark, txns, "run-ph-c1", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+        assert all(s == "pass" for _, s, _ in inv), inv
+        assert counted == ["inputs", "simulate"], counted
+        _alerts(spark, "run-ph-c2")
+        watched(fail=True)
+        inv = tm.run_tm_operations(
+            spark, txns, "run-ph-c2", params=PARAMS, source_rows_fn=lambda s: n_rows
+        )
+    finally:
+        tm.build_alert_inputs, tm.simulate = real_inputs, real_simulate
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "fail")], inv
+    assert "replay lost" in inv[0][2], inv
+
     # (e) No manifest: the layer reports not run, with the reason, and
     # leaves detection's alerts alone.
     spark.sql("DROP TABLE lakehouse.bronze.manifest")
@@ -805,20 +869,25 @@ def _check(spark):
 
     # The continuous reset drops every TM table, so a new continuous run
     # never shows the previous run's queue before its first tick.
-    bvf._continuous_reset(spark, spark.table("lakehouse.default.pacs008_raw"))
+    # The product passes the raw-file read of the corpus, never a frame over
+    # the bronze table the reset drops: on Spark 4.1 a frame over a dropped
+    # table cannot be re-analysed for the create.
+    raw = spark.createDataFrame([], spark.table("lakehouse.default.pacs008_raw").schema)
+    bvf._continuous_reset(spark, raw)
     for t in ("tm_reconciliation", "scenario_coverage", "alert_dispositions", "cases"):
         assert not table_exists(spark, f"lakehouse.gold.{t}"), t
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess (argv: <warehouse> <jars>), which puts the
+    # scripts on PYTHONPATH.
     # A path-based (hadoop) catalog places tables itself, like Polaris; the
     # Hive-only explicit bronze location does not apply.
     os.environ["LB_CATALOG_TYPE"] = "polaris"
     os.environ["LB_TEST_WAREHOUSE"] = sys.argv[1]
     # Keep the continuous reset's raw-path handling on local disk.
     os.environ["LB_BRONZE_URI"] = f"file://{sys.argv[1]}/raw/"
-    _spark = _session(sys.argv[1])
+    _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
     finally:

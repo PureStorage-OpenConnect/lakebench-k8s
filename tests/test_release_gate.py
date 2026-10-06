@@ -16,8 +16,6 @@ rg = importlib.util.module_from_spec(_spec)
 sys.modules["release_gate"] = rg  # dataclasses look the module up by name
 _spec.loader.exec_module(rg)
 
-EM = chr(0x2014)
-
 
 def _check(name, status, detail=""):
     return rg.Check(name, lambda: rg.Result(name, status, detail), name)
@@ -68,13 +66,21 @@ def test_command_check_exit_codes(tmp_path):
     assert missing.status == rg.FAIL and "not found" in missing.detail
 
 
-def test_find_em_dashes(tmp_path, monkeypatch):
-    monkeypatch.setattr(rg, "ROOT", tmp_path)
-    clean = tmp_path / "a.md"
-    clean.write_text("fine -- text\n")
-    dirty = tmp_path / "b.md"
-    dirty.write_text(f"ok\nbad {EM} here\n")
-    assert rg.find_em_dashes([clean, dirty]) == ["b.md:2"]
+def test_prose_check_runs_the_prose_guard(monkeypatch):
+    # The gate's check is the guard's own check(): a hit or a stale
+    # allowlist entry fails it, with the guard's lines as the detail.
+    assert rg.check_prose().status == rg.PASS
+    real = rg._load_script
+
+    def fake(name):
+        mod = real(name)
+        if name == "prose_guard":
+            mod.check = lambda skipped=None: ["docs/a.md:2 em-dash -- use `--` or restructure"]
+        return mod
+
+    monkeypatch.setattr(rg, "_load_script", fake)
+    res = rg.check_prose()
+    assert res.status == rg.FAIL and "docs/a.md:2 em-dash" in res.detail
 
 
 def test_main_exit_code_follows_failures(monkeypatch, capsys):
@@ -104,10 +110,13 @@ def test_gate_covers_the_required_checks():
         "cargo-clippy",
         "cargo-test",
         "gitleaks",
+        "gitleaks-history",
+        "pre-push-hook",
         "examples",
         "version",
         "changelog",
-        "em-dashes",
+        "prose",
+        "package-guard",
         "uat-results",
         "perf-baselines",
     } <= names
@@ -206,12 +215,6 @@ def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monk
         assert rg.check_uat_results().status == rg.FAIL, ref
 
 
-def test_em_dash_scope_covers_changelog_github_examples_and_cli():
-    scope = rg.EM_DASH_SCOPE
-    assert "*.md" in scope and ".github/**" in scope and "examples/**" in scope
-    assert any(s.startswith("src/lakebench/cli") for s in scope)
-
-
 def test_pythonpath_is_appended_not_replaced(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/elsewhere")
     parts = rg._pythonpath_with_src().split(":")
@@ -224,19 +227,454 @@ def test_check_examples_restores_sys_path():
     assert sys.path == before
 
 
-def test_releasing_doc_matches_release_workflow_only_list():
-    """docs/releasing.md must say what release.yml's gate --only runs."""
-    import re
+def _gitleaks_or_skip() -> str:
+    import os
+    import shutil
 
-    wf = (ROOT / ".github" / "workflows" / "release.yml").read_text()
-    m = re.search(r"release_gate\.py[^\n]*\n?[^\n]*--only ([\w,-]+)", wf)
-    assert m, "release.yml no longer passes --only to release_gate.py"
-    only = set(m.group(1).split(","))
-    doc = (ROOT / "docs" / "releasing.md").read_text()
-    in_wf = "perf-baselines" in only
-    says_not_in = "not in the release workflow's `--only` list" in doc
-    assert in_wf != says_not_in, (sorted(only), says_not_in)
-    listed = re.search(r"\(`release\.yml` runs ([^)]*)\)", doc)
-    assert listed, "docs/releasing.md no longer lists what release.yml runs"
-    doc_names = set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
-    assert doc_names == only, (sorted(doc_names), sorted(only))
+    exe = shutil.which("gitleaks")
+    if exe is None:
+        if os.environ.get("LB_REQUIRE_GITLEAKS") == "1":
+            pytest.fail("gitleaks is not on PATH and LB_REQUIRE_GITLEAKS=1")
+        pytest.skip("requires gitleaks on PATH")
+    return exe
+
+
+def _repo(tmp_path, text: str):
+    import subprocess
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    (tmp_path / ".gitleaks.toml").write_text((ROOT / ".gitleaks.toml").read_text())
+    (tmp_path / "a.txt").write_text(text)
+    git("add", ".")
+    git("commit", "-q", "-m", "c")
+    return git("rev-parse", "HEAD")
+
+
+def test_gitleaks_history_check(tmp_path, monkeypatch):
+    import subprocess
+
+    _gitleaks_or_skip()
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    # Built at run time so this file never matches the FlashBlade rule itself.
+    sha = _repo(tmp_path, "access_key_id: " + "PSFB" + "Q" * 38 + "\n")
+    # Without the baseline file the check refuses to run.
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and ".gitleaksignore" in res.detail
+    (tmp_path / ".gitleaksignore").write_text("# other\n" + "a" * 40 + ":x:generic-api-key:1\n")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+    (tmp_path / ".gitleaksignore").write_text(
+        f"# planted\n{sha}:a.txt:pure-flashblade-s3-access-key:1\n"
+    )
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.PASS, res.detail
+    # A key in a commit message, which `gitleaks git` alone does not read.
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "note " + "PSFB" + "Z" * 38,
+        ],
+        check=True,
+    )
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+
+
+def test_gitleaks_history_check_refuses_a_shallow_clone(monkeypatch, tmp_path):
+    monkeypatch.setattr(rg.shutil, "which", lambda name: "/bin/true")
+    monkeypatch.setattr(rg, "_is_shallow", lambda root: True)
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "shallow" in res.detail
+    monkeypatch.setattr(rg, "_is_shallow", lambda root: None)
+    assert rg.check_gitleaks_history().status == rg.FAIL
+
+
+def test_gitleaks_history_check_skips_without_gitleaks(monkeypatch):
+    monkeypatch.delenv("GITLEAKS", raising=False)
+    monkeypatch.setattr(rg.shutil, "which", lambda name: None)
+    assert rg.check_gitleaks_history().status == rg.SKIP
+
+
+def test_gitleaks_history_check_sees_merges_and_inline_allow(tmp_path, monkeypatch):
+    import subprocess
+
+    _gitleaks_or_skip()
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _repo(tmp_path, "base\n")
+    (tmp_path / ".gitleaksignore").write_text("# none\n")
+    git("add", ".gitleaksignore")
+    git("commit", "-q", "-m", "baseline")
+    assert rg.check_gitleaks_history().status == rg.PASS
+    key = "PSFB" + "Q" * 38  # built at run time
+    # A key added while resolving a merge conflict, in the merge commit only.
+    git("checkout", "-q", "-b", "side")
+    (tmp_path / "a.txt").write_text("side\n")
+    git("commit", "-q", "-am", "side")
+    git("checkout", "-q", "main")
+    (tmp_path / "a.txt").write_text("main\n")
+    git("commit", "-q", "-am", "main")
+    m = subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "merge", "side"],
+        capture_output=True,
+        text=True,
+    )
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists(), m.stdout + m.stderr  # a conflicted merge
+    (tmp_path / "a.txt").write_text(f"key: {key}\n")
+    git("add", "a.txt")
+    git("commit", "-q", "-m", "merge")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+    # An inline allow comment does not hide one either.
+    git("reset", "-q", "--hard", "main~1")
+    (tmp_path / "b.txt").write_text(f"key: {key} # gitleaks:allow\n")
+    git("add", "b.txt")
+    git("commit", "-q", "-m", "allow")
+    res = rg.check_gitleaks_history()
+    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
+
+
+def test_pre_push_hook_check(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "scripts" / "hooks").mkdir(parents=True)
+    (tmp_path / "scripts" / "hooks" / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.SKIP  # nothing installed
+    installed = tmp_path / ".git" / "hooks" / "pre-push"
+    installed.write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.PASS
+    installed.write_text("#!/bin/sh\nexit 1\n")
+    res = rg.check_pre_push_hook()
+    assert res.status == rg.FAIL and "differs" in res.detail
+    # With core.hooksPath set, git runs that directory's hook, so that is the one checked.
+    other = tmp_path / "hooks2"
+    other.mkdir()
+    subprocess.run(["git", "-C", str(tmp_path), "config", "core.hooksPath", str(other)], check=True)
+    assert rg.check_pre_push_hook().status == rg.SKIP
+    (other / "pre-push").write_text("#!/bin/sh\nexit 0\n")
+    assert rg.check_pre_push_hook().status == rg.PASS
+
+
+# --- release evidence: freeze, expected-results, records, support-record ----
+
+
+def _git(repo, *args):
+    import subprocess as sp
+
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(repo),
+    }
+    out = sp.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+@pytest.fixture
+def frozen(tmp_path, monkeypatch):
+    """A repository with a freeze commit declared in uat/freeze-9.9.9 and
+    the expected-results file committed before it."""
+    import shutil as sh
+
+    if sh.which("git") is None:
+        pytest.skip("git not installed")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "README.md").write_text((ROOT / "README.md").read_text())
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n- a change\n")
+    (repo / "src.txt").write_text("code\n")
+    (repo / "uat").mkdir()
+    (repo / "uat" / "expected-results-9.9.9.json").write_text(
+        '{"version": "9.9.9", "entries": [], "continuous": []}\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "expected")
+    (repo / "src.txt").write_text("code 2\n")
+    _git(repo, "commit", "-qam", "freeze")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "uat" / "freeze-9.9.9").write_text(sha + "\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "declare freeze")
+    monkeypatch.setattr(rg, "ROOT", repo)
+    fake = type("M", (), {"package_version": staticmethod(lambda: "9.9.9")})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    return repo, sha
+
+
+def test_release_checks_skip_before_the_freeze(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    fake = type("M", (), {"package_version": staticmethod(lambda: "9.9.9")})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    for check in (rg.check_freeze, rg.check_expected_results, rg.check_records):
+        assert check().status == rg.SKIP
+    assert rg.make_support_record_check(None)().status == rg.SKIP
+    # --require-all at the tag makes each a failure.
+    results = [rg.check_freeze(), rg.check_records()]
+    assert len(rg.failures(results, require_all=True)) == 2
+
+
+def test_freeze_clean_passes(frozen):
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+
+
+def test_freeze_file_not_a_sha(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "freeze-9.9.9").write_text("main\n")
+    assert rg.check_freeze().status == rg.FAIL
+
+
+def test_freeze_not_an_ancestor(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "freeze-9.9.9").write_text("e" * 40 + "\n")
+    _git(repo, "commit", "-qam", "bad freeze")
+    assert "not an ancestor" in rg.check_freeze().detail
+
+
+def test_freeze_dirty_tree(frozen):
+    repo, _sha = frozen
+    (repo / "src.txt").write_text("uncommitted\n")
+    assert "not clean" in rg.check_freeze().detail
+
+
+def test_post_freeze_allowed_paths_pass(frozen):
+    repo, _sha = frozen
+    for rel in ("benchmarks/perf/baselines.yaml", "docs/benchmarks/examples/pair/README.md"):
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("evidence\n")
+    (repo / "uat" / "results-9.9.9.md").write_text("# UAT results 9.9.9\n")
+    text = (repo / "CHANGELOG.md").read_text().replace("## [Unreleased]", "## [9.9.9] - 2026-11-11")
+    (repo / "CHANGELOG.md").write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "evidence")
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+
+
+def test_post_freeze_readme_edit_outside_a_block_fails(frozen):
+    repo, _sha = frozen
+    (repo / "README.md").write_text((repo / "README.md").read_text() + "\nA stray line.\n")
+    _git(repo, "commit", "-qam", "stray")
+    assert "README.md changed outside its generated blocks" in rg.check_freeze().detail
+
+
+def test_post_freeze_changelog_body_edit_fails(frozen):
+    repo, _sha = frozen
+    (repo / "CHANGELOG.md").write_text((repo / "CHANGELOG.md").read_text() + "- another\n")
+    _git(repo, "commit", "-qam", "changelog")
+    assert "beyond the release heading" in rg.check_freeze().detail
+
+
+def test_post_freeze_code_change_fails(frozen):
+    repo, _sha = frozen
+    (repo / "src.txt").write_text("hotfix\n")
+    _git(repo, "commit", "-qam", "hotfix")
+    assert "src.txt changed after the freeze" in rg.check_freeze().detail
+
+
+def test_expected_results_before_the_freeze_pass(frozen):
+    assert rg.check_expected_results().status == rg.PASS, rg.check_expected_results().detail
+
+
+def test_expected_results_newer_than_the_freeze_fail(frozen):
+    repo, _sha = frozen
+    (repo / "uat" / "expected-results-9.9.9.json").write_text(
+        '{"version": "9.9.9", "entries": [{"workload": "x"}], "continuous": []}\n'
+    )
+    _git(repo, "commit", "-qam", "late fingerprints")
+    assert "newer than the freeze is refused" in rg.check_expected_results().detail
+
+
+def test_records_check_reads_each_cited_record(frozen, monkeypatch):
+    import json
+
+    from tests.fixtures import stored_records as sr
+
+    repo, sha = frozen
+    rid = "20260928-102711-8387da"
+    (repo / "uat" / "runs" / f"run-{rid}").mkdir(parents=True)
+    (repo / "uat" / "runs" / f"run-{rid}" / "metrics.json").write_text(
+        json.dumps(sr.load_record("102711-8387da"))
+    )
+    (repo / "uat" / "results-9.9.9.md").write_text(
+        "# UAT results 9.9.9\n\n| recipe | run |\n|---|---|\n| c360 | " + rid + " |\n"
+    )
+    res = rg.check_records()
+    assert res.status == rg.FAIL
+    assert rid in res.detail and "not from the freeze commit" in res.detail
+
+
+def test_support_record_empty_on_tag_fails(frozen):
+    res = rg.make_support_record_check("v9.9.9")()
+    assert res.status == rg.FAIL and "lists nothing" in res.detail
+
+
+def test_post_freeze_rename_out_of_src_fails(frozen):
+    repo, _sha = frozen
+    _git(repo, "mv", "src.txt", "uat/src.txt")
+    _git(repo, "commit", "-qm", "move")
+    assert "src.txt changed after the freeze" in rg.check_freeze().detail
+
+
+def test_support_record_needs_every_row_at_its_scale_on_the_freeze_tree(frozen, monkeypatch):
+    import json
+
+    import lakebench.config.support as support
+    from lakebench.metrics import release_record as rr
+    from tests.fixtures import stored_records as sr
+
+    repo, sha = frozen
+    rid = "20260928-130953-f8a2cf"  # AML batch hive Trino at scale 1
+    d = repo / "uat" / "runs" / f"run-{rid}"
+    d.mkdir(parents=True)
+    data = sr.load_record("130953-f8a2cf")
+    data["experiment"]["architecture"]["pipeline_engine"]["image"] = "apache/spark:4.1.1-python3"
+    d.joinpath("metrics.json").write_text(json.dumps(data))
+    record = _matrix_record(support, rr, rid)
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert "no validated run for financial hive-iceberg-spark-trino batch at scale 10" in detail
+    assert "no validated run for financial hive-iceberg-spark-trino batch at scale 1;" not in (
+        detail + ";"
+    )
+    assert f"not the freeze {sha[:12]}" in detail
+
+
+def _matrix_record(support, rr, rid: str, versions=None) -> dict:
+    """A validation record with one entry per release-matrix row, at the
+    row's versions unless *versions* overrides them, each citing *rid*."""
+    out = {}
+    for w, m, r, _s in rr.RELEASE_MATRIX:
+        spark, version = versions or rr.RELEASE_MATRIX_VERSIONS[(w, m, r)]
+        v = support.Validation(w, r, support.canonical_mode(m), spark, version, "0" * 40, (rid,))
+        out[v.key] = v
+    return out
+
+
+def test_support_record_rows_are_keyed_by_the_matrix_versions(frozen, monkeypatch):
+    # A record whose entries name other versions than SPEC section 11 does
+    # not cover the matrix, and a run at other versions than its entry is
+    # not that entry's evidence.
+    import json
+
+    import lakebench.config.support as support
+    from lakebench.metrics import release_record as rr
+    from tests.fixtures import stored_records as sr
+
+    repo, _sha = frozen
+    rid = "20260928-130953-f8a2cf"
+    d = repo / "uat" / "runs" / f"run-{rid}"
+    d.mkdir(parents=True)
+    d.joinpath("metrics.json").write_text(json.dumps(sr.load_record("130953-f8a2cf")))
+    record = _matrix_record(support, rr, rid, versions=("4.0", "1.11.0"))
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert (
+        "no validated entry for customer360 hive-iceberg-spark-trino batch on Spark 4.1 "
+        "with table format 1.11.0"
+    ) in detail
+    assert (
+        "customer360 hive-iceberg-spark-trino batch on Spark 4.0 with table format 1.11.0 "
+        "is not a release-matrix row"
+    ) in detail
+    # The stored run is Spark 4.0: it is the 4.0 entry's run, so its key agrees.
+    assert f"{rid}: record is not financial hive-iceberg-spark-trino batch" not in detail
+    record = _matrix_record(support, rr, rid)
+    monkeypatch.setattr(support, "load_validation_record", lambda path=None: record)
+    detail = rg.make_support_record_check("v9.9.9")().detail
+    assert (
+        f"{rid}: record is not financial hive-iceberg-spark-trino batch on Spark 4.1 "
+        "with table format 1.11.0"
+    ) in detail
+
+
+def test_post_freeze_version_bump_allowed_other_edits_not(frozen):
+    repo, _sha = frozen
+    init = repo / "src" / "lakebench" / "__init__.py"
+    init.parent.mkdir(parents=True)
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9.dev0"\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "version file before the freeze")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "uat" / "freeze-9.9.9").write_text(sha + "\n")
+    _git(repo, "commit", "-qam", "move the freeze")
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "bump")
+    assert rg.check_freeze().status == rg.PASS, rg.check_freeze().detail
+    init.write_text('"""Lakebench."""\n\n__version__ = "9.9.9"; import os\n')
+    _git(repo, "commit", "-qam", "code on the version line")
+    assert "beyond __version__" in rg.check_freeze().detail
+    init.write_text('"""Lakebench, edited."""\n\n__version__ = "9.9.9"\n')
+    _git(repo, "commit", "-qam", "edit")
+    assert "beyond __version__" in rg.check_freeze().detail
+
+
+def test_release_workflow_runs_the_evidence_checks_on_full_history():
+    import yaml
+
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yml").read_text())
+    gate = wf["jobs"]["gate"]
+    assert gate["steps"][0]["with"]["fetch-depth"] == 0
+    run = next(s["run"] for s in gate["steps"] if "release_gate.py" in str(s.get("run")))
+    only = set(run.split("--only", 1)[1].split()[0].split(","))
+    assert {"records", "support-record", "freeze", "expected-results"} <= only
+    assert "--require-all" in run
+
+
+def test_records_check_refuses_a_held_out_seed_record(frozen, monkeypatch):
+    """AML-12: a cited AML record whose seed hashes to a held-out seed (the
+    synthetic test fixture) is refused by run id and role, never by seed."""
+    import json
+
+    from tests.fixtures import protected_corpus as pc
+    from tests.fixtures import stored_records as sr
+
+    pc.use_heldout(monkeypatch)
+    repo, _sha = frozen
+    rid = "20260928-130953-f8a2cf"
+    rec = sr.load_record("130953-f8a2cf")
+    rec["experiment"]["corpus"]["seed"] = pc.EV
+    rec["experiment"]["corpus"]["corpus_role"] = None
+    (repo / "uat" / "runs" / f"run-{rid}").mkdir(parents=True)
+    (repo / "uat" / "runs" / f"run-{rid}" / "metrics.json").write_text(json.dumps(rec))
+    (repo / "uat" / "results-9.9.9.md").write_text(
+        "# UAT results 9.9.9\n\n| recipe | run |\n|---|---|\n| aml | " + rid + " |\n"
+    )
+    res = rg.check_records()
+    assert res.status == rg.FAIL
+    assert f"{rid}: " in res.detail
+    assert (
+        f"{rid}: the corpus is a protected AML corpus (its seed is the registered "
+        "evaluation seed)" in res.detail
+    )
+    assert pc.seed_tokens(res.detail) == []

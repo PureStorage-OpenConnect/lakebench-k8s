@@ -5,22 +5,20 @@ at each scale point. Referenced by ENG-2C.4.8 verification (W8 replay
 timeout budget), by release regression detection, and by external
 narratives that need quotable numbers.
 
-**v1.6 publishes no numbers here.** The frozen-generator performance and
-size measurements are deferred to v1.7, with the performance re-baseline.
-Earlier measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were
-taken on a generator and rule set that have since changed and are void; see
-History. The tables below will be filled from post-freeze runs, each with
+**No numbers are published here yet.** The frozen-generator performance
+and size measurements wait on the performance re-baseline. Earlier
+measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were taken
+on a generator and rule set that have since changed and are void; see
+History. The tables below are filled from post-freeze runs, each with
 its run id.
 
 ## How to read this table
 
 - **Scale.** Datagen `scale` factor. Per scale unit the generator writes
   111,111 entities * 4 txns/month * 60 months = 26.7M transactions.
-  Lakebench's size estimate (`src/lakebench/config/scale.py`) is about
-  8.4 GB of pacs.008 per scale unit, linear in scale (scale 100 is about
-  840 GB). That figure was measured on the pre-freeze generator and is
-  superseded; v1.6 has no size measurements on the frozen generator
-  (deferred to v1.7). AML has been run end to end up to scale 100
+  The pacs.008 size (`src/lakebench/config/scale.py`) is measured: 8.47 GB
+  at scale 1 and 93.6 GB at scale 10, about 9.4 GB per unit from scale 10
+  (see data-generation.md). AML has been run end to end up to scale 100
   (pre-freeze). Datagen is supported up to scale 300, unverified up to 800
   and refused above 800.
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock
@@ -79,9 +77,11 @@ budget below is what the ENG-2C.4.8 verification asserts against.
 
 ## Reproduce (W10, `lakebench financial reproduce`)
 
-Reproducing a specific past alert via `FOR TIMESTAMP AS OF`. Small,
-bounded work; used as a supervisory-reproducibility smoke check rather
-than a scaling metric.
+Reproducing one batch alert from the snapshots its run's gold read (the
+run record's `financial_scoring.read_snapshots`). It runs the alert's rule
+over the whole silver snapshot (plus a fingerprint of a table whose snapshot
+expired); used as a supervisory-reproducibility smoke check rather than a
+scaling metric.
 
 | Scale | Wall-clock p50 (s) | Reproduction match rate |
 |------:|-------------------:|------------------------:|

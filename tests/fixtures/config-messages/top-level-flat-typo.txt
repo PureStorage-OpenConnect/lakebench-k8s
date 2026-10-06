@@ -1,0 +1,1 @@
+  - namespce: unknown key; did you mean `platform.kubernetes.namespace`?

@@ -27,21 +27,76 @@ holder that cannot reach the API server can still complete its
 mutation locally. What it does prevent is two ``lakebench`` processes
 racing the same Helm upgrade or the same SCC install through the
 apiserver -- which is what actually broke under parallel UAT.
+
+While the lease is held (cluster-safety 2, DESIGN ch01 3.6):
+
+- ``lease_held()`` is true in the holding context, and
+  ``lease_hold_remaining()``/``lease_clamp()`` give the hold budget
+  (``max_hold_s``: ``LEASE_MAX_HOLD_S`` for deploy, destroy and run,
+  ``ADMIN_MAX_HOLD_S`` for admin verbs). The state lives in
+  ``lakebench.k8s.lease_state`` so the k8s helpers can read it.
+- On the main thread, SIGINT, SIGTERM and SIGHUP are deferred
+  (``_SignalDeferral``): the first is recorded and announced, the shared
+  change finishes, the lease is released (signals during the release are
+  only recorded), and then the first signal is re-delivered to the
+  handler that was installed before the lease. A third signal raises
+  ``LeaseAbort`` at once; the lease is still released.
+- ``lakebench.k8s._pinned`` runs kubectl, helm and oc in a new session
+  with a timeout from the hold budget, refuses a helm mutation that the
+  budget cannot cover (``LeaseHoldExceeded``), and stops a child with
+  SIGTERM before SIGKILL, so a helm upgrade is not left
+  ``pending-upgrade`` by a Ctrl-C or a timeout.
+- Every Kubernetes API call this module makes carries
+  ``_request_timeout=LEASE_REQUEST_TIMEOUT``, so a deferred signal never
+  waits on a request that does not return; a write whose reply timed out
+  but which landed is kept (``_adopt_if_written``).
+
+Not covered: SIGKILL and a lost host. The TTL reclaims the lease. An
+interrupt inside the acquire, after the lease was written, releases it:
+the holder id is unique to each acquire.
 """
 
 from __future__ import annotations
 
 import getpass
 import logging
+import math
 import os
+import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
-from collections.abc import Iterator
+import uuid
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+from lakebench.k8s import lease_state
+from lakebench.k8s.lease_state import (
+    LEASE_REQUEST_TIMEOUT,
+    LeaseHoldExceeded,
+    lease_clamp,
+    lease_held,
+    lease_hold_remaining,
+)
+
+__all__ = [
+    "ADMIN_MAX_HOLD_S",
+    "LEASE_MAX_HOLD_S",
+    "LEASE_REQUEST_TIMEOUT",
+    "ClusterLockError",
+    "ClusterLockHeld",
+    "LeaseAbort",
+    "LeaseHoldExceeded",
+    "cluster_lock",
+    "lease_clamp",
+    "lease_held",
+    "lease_hold_remaining",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +117,22 @@ _POLL_INITIAL_SEC = 1.0
 _WAIT_NOTICE_SEC = 30.0
 _POLL_MAX_SEC = 4.0
 
+# How long one holder may keep the lease (DESIGN ch01 3.7). The watch-list
+# phases (helm upgrade, rollout waits, restart, the operator pod poll, the
+# namespace delete) fit in LEASE_MAX_HOLD_S. The admin verbs
+# (admin install, repair-operator's per-namespace
+# restarts, migrate-deployment, reclaim-bucket) get ADMIN_MAX_HOLD_S. Both
+# stay under the TTL so a crashed holder is still reclaimed. Subprocesses
+# under the lease are bounded by the budget today (lakebench.k8s._pinned);
+# the remaining waits and sleeps are to move onto lease_clamp.
+LEASE_MAX_HOLD_S = 750
+ADMIN_MAX_HOLD_S = 1800
+
+# Signals deferred while the lease is held. SIGHUP is absent on Windows.
+_DEFERRED_SIGNALS: tuple[int, ...] = tuple(
+    s for s in (getattr(signal, n, None) for n in ("SIGINT", "SIGTERM", "SIGHUP")) if s is not None
+)
+
 
 class ClusterLockError(RuntimeError):
     """Base class for lease errors."""
@@ -78,8 +149,8 @@ class ClusterLockHeld(ClusterLockError):
         super().__init__(
             f"cluster lease held by {holder!r} since {acquired_at} "
             f"(ttl {ttl_seconds}s, expires {expires_at}); "
-            f"pass --wait to block, or `lakebench admin release-lock "
-            f"--expired-only` after the TTL"
+            "wait for the holder to finish, or run `lakebench admin "
+            "release-lock` after the TTL"
         )
 
 
@@ -91,18 +162,21 @@ class ClusterLockNotHeld(ClusterLockError):
 class LeaseHandle:
     """Opaque token proving ownership of the lease.
 
-    ``holder`` is the ``<hostname>@<user>@<git-sha>`` string written at
-    acquire time. ``resource_version`` is the ConfigMap resourceVersion
-    at acquire time. Release matches on holder and acquired-at, then
-    deletes with a resourceVersion precondition taken from that same
-    read, so a steal landing between the read and the delete makes the
-    delete fail instead of removing the new holder's lease.
+    ``holder`` is the ``<hostname>@<user>@<git-sha>#<pid>-<8 hex>`` string
+    written at acquire time (``build_holder_id``). ``resource_version`` is
+    the ConfigMap resourceVersion at acquire time. ``write_nonce`` is the
+    random ``write-nonce`` of this acquire's write. Release matches on
+    holder, acquired-at and, when set, the write nonce, then deletes with a
+    resourceVersion precondition taken from that same read, so a steal
+    landing between the read and the delete makes the delete fail instead
+    of removing the new holder's lease.
     """
 
     holder: str
     acquired_at: str
     ttl_seconds: int
     resource_version: str
+    write_nonce: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +189,9 @@ class LeaseState:
     expires_at_epoch: float
     resource_version: str
     uid: str | None = None
+    # Random per write; tells this process's write from another's with the
+    # same holder string and second (``_adopt_if_written``).
+    write_nonce: str = ""
 
     def is_expired(self, now_epoch: float | None = None) -> bool:
         return (now_epoch if now_epoch is not None else time.time()) >= self.expires_at_epoch
@@ -142,10 +219,15 @@ def _git_sha_short() -> str:
 
 
 def build_holder_id() -> str:
-    """Return ``<hostname>@<user>@<git-sha>`` for the lease's holder field.
+    """Return ``<hostname>@<user>@<git-sha>#<pid>-<8 hex>`` for the holder field.
 
-    All three components are best-effort so the holder line is never
-    empty. This is a diagnostic string, not a security identifier.
+    The first three components are best-effort so the holder line is never
+    empty. The suffix names the process for ``admin status`` and
+    makes the id unique to one acquire: two runs from the same tree on the
+    same host, in the same second, no longer write the same holder, and
+    ``cluster_lock`` can tell its own lease from anyone else's after an
+    interrupt inside the acquire. A diagnostic string, not a security
+    identifier.
     """
     try:
         host = socket.gethostname() or "unknown-host"
@@ -155,7 +237,7 @@ def build_holder_id() -> str:
         user = getpass.getuser()
     except Exception:  # noqa: BLE001
         user = os.environ.get("USER", "unknown-user")
-    return f"{host}@{user}@{_git_sha_short()}"
+    return f"{host}@{user}@{_git_sha_short()}#{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +260,7 @@ def _ensure_lock_namespace(core_v1: Any) -> None:
         raise ClusterLockError(f"kubernetes client not installed: {e}") from e
 
     try:
-        core_v1.read_namespace(LOCK_NAMESPACE)
+        core_v1.read_namespace(LOCK_NAMESPACE, _request_timeout=LEASE_REQUEST_TIMEOUT)
         return
     except ApiException as e:
         if e.status != 404:
@@ -191,7 +273,7 @@ def _ensure_lock_namespace(core_v1: Any) -> None:
         )
     )
     try:
-        core_v1.create_namespace(body)
+        core_v1.create_namespace(body, _request_timeout=LEASE_REQUEST_TIMEOUT)
     except ApiException as e:
         # Race with another process bootstrapping the same namespace is
         # benign; anything else is a real error.
@@ -217,7 +299,9 @@ def read_cluster_lock(core_v1: Any) -> LeaseState | None:
         raise ClusterLockError(f"kubernetes client not installed: {e}") from e
 
     try:
-        cm = core_v1.read_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+        cm = core_v1.read_namespaced_config_map(
+            LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, _request_timeout=LEASE_REQUEST_TIMEOUT
+        )
     except ApiException as e:
         if e.status == 404:
             return None
@@ -237,6 +321,7 @@ def read_cluster_lock(core_v1: Any) -> LeaseState | None:
         expires_at_epoch=_parse_iso8601(acquired_at) + ttl,
         resource_version=cm.metadata.resource_version,
         uid=getattr(cm.metadata, "uid", None),
+        write_nonce=data.get("write-nonce", ""),
     )
 
 
@@ -257,14 +342,16 @@ def _delete_if_unchanged(core_v1: Any, resource_version: str | None, uid: str | 
     body = V1DeleteOptions(
         preconditions=V1Preconditions(resource_version=resource_version, uid=uid)
     )
-    core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, body=body)
+    core_v1.delete_namespaced_config_map(
+        LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, body=body, _request_timeout=LEASE_REQUEST_TIMEOUT
+    )
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _build_configmap(holder: str, acquired_at: str, ttl_seconds: int) -> Any:
+def _build_configmap(holder: str, acquired_at: str, ttl_seconds: int, write_nonce: str) -> Any:
     from kubernetes.client.models import V1ConfigMap, V1ObjectMeta
 
     return V1ConfigMap(
@@ -277,7 +364,56 @@ def _build_configmap(holder: str, acquired_at: str, ttl_seconds: int) -> Any:
             "holder": holder,
             "acquired-at": acquired_at,
             "ttl-seconds": str(ttl_seconds),
+            "write-nonce": write_nonce,
         },
+    )
+
+
+def _adopt_if_written(
+    core_v1: Any,
+    holder: str,
+    acquired_at: str,
+    ttl_seconds: int,
+    write_nonce: str,
+    error: Exception,
+) -> LeaseHandle:
+    """After a transport error on our create or replace, keep a lease we did write.
+
+    The request timeout (``LEASE_REQUEST_TIMEOUT``) can fire after the API
+    server committed the write. Without this the lease would stay held,
+    by us, until its TTL. Only the random ``write-nonce`` of this write
+    identifies it: the holder string and the acquired-at second can be
+    identical for another lakebench run from the same tree on this host.
+    Anything else re-raises the original error.
+    """
+    try:
+        state = read_cluster_lock(core_v1)
+    except Exception:  # noqa: BLE001
+        raise error from None
+    if (
+        state is not None
+        and state.write_nonce == write_nonce
+        and state.holder == holder
+        and state.acquired_at == acquired_at
+    ):
+        logger.warning("cluster_lock: the lease write timed out but landed; keeping it")
+        return LeaseHandle(
+            holder=holder,
+            acquired_at=acquired_at,
+            ttl_seconds=ttl_seconds,
+            resource_version=state.resource_version,
+            write_nonce=write_nonce,
+        )
+    raise error
+
+
+def _as_own(state: LeaseState) -> LeaseHandle:
+    return LeaseHandle(
+        holder=state.holder,
+        acquired_at=state.acquired_at,
+        ttl_seconds=state.ttl_seconds,
+        resource_version=state.resource_version,
+        write_nonce=state.write_nonce,
     )
 
 
@@ -285,11 +421,21 @@ def _try_acquire_once(
     core_v1: Any,
     holder: str,
     ttl_seconds: int,
+    *,
+    adopt_own: bool = False,
 ) -> LeaseHandle | LeaseState:
     """Single acquire attempt.
 
     Returns a ``LeaseHandle`` on success, or a ``LeaseState`` describing
     the current holder if the lease is held with unexpired TTL.
+
+    With ``adopt_own`` (``holder`` is unique to this acquire, as
+    ``build_holder_id`` makes it), a lease already carrying ``holder`` is
+    ours: an earlier attempt's write that committed although its reply was
+    lost, or one the client re-sent after a read timeout (urllib3 retries a
+    PUT, and the retry then 409s on the stale resourceVersion). Without
+    this the acquire would wait on itself and then leave the lease held
+    until its TTL.
 
     Raises on transport errors so the caller's poll loop stops on
     non-retryable conditions (missing namespace after we created it,
@@ -297,15 +443,25 @@ def _try_acquire_once(
     """
     from kubernetes.client.exceptions import ApiException
 
+    def own(st: LeaseState | None) -> bool:
+        return adopt_own and st is not None and st.holder == holder
+
     now_epoch = time.time()
     state = read_cluster_lock(core_v1)
+    if own(state):
+        assert state is not None
+        logger.warning("cluster_lock: an earlier write of this acquire landed; keeping it")
+        return _as_own(state)
 
     if state is None:
         # No lease. Try create.
         acquired_at = _now_iso()
-        body = _build_configmap(holder, acquired_at, ttl_seconds)
+        nonce = uuid.uuid4().hex
+        body = _build_configmap(holder, acquired_at, ttl_seconds, nonce)
         try:
-            created = core_v1.create_namespaced_config_map(LOCK_NAMESPACE, body)
+            created = core_v1.create_namespaced_config_map(
+                LOCK_NAMESPACE, body, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
         except ApiException as e:
             if e.status == 409:
                 # Another process created it in the gap. Fall through by
@@ -314,13 +470,16 @@ def _try_acquire_once(
                 if s2 is None:
                     # Deleted again in the gap. Signal caller to retry.
                     raise ClusterLockError("lease vanished mid-create; retry") from e
-                return s2
+                return _as_own(s2) if own(s2) else s2
             raise ClusterLockError(f"cannot create lease: {e}") from e
+        except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
+            return _adopt_if_written(core_v1, holder, acquired_at, ttl_seconds, nonce, e)
         return LeaseHandle(
             holder=holder,
             acquired_at=acquired_at,
             ttl_seconds=ttl_seconds,
             resource_version=created.metadata.resource_version,
+            write_nonce=nonce,
         )
 
     if not state.is_expired(now_epoch):
@@ -329,17 +488,22 @@ def _try_acquire_once(
     # Expired. Steal via replace() keyed on resourceVersion. If someone
     # else steals it first, the replace 409s and we return their state.
     acquired_at = _now_iso()
-    body = _build_configmap(holder, acquired_at, ttl_seconds)
+    nonce = uuid.uuid4().hex
+    body = _build_configmap(holder, acquired_at, ttl_seconds, nonce)
     body.metadata.resource_version = state.resource_version
     try:
-        replaced = core_v1.replace_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, body)
+        replaced = core_v1.replace_namespaced_config_map(
+            LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, body, _request_timeout=LEASE_REQUEST_TIMEOUT
+        )
     except ApiException as e:
         if e.status == 409:
             s2 = read_cluster_lock(core_v1)
             if s2 is None:
                 raise ClusterLockError("lease vanished mid-steal; retry") from e
-            return s2
+            return _as_own(s2) if own(s2) else s2
         raise ClusterLockError(f"cannot steal expired lease: {e}") from e
+    except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
+        return _adopt_if_written(core_v1, holder, acquired_at, ttl_seconds, nonce, e)
     logger.info(
         "cluster_lock: stole expired lease from %r (was acquired %s, ttl %ss)",
         state.holder,
@@ -351,6 +515,7 @@ def _try_acquire_once(
         acquired_at=acquired_at,
         ttl_seconds=ttl_seconds,
         resource_version=replaced.metadata.resource_version,
+        write_nonce=nonce,
     )
 
 
@@ -360,6 +525,7 @@ def acquire_cluster_lock(
     ttl_seconds: int = DEFAULT_TTL_SEC,
     timeout: float = DEFAULT_ACQUIRE_TIMEOUT_SEC,
     holder: str | None = None,
+    adopt_own: bool | None = None,
 ) -> LeaseHandle:
     """Acquire the cluster lease or raise.
 
@@ -373,6 +539,10 @@ def acquire_cluster_lock(
     _ensure_lock_namespace(core_v1)
 
     holder_id = holder or build_holder_id()
+    # A generated holder id is unique to this acquire, so a lease carrying
+    # it can only be one of our own writes (``_try_acquire_once``).
+    if adopt_own is None:
+        adopt_own = holder is None
     deadline = time.time() + max(0.0, timeout)
     delay = _POLL_INITIAL_SEC
     last_state: LeaseState | None = None
@@ -380,7 +550,7 @@ def acquire_cluster_lock(
 
     while True:
         try:
-            outcome = _try_acquire_once(core_v1, holder_id, ttl_seconds)
+            outcome = _try_acquire_once(core_v1, holder_id, ttl_seconds, adopt_own=adopt_own)
         except ClusterLockError as e:
             # ADR-F7: the internal "lease vanished mid-{create,steal}"
             # signals are benign contention: the winning holder released
@@ -447,14 +617,20 @@ def release_cluster_lock(core_v1: Any, handle: LeaseHandle) -> None:
 
     for _ in range(_DELETE_ATTEMPTS):
         try:
-            cm = core_v1.read_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+            cm = core_v1.read_namespaced_config_map(
+                LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
         except ApiException as e:
             if e.status == 404:
                 return
             raise ClusterLockError(f"cannot read lease for release: {e}") from e
 
         data = cm.data or {}
-        if data.get("holder") != handle.holder or data.get("acquired-at") != handle.acquired_at:
+        if (
+            data.get("holder") != handle.holder
+            or data.get("acquired-at") != handle.acquired_at
+            or (handle.write_nonce and data.get("write-nonce") != handle.write_nonce)
+        ):
             logger.warning(
                 "cluster_lock: release skipped; lease no longer ours "
                 "(current holder=%r acquired_at=%r)",
@@ -513,7 +689,9 @@ def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseStat
 
     if not expired_only:
         try:
-            core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+            core_v1.delete_namespaced_config_map(
+                LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, _request_timeout=LEASE_REQUEST_TIMEOUT
+            )
         except ApiException as e:
             if e.status == 404:
                 return state
@@ -544,6 +722,157 @@ def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseStat
     )
 
 
+# ---------------------------------------------------------------------------
+# Signal deferral while the lease is held
+# ---------------------------------------------------------------------------
+
+
+class LeaseAbort(KeyboardInterrupt):
+    """The third interrupt inside the lease: stop now, after the release.
+
+    ``signum`` is the signal that aborted, for the run's interrupt record.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+_Handler = Callable[[int, Any], Any] | int | None
+
+
+@dataclass
+class _SignalDeferral:
+    """Holds back SIGINT/SIGTERM/SIGHUP while the lease is held (main thread).
+
+    Before the acquire (``guard_acquire``), SIGTERM and SIGHUP left at their
+    default raise ``LeaseAbort`` instead of killing the process, as SIGINT
+    raises ``KeyboardInterrupt``, so an acquire interrupted after its write
+    landed still releases the lease. While the lease is held (``install``)
+    the first signal is announced and held back; the second repeats the
+    budget left; the third raises ``LeaseAbort`` at once. While the lease is
+    being released (``quiet``) every signal is only recorded, so no
+    interrupt can stop the release half way and leave the lease held until
+    its TTL. After the release the saved handlers are restored and the first
+    recorded signal is sent again, so the handler that was installed before
+    the lease (Python's ``KeyboardInterrupt`` for SIGINT, or a command's own
+    SIGTERM handler) runs then. A signal its process ignores (``SIG_IGN``,
+    as under ``nohup``) stays ignored.
+    """
+
+    held: lease_state.HeldLease | None = None
+    saved: dict[int, _Handler] = field(default_factory=dict)
+    received: list[int] = field(default_factory=list)
+    aborted: bool = False
+    active: bool = False
+
+    def _set(self, sig: int, handler: _Handler) -> bool:
+        """Install ``handler`` for ``sig``, first saving the original; False if ignored."""
+        if sig not in self.saved:
+            self.saved[sig] = signal.getsignal(sig)
+        if self.saved[sig] == signal.SIG_IGN:
+            return False
+        signal.signal(sig, handler)  # type: ignore[arg-type]
+        return True
+
+    def guard_acquire(self) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            return
+        self.active = True
+        for sig in _DEFERRED_SIGNALS:
+            if sig == getattr(signal, "SIGINT", None):
+                continue  # its default already raises KeyboardInterrupt
+            try:
+                if signal.getsignal(sig) == signal.SIG_DFL:
+                    self._set(sig, self._raise_now)
+            except (ValueError, OSError) as e:
+                logger.debug("cluster_lock: cannot guard %s during the acquire: %s", sig, e)
+
+    def install(self, held: lease_state.HeldLease) -> bool:
+        self.held = held
+        if threading.current_thread() is not threading.main_thread():
+            logger.warning(
+                "cluster_lock: held off the main thread; an interrupt can stop the shared change"
+            )
+            return False
+        self.active = True
+        try:
+            for sig in _DEFERRED_SIGNALS:
+                self._set(sig, self._on_signal)
+        except (ValueError, OSError) as e:  # not the main interpreter, or unsupported
+            logger.warning("cluster_lock: cannot defer signals: %s", e)
+            self.restore()
+            return False
+        return True
+
+    def quiet(self) -> None:
+        """Record, never raise, while the lease is released."""
+        if not self.active:
+            return
+        for sig in _DEFERRED_SIGNALS:
+            try:
+                self._set(sig, self._record_only)
+            except (ValueError, OSError) as e:
+                logger.debug("cluster_lock: could not quiet %s: %s", sig, e)
+
+    def restore(self) -> None:
+        for sig, handler in self.saved.items():
+            try:
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+            except (ValueError, OSError, TypeError) as e:
+                logger.debug("cluster_lock: could not restore handler for %s: %s", sig, e)
+
+    def _left(self) -> int:
+        if self.held is None:
+            return 0
+        return max(0, math.ceil(self.held.deadline - time.monotonic()))
+
+    def _record_only(self, signum: int, _frame: Any) -> None:
+        self.received.append(signum)
+
+    def _raise_now(self, signum: int, _frame: Any) -> None:
+        # During the acquire nothing is held yet: stop now, releasing a lease
+        # this acquire may already have written (cluster_lock's finally).
+        self.aborted = True
+        raise LeaseAbort(signum)
+
+    def _on_signal(self, signum: int, _frame: Any) -> None:
+        self.received.append(signum)
+        n = len(self.received)
+        if n == 1:
+            _say(
+                "interrupt received while holding the cluster lease; finishing the "
+                f"shared change (hold budget {self._left()} s left), then stopping. "
+                "Interrupt twice more to abort now"
+            )
+        elif n == 2:
+            _say(
+                "still finishing the shared change under the cluster lease (hold "
+                f"budget {self._left()} s left). Interrupt once more to abort now"
+            )
+        else:
+            self.aborted = True
+            self.quiet()
+            _say(
+                "aborting inside the cluster lease; the lease is released first. If a "
+                "helm upgrade was running, run `lakebench admin repair-operator`: it "
+                "rolls a pending-upgrade revision back when that is safe"
+            )
+            raise LeaseAbort(signum)
+
+    def redeliver(self) -> None:
+        if self.received and not self.aborted:
+            signal.raise_signal(self.received[0])
+
+
+def _say(message: str) -> None:
+    try:
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+    except Exception:  # noqa: BLE001 -- a closed stderr must not break the lease
+        pass
+
+
 @contextmanager
 def cluster_lock(
     core_v1: Any,
@@ -551,26 +880,95 @@ def cluster_lock(
     ttl_seconds: int = DEFAULT_TTL_SEC,
     timeout: float = DEFAULT_ACQUIRE_TIMEOUT_SEC,
     holder: str | None = None,
+    max_hold_s: float = LEASE_MAX_HOLD_S,
 ) -> Iterator[LeaseHandle]:
     """Acquire on enter, release on exit (even under exception).
 
     The context manager is the preferred acquisition path -- it makes
     the release non-optional and localises the ``finally`` in one
-    place, so future callers cannot forget it.
+    place, so future callers cannot forget it. While the body runs,
+    ``lease_held()`` is true, the hold budget is ``max_hold_s``
+    (``lease_hold_remaining``, ``lease_clamp``), and on the main thread
+    SIGINT, SIGTERM and SIGHUP are deferred until the lease is released
+    (``_SignalDeferral``).
     """
-    handle = acquire_cluster_lock(
-        core_v1,
-        ttl_seconds=ttl_seconds,
-        timeout=timeout,
-        holder=holder,
-    )
+    if max_hold_s <= 0:
+        raise ValueError("max_hold_s must be positive")
+    # The hold budget never outlives the lease itself.
+    max_hold_s = min(max_hold_s, ttl_seconds)
+    holder_id = holder or build_holder_id()
+    handle: LeaseHandle | None = None
+    token = None
+    pending: BaseException | None = None
+    entered = False
+    deferral = _SignalDeferral()
+    deferral.guard_acquire()
     try:
+        handle = acquire_cluster_lock(
+            core_v1,
+            ttl_seconds=ttl_seconds,
+            timeout=timeout,
+            holder=holder_id,
+            adopt_own=holder is None,
+        )
+        entered = True
+        held, token = lease_state.enter(handle.holder, max_hold_s)
+        deferral.install(held)
         yield handle
     finally:
+        # First, so a signal landing as the body ends (the third interrupt,
+        # or a Ctrl-C during a failed acquire, before SIGINT is deferred)
+        # cannot skip the release.
         try:
-            release_cluster_lock(core_v1, handle)
-        except Exception as e:  # noqa: BLE001
-            # Log but do not shadow whatever the body raised. Transport
-            # errors (urllib3 MaxRetryError and friends) are not
-            # ApiException and would otherwise replace the body's error.
-            logger.warning("cluster_lock: release failed on exit: %s", e)
+            deferral.quiet()
+        except KeyboardInterrupt as e:  # LeaseAbort included
+            pending = e
+            deferral.quiet()
+        try:
+            if handle is not None:
+                try:
+                    release_cluster_lock(core_v1, handle)
+                except Exception as e:  # noqa: BLE001
+                    # Log but do not shadow whatever the body raised.
+                    # Transport errors (urllib3 MaxRetryError and friends)
+                    # are not ApiException and would otherwise replace the
+                    # body's error.
+                    logger.warning("cluster_lock: release failed on exit: %s", e)
+            elif holder is None:
+                # The acquire failed or was interrupted, possibly after its
+                # write committed (a lost reply, a 504, a signal). The holder
+                # id is unique to this acquire, so a lease carrying
+                # it is ours to release.
+                _release_interrupted_acquire(core_v1, holder_id)
+        finally:
+            try:
+                if entered:
+                    # Only a lease this call entered: a failed acquire must not
+                    # clear an outer holder's state.
+                    lease_state.leave(token)
+            finally:
+                deferral.restore()
+                # After the release: the saved handler now sees the signal.
+                deferral.redeliver()
+        if pending is not None:
+            raise pending
+
+
+def _release_interrupted_acquire(core_v1: Any, holder_id: str) -> None:
+    """Delete the lease if this acquire wrote it before it failed or was interrupted.
+
+    Only a lease whose holder equals ``holder_id``, which ``build_holder_id``
+    makes unique to one acquire, is deleted, with the resourceVersion and
+    uid of the read as preconditions. Best effort: an error is logged and
+    the TTL reclaims the lease.
+    """
+    try:
+        state = read_cluster_lock(core_v1)
+        if state is not None and state.holder == holder_id:
+            _delete_if_unchanged(core_v1, state.resource_version, state.uid)
+            logger.warning("cluster_lock: the acquire did not complete; released its lease")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "cluster_lock: the acquire did not complete; any lease it wrote is left to its TTL: %s",
+            e,
+        )

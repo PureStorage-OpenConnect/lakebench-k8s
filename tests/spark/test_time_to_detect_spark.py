@@ -6,12 +6,11 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 _ALERTS = "alert_id string, rule_id string, entity_id long, related_txn_ids array<string>"
 

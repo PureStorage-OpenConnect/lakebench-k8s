@@ -229,7 +229,7 @@ fn person_pool(population: usize, seed: i64) -> Vec<u64> {
 /// Subset of `person_pool` where the participant lives in a corridor
 /// country. Falls back to the full pool if the corridor pool is too small.
 fn corridor_pool<F: Fn(usize) -> &'static str>(pool: &[u64], country: F) -> Vec<u64> {
-    // `country` is recomputed on demand (LB-204). `pool` ids are real entities
+    // `country` is recomputed on demand to bound pod memory. `pool` ids are real entities
     // (1..=population), so `country(id)` is always valid; the former
     // `idx < country.len()` bound only guarded the sentinel-length Vec.
     let mut v: Vec<u64> = pool
@@ -266,7 +266,7 @@ fn pick_distinct(rng: &mut Rng, pool: &[u64], k: usize) -> Vec<u64> {
 /// Index of the subject role in `participants`: the account whose behaviour
 /// the typology's designated scenario fires on, and so the one a real
 /// monitoring alert is raised on. The reporting FI monitors only its own
-/// customers, so the subject must be one (GOALS P10 stage 0). The rule:
+/// customers, so the subject must be one. The rule:
 /// the collecting beneficiary for many-to-one structuring, the first
 /// pass-through account for layering chains, the originator otherwise.
 /// corridor_high_risk's originator is chosen per instance by a hash of its
@@ -456,7 +456,7 @@ pub fn schedule_p<F: Fn(usize) -> &'static str>(
         while rows_left > 0 {
             // Hashed, not added: `seed + tid * stride + j` made seed s+1's
             // instance j the same draw as seed s's instance j+1, so different
-            // seeds produced shifted copies of one schedule (LB-139).
+            // seeds produced shifted copies of one schedule.
             let iseed = splitmix64(
                 (seed as u64) ^ splitmix64(0xF100 + (spec.tid as i64 * TID_SEED_STRIDE + j) as u64),
             ) as i64;
@@ -550,7 +550,7 @@ pub fn schedule_p<F: Fn(usize) -> &'static str>(
                     // Dormancy length: log-uniform over 45..365 days. The old
                     // 95..179 range was chosen to clear W8's 90-day threshold,
                     // which made W8's dormancy recall partly built into the
-                    // data (LB-138, AML-GOALS R2). The floor moved from 60 to
+                    // data, which datagen must never be tuned for. The floor moved from 60 to
                     // 45 days so the short end overlaps the quiet spells a
                     // normal low-activity account has (an account sending
                     // about once a month goes 45 days without a send about one
@@ -697,7 +697,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         // fan_in / fan_out: the signal is the shape (many senders to one
         // collector, or one payer to many), not the amount. Their amounts are
         // each sender's own draw: pinning them to the structuring band made
-        // them sit just under W2's threshold by construction (AML-GOALS R2).
+        // them sit just under W2's threshold by construction, which datagen must never be tuned for.
         // Only micro_structuring keeps band amounts, its defining attribute.
         "fan_in" => {
             let bene = *p.last().unwrap();
@@ -880,7 +880,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
                     structuring: false,
-                    // No rule-derived floor (LB-138): the burst is drawn from
+                    // No rule-derived floor: the burst is drawn from
                     // the account's own amount distribution like any send.
                 });
             }

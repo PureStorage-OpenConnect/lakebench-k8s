@@ -24,7 +24,7 @@ fn main() {
     let n = w.population;
     let idx = 1..=n;
 
-    // Attributes are recomputed on demand (LB-204): the world no longer holds
+    // Attributes are recomputed on demand to bound pod memory: the world no longer holds
     // the per-entity columns, so the dump recomputes each one via its method.
     let id: Vec<i64> = idx.clone().map(|i| i as i64).collect();
     let ty: Vec<i32> = idx.clone().map(|i| w.ty(i) as i32).collect();

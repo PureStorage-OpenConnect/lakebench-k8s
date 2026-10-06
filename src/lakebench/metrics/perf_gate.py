@@ -15,11 +15,17 @@ Two hashes guard "like for like":
   recorded ``config_snapshot`` (the resolved values after autosizing and any
   cluster capping). The pinned file's fingerprint is computed the same way,
   so a run that silently ran with 8 Trino workers instead of 2 is refused
-  rather than compared.
+  rather than compared. Version 2 (``FINGERPRINT_VERSION``) also hashes the
+  job profiles and the Spark conf each job's manifest asks for
+  (``metrics/fingerprint_inputs.py``); the version and those inputs are
+  stamped into the snapshot when the run starts and read, never rebuilt.
 
-Metric classification and direction come from ``lakebench.cli._reproduce``
-(``_METRIC_TABLE`` and ``_classify_direction``); this module adds no second
-table. Only the performance band is compared here: the correctness signals
+A baseline also records the dependency pinset of its run
+(``provenance.deps.pinset_sha256``); a run on another set is refused.
+
+Metric classification and direction come from the metric registry
+(``metrics/metric_registry.reproduce_class``), as reproduce's do; this
+module adds no second table. Only the performance band is compared here: the correctness signals
 (``scale_ratio``, ``corpus_drained``) are guards that refuse a run.
 
 Design and workflow: docs/perf-regression-gate.md.
@@ -42,7 +48,6 @@ import yaml
 
 from lakebench.cli._reproduce import (
     QUERY_QPH_PREFIX,
-    _classify_direction,
     _drift_pct,
     _extract_expected_numbers,
     _is_stage_seconds,
@@ -57,9 +62,14 @@ from lakebench.metrics.experiment import (
     results_established,
     stored_identity_refusals,
 )
+from lakebench.metrics.fingerprint_inputs import FINGERPRINT_VERSION
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
+from lakebench.metrics.metric_registry import reproduce_class as _classify_direction
 
-STORE_SCHEMA_VERSION = 1
+# Schema 2 adds fingerprint_version and pinset_sha256 to every baseline.
+# load_store reads 1 and 2; save always writes 2.
+STORE_SCHEMA_VERSION = 2
+_READABLE_STORE_SCHEMAS = (1, 2)
 
 # Refuse batch runs that processed less than this share of the expected
 # bronze volume (a scale_ratio of 0 means the volume was not measured).
@@ -80,10 +90,11 @@ WINDOW_TOLERANCE_PCT = 10.0
 # 1.0 is saturation, a real performance signal, and stays comparable.
 MAX_INGEST_RATIO = 1.05
 
-# The datagen fleet numbers come from a sidecar written by the last
-# `lakebench generate` in the namespace. One written more than this before
-# the run started belongs to an earlier generate: its datagen numbers are
-# left out rather than attributed to the run.
+# The datagen fleet numbers come from the run's own datagen pods when it
+# generated, else from the sidecar the last generate in the namespace wrote
+# (`lakebench generate`, or a run that generated). One written more than
+# this before the run started belongs to an earlier generate: its datagen
+# numbers are left out rather than attributed to the run.
 MAX_DATAGEN_AGE_HOURS = 24.0
 # Before v1.6 start_time is naive local time on the host that ran lakebench,
 # and the zone is not recorded (from v1.6 it is UTC with its offset, and the
@@ -190,6 +201,33 @@ def normalise_mode(mode: str | None) -> str:
     return "sustained" if mode == "continuous" else mode
 
 
+_FINGERPRINT_KEYS = (
+    "scale",
+    "processing_pattern",
+    "catalog",
+    "table_format",
+    "pipeline_engine",
+    "query_engine",
+    "workload_schema",
+    "spark",
+    "datagen",
+    "images",
+    "benchmark",
+    "maintenance",
+)
+
+
+def snapshot_fingerprint_version(snapshot: Mapping[str, Any]) -> int | None:
+    """The fingerprint version a snapshot was stamped with; 1 when unstamped.
+
+    None when the stamp is not an integer, which no version reads.
+    """
+    value = snapshot.get("fingerprint_version", 1)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def snapshot_fingerprint(snapshot: Mapping[str, Any], mode: str) -> dict[str, Any]:
     """The sizing-relevant subset of a ``build_config_snapshot`` dict.
 
@@ -197,31 +235,69 @@ def snapshot_fingerprint(snapshot: Mapping[str, Any], mode: str) -> dict[str, An
     between deployments of the same pinned config. Keys missing from an old
     snapshot become None, so a run recorded before a field existed does not
     match a config that pins it.
+
+    The projection follows the version the snapshot was stamped with, so a
+    v1.6 record is read as version 1 and never given a version 2 shape.
+    Version 2 drops the Spark driver and executor blocks and the scratch size
+    (they sized nothing) and adds the per-job scratch sizes and the stamped
+    ``fingerprint_inputs``.
     """
     mode = normalise_mode(mode)
+    version = snapshot_fingerprint_version(snapshot)
     fp: dict[str, Any] = {"pipeline_mode": mode}
-    for key in (
-        "scale",
-        "processing_pattern",
-        "catalog",
-        "table_format",
-        "pipeline_engine",
-        "query_engine",
-        "workload_schema",
-        "spark",
-        "datagen",
-        "images",
-        "benchmark",
-        "maintenance",
-    ):
+    for key in _FINGERPRINT_KEYS:
         fp[key] = snapshot.get(key)
     scratch = snapshot.get("scratch") or {}
-    fp["scratch"] = {k: scratch.get(k) for k in ("enabled", "storage_class", "size")}
+    if version == FINGERPRINT_VERSION:
+        fp["fingerprint_version"] = version
+        fp["scratch"] = {k: scratch.get(k) for k in ("enabled", "storage_class", "size_per_job")}
+        fp["fingerprint_inputs"] = snapshot.get("fingerprint_inputs")
+    else:
+        if version != 1:
+            fp["fingerprint_version"] = snapshot.get("fingerprint_version")
+        fp["scratch"] = {k: scratch.get(k) for k in ("enabled", "storage_class", "size")}
     if snapshot.get("query_engine") == "trino":
         fp["trino"] = snapshot.get("trino")
     if mode == "sustained":
         fp["sustained"] = snapshot.get("sustained")
     return _normalise(fp)
+
+
+def fingerprint_version_refusal(snapshot: Mapping[str, Any]) -> str | None:
+    """Why a run snapshot cannot be fingerprinted as version 2, or None."""
+    version = snapshot_fingerprint_version(snapshot)
+    if version != FINGERPRINT_VERSION:
+        if version == 1:
+            return (
+                f"run predates fingerprint v{FINGERPRINT_VERSION} (its snapshot has no "
+                "fingerprint_version); re-run it with this version"
+            )
+        return (
+            f"run snapshot has fingerprint_version {snapshot.get('fingerprint_version')!r}, "
+            f"not {FINGERPRINT_VERSION}"
+        )
+    inputs = snapshot.get("fingerprint_inputs")
+    if not isinstance(inputs, Mapping):
+        return "run snapshot has no fingerprint_inputs"
+    if inputs.get("error"):
+        return f"run fingerprint inputs could not be built: {inputs['error']}"
+    return None
+
+
+def run_pinset(raw: Mapping[str, Any]) -> str | None:
+    """The dependency pinset a run recorded (``provenance.deps.pinset_sha256``).
+
+    None when the record has none: every record before the in-deployment
+    dependency server writes it.
+    """
+    provenance = raw.get("provenance")
+    deps = provenance.get("deps") if isinstance(provenance, Mapping) else None
+    value = deps.get("pinset_sha256") if isinstance(deps, Mapping) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _short(sha: str | None) -> str:
+    return sha[:12] if sha else "none recorded"
 
 
 def fingerprint_hash(fp: Mapping[str, Any]) -> str:
@@ -268,7 +344,7 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
     offline autosizing ``lakebench run`` applies, so it is the snapshot a
     faithful run of this file records (before any cluster capping).
     """
-    from lakebench.config import load_config
+    from lakebench.config import LoadPurpose, load_config
     from lakebench.config.autosizer import resolve_auto_sizing
     from lakebench.metrics.collector import build_config_snapshot
 
@@ -281,7 +357,9 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
     try:
         # The fingerprint does not depend on the name, so a too-long
         # LAKEBENCH_PERF_NAME left in the environment must not fail the gate.
-        cfg = load_config(path, allow_long_names=True)
+        # RUN: a pinned config is run with `lakebench run`, so it must load as
+        # run loads it (removed keys refused), not as a teardown.
+        cfg = load_config(path, purpose=LoadPurpose.RUN, allow_long_names=True)
         resolve_auto_sizing(cfg, None)
     except Exception as e:  # noqa: BLE001 -- any load failure is a gate failure
         raise PerfGateError(f"pinned config {path} does not load: {e}") from None
@@ -289,7 +367,64 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
         for k in added:
             os.environ.pop(k, None)
     mode = normalise_mode(cfg.architecture.pipeline.mode.value)
-    fp = snapshot_fingerprint(build_config_snapshot(cfg), mode)
+    # A baseline measures the proven profile: a pinned executor count that
+    # differs from what the profile asks at the pinned scale, or a driver
+    # override, sizes the run some other way.
+    from lakebench.modules.pipeline_engines.spark.job import (
+        BATCH_JOB_TYPES,
+        STREAMING_JOB_TYPES,
+        executor_override,
+        get_executor_count,
+    )
+
+    schema = cfg.architecture.workload.schema_type.value
+    scale = cfg.architecture.workload.datagen.get_effective_scale()
+    off_profile = []
+    for jt in STREAMING_JOB_TYPES if mode == "sustained" else BATCH_JOB_TYPES:
+        pinned = executor_override(jt, cfg)
+        asks = get_executor_count(jt, scale, schema)
+        if pinned is not None and pinned != asks:
+            off_profile.append(f"{jt} {pinned} (profile asks {asks})")
+    spark_compute = cfg.platform.compute.spark
+    if off_profile or spark_compute.driver_cores is not None or spark_compute.driver_memory:
+        what = list(off_profile)
+        if spark_compute.driver_cores is not None or spark_compute.driver_memory:
+            what.append("a driver override")
+        raise PerfGateError(
+            f"pinned config {path} does not size the run by the proven profile: "
+            + "; ".join(what)
+            + ". Pin each executor count at the profile's count, or leave it unset"
+        )
+    if mode == "sustained":
+        # The continuous concurrent budget caps unpinned executor counts by
+        # cluster size, and the fingerprint records the count before that
+        # cap: two clusters would run different counts under one fingerprint.
+        # A pinned count beats the budget.
+        spark = cfg.platform.compute.spark
+        unpinned = [
+            key
+            for key in (
+                "bronze_ingest_executors",
+                "silver_stream_executors",
+                "gold_refresh_executors",
+            )
+            if getattr(spark, key) is None
+        ]
+        if unpinned:
+            raise PerfGateError(
+                f"pinned config {path}: a continuous pinned config must set "
+                f"platform.compute.spark.{', '.join(unpinned)} (the concurrent budget "
+                "would otherwise size them by cluster)"
+            )
+    # Through JSON, as a run's snapshot reaches the gate from metrics.json,
+    # so both sides hash the same representation.
+    snapshot = json.loads(json.dumps(build_config_snapshot(cfg), default=str))
+    inputs = snapshot.get("fingerprint_inputs") or {}
+    if inputs.get("error"):
+        raise PerfGateError(
+            f"pinned config {path}: fingerprint inputs could not be built: {inputs['error']}"
+        )
+    fp = snapshot_fingerprint(snapshot, mode)
     return PinnedConfig(
         name=name or path.stem,
         path=path,
@@ -390,15 +525,21 @@ def load_run(ref: str | Path, runs_dir: Path | list[Path] | None = None) -> RunR
 
 
 def iter_runs(runs_dir: Path) -> Iterator[RunRecord]:
-    """Every readable run under *runs_dir*, newest run id first."""
+    """Every readable run under *runs_dir*, newest run id first.
+
+    A ``lakebench benchmark`` record (``record_kind`` "benchmark") is not a
+    run: it copies the run it measured, so yielding it would offer that run's
+    pipeline numbers twice, under a newer run id."""
     if not runs_dir.is_dir():
         return
     for d in sorted(runs_dir.glob("run-*"), reverse=True):
         if (d / "metrics.json").is_file():
             try:
-                yield load_run(d)
+                run = load_run(d)
             except PerfGateError:
                 continue
+            if (run.raw.get("record_kind") or "run") == "run":
+                yield run
 
 
 def _is_datagen_stage(stage: Mapping[str, Any]) -> bool:
@@ -549,6 +690,11 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         if _classify_direction(k)[0] == "performance"
     }
     excluded: dict[str, str] = {}
+    from lakebench.metrics.storage import recorded_qph_basis
+
+    basis = recorded_qph_basis(run.raw)
+    if isinstance(basis, Mapping) and basis.get("blended"):
+        excluded["composite_qph"] = "in-stream rounds ran different query sets"
 
     if run.mode == "sustained":
         # Every continuous stage runs for the whole window, so its seconds
@@ -627,8 +773,8 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     stale = _datagen_stale(run)
     if stale:
         # datagen_seconds is the in-run generate time when there was one
-        # (`lakebench run --generate`, which writes no sidecar but still
-        # attaches an old one); the collector only falls back to the
+        # (a record from before 1.7, whose `run --generate` attached an old
+        # sidecar instead of its own fleet); the collector only falls back to the
         # sidecar's wall_elapsed_max_s when the run did not generate. Keep
         # it unless it is the sidecar's number.
         fleet = run.raw.get("datagen_fleet") or {}
@@ -680,16 +826,71 @@ def benchmark_sample_refusal(run: RunRecord, pinned: PinnedConfig) -> str | None
     )
 
 
+def protected_run_refusal(raw: Mapping[str, Any]) -> str | None:
+    """Why a run record is never a perf baseline or a gated run: a protected
+    AML corpus, or one not shown to be outside the held-out corpora
+    (``look_guard.protected_record_reason``, fail closed, identity
+    required). Names a role or a kind, never a seed."""
+    from lakebench.aml.look_guard import protected_record_reason
+
+    why = protected_record_reason(raw, require_identity=True, fail_closed=True)
+    if why is None:
+        return None
+    if why.startswith("unidentified") or "cannot be read" in why or "withheld" in why:
+        return f"the run's corpus is not shown to be outside the held-out AML corpora ({why})"
+    return f"the run's corpus is a protected AML corpus ({why})"
+
+
+def baseline_seed_refusal(experiment_identity: Mapping[str, Any] | None) -> str | None:
+    """Why a stored baseline's identity names a held-out seed, or None. The
+    identity keeps the corpus seed under ``seed``. As for a run: any
+    workload's seed that hashes to a held-out seed is refused; an AML
+    baseline is also refused, fail closed, when its seed is absent, withheld
+    or in no form the guard reads, or the held-out record cannot be read."""
+    from lakebench.aml.look_guard import WITHHELD, recorded_seed_role, seed_readable
+
+    identity = experiment_identity or {}
+    financial = identity.get("workload") == "financial"
+    seed = identity.get("seed")
+    if seed is None:
+        return "the baseline's AML corpus has no recorded seed" if financial else None
+    try:
+        role = recorded_seed_role(seed)
+    except Exception as e:  # noqa: BLE001 -- unreadable held-out record
+        return f"the baseline's seed cannot be checked ({type(e).__name__})" if financial else None
+    if role == WITHHELD:
+        return "the baseline's seed is withheld"
+    if role is not None:
+        return f"the baseline's seed is the registered {role} seed"
+    if financial and not seed_readable(seed):
+        return "the baseline's AML seed is in no form the guard can check"
+    return None
+
+
 def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
-    """Reasons this run cannot stand for *pinned*. Empty means comparable."""
+    """Reasons this run cannot stand for *pinned*. Empty means comparable.
+    A run from a protected AML corpus gets that reason alone, so nothing
+    else about it (a fingerprint or identity diff) reaches the output."""
     from lakebench.metrics.verdict import passed as _record_passed
 
+    protected = protected_run_refusal(run.raw)
+    if protected:
+        return [protected]
+
     reasons: list[str] = []
+    kind = run.raw.get("record_kind") or "run"
+    if kind != "run":
+        reasons.append(
+            f"a {kind} record (of run {run.raw.get('parent_run_id') or 'unknown'}), not a run"
+        )
     # Prefer the persisted verdict (OD-6: v1.6 records) and fall back to
     # raw ``success`` for legacy v1.5 records. A verdict of FAILED refuses
     # even when the raw flag is True (LB-044 shape).
     if not _record_passed(run.raw):
         reasons.append("run did not succeed")
+    if run.raw.get("stage_only"):
+        # `run --stage` ran one stage: it times that stage, not the pipeline.
+        reasons.append(f"run measured one stage only ({run.raw['stage_only']})")
     # Only runs under this version's maintenance policy are compared or
     # recorded: m1-legacy covers two different real policies, and a baseline
     # recorded from a legacy run would refuse every current run.
@@ -704,20 +905,36 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         reasons.append(f"run mode {run.mode} but pinned config is {pinned.mode}")
     if experiment_of(run.raw) is None:
         reasons.append(f"{NO_PROVENANCE} (run {run.run_id} has no experiment block)")
-    run_fp = run.fingerprint
-    if fingerprint_hash(run_fp) != pinned.fingerprint_hash:
-        diff = fingerprint_diff(pinned.fingerprint, run_fp)
-        reasons.append("config fingerprint differs from the pinned config: " + "; ".join(diff))
+    # A run an evaluation profile or a Lakebench cap bound measures the
+    # limit: never a baseline, never compared against one.
+    from lakebench.metrics.release_record import bound_problems
 
-    # A run that records the sha256 of the config file it used must have used
-    # the pinned file byte for byte. Runs that predate the field cannot be
-    # checked this way; the fingerprint is the only guard for them.
+    reasons += bound_problems(run.raw)
+    # The run's fingerprint is read from its stored snapshot. A snapshot not
+    # stamped with this version cannot show what the version 2 inputs were,
+    # so it is refused by name rather than diffed field by field.
+    version_problem = fingerprint_version_refusal(run.snapshot)
+    if version_problem:
+        reasons.append(version_problem)
+    else:
+        run_fp = run.fingerprint
+        if fingerprint_hash(run_fp) != pinned.fingerprint_hash:
+            diff = fingerprint_diff(pinned.fingerprint, run_fp)
+            reasons.append("config fingerprint differs from the pinned config: " + "; ".join(diff))
+
+    # The run must have used the pinned file byte for byte: the fingerprint
+    # covers the fields that size work, the file covers every other setting.
+    # Version 2 runs record the file's sha256 when they start, so a version 2
+    # snapshot without it is refused (fail closed); older runs are refused by
+    # their version above.
     recorded = run.snapshot.get("config_sha256")
     if recorded and recorded != pinned.file_sha256:
         reasons.append(
             f"run used a different config file (sha256 {str(recorded)[:12]}, "
             f"pinned {pinned.file_sha256[:12]})"
         )
+    elif not recorded and version_problem is None:
+        reasons.append("run snapshot records no config_sha256, so its config file is unknown")
 
     scores = run.scores
     if run.mode == "batch":
@@ -869,6 +1086,11 @@ class Baseline:
     # nothing can be gated against it.
     experiment_identity: dict[str, Any] | None = None
     result_fingerprints: dict[str, Any] | None = None
+    # Fingerprint version the baseline's fingerprint_hash was taken under.
+    # Entries of a schema 1 store are version 1.
+    fingerprint_version: int | None = None
+    # Dependency pinset of the baseline run (provenance.deps.pinset_sha256).
+    pinset_sha256: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -892,6 +1114,8 @@ class Baseline:
             "maintenance_policy_id",
             "experiment_identity",
             "result_fingerprints",
+            "fingerprint_version",
+            "pinset_sha256",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -951,9 +1175,11 @@ def load_store(path: Path) -> BaselineStore:
         raw = yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError) as e:
         raise PerfGateError(f"cannot read baseline store {path}: {e}") from None
-    if raw.get("schema_version") != STORE_SCHEMA_VERSION:
+    schema = raw.get("schema_version")
+    if isinstance(schema, bool) or schema not in _READABLE_STORE_SCHEMAS:
         raise PerfGateError(
-            f"{path}: schema_version {raw.get('schema_version')!r} is not {STORE_SCHEMA_VERSION}"
+            f"{path}: schema_version {schema!r} is not one of "
+            f"{', '.join(str(v) for v in _READABLE_STORE_SCHEMAS)}"
         )
     entries = raw.get("baselines")
     if not isinstance(entries, dict) or not entries:
@@ -967,8 +1193,18 @@ def load_store(path: Path) -> BaselineStore:
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
                 raise PerfGateError(f"{path}: {name}.metrics.{k} must be a finite number")
         status = entry.get("status", STATUS_PENDING)
+        # A schema 1 store predates fingerprint versions: its entries are
+        # version 1 whatever they say. In schema 2 the version is written.
+        fp_version = 1 if schema == 1 else entry.get("fingerprint_version")
         if status == STATUS_ACCEPTED:
-            missing = [k for k in ("run_id", "config_hash", "fingerprint_hash") if not entry.get(k)]
+            required_keys = ["run_id", "config_hash", "fingerprint_hash"]
+            if schema != 1:
+                required_keys.append("fingerprint_version")
+                # A version 1 entry carried into a schema 2 store by a save
+                # has no pinset; it is refused by its version instead.
+                if fp_version == FINGERPRINT_VERSION:
+                    required_keys.append("pinset_sha256")
+            missing = [k for k in required_keys if not entry.get(k)]
             if missing or not metrics:
                 raise PerfGateError(
                     f"{path}: accepted baseline {name!r} lacks {', '.join(missing) or 'metrics'}"
@@ -992,6 +1228,8 @@ def load_store(path: Path) -> BaselineStore:
             maintenance_policy_id=entry.get("maintenance_policy_id"),
             experiment_identity=entry.get("experiment_identity"),
             result_fingerprints=entry.get("result_fingerprints"),
+            fingerprint_version=fp_version,
+            pinset_sha256=entry.get("pinset_sha256") if schema != 1 else None,
         )
     return BaselineStore(path=path, baselines=baselines)
 
@@ -1057,18 +1295,45 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
         result.verdict = NO_BASELINE
         result.reasons.append(f"baseline is '{baseline.status}'")
         return result
+    # A protected corpus on either side is refused with that reason alone:
+    # the comparison below would print identity differences of its corpus.
+    protected = protected_run_refusal(run.raw) or baseline_seed_refusal(
+        baseline.experiment_identity
+    )
+    if protected:
+        result.verdict = REFUSED
+        result.reasons.append(protected)
+        return result
+    if baseline.fingerprint_version != FINGERPRINT_VERSION:
+        # Its fingerprint_hash cannot equal any version 2 hash; say why
+        # instead of reporting a changed snapshot.
+        result.reasons.append(
+            f"baseline predates fingerprint v{FINGERPRINT_VERSION} (recorded under "
+            f"version {baseline.fingerprint_version}); re-record it with the v1.7 "
+            "re-baseline (scripts/perf_gate.py record --replace)"
+        )
+    elif baseline.fingerprint_hash != pinned.fingerprint_hash:
+        result.reasons.append(
+            "pinned config resolves to a different snapshot than when the baseline was "
+            "recorded (a schema default, job profile, Spark conf or autosizer change); "
+            "record a new baseline"
+        )
     if baseline.config_hash != pinned.config_hash:
         result.reasons.append(
             f"pinned config {baseline.config} changed since the baseline was recorded "
             f"(baseline config_hash {(baseline.config_hash or '')[:12]}, now {pinned.config_hash[:12]}); "
             "record a new baseline"
         )
-    if baseline.fingerprint_hash != pinned.fingerprint_hash:
-        result.reasons.append(
-            "pinned config resolves to a different snapshot than when the baseline was "
-            "recorded (a schema default or autosizer change); record a new baseline"
-        )
     result.reasons.extend(run_refusals(run, pinned))
+    # The pinned config is compared with itself, so every other part of the
+    # architecture is equal by construction: a run on another dependency set
+    # differs from the baseline in its jars alone, which is not like for like.
+    pinset = run_pinset(run.raw)
+    if baseline.fingerprint_version == FINGERPRINT_VERSION and pinset != baseline.pinset_sha256:
+        result.reasons.append(
+            f"dependency set differs from the baseline ({_short(pinset)} vs "
+            f"{_short(baseline.pinset_sha256)})"
+        )
     run_exp = experiment_of(run.raw)
     if run_exp is not None:
         # Same workload, corpus, seed, scale and mode, and every benchmark
@@ -1236,6 +1501,12 @@ def record_baseline(
         )
     pinned = store.pinned(name)
     reasons = run_refusals(run, pinned)
+    pinset = run_pinset(run.raw)
+    if pinset is None:
+        reasons.append(
+            "run records no dependency set (provenance.deps.pinset_sha256), so a later run "
+            "on other jars could not be told apart"
+        )
     basis = ttv_basis(run) if run.mode == "batch" else None
     if run.mode == "batch" and stage_timing_basis(run) == STAGE_TIMING_MIXED:
         reasons.append(
@@ -1318,6 +1589,8 @@ def record_baseline(
         maintenance_policy_id=recorded_policy(run.raw),
         experiment_identity=identity(exp),
         result_fingerprints=result_fingerprints(exp),
+        fingerprint_version=FINGERPRINT_VERSION,
+        pinset_sha256=pinset,
     )
     store.baselines[name] = new
     return new
@@ -1371,6 +1644,9 @@ def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
         # once the perf-gate test suite fixtures carry verdict blocks.
         if (
             _record_passed(run.raw)
+            # A run from a protected corpus never gates; it must not displace
+            # the newest run that can.
+            and protected_run_refusal(run.raw) is None
             and run.mode == pinned.mode
             and fingerprint_hash(run.fingerprint) == pinned.fingerprint_hash
             # A later --skip-maintenance or --local run must not displace the

@@ -1,8 +1,10 @@
 """The Spark Operator controller's ``/tmp`` scratch volume.
 
 The operator runs spark-submit inside its controller pod, and spark-submit
-resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy``
-(``/tmp/.ivy2`` for every lakebench job). The controller's root filesystem is
+resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy`` (before 1.7,
+``/tmp/.ivy2`` for every lakebench job; since 1.7 the jobs name lb-deps jar
+URLs and set no packages, but other tenants' applications may). The
+controller's root filesystem is
 read-only (chart ``controller.securityContext.readOnlyRootFilesystem``), so
 ``/tmp`` is the chart's ``tmp`` emptyDir, and chart 2.5.1 (like 2.4.0) caps
 it at ``sizeLimit: 1Gi``. The Iceberg or Delta runtime, hadoop-aws and the
@@ -26,7 +28,7 @@ from typing import Any
 # ``controller.volumes[0]``, mounted at /tmp by ``controller.volumeMounts``).
 CONTROLLER_TMP_VOLUME = "tmp"
 
-# What ``admin install-spark-operator`` and ``admin repair-operator`` set.
+# What ``admin install --component spark-operator`` and ``admin repair-operator`` set.
 # One Spark line's jars are ~1.2 GB; the UAT matrix resolves three Spark
 # minors (each with its own AWS SDK bundle) plus Iceberg and Delta, so a
 # controller that lives through a full matrix holds 3-4 GB.
@@ -36,23 +38,6 @@ DEFAULT_CONTROLLER_TMP_SIZE = "8Gi"
 # concurrent resolve can fill it; doctor reports it as undersized.
 MIN_CONTROLLER_TMP_BYTES = 4 * 1024**3
 
-_QUANTITY = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGTPE]i?|k|m)?\s*$")
-_FACTORS = {
-    None: 1,
-    "k": 1000,
-    "K": 1000,
-    "M": 1000**2,
-    "G": 1000**3,
-    "T": 1000**4,
-    "P": 1000**5,
-    "E": 1000**6,
-    "Ki": 1024,
-    "Mi": 1024**2,
-    "Gi": 1024**3,
-    "Ti": 1024**4,
-    "Pi": 1024**5,
-    "Ei": 1024**6,
-}
 
 # Kubelet eviction messages for this failure, e.g. 'Usage of EmptyDir volume
 # "tmp" exceeds the limit "1Gi". ' or 'Pod ephemeral local storage usage
@@ -62,15 +47,14 @@ _STORAGE_EVICTION = re.compile(r"emptydir volume|ephemeral(?:-| local )storage",
 
 def parse_quantity(value: str | None) -> int | None:
     """Bytes in a Kubernetes quantity ("1Gi", "500Mi", "4G"), None if unparseable."""
+    from lakebench.quantity import QuantityError, to_bytes
+
     if not value:
         return None
-    m = _QUANTITY.match(str(value))
-    if not m:
+    try:
+        return to_bytes(str(value))
+    except QuantityError:
         return None
-    unit = m.group(2)
-    if unit == "m":  # milli-bytes: legal, never meant for storage
-        return int(float(m.group(1)) / 1000)
-    return int(float(m.group(1)) * _FACTORS[unit])
 
 
 def validate_size(value: str) -> str:

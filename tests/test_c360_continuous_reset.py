@@ -100,9 +100,36 @@ def test_c360_state_reset_refuses_without_ownership(monkeypatch):
     monkeypatch.setattr(_sustained, "_reset_ownership_problem", lambda c: "bucket c-b: FOREIGN")
     client = MagicMock()
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
-    with pytest.raises(typer.Exit):
+    with pytest.raises(typer.Exit) as exc:
         _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 3  # refused (CLI-1)
     client.delete_prefix.assert_not_called()
+
+
+def test_c360_state_reset_that_cannot_check_ownership_is_a_prerequisite(monkeypatch):
+    """The cluster or namespace could not be read: exit 4, not 3 (retry later)."""
+    cfg = _c360_cfg()
+
+    def unreadable(_c):
+        raise _sustained._OwnershipUnverifiable("cannot reach the cluster to verify ownership")
+
+    monkeypatch.setattr(_sustained, "_reset_ownership_problem", unreadable)
+    client = MagicMock()
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
+    with pytest.raises(typer.Exit) as exc:
+        _sustained._reset_continuous_state(cfg, clear_raw=True)
+    assert exc.value.exit_code == 4
+    client.delete_prefix.assert_not_called()
+
+
+def test_reset_ownership_problem_raises_when_the_namespace_is_unreadable(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    core = MagicMock()
+    core.read_namespace.side_effect = ApiException(status=403)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
+    with pytest.raises(_sustained._OwnershipUnverifiable):
+        _sustained._reset_ownership_problem(_c360_cfg())
 
 
 class _StopAfterFirstStream(Exception):
@@ -123,6 +150,9 @@ def _drive_sustained(
     force_reset=False,
     raw_problem=None,
     dg_state="unfinished",
+    skip_generate=False,
+    stop_raises=None,
+    deploy_result=None,
 ):
     """Run _run_sustained with every cluster and S3 edge mocked; return the
     ordered list of side effects it performed."""
@@ -155,10 +185,18 @@ def _drive_sustained(
 
     def dg_deploy():
         events.append("datagen")
+        if deploy_result is not None:
+            return deploy_result
         return MagicMock(status=_sustained_status_success())
 
+    def dg_stop():
+        events.append("stop-datagen")
+        if stop_raises is not None:
+            raise stop_raises
+
     dg.deploy.side_effect = dg_deploy
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e: dg)
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: dg_stop())
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
 
     def ownership(c):
         events.append("ownership")
@@ -185,9 +223,29 @@ def _drive_sustained(
 
     # The run ends at the first stream submit (or an Exit); the finally
     # block may then fail on mocked metrics, which is irrelevant here.
-    with pytest.raises(Exception):  # noqa: B017
-        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60, force_reset=force_reset)
+    with pytest.raises(Exception) as ei:  # noqa: B017
+        _sustained._run_sustained(
+            cfg,
+            tmp_path / "cfg.yaml",
+            60,
+            True,
+            60,
+            skip_generate=skip_generate,
+            force_reset=force_reset,
+        )
+    events_ref["exc"] = _exit_in_chain(ei.value)
     return events
+
+
+def _exit_in_chain(exc):
+    """The typer/click Exit that ended the run: the finally block may raise
+    over it on mocked metrics, which keeps it as ``__context__``."""
+    seen = exc
+    while seen is not None:
+        if hasattr(seen, "exit_code"):
+            return seen
+        seen = seen.__context__
+    return exc
 
 
 def _sustained_status_success():
@@ -199,7 +257,13 @@ def _sustained_status_success():
 def test_c360_continuous_entry_resets_before_any_stream(monkeypatch, tmp_path):
     events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg())
     reset_submit = "submit:bronze-verify:{'LB_CONTINUOUS_RESET': '1'}"
-    assert events[:4] == ["ownership", "stop-streams", "reset-s3:clear_raw=True", "datagen"]
+    assert events[:5] == [
+        "ownership",
+        "stop-streams",
+        "stop-datagen",  # an earlier datagen Job's pods stop before the reset clears raw
+        "reset-s3:clear_raw=True",
+        "datagen",
+    ]
     assert reset_submit in events
     first_stream = next(i for i, e in enumerate(events) if e.startswith("submit:bronze-ingest"))
     assert events.index(reset_submit) < first_stream
@@ -220,7 +284,7 @@ def test_existing_state_refuses_without_force_reset(monkeypatch, tmp_path, capsy
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-s/", "c-b/customer/interactions/"]
     )
     assert events == ["ownership"]  # nothing stopped, deleted or submitted
-    out = capsys.readouterr().out
+    out = "".join(capsys.readouterr())
     assert "--force-reset" in out and "silver.customer_interactions_enriched" in out
     assert "c-b/customer/interactions/" in out
 
@@ -248,11 +312,11 @@ def test_existing_state_lists_only_non_empty_prefixes(monkeypatch):
     cfg = _c360_cfg()
     raw = MagicMock()
 
-    def list_objects_v2(Bucket, Prefix, MaxKeys):
+    def list_objects_v2(Bucket, Prefix, MaxKeys, **_kw):
         if Bucket == "c-g":
             raise RuntimeError("NoSuchBucket")
         if (Bucket, Prefix) == ("c-s", ""):
-            return {"KeyCount": 1}
+            return {"KeyCount": 1, "Contents": [{"Key": "x"}]}
         if (Bucket, Prefix) == ("c-b", "checkpoints/bronze-ingest/"):
             raise RuntimeError("AccessDenied")
         return {"KeyCount": 0}
@@ -289,10 +353,10 @@ def test_run_command_passes_force_reset(monkeypatch, tmp_path):
         lambda *a, **kw: seen.update(kw),
     )
     res = CliRunner().invoke(
-        app, ["run", str(cfg_file), "--sustained", "--skip-deploy", "--force-reset"]
+        app, ["run", str(cfg_file), "--sustained", "--skip-preflight", "--force-reset"]
     )
     assert seen.get("force_reset") is True, res.output
-    res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-deploy"])
+    res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-preflight"])
     assert seen.get("force_reset") is False, res.output
 
 
@@ -302,9 +366,15 @@ def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, 
     events = _drive_sustained(
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-b/customer/interactions/"]
     )
-    assert events[:4] == ["ownership", "stop-streams", "reset-s3:clear_raw=True", "datagen"]
+    assert events[:5] == [
+        "ownership",
+        "stop-streams",
+        "stop-datagen",
+        "reset-s3:clear_raw=True",
+        "datagen",
+    ]
     assert any(e.startswith("submit:bronze-ingest") for e in events)
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "Refusing" not in out and "a separate generate is not needed" in out
 
 
@@ -330,7 +400,7 @@ def test_raw_only_but_unsafe_to_replace_still_refuses(monkeypatch, tmp_path, cap
         raw_problem="a lakebench-datagen Job is still running",
     )
     assert events == ["ownership"]
-    out = " ".join(capsys.readouterr().out.split())
+    out = " ".join("".join(capsys.readouterr()).split())
     assert "still running" in out and "--force-reset" in out
 
 
@@ -454,3 +524,65 @@ def test_datagen_release_retries_an_unknown_state(monkeypatch):
     monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (next(states), "blip"))
     monkeypatch.setattr(_sustained.time, "sleep", lambda s: None)
     assert _sustained._datagen_released("ns", deployed_here=True) is True
+
+
+def test_skip_generate_stops_no_datagen(monkeypatch, tmp_path):
+    """--skip-generate keeps raw data and may be fed by another writer: the
+    reset neither clears raw nor stops a datagen Job."""
+    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), skip_generate=True)
+    assert "stop-datagen" not in events
+    assert "reset-s3:clear_raw=False" in events
+
+
+@pytest.mark.parametrize("financial", [False, True])
+def test_live_datagen_pods_refuse_before_the_reset(monkeypatch, tmp_path, financial):
+    """C360 and AML: earlier datagen pods still running after the bounded wait
+    refuse the run (exit 3) before anything is cleared."""
+    from lakebench.deploy.datagen import DatagenPodsStillRunning
+
+    cfg = _c360_cfg()
+    if financial:
+        cfg.architecture.workload.schema_type = type(cfg.architecture.workload.schema_type)(
+            "financial"
+        )
+    events = _drive_sustained(
+        monkeypatch, tmp_path, cfg, stop_raises=DatagenPodsStillRunning("pods still running")
+    )
+    assert events == ["ownership", "stop-streams", "stop-datagen"]
+    assert events_ref["exc"].exit_code == 3
+
+
+def test_unknown_datagen_pods_fail_before_the_reset(monkeypatch, tmp_path):
+    from lakebench.deploy.datagen import DatagenPodsUnknown
+
+    events = _drive_sustained(
+        monkeypatch, tmp_path, _c360_cfg(), stop_raises=DatagenPodsUnknown("cannot list")
+    )
+    assert events == ["ownership", "stop-streams", "stop-datagen"]
+    assert events_ref["exc"].exit_code == 4  # could not check: k8s.unreachable
+
+
+def test_refused_datagen_deploy_exits_3(monkeypatch, tmp_path):
+    """A continuous datagen refusal (stale bronze after the reset) is the
+    documented exit 3, run.bronze_nonempty, not a generic 1."""
+    from lakebench.deploy import DeploymentResult, DeploymentStatus
+    from lakebench.exit_codes import REFUSAL_DETAIL
+
+    refused = DeploymentResult(
+        component="datagen",
+        status=DeploymentStatus.FAILED,
+        message="holds objects",
+        details={REFUSAL_DETAIL: "run.bronze_nonempty"},
+    )
+    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), deploy_result=refused)
+    assert "datagen" in events
+    assert not any(e.startswith("submit:bronze-ingest") for e in events)
+    assert events_ref["exc"].exit_code == 3
+
+
+def test_failed_datagen_deploy_still_exits_1(monkeypatch, tmp_path):
+    from lakebench.deploy import DeploymentResult, DeploymentStatus
+
+    failed = DeploymentResult(component="datagen", status=DeploymentStatus.FAILED, message="boom")
+    _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), deploy_result=failed)
+    assert events_ref["exc"].exit_code == 1

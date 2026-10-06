@@ -37,7 +37,15 @@ spec:
             - name: QUARKUS_DATASOURCE_USERNAME
               value: "polaris"
             - name: QUARKUS_DATASOURCE_PASSWORD
-              value: "lakebench-polaris-2024"
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-db
+                  key: password
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-client
+                  key: clientSecret
             - name: QUARKUS_DATASOURCE_JDBC_URL
               value: "jdbc:postgresql://lakebench-postgres.{{ namespace }}.svc.cluster.local:5432/polaris"
           command: ["/bin/sh", "-c"]
@@ -45,7 +53,7 @@ spec:
             - |
               OUTPUT=$(java -jar /deployments/polaris-admin-tool.jar bootstrap \
                 -r POLARIS \
-                -c "POLARIS,lakebench,{{ polaris_client_secret }}" 2>&1)
+                -c "POLARIS,lakebench,$CLIENT_SECRET" 2>&1)
               RC=$?
               echo "$OUTPUT"
               if [ $RC -ne 0 ]; then
@@ -65,7 +73,10 @@ spec:
             - name: CLIENT_ID
               value: "lakebench"
             - name: CLIENT_SECRET
-              value: "{{ polaris_client_secret }}"
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-client
+                  key: clientSecret
             - name: S3_ENDPOINT
               value: "{{ s3_endpoint }}"
             - name: S3_REGION

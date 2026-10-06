@@ -11,10 +11,8 @@ capped figure as bare headline evidence, or a compare table that says only
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
-from unittest import mock
 
 import pytest
 
@@ -297,10 +295,12 @@ class TestReportContainsQualifiers:
         html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
         assert "BOUNDED BY" not in html
 
-    def test_qph_card_carries_n_from_iterations(self, tmp_path):
+    def test_qph_card_labels_iterations_as_samples_not_runs(self, tmp_path):
+        # Five iterations inside one run are samples per query, not five runs.
         storage, m = _metrics_with_experiment(tmp_path, n_iterations=5)
         html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
-        assert "n=5" in html
+        assert "5 samples/query" in html
+        assert "n=5" not in html
 
 
 class TestReadFirstPanel:
@@ -314,13 +314,20 @@ class TestReadFirstPanel:
             n_runs=3,
         )
         assert "Read this first" in html
-        # Verdict, headline, corpus label, n, limits present, record digest.
-        assert "Verdict:" in html
-        assert "Headline:" in html
-        assert "Corpus:" in html
-        assert ">n:</span>" in html or "n:</span>" in html
-        assert "Limits present:" in html
-        assert "Record digest:" in html
+        # The front matter, in its order (reports/front_matter.py).
+        labels = [
+            "Verdict:",
+            "Headline:",
+            "Evidence class:",
+            "Corpus:",
+            "Support state:",
+            "Binding caps:",
+            "n:",
+            "Provenance:",
+            "Digest:",
+        ]
+        positions = [html.index(f">{label}</span>") for label in labels]
+        assert positions == sorted(positions)
 
     def test_corpus_label_includes_role_and_id_prefix(self, tmp_path):
         storage, m = _metrics_with_experiment(tmp_path, corpus_role="evaluation")
@@ -334,22 +341,20 @@ class TestReadFirstPanel:
         assert "evaluation" in html
         assert "abc123abc123" in html  # first 12 chars of the corpus id
 
-    def test_provenance_label_at_top(self, tmp_path):
+    def test_fixed_stamp_is_gone(self, tmp_path):
+        # The evidence class comes from the look record in the front
+        # matter; the fixed "single-owner recorded" stamp is removed.
         storage, m = _metrics_with_experiment(tmp_path)
-        gen = ReportGenerator(storage.metrics_dir)
-        html = gen._generate_html(m, platform_metrics=None)
-        # The provenance label sits above the header, so it appears before
-        # the <h1> tag in the document flow.
-        h1 = html.index("<h1>")
-        prov = html.index("internal benchmark, single-owner recorded")
-        assert prov < h1
+        html = ReportGenerator(storage.metrics_dir)._generate_html(m, platform_metrics=None)
+        assert "single-owner recorded" not in html
+        assert "Evidence class:" in html
 
     def test_read_first_panel_present_in_full_html(self, tmp_path):
         storage, m = _metrics_with_experiment(tmp_path)
         gen = ReportGenerator(storage.metrics_dir)
         html = gen._generate_html(m, platform_metrics=None)
         assert "Read this first" in html
-        assert "Record digest:" in html
+        assert "Digest:" in html
 
 
 class TestConfidenceChipOnBadge:
@@ -388,100 +393,9 @@ class TestConfidenceChipOnBadge:
 
 
 # ---------------------------------------------------------------------------
-# Compare CLI: WCAG 1.4.1 -- delta cells carry a text token, not colour
-# alone; a screen-reader or a plain-text strip of Rich markup still names
-# who won. This exercises the printer end-to-end with a minimal comparison.
-# ---------------------------------------------------------------------------
-
-
-def _min_comparison(
-    *,
-    val_a: float,
-    val_b: float,
-    metric: str = "composite_qph",
-    verdict: str = "comparable",
-    comparable: bool = True,
-) -> dict:
-    return {
-        "timestamp": "2026-09-28T12:00:00",
-        "verdict": verdict,
-        "comparable": comparable,
-        "not_established": [],
-        "like_for_like": True,
-        "condition_differences": [],
-        "support": {"config_a": "unverified", "config_b": "unverified"},
-        "refusals": {"provenance": [], "results": []},
-        "warnings": [],
-        "config_a": {"name": "A", "error": None, "run_id": "run-a"},
-        "config_b": {"name": "B", "error": None, "run_id": "run-b"},
-        "noise_floor_pct": 2.0,
-        "query_sets": {"config_a": "qs1", "config_b": "qs1"},
-        "qph_comparable": True,
-        "qph_refused": None,
-        "metrics": [
-            {
-                "metric": metric,
-                "config_a": val_a,
-                "config_b": val_b,
-                **({"not_comparable": True} if not comparable else {}),
-            }
-        ],
-    }
-
-
-def _strip_rich_markup(text: str) -> str:
-    """Remove Rich colour tags: WCAG check reads the plain text stream."""
-    return re.sub(r"\[/?[a-zA-Z0-9_ ]+\]", "", text)
-
-
-def _capture_compare_print(comparison: dict) -> str:
-    from io import StringIO
-
-    from rich.console import Console
-
-    from lakebench.cli import _compare as compare_mod
-
-    buf = StringIO()
-    fake_console = Console(file=buf, force_terminal=False, width=200)
-    with mock.patch.object(compare_mod, "console", fake_console):
-        compare_mod._print_comparison_table(comparison)
-    return buf.getvalue()
-
-
-class TestCompareDeltaTokens:
-    def test_b_faster_wins_a_qph_gain_carries_the_token(self):
-        cmp = _min_comparison(val_a=100.0, val_b=120.0, metric="composite_qph")
-        out = _capture_compare_print(cmp)
-        # Text token is present in the visible output, not only in Rich
-        # colour markup. Stripping the markup still shows the token.
-        assert DELTA_TOKEN_B_FASTER in _strip_rich_markup(out)
-
-    def test_a_faster_carries_the_token_for_time_metric(self):
-        # Lower-is-better metric (time). B took longer, so A is faster.
-        cmp = _min_comparison(val_a=10.0, val_b=15.0, metric="time_to_value_seconds")
-        out = _capture_compare_print(cmp)
-        assert DELTA_TOKEN_A_FASTER in _strip_rich_markup(out)
-
-    def test_overlap_when_within_noise_floor(self):
-        # 0.5% difference is inside the ~2% noise floor.
-        cmp = _min_comparison(val_a=100.0, val_b=100.5, metric="composite_qph")
-        out = _capture_compare_print(cmp)
-        assert DELTA_TOKEN_OVERLAP in _strip_rich_markup(out)
-
-    def test_withheld_when_not_comparable(self):
-        cmp = _min_comparison(
-            val_a=100.0,
-            val_b=120.0,
-            metric="composite_qph",
-            verdict="not_comparable",
-            comparable=False,
-        )
-        out = _capture_compare_print(cmp)
-        assert DELTA_TOKEN_WITHHELD in _strip_rich_markup(out)
-
-
-# ---------------------------------------------------------------------------
-# caps_bound_from + n_runs_of: pull-through helpers from PipelineMetrics.
+# Compare CLI: WCAG 1.4.1 -- nothing is carried by colour alone. compare
+# names no winner, so it prints no winner token; what a row may be read as
+# is its assessment, in text.
 # ---------------------------------------------------------------------------
 
 

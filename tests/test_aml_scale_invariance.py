@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -29,6 +30,11 @@ pytest.importorskip("scipy")
 from lakebench.aml import d8_shards  # noqa: E402
 from lakebench.aml import fidelity_gate as fg  # noqa: E402
 from lakebench.aml import scale_invariance as si  # noqa: E402
+
+# CPU-bound (10 to 20 minutes on several cores): CI runs it on the pinned
+# libraries in the "AML statistics (slow)" job (.github/workflows/ci.yml); the
+# unit legs also run it until the fast path (QA-6) deselects the mark there.
+pytestmark = pytest.mark.slow
 
 ROOT = Path(__file__).resolve().parents[1]
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
@@ -698,7 +704,12 @@ def test_power_sim_output_hash_is_recorded():
     rec = REAL["scale_invariance"]["power_sim"]
     pinned = (rec["produced_with"]["numpy"], rec["produced_with"]["scipy"])
     if (np.__version__, scipy.__version__) != pinned:
-        pytest.skip(f"the recorded hash was produced with numpy/scipy {pinned}")
+        msg = f"the recorded hash was produced with numpy/scipy {pinned}"
+        # The CI slow job installs the recorded versions for this test alone and
+        # sets this, so the guard cannot pass there by skipping.
+        if os.environ.get("LB_REQUIRE_POWER_SIM_HASH") == "1":
+            pytest.fail(f"{msg}; installed {(np.__version__, scipy.__version__)}")
+        pytest.skip(msg)
     out = subprocess.run(
         [sys.executable, str(ROOT / "scripts/aml_d8_power_sim.py")],
         capture_output=True,

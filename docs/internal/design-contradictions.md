@@ -24,6 +24,11 @@ remains open only as implementation work.
    and mark mismatched comparisons invalid [impl]. [decided D1] `compare`
    shows the evidence, gives a NOT COMPARABLE verdict, suppresses any winner
    or performance conclusion, and exits non-zero.
+   **Superseded 2026-10-03 (owner):** `compare` is removed; humans compare
+   two reports. Each report shows the evidence (per-query result
+   fingerprints, the query set, the AML batch alert set and the identity
+   digest), and the perf gate and `reproduce` still refuse a run whose query
+   results differ from their reference. They do not compare alert sets.
 
 2. **Queries are never checked for non-empty or correct results.**
    `rows_returned` (`benchmark/runner.py:37`) is only displayed
@@ -66,12 +71,12 @@ remains open only as implementation work.
    difference from the request, and between compared runs, visible in the
    report and in comparisons.
 
-6. **Customer 360 has no expected-result definition.** [decided D6] Non-empty guards exist
-   (`bronze_verify.py:139`, `silver_build.py:449`, `gold_finalize.py:313`) and
-   the continuous zero-row gate (`cli/_sustained.py:48`), but a zero KPI count
-   is only logged and nothing checks gold KPIs against what the generator
-   produced. Remaining work [impl]: derive expected results from the
-   generator; the owner approves their meaning before they gate a run.
+6. **Customer 360 has no expected-result definition.** [decided D6, resolved]
+   Expected results are derived from the generator in
+   `metrics/c360_correctness.py`, and the owner approved 16 of them as
+   gating on 2026-09-27 (`GATING_CHECKS`, read by the CLI and the verdict's
+   `c360` gate). A batch run on the cluster is gated; continuous runs keep
+   the zero-row gate (`cli/_sustained.py`) and no expected-result check.
 
 7. **A benchmark exception leaves the run successful.** [impl] Existing gates
    cover failed queries and AML zero alerts, but an exception in the
@@ -209,6 +214,9 @@ remains open only as implementation work.
   the effective policy is stamped and the difference is visible.
 - **D6** (item 6), accepted. Customer 360 expected results are derived by the
   implementation; the owner approves their meaning before they gate.
+  Approved 2026-09-27: checks 0 to 14 and 17 of the expected-results table
+  gate a batch run (`metrics/c360_correctness.py` `GATING_CHECKS`); the other
+  statistical checks and the benchmark row-count checks report only.
 - **D12** (item 12), accepted. `workload` is a top-level config key; the old
   location is accepted with a deprecation warning.
 - **D13** (item 13), accepted. Reject `custom` in v1.6.

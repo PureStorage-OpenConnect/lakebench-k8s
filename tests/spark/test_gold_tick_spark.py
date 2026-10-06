@@ -10,64 +10,37 @@
 - The tick logs a phase breakdown the collector parses, with one phase per
   rule, in the continuous rule order.
 
-Needs the Iceberg Spark runtime jar (LB_TEST_ICEBERG_JAR or
-LB_SPARK_TEST_JARS), otherwise skipped.
+Needs the Iceberg Spark runtime jar in LB_SPARK_TEST_JARS (see
+tests/spark/conftest.py).
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
 
-_ROOT = Path(__file__).resolve().parents[2]
+pytestmark = pytest.mark.requires_jars("iceberg")
 
 
-def _find_jar() -> str | None:
-    cands = [os.environ.get("LB_TEST_ICEBERG_JAR", "")]
-    cands += os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
-    for c in (c.strip() for c in cands):
-        if c and "iceberg-spark-runtime" in Path(c).name and Path(c).is_file():
-            return c
-    return None
-
-
-_JAR = _find_jar()
-pytestmark = pytest.mark.skipif(
-    _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
-)
-
-
-def test_gold_tick_matches_batch_and_is_idempotent(tmp_path):
-    """Runs in a fresh interpreter: spark.jars only takes effect in a JVM that
-    has not started yet, and other Spark tests share this process."""
-    env = dict(
-        os.environ,
-        PYSPARK_PYTHON=sys.executable,
-        LB_TM_ENABLED="false",
-        LB_RUN_ID="run-tick",
-        PYTHONPATH=os.pathsep.join(
-            [str(_ROOT / "src"), str(_ROOT / "src/lakebench/spark/scripts")]
-            + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
-        ),
-    )
-    proc = subprocess.run(
-        [sys.executable, __file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        env=env,
+def test_gold_tick_matches_batch_and_is_idempotent(tmp_path, spark_subprocess, spark_jars):
+    """Runs in a fresh interpreter: a JVM with its own static Spark conf
+    (catalogs, extensions), apart from the other Spark tests in this
+    process."""
+    proc = spark_subprocess(
+        __file__,
+        tmp_path,
+        spark_jars.classpath,
+        env={"LB_TM_ENABLED": "false", "LB_RUN_ID": "run-tick"},
         timeout=900,
     )
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
     assert "CHECK OK" in proc.stdout
 
 
-def _session(warehouse):
+def _session(warehouse, jars):
+    """*jars*: the comma-separated test jar classpath."""
     from pyspark.sql import SparkSession
 
     return (
@@ -75,7 +48,7 @@ def _session(warehouse):
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.jars", _JAR)
+        .config("spark.jars", jars)
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -177,8 +150,23 @@ def _check(spark):
     _append(spark, 1, now - 100)
 
     # The pin: an append after the pin is not in the pinned frame.
-    txns, sid, rows, newest = g._pin_silver(spark)
+    txns, sid, _versions, rows, newest, tt = g._pin_silver(spark)
     assert sid is not None and rows == len(_rows(1)), (sid, rows)
+    # AML-9 tick record: the snapshot's own metadata counts, read from the
+    # real Iceberg summary (copy-on-write: no delete files) and its commit
+    # time in UTC.
+    assert tt["snapshot"] == sid and tt["count_source"] == "summary", tt
+    assert tt["total_records"] == len(_rows(1)), tt
+    assert tt["pos_deletes"] == 0 and tt["eq_deletes"] == 0, tt
+    assert tt["committed_at"].endswith("Z") and tt["committed_at"][:2] == "20", tt
+    want = spark.sql(
+        "SELECT CAST(unix_micros(committed_at) AS BIGINT) AS us FROM "
+        f"lakehouse.silver.transactions.snapshots WHERE snapshot_id = {sid}"
+    ).collect()[0]["us"]
+    from datetime import datetime as _dt
+
+    got = _dt.strptime(tt["committed_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+    assert round((got - _dt(1970, 1, 1)).total_seconds() * 1e6) == want, (tt, want)
     assert abs(newest - (now - 100)) < 1e-3, newest
     _append(spark, 2, now - 50)
     assert txns.count() == len(_rows(1))
@@ -218,6 +206,29 @@ def _check(spark):
     assert abs(parts - phases1["total"]) < 0.5, phases1
     g_metrics = MetricsCollector().parse_streaming_logs("\n".join(lines), "gold-refresh")
     assert [t["cycle"] for t in g_metrics.tick_timings] == [1]
+    # AML-6 tick record: pinned before detection, committed after it, then
+    # completed, with the snapshots the tick read and wrote.
+    from lakebench.metrics.tick_records import is_pin, parse_tick_records
+
+    rec = parse_tick_records("\n".join(lines), "run-tick")["ticks"]
+    assert [t["cycle"] for t in rec] == [1], lines
+    assert rec[0]["completed"], rec
+    for key in ("pinned_txns", "pinned_entities", "committed_alerts", "committed_status"):
+        assert is_pin(rec[0][key]), (key, rec)
+    assert rec[0]["pinned_txns"] == g._current_snapshot(spark, "lakehouse.silver.transactions")
+    assert rec[0]["committed_alerts"] == g._current_snapshot(spark, "lakehouse.gold.alerts")
+    # The tick's time-travel record names the snapshot detection read, with
+    # its summary count (the rows re-appended after the DELETE above).
+    tt1 = rec[0]["tt"]
+    assert tt1["snapshot"] == rec[0]["pinned_txns"] and tt1["table"] == "silver.transactions"
+    assert tt1["total_records"] == len(_rows(1)) and tt1["count_source"] == "summary", tt1
+    order = [
+        i
+        for i, ln in enumerate(lines)
+        for marker in ("Cycle 1: pinned", "Cycle 1: committed", "Cycle 1: completed")
+        if ln.startswith(marker)
+    ]
+    assert len(order) == 3 and order == sorted(order), lines
 
     # Tick 2 over unchanged silver: same content, nothing new to measure.
     lines.clear()
@@ -269,8 +280,9 @@ def _check(spark):
 
 
 if __name__ == "__main__":
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    _spark = _session(sys.argv[1])
+    # Run by spark_subprocess (argv: <warehouse> <jars>), which puts src and
+    # the scripts on PYTHONPATH.
+    _spark = _session(sys.argv[1], sys.argv[2])
     try:
         _check(_spark)
     finally:

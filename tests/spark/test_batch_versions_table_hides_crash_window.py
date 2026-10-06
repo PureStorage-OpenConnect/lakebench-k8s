@@ -8,50 +8,28 @@ row for that batch. Then a reader that semi-joins silver.transactions
 against silver_batch_versions on (_stream_id, _batch_id) sees zero rows
 for the crashed batch.
 
-Runs in a child process because Iceberg jars must be on the driver
-classpath at JVM launch, matching the pattern in
-``tests/spark/test_aml_stream_one_delete_per_restart.py``.
+Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
+``LB_SPARK_TEST_JARS`` on the driver classpath at JVM launch, matching the
+pattern in ``tests/spark/test_aml_stream_one_delete_per_restart.py``.
 """
 
 from __future__ import annotations
 
-import glob
 import json
-import os
-import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parents[1] / "src/lakebench/spark/scripts"
 
-
-def _iceberg_jar() -> str | None:
-    env = os.environ.get("LB_TEST_ICEBERG_JAR")
-    if env and Path(env).exists():
-        return env
-    hits = sorted(
-        glob.glob(str(Path.home() / ".lakebench/local/*/ivy/cache/org.apache.iceberg/*/jars/*.jar"))
-        + glob.glob(str(Path.home() / ".ivy2*/cache/org.apache.iceberg/*/jars/*.jar"))
-    )
-    return next((h for h in hits if "spark-runtime-4.0" in h), None)
-
-
-def test_crash_window_is_invisible_to_semi_join():
-    jar = _iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+@pytest.mark.requires_jars("iceberg")
+def test_crash_window_is_invisible_to_semi_join(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Batch 0 sealed cleanly -- txns rows visible under the filter.
     assert out["sealed_visible_rows"] == 1, out
@@ -121,64 +99,14 @@ def _bronze_row(spark, txn_id, ts):
     return spark.createDataFrame([row], _PACS_SCHEMA)
 
 
-_TXNS_DDL = """
-CREATE TABLE lh.silver.transactions (
-    txn_id                  STRING NOT NULL,
-    uetr                    STRING NOT NULL,
-    originator_id           BIGINT NOT NULL,
-    beneficiary_id          BIGINT NOT NULL,
-    originator_bank_bic     STRING,
-    beneficiary_bank_bic    STRING,
-    txn_amount              DECIMAL(18, 2) NOT NULL,
-    txn_currency            STRING NOT NULL,
-    txn_amount_usd          DECIMAL(18, 2),
-    txn_timestamp           TIMESTAMP NOT NULL,
-    txn_type                STRING NOT NULL,
-    purpose_code            STRING,
-    correspondent_chain     ARRAY<STRING>,
-    cross_border            BOOLEAN,
-    regulatory_reported     BOOLEAN NOT NULL,
-    rptd_originator_name    STRING,
-    rptd_originator_address STRING,
-    rptd_beneficiary_name   STRING,
-    rptd_beneficiary_address STRING,
-    source_message_ref      STRING,
-    _batch_id               BIGINT,
-    _stream_id              STRING,
-    ingest_ts               TIMESTAMP
-) USING iceberg PARTITIONED BY (months(txn_timestamp))
-"""
-
-_EDGES_DDL = """
-CREATE TABLE lh.silver.counterparty_edges (
-    source_entity_id       BIGINT NOT NULL,
-    target_entity_id       BIGINT NOT NULL,
-    first_seen_ts          TIMESTAMP NOT NULL,
-    last_seen_ts           TIMESTAMP NOT NULL,
-    cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
-    txn_count              BIGINT NOT NULL,
-    _batch_id              BIGINT,
-    _stream_id             STRING
-) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
-"""
-
-_VERSIONS_DDL = """
-CREATE TABLE lh.silver.silver_batch_versions (
-    stream_id      STRING NOT NULL,
-    batch_id       BIGINT NOT NULL,
-    committed_at   TIMESTAMP NOT NULL
-) USING iceberg
-"""
-
-
-def _run(jar):
+def _run(jars):
     from pyspark.sql import SparkSession
 
     with tempfile.TemporaryDirectory() as work:
         spark = (
             SparkSession.builder.master("local[1]")
             .config("spark.ui.enabled", "false")
-            .config("spark.jars", jar)
+            .config("spark.jars", jars)
             .config("spark.sql.shuffle.partitions", "2")
             .config(
                 "spark.sql.extensions",
@@ -192,23 +120,12 @@ def _run(jar):
             .getOrCreate()
         )
 
-        import silver_stream_financial as ss
+        from _d_full_helpers import bind_stream_module, bootstrap_catalog
 
-        ss.CATALOG = "lh"
-        ss.SILVER_TXNS = "silver.transactions"
-        ss.SILVER_EDGES = "silver.counterparty_edges"
-        ss.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
-
-        spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
-        spark.sql(_TXNS_DDL)
-        spark.sql(_EDGES_DDL)
-        spark.sql(_VERSIONS_DDL)
-
-        # Skip KYC + dimension writes (tables not created here).
-        ss._KYC = None
-        ss._KYC_LOADED = True
-        ss._kyc = lambda _s: None
-        ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
+        # Every table _merge_batch writes, in the shapes the stream uses
+        # today; KYC and dimension writes are skipped.
+        bootstrap_catalog(spark)
+        ss = bind_stream_module(spark)
 
         def bronze(bid):
             return _bronze_row(
@@ -218,7 +135,7 @@ def _run(jar):
             )
 
         # ---- Batch 0: sealed cleanly.
-        ss._merge_batch(bronze(0), 0)
+        foreach_batch_harness(spark, ss._merge_batch, bronze(0), 0)
 
         # ---- Batch 1: crash between phase-2 (edges commit) and phase-4
         # (sealed marker). Intercept spark.sql: allow every phase-1/2
@@ -235,7 +152,7 @@ def _run(jar):
         spark.sql = _sql  # type: ignore[assignment]
         try:
             try:
-                ss._merge_batch(bronze(1), 1)
+                foreach_batch_harness(spark, ss._merge_batch, bronze(1), 1)
             except RuntimeError as e:
                 assert "simulated driver crash" in str(e), e
         finally:
@@ -267,8 +184,10 @@ def _run(jar):
         # SAME batchId, but this test simulates a crash-then-restart cycle
         # where the driver process died; we drive a re-run of batch 1 (with
         # the crash injector off) and a fresh batch 2 on top.
-        ss._merge_batch(bronze(1), 1)  # sealed retry of the crashed batch
-        ss._merge_batch(bronze(2), 2)  # new batch on top
+        foreach_batch_harness(
+            spark, ss._merge_batch, bronze(1), 1
+        )  # sealed retry of the crashed batch
+        foreach_batch_harness(spark, ss._merge_batch, bronze(2), 2)  # new batch on top
 
         versions_row_count_after_retry = spark.table("lh.silver.silver_batch_versions").count()
         versions_rows_for_batch_1_after_retry = (
@@ -278,7 +197,7 @@ def _run(jar):
 
         # ---- MERGE-idempotency direct check: re-drive batch 0 again with
         # the SAME (sid, batch_id). Row count in versions must not grow.
-        ss._merge_batch(bronze(0), 0)
+        foreach_batch_harness(spark, ss._merge_batch, bronze(0), 0)
         versions_row_count_after_replay_of_batch_0 = spark.table(
             "lh.silver.silver_batch_versions"
         ).count()
@@ -301,6 +220,6 @@ def _run(jar):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(SCRIPTS)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
+    # is the comma-separated jar classpath.
     _run(sys.argv[1])

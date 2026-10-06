@@ -158,6 +158,7 @@ def test_add_first_namespace_still_runs_helm_upgrade() -> None:
         patch.object(mgr, "_is_openshift", return_value=False),
         patch.object(mgr, "_restart_operator", return_value=True),
         patch.object(mgr, "_verify_namespace_watched", return_value=True),
+        patch.object(mgr, "_get_helm_version", return_value="2.5.1"),
         patch.object(mgr, "_run", side_effect=fake_run),
     ):
         assert mgr._add_namespace_to_watch_impl("ns-b") is True

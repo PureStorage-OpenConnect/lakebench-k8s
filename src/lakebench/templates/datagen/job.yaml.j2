@@ -16,7 +16,7 @@ spec:
   completions: {{ datagen_parallelism | default(4) }}
   completionMode: Indexed
   backoffLimit: 60
-  ttlSecondsAfterFinished: 3600
+  ttlSecondsAfterFinished: {{ datagen_ttl_seconds | default(3600) }}
   template:
     metadata:
       labels:
@@ -27,15 +27,26 @@ spec:
     spec:
       serviceAccountName: lakebench-spark-runner
       restartPolicy: OnFailure
-      {% if s3_ca_cert_pem %}
+      {% set heldout = (datagen_schema | default('customer360')) == 'financial' and datagen_heldout_map is defined %}
+      {% if s3_ca_cert_pem or heldout %}
       volumes:
+        {% if s3_ca_cert_pem %}
         - name: ca-cert
           secret:
             secretName: lakebench-ca-certificate
+        {% endif %}
+        {% if heldout %}
+        {# The held-out hash file; the generator refuses the financial schema
+           without it. #}
+        - name: heldout
+          configMap:
+            name: {{ datagen_heldout_map }}
+            optional: false
+        {% endif %}
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:1.6.0') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -74,8 +85,12 @@ spec:
             - "{{ bucket_bronze }}"
             - "--prefix"
             - "{{ datagen_path_prefix | default('customer/interactions/') }}"
+            {# A registered (held-out) corpus's seed comes from the Secret
+               through LB_DATAGEN_SEED below, never from the Job's args. #}
+            {% if not (datagen_seed_secret is defined and datagen_seed_secret) %}
             - "--seed"
             - "{{ datagen_seed }}"
+            {% endif %}
             {% if datagen_robustness_perturbation is defined and datagen_robustness_perturbation %}
             - "--robustness-perturbation"
             {% endif %}
@@ -133,6 +148,11 @@ spec:
             {% if s3_ca_cert_pem %}
             - name: S3_CA_CERT
               value: "/etc/ssl/certs/custom-ca/ca.crt"
+            # Also the trust store of rustls-native-certs, so an image that
+            # predates S3_CA_CERT trusts the configured CA too. It replaces
+            # the system store, which is why it is set only with a CA.
+            - name: SSL_CERT_FILE
+              value: "/etc/ssl/certs/custom-ca/ca.crt"
             {% elif not s3_verify_ssl %}
             - name: S3_VERIFY_SSL
               value: "false"
@@ -142,6 +162,18 @@ spec:
             # aggregator prefers this over rayon's pool size (which may
             # differ from the pod's request because rayon's default reads
             # `available_parallelism()`, not the cgroup CPU quota).
+            {% if datagen_seed_secret is defined and datagen_seed_secret %}
+            - name: LB_DATAGEN_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ datagen_seed_secret }}
+                  key: {{ datagen_seed_secret_key | default('seed') }}
+                  optional: false
+            {% endif %}
+            {% if heldout %}
+            - name: LB_HELDOUT_HASHES
+              value: "{{ datagen_heldout_dir }}/heldout_hashes.json"
+            {% endif %}
             - name: LB_POD_CPU_REQUEST_MILLI
               valueFrom:
                 resourceFieldRef:
@@ -157,11 +189,18 @@ spec:
             - name: LB_RUN_ID
               value: "{{ run_id | default('') }}"
             {% endif %}
-          {% if s3_ca_cert_pem %}
+          {% if s3_ca_cert_pem or heldout %}
           volumeMounts:
+            {% if s3_ca_cert_pem %}
             - name: ca-cert
               mountPath: /etc/ssl/certs/custom-ca
               readOnly: true
+            {% endif %}
+            {% if heldout %}
+            - name: heldout
+              mountPath: {{ datagen_heldout_dir }}
+              readOnly: true
+            {% endif %}
           {% endif %}
           resources:
             requests:

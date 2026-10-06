@@ -5,9 +5,9 @@ alternative to Hive Metastore for Iceberg catalog management. Polaris is an
 open-source REST catalog that provides OAuth2 authentication, fine-grained
 access control, and a standards-based Iceberg REST API.
 
-Switching to Polaris takes two configuration changes: the catalog type and an
-OAuth2 client secret. The rest of the workflow -- deploy, generate, run,
-destroy -- stays exactly the same.
+Switching to Polaris takes one configuration change: the catalog type. The
+rest of the workflow -- deploy, generate, run, destroy -- stays exactly the
+same.
 
 ---
 
@@ -37,20 +37,20 @@ native S3 file system required for current Trino releases.
 ## Configuration
 
 Start from an existing config file (or generate one with `lakebench init`).
-Set the catalog type and a client secret:
+Set the catalog type:
 
 ```yaml
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"
 ```
 
-The client secret has no default: `deploy` and `run` refuse a Polaris config
-without it, and it must be the same for `deploy`, `run` and `destroy`.
-Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`
-and export it, or write it into the file. Lakebench uses the default Polaris
+`deploy` generates the OAuth2 client secret for this deployment and stores it
+in the Secret `lakebench-polaris-client` in the namespace, where `run` and
+the query engines read it. To choose your own, set
+`architecture.catalog.polaris.client_secret` (for example
+`"${LAKEBENCH_POLARIS_CLIENT_SECRET}"`) before the first deploy; a deployed
+Polaris keeps the secret it was bootstrapped with. Lakebench uses the default Polaris
 image (1.6.0) and Trino version (483), both of which satisfy the minimum
 requirements above.
 
@@ -81,14 +81,15 @@ When `catalog.type: polaris` is set, Lakebench automatically:
 ### 1. Generate or modify your config
 
 ```bash
-# New config
-lakebench init --name polaris-test --scale 1
+# New config: init writes the Polaris recipe by default
+lakebench init --name polaris-test
 
 # Then edit lakebench.yaml:
 ```
 
 ```yaml
 name: polaris-test
+recipe: polaris-iceberg-spark-trino
 
 platform:
   storage:
@@ -99,9 +100,7 @@ platform:
 
 architecture:
   catalog:
-    type: polaris    # <-- changed from the default
-    polaris:
-      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"   # required
+    type: polaris    # optional: the recipe sets it
 
 workload:
   datagen:
@@ -130,7 +129,7 @@ Trino configured with the REST catalog connector.
 ### 4. Generate and run
 
 ```bash
-lakebench generate lakebench.yaml --wait
+lakebench generate lakebench.yaml
 lakebench run lakebench.yaml
 ```
 
@@ -148,10 +147,9 @@ lakebench destroy lakebench.yaml
 
 Destroy handles Polaris-specific cleanup: it deletes the bootstrap job,
 Polaris deployment, service and ConfigMap. The `polaris` PostgreSQL database
-is not dropped separately; it lives on the PostgreSQL PVC, which goes with the
-namespace. With `platform.kubernetes.create_namespace: false` the namespace
-and that PVC survive, so destroy unregisters the tables from the catalog
-first.
+is not dropped separately; it lives on the PostgreSQL PVC, which destroy
+deletes. With `platform.kubernetes.create_namespace: false` the namespace
+survives, and destroy still unregisters the tables from the catalog first.
 
 ---
 
@@ -194,8 +192,7 @@ images:
   polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"
 ```
 
-The Polaris version that runs is the tag of `images.polaris`;
-`architecture.catalog.polaris.version` is not read by the deployer.
+The Polaris version that runs is the tag of `images.polaris`.
 
 ### Bootstrap job fails with "already been bootstrapped"
 

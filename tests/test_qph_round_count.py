@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from lakebench.cli._compare import _build_comparison
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
@@ -86,31 +85,6 @@ def test_different_round_counts_are_not_like_for_like():
 def test_batch_identity_has_no_round_key():
     """Batch baselines keep their stored identity keys."""
     assert "benchmark rounds" not in ex.identity(_exp("batch", None))
-
-
-def _record(rounds: int, qph: float) -> dict:
-    return {
-        "run_id": f"r{rounds}",
-        "success": True,
-        "experiment": _exp("sustained", rounds),
-        "pipeline_benchmark": {
-            "pipeline_mode": "sustained",
-            "scores": {"composite_qph": qph, "composite_qph_rounds": rounds},
-            "query_benchmark": {"query_set_id": "qs8-32043638dbc4"},
-        },
-    }
-
-
-def test_compare_shows_the_counts_and_withholds_like_for_like():
-    c = _build_comparison("thrift", _record(4, 456.2), "trino", _record(5, 1239.5))
-    assert c["like_for_like"] is False
-    assert "benchmark rounds differs (4 vs 5)" in c["condition_differences"]
-    assert any("median of 4 in-stream round(s) and for B of 5" in w for w in c["warnings"])
-    rows = {r["metric"]: r for r in c["metrics"]}
-    assert (rows["composite_qph_rounds"]["config_a"], rows["composite_qph_rounds"]["config_b"]) == (
-        4,
-        5,
-    )
 
 
 def test_report_shows_the_round_count(tmp_path):

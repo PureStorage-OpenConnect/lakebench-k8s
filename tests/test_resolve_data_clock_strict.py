@@ -9,13 +9,11 @@ Two cases:
 
 from __future__ import annotations
 
-import sys
 from datetime import date
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 def test_resolve_data_clock_strict_missing_env_raises(monkeypatch):

@@ -1,0 +1,975 @@
+"""``lakebench init --from OLD``: rewrite an older config as a 1.7 config.
+
+The conversion works on OLD's raw YAML, never on a loaded model, so no
+default is written out and no ``${VAR}`` is expanded:
+
+1. OLD is read with ``yaml.safe_load`` rules and no substitution. A plain
+   (unquoted) scalar holding a reference is kept plain (:class:`PlainRef`)
+   and a quoted one quoted, because the loader types a plain scalar after
+   substituting it and passes a quoted one through as text.
+2. The deprecated spellings move to where 1.7 reads them: flat top-level
+   keys (``loader._FLAT_FIELD_MAP``), ``architecture.workload`` to
+   ``workload``, ``architecture.processing`` to ``architecture.pipeline``,
+   ``pipeline.sustained`` to ``pipeline.continuous``, ``mode: sustained`` to
+   ``continuous``. A recipe that contradicts the components written becomes
+   the recipe 1.6 deployed (the written components won in 1.6).
+3. Every ``_removed_keys`` and ``_dead_fields`` entry present is dropped,
+   with its fix text; so is each refused-key row whose ``init_from`` is
+   ``drop`` (``config/refused_keys.py``), and each ``spark.conf`` key
+   Lakebench owns that carries its 1.6 default (1.6 overwrote it too).
+4. The name is OLD's, else the name 1.6 recorded in the directory's
+   ``.lakebench/state.json``, else a new one. The bucket names are written
+   out, so a later rename cannot move them.
+5. A plaintext value under a credential key (``access_key``,
+   ``secret_key``, ``client_secret``, a ``spark.conf`` secret) becomes a
+   ``${VAR}`` reference; the value itself is never printed or written.
+
+:func:`verify` then loads OLD and the new text in-process for a read-only
+command, every referenced variable set to a placeholder, and compares the
+two models and their planned experiment identities. ``init`` writes the new
+file only when they agree, apart from the secrets that became references.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+#: Where ``init --from`` puts a plaintext Polaris client secret.
+POLARIS_SECRET_VAR = "LAKEBENCH_POLARIS_CLIENT_SECRET"
+
+# A key whose value is a credential, judged on its words (split at '.', '_',
+# '-' and camelCase): it ends in one of _SECRET_WORDS or one of
+# _SECRET_TAILS, or holds 'account key' (fs.azure.account.key.<host>).
+# 'credentials.provider' (a class name) and 'token-refresh-enabled' are not.
+_SECRET_WORDS = frozenset({"password", "passwd", "secret", "token", "credential", "credentials"})
+_SECRET_TAILS = (
+    ("access", "key"),
+    ("secret", "key"),
+    ("private", "key"),
+    ("api", "key"),
+    ("encryption", "key"),
+    ("account", "key"),
+    ("access", "key", "id"),
+)
+_WORD = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+
+
+def is_credential_key(key: str) -> bool:
+    """Whether a config or ``spark.conf`` key holds a credential."""
+    if re.search(r"(?i)\.secretkeyref\.|\.secrets\.", key):
+        return False  # Spark on Kubernetes: a Secret's name or mount path
+    words = [w.lower() for w in _WORD.findall(key)]
+    if not words:
+        return False
+    if words[-1] in _SECRET_WORDS:
+        return True
+    if any(tuple(words[-len(t) :]) == t for t in _SECRET_TAILS):
+        return True
+    return any(words[i : i + 2] == ["account", "key"] for i in range(len(words) - 1))
+
+
+_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+
+
+class InitFromError(Exception):
+    """``init --from`` refused; nothing was written.
+
+    ``refused`` is True for a safety refusal (exit 3) and False for a usage
+    or config error (exit 2).
+    """
+
+    def __init__(self, message: str, *, refused: bool = False):
+        super().__init__(message)
+        self.refused = refused
+
+
+# -- reading and writing YAML without losing how a reference was quoted -------
+
+
+class PlainRef(str):
+    """A plain (unquoted) scalar holding a ``${VAR}`` reference."""
+
+    __slots__ = ()
+
+
+class _RawLoader(yaml.SafeLoader):
+    """``SafeLoader`` that marks plain, untagged scalars holding ``${``."""
+
+    def compose_scalar_node(self, anchor: Any) -> Any:
+        event = self.peek_event()
+        node = super().compose_scalar_node(anchor)
+        if event.style is None and event.tag in (None, "!") and "${" in event.value:
+            setattr(node, "lb_plain_ref", True)  # noqa: B010 -- yaml nodes have no slots
+        return node
+
+
+def _construct_str(loader: yaml.SafeLoader, node: Any) -> str:
+    value = loader.construct_scalar(node)
+    assert isinstance(value, str)
+    return PlainRef(value) if getattr(node, "lb_plain_ref", False) else value
+
+
+_RawLoader.add_constructor("tag:yaml.org,2002:str", _construct_str)
+
+
+def _yaml_problem(e: Exception) -> str:
+    """A YAML error without the source snippet PyYAML quotes (it can hold a
+    secret): the problem and where."""
+    problem = getattr(e, "problem", None) or type(e).__name__
+    mark = getattr(e, "problem_mark", None)
+    if mark is not None:
+        return f"{problem} at line {mark.line + 1}, column {mark.column + 1}"
+    return str(problem)
+
+
+def read_raw(text: str) -> Any:
+    """*text* parsed as ``yaml.safe_load`` does, with plain references kept."""
+    loader = _RawLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
+class _Dumper(yaml.SafeDumper):
+    pass
+
+
+def _represent_str(dumper: yaml.SafeDumper, value: str) -> Any:
+    style = None
+    if "${" in value and not isinstance(value, PlainRef):
+        # Quoted in OLD (or written by this module): it must stay text.
+        style = '"'
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_Dumper.add_representer(str, _represent_str)
+_Dumper.add_representer(PlainRef, _represent_str)
+
+
+def dump(data: dict[str, Any]) -> str:
+    """Block-style YAML of *data*, keys in order, references quoted as read."""
+    return yaml.dump(
+        data,
+        Dumper=_Dumper,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+        width=1000,
+    )
+
+
+# -- dict helpers -------------------------------------------------------------
+
+
+def _get(data: Any, path: tuple[str, ...]) -> Any:
+    node = data
+    for part in path:
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    return node
+
+
+def _has(data: Any, path: tuple[str, ...]) -> bool:
+    node = data
+    for part in path:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _pop(data: dict[str, Any], path: tuple[str, ...]) -> Any:
+    """Pop *path*; a mapping left empty by the pop is removed too."""
+    parents = [data]
+    for part in path[:-1]:
+        parents.append(parents[-1][part])
+    value = parents[-1].pop(path[-1])
+    for depth in range(len(path) - 1, 0, -1):
+        if parents[depth]:
+            break
+        parents[depth - 1].pop(path[depth - 1])
+    return value
+
+
+def _rename(node: dict[str, Any], old: str, new: str) -> dict[str, Any]:
+    """*node* with key *old* renamed to *new*, in the same place."""
+    return {(new if k == old else k): v for k, v in node.items()}
+
+
+def _dotted(path: tuple[str, ...]) -> str:
+    return ".".join(path)
+
+
+# -- the conversion -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Change:
+    """One line of the report: ``kind`` is moved, dropped, derived or secret."""
+
+    kind: str
+    path: str
+    text: str
+
+
+@dataclass
+class Conversion:
+    """What ``convert`` made of OLD."""
+
+    #: The new config, as a dict in the shape it is written.
+    data: dict[str, Any]
+    #: The deployment name it carries (as written, possibly a ``${VAR}``).
+    name: str
+    #: Where the name came from: config, override, legacy-state or new.
+    name_source: str
+    changes: list[Change] = field(default_factory=list)
+    #: Written paths whose plaintext value became a reference; the only
+    #: places the verified models may differ.
+    secret_paths: list[tuple[str, ...]] = field(default_factory=list)
+    #: The recipe written for a config that had none (or ``default``), and
+    #: what OLD had there (``_ABSENT`` for no key), so it can be taken back.
+    derived_recipe: str | None = None
+    recipe_before: Any = None
+
+
+@contextmanager
+def _quiet() -> Iterator[Any]:
+    """Collect load notes and silence their warnings and log lines."""
+    from ._load_context import collecting_notes
+
+    schema_log = logging.getLogger("lakebench.config.schema")
+    level = schema_log.level
+    schema_log.setLevel(logging.CRITICAL)
+    try:
+        with collecting_notes() as notes, warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield notes
+    finally:
+        schema_log.setLevel(level)
+
+
+def _block_models() -> dict[type, dict[str, type]]:
+    """For each config model, its sub-blocks: written key -> model."""
+    import typing
+
+    from pydantic import BaseModel
+
+    from .schema import ArchitectureConfig, LakebenchConfig, ProcessingConfig
+
+    def models_in(annotation: Any) -> list[type]:
+        args = typing.get_args(annotation) or (annotation,)
+        return [a for a in args if isinstance(a, type) and issubclass(a, BaseModel)]
+
+    out: dict[type, dict[str, type]] = {}
+
+    def walk(model: type) -> None:
+        if model in out:
+            return
+        blocks: dict[str, type] = {}
+        for name, f in model.model_fields.items():  # type: ignore[attr-defined]
+            if typing.get_origin(f.annotation) in (dict, list):
+                continue
+            found = models_in(f.annotation)
+            if found:
+                blocks[f.alias or name] = found[0]
+        if model is LakebenchConfig:
+            # Written at the top level, stored on architecture.
+            workload = ArchitectureConfig.model_fields["workload"].annotation
+            assert isinstance(workload, type)
+            blocks["workload"] = workload
+        if model is ProcessingConfig:
+            blocks["continuous"] = blocks["sustained"]
+        out[model] = blocks
+        for sub in blocks.values():
+            walk(sub)
+
+    walk(LakebenchConfig)
+    return out
+
+
+def _medallion_changed_paths(data: dict[str, Any]) -> bool:
+    """Whether ``architecture.pipeline.medallion`` moved the bronze layout:
+    ``bronze.path_template`` is the one key of the block 1.6 read, and 1.7
+    has no such setting, so dropping another layout would point the run at
+    other data. The rest of the block was never read."""
+    from .schema import _drop_default_medallion
+
+    template = _get(data, ("architecture", "pipeline", "medallion", "bronze", "path_template"))
+    if template is None:
+        return False
+    probe = {"medallion": {"bronze": {"path_template": template}}}
+    with _quiet():
+        kept = _drop_default_medallion({"pipeline": probe, "workload": data.get("workload")})
+    return "medallion" in kept["pipeline"]
+
+
+def _drop_removed(data: dict[str, Any], changes: list[Change]) -> None:
+    """Drop every removed key and dead field present, with its fix text.
+
+    One is kept: a medallion block that moved the bronze layout, which 1.6
+    read. The commands that change data refuse it with its fix text, and
+    the conversion lists it.
+    """
+    from .schema import LakebenchConfig
+
+    blocks = _block_models()
+    keep = {("architecture", "pipeline", "medallion")} if _medallion_changed_paths(data) else set()
+
+    def walk(node: dict[str, Any], model: type, path: tuple[str, ...]) -> None:
+        removed: dict[str, str] = getattr(model, "_removed_keys", {}) or {}
+        dead: dict[str, str] = getattr(model, "_dead_fields", {}) or {}
+        for key in list(node):
+            if (*path, key) in keep:
+                continue
+            if key in removed:
+                node.pop(key)
+                changes.append(Change("dropped", _dotted((*path, key)), removed[key]))
+            elif key in dead:
+                node.pop(key)
+                text = dead[key] or "nothing in lakebench read it."
+                changes.append(Change("dropped", _dotted((*path, key)), text))
+        for key, sub in blocks[model].items():
+            child = node.get(key)
+            if isinstance(child, dict) and child:
+                walk(child, sub, (*path, key))
+                if not child:  # emptied by the drops above
+                    node.pop(key)
+
+    walk(data, LakebenchConfig, ())
+
+
+def _move_locations(data: dict[str, Any], changes: list[Change]) -> dict[str, Any]:
+    """Move the deprecated spellings to the places 1.7 reads."""
+    from .loader import _FLAT_FIELD_MAP, ConfigError, _apply_flat_fields
+    from .schema import resolve_workload_location
+
+    arch = data.get("architecture")
+    if isinstance(arch, dict) and "processing" in arch and "pipeline" not in arch:
+        data["architecture"] = arch = _rename(arch, "processing", "pipeline")
+        changes.append(Change("moved", "architecture.processing", "-> architecture.pipeline"))
+
+    flat = [k for k in _FLAT_FIELD_MAP if k in data]
+    with _quiet() as notes:
+        try:
+            data = _apply_flat_fields(data)
+        except ConfigError as e:
+            raise InitFromError(str(e)) from None
+    for key in flat:
+        changes.append(Change("moved", key, "-> " + _dotted(_FLAT_FIELD_MAP[key])))
+    for text in notes.texts():
+        if text.startswith("both flat"):
+            changes.append(Change("dropped", "", text))
+
+    arch = data.get("architecture")
+    if isinstance(arch, dict) and "workload" in arch:
+        had_top = "workload" in data
+        with _quiet():
+            try:
+                merged = resolve_workload_location(data)
+            except ValueError as e:
+                raise InitFromError(str(e)) from None
+        block = merged["architecture"].pop("workload")
+        if not merged["architecture"]:
+            merged.pop("architecture")
+        # Top level, after name and recipe, as init writes it.
+        head = {k: merged.pop(k) for k in ("name", "recipe") if k in merged}
+        data = {**head, "workload": block, **merged}
+        text = "-> workload" + (" (merged with the top-level block)" if had_top else "")
+        changes.append(Change("moved", "architecture.workload", text))
+
+    pipeline = _get(data, ("architecture", "pipeline"))
+    if isinstance(pipeline, dict):
+        if "sustained" in pipeline and "continuous" not in pipeline:
+            pipeline = _rename(pipeline, "sustained", "continuous")
+            data["architecture"]["pipeline"] = pipeline
+            changes.append(
+                Change(
+                    "moved",
+                    "architecture.pipeline.sustained",
+                    "-> architecture.pipeline.continuous",
+                )
+            )
+        mode = pipeline.get("mode")
+        if (
+            isinstance(mode, str)
+            and not isinstance(mode, PlainRef)
+            and mode.strip().lower() == "sustained"
+        ):
+            pipeline["mode"] = "continuous"
+            changes.append(Change("moved", "architecture.pipeline.mode", "sustained -> continuous"))
+    return data
+
+
+_ABSENT = object()
+
+
+def _derive_recipe(data: dict[str, Any], changes: list[Change]) -> tuple[str | None, Any]:
+    """Write the recipe a config with none (or ``recipe: default``) resolves
+    to: the components it writes, else the default resolution. Returns the
+    recipe and what was there before. 1.8 requires ``recipe:``; the caller
+    takes it back when the verified models then differ."""
+    from .loader import DEFAULT_RECIPE_RESOLUTION
+    from .recipes import RECIPE_OWNED_KEYS, recipe_components
+    from .support import recipe_for
+
+    before = data.get("recipe", _ABSENT)
+    if before not in (_ABSENT, None, "", "default"):
+        return None, before
+    resolved = recipe_components(DEFAULT_RECIPE_RESOLUTION)
+    for dotted in RECIPE_OWNED_KEYS:
+        value = _get(data, tuple(dotted.split(".")))
+        if value is None:
+            continue
+        if not isinstance(value, (str, int, float)) or "${" in str(value):
+            return None, before  # resolved only at load; leave it for the user
+        resolved[dotted] = str(value)
+    recipe = recipe_for(*(resolved[k].lower() for k in RECIPE_OWNED_KEYS))
+    if recipe is None:
+        return None, before
+    data["recipe"] = recipe
+    changes.append(
+        Change("derived", "recipe", f"{recipe}: what the config resolves to (1.8 requires recipe:)")
+    )
+    return recipe, before
+
+
+def undo_derived_recipe(conv: Conversion, differ: list[str]) -> None:
+    """Take back a derived recipe whose defaults changed the settings."""
+    recipe = conv.derived_recipe
+    if recipe is None:
+        return
+    if conv.recipe_before is _ABSENT:
+        conv.data.pop("recipe", None)
+    else:
+        conv.data["recipe"] = conv.recipe_before
+    conv.changes = [c for c in conv.changes if not (c.kind == "derived" and c.path == "recipe")]
+    conv.changes.append(
+        Change(
+            "derived",
+            "recipe",
+            f"not written: recipe {recipe} would also change {', '.join(differ)}; add "
+            "recipe: by hand once those are set",
+        )
+    )
+    conv.derived_recipe = None
+
+
+def _resolve_recipe_conflict(data: dict[str, Any], changes: list[Change]) -> None:
+    """A recipe the written components contradict becomes the recipe they make.
+
+    1.6 let the written components win, so a deployment made from the file
+    runs them; a read-only 1.7 load resolves the file the same way.
+    """
+    from .recipes import RECIPE_OWNED_KEYS, RECIPES, recipe_conflicts, written_recipe
+
+    recipe = data.get("recipe")
+    if not isinstance(recipe, str) or recipe not in RECIPES:
+        return
+    for dotted in RECIPE_OWNED_KEYS:
+        value = _get(data, tuple(dotted.split(".")))
+        if isinstance(value, str) and "${" in value:
+            return  # resolved only at load; leave it for the user
+    if not recipe_conflicts(data, recipe):
+        return
+    written = written_recipe(data, recipe)
+    if written is None or written == recipe:
+        return
+    data["recipe"] = written
+    changes.append(
+        Change(
+            "derived",
+            "recipe",
+            f"{recipe} -> {written}: the components written contradict {recipe}, and 1.6 "
+            f"deployed the written ones ({written})",
+        )
+    )
+
+
+def _drop_refused(data: dict[str, Any], changes: list[Change]) -> None:
+    """Drop the refused-key rows ``init --from`` translates, and spark.conf
+    keys Lakebench owns that carry their 1.6 default."""
+    from lakebench.modules.pipeline_engines.spark.conf_keys import (
+        V16_DEFAULT_SPARK_CONF,
+        is_owned_spark_key,
+    )
+
+    from .refused_keys import REFUSED_KEYS
+
+    for row in REFUSED_KEYS:
+        path = tuple(row.key.split("."))
+        if row.init_from == "keep" or not _has(data, path):
+            continue
+        if row.init_from == "drop-default":
+            default = _field_default(path)
+            if default is _NO_DEFAULT or _get(data, path) != default:
+                continue
+            _pop(data, path)
+            changes.append(
+                Change(
+                    "dropped",
+                    row.key,
+                    f"was {_show(default)}, the default it keeps without the key ({row.fix} "
+                    "for another value)",
+                )
+            )
+            continue
+        value = _pop(data, path)
+        changes.append(Change("dropped", row.key, f"was {_show(value)}: {row.fix}"))
+
+    conf = _get(data, ("spark", "conf"))
+    if not isinstance(conf, dict):
+        return
+    catalog = _get(data, ("architecture", "query_engine", "trino", "catalog_name"))
+    catalog = catalog if isinstance(catalog, str) and catalog else "lakehouse"
+    for key in list(conf):
+        value = conf[key]
+        if (
+            isinstance(key, str)
+            and is_owned_spark_key(key, catalog)
+            and V16_DEFAULT_SPARK_CONF.get(key) == str(value)
+        ):
+            _pop(data, ("spark", "conf", key))
+            changes.append(
+                Change(
+                    "dropped",
+                    f"spark.conf.{key}",
+                    "carried its 1.6 default, which Lakebench overwrote then too",
+                )
+            )
+
+
+_NO_DEFAULT = object()
+
+
+def _field_default(path: tuple[str, ...]) -> Any:
+    """The schema default of the field at a written *path*, or ``_NO_DEFAULT``."""
+    from pydantic_core import PydanticUndefined
+
+    from .schema import LakebenchConfig
+
+    blocks = _block_models()
+    model: type = LakebenchConfig
+    for part in path[:-1]:
+        sub = blocks[model].get(part)
+        if sub is None:
+            return _NO_DEFAULT
+        model = sub
+    fields = model.model_fields  # type: ignore[attr-defined]
+    if path[-1] not in fields:
+        return _NO_DEFAULT
+    default = fields[path[-1]].get_default(call_default_factory=True)
+    return _NO_DEFAULT if default is PydanticUndefined else default
+
+
+def _show(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value) if isinstance(value, str) else str(value)
+
+
+def _set_name(
+    data: dict[str, Any],
+    old_path: Path,
+    name_override: str | None,
+    fresh_name: str,
+    changes: list[Change],
+) -> tuple[str, str]:
+    """The name NEW carries and where it came from; written into *data*.
+
+    OLD's own name wins. A nameless OLD takes the name 1.6 recorded in
+    ``.lakebench/state.json`` beside the path as given, a link or not, where
+    1.6 read it; the file a link resolves to is read too. Two different
+    names, a name only beside the link's target (1.6 never read it through
+    this path), or another nameless config in the directory (1.6 gave all
+    of them the one name) need ``--name``, as the nameless checks of
+    ``destroy`` and ``status`` do (``loader.ConfigNameRequired``).
+    """
+    from .deploy_state import given_legacy_state_path, legacy_names, other_nameless_configs
+
+    own = data.get("name")
+    if own not in (None, ""):
+        if name_override and str(own) != name_override:
+            raise InitFromError(
+                f"--name {name_override!r} does not match the name {str(own)!r} in "
+                f"{old_path.name}; --name is only for a config that sets none"
+            )
+        return str(own), "config"
+    found = legacy_names(old_path)
+    recorded = sorted(set(found.values()))
+    if name_override:
+        name, source = name_override, "override"
+        text = f"'{name}', from --name"
+        others = [n for n in recorded if n != name]
+        if others:
+            text += (
+                f"; 1.6 recorded {', '.join(repr(n) for n in others)} for nameless configs "
+                "here, and the new file does not address that deployment or its buckets"
+            )
+    elif len(recorded) > 1:
+        where = "; ".join(f"'{n}' in {p}" for p, n in found.items())
+        raise InitFromError(
+            f"{old_path} has no name, and 1.6 recorded two names for it ({where}): pass "
+            "--name with the deployment this file made",
+            refused=True,
+        )
+    elif recorded and given_legacy_state_path(old_path) not in found:
+        (target_state,) = found
+        raise InitFromError(
+            f"{old_path} has no name and is a symbolic link: 1.6 recorded "
+            f"'{recorded[0]}' in {target_state}, beside the file the link points to, "
+            "and no name beside the link, so it is not the name 1.6 gave this path. "
+            f"Pass --name {recorded[0]} if this file deployed it, or convert the file "
+            "from its own path",
+            refused=True,
+        )
+    elif recorded:
+        legacy = recorded[0]
+        # The config as named in each directory that holds a state file:
+        # the path as given, and the file a link resolves to.
+        state_dirs = {state.parent.parent for state in found}
+        for config in dict.fromkeys([old_path.absolute(), old_path.resolve()]):
+            if config.parent not in state_dirs:
+                continue
+            others_there = other_nameless_configs(config)
+            if others_there is None or others_there:
+                listed = (
+                    "its directory could not be listed"
+                    if others_there is None
+                    else "its directory also holds nameless "
+                    + ", ".join(p.name for p in others_there)
+                )
+                raise InitFromError(
+                    f"{old_path.name} has no name, and {listed}; 1.6 gave every nameless "
+                    f"config there the name '{legacy}', so which one deployed it cannot be "
+                    f"told from the files. Pass --name {legacy} if this file deployed it, or "
+                    "--name with a new name",
+                    refused=True,
+                )
+        name, source = legacy, "legacy-state"
+        text = f"'{name}', read from {next(iter(found))} (1.6 recorded it there)"
+    else:
+        name, source = fresh_name, "new"
+        text = (
+            f"'{name}', new: the config has no name and no .lakebench/state.json beside it. "
+            "If it deployed something, convert again with --name and that deployment's name "
+            "(its namespace's lakebench.deployment/name annotation)"
+        )
+    data["name"] = name
+    changes.append(Change("derived", "name", text))
+    return name, source
+
+
+def _set_buckets(data: dict[str, Any], name: Any, changes: list[Change]) -> None:
+    """Write the bucket names a load derives from the name (``<name>-<layer>``).
+
+    1.6 and 1.7 derive them; 1.5 and earlier used ``lakebench-bronze`` and
+    so on for a config that named none (docs/configuration.md says so).
+    """
+    if not isinstance(name, str) or not name:
+        return  # a name that is not text fails the load; nothing to derive
+    node: Any = data
+    for key in ("platform", "storage", "s3", "buckets"):
+        if node.get(key) is None:  # absent, or an empty block ('platform:')
+            node[key] = {}
+        node = node[key]
+        if not isinstance(node, dict):
+            return  # not a mapping: the load fails on it, nothing to derive
+    why = (
+        f"follows the name's reference ({name}), as before"
+        if "${" in name
+        else "written out, so a later rename cannot move it"
+    )
+    for layer in ("bronze", "silver", "gold"):
+        if layer in node:
+            continue
+        value = f"{name}-{layer}"
+        node[layer] = PlainRef(value) if isinstance(name, PlainRef) else value
+        changes.append(
+            Change("derived", f"platform.storage.s3.buckets.{layer}", f"{value} ({why})")
+        )
+
+
+def _secret_var(path: tuple[str, ...], s3_vars: tuple[str, str]) -> str:
+    if path == ("platform", "storage", "s3", "access_key"):
+        return s3_vars[0]
+    if path == ("platform", "storage", "s3", "secret_key"):
+        return s3_vars[1]
+    if path == ("architecture", "catalog", "polaris", "client_secret"):
+        return POLARIS_SECRET_VAR
+    tail = path[-1] if path[:2] == ("spark", "conf") else _dotted(path)
+    return "LAKEBENCH_" + re.sub(r"[^A-Za-z0-9]+", "_", tail).strip("_").upper()
+
+
+def _move_secrets(
+    data: dict[str, Any], s3_vars: tuple[str, str], changes: list[Change]
+) -> list[tuple[str, ...]]:
+    """Replace each plaintext credential with a ``${VAR}`` reference.
+
+    A value that is all references stays; a reference with a default loses
+    the default (it is a plaintext secret too). The value is never put in a
+    change line.
+    """
+    moved: list[tuple[str, ...]] = []
+    used: dict[str, tuple[str, ...]] = {}
+
+    def leaves(node: dict[str, Any], path: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
+        for key, value in node.items():
+            if isinstance(value, dict):
+                yield from leaves(value, (*path, str(key)))
+            elif isinstance(key, str) and is_credential_key(key):
+                yield (*path, key)
+
+    for path in list(leaves(data, ())):
+        parent = _get(data, path[:-1])
+        value = parent[path[-1]]
+        if value is None or isinstance(value, bool) or value == "":
+            continue
+        if isinstance(value, str) and "${" in value:
+            if not _REF.sub("", value).strip():
+                if any(m.group(2) for m in _REF.finditer(value)):
+                    bare = _REF.sub(lambda m: "${" + m.group(1) + "}", value)
+                    parent[path[-1]] = PlainRef(bare) if isinstance(value, PlainRef) else bare
+                    moved.append(path)
+                    changes.append(
+                        Change(
+                            "secret",
+                            _dotted(path),
+                            "dropped the plaintext default from its ${VAR} reference",
+                        )
+                    )
+                continue
+        var = _secret_var(path, s3_vars)
+        base, n = var, 2
+        while var in used and used[var] != path:
+            var, n = f"{base}_{n}", n + 1
+        used[var] = path
+        parent[path[-1]] = f"${{{var}}}"
+        moved.append(path)
+        changes.append(
+            Change("secret", _dotted(path), f"moved a plaintext secret to ${{{var}}}; export it")
+        )
+    return moved
+
+
+def secret_vars(conv: Conversion) -> list[str]:
+    """The variables the moved secrets now reference."""
+    out: list[str] = []
+    for path in conv.secret_paths:
+        value = _get(conv.data, path)
+        if isinstance(value, str):
+            out += [m.group(1) for m in _REF.finditer(value)]
+    return sorted(set(out))
+
+
+def convert(
+    old_path: Path,
+    *,
+    s3_vars: tuple[str, str],
+    name_override: str | None,
+    fresh_name: str,
+) -> tuple[Conversion, str]:
+    """Convert the config at *old_path*; returns the conversion and OLD's text.
+
+    *s3_vars* names the S3 key variables (``--credentials-env``);
+    *fresh_name* is used when OLD and its directory name no deployment.
+    Raises :class:`InitFromError`; nothing is written.
+    """
+    try:
+        text = old_path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        raise InitFromError(f"cannot read {old_path}: {e}") from None
+    try:
+        raw = read_raw(text)
+    except (yaml.YAMLError, ValueError) as e:
+        raise InitFromError(f"{old_path} is not YAML: {_yaml_problem(e)}") from None
+    if not isinstance(raw, dict) or not raw:
+        raise InitFromError(f"{old_path} is not a config: its top level is not a mapping of keys")
+
+    changes: list[Change] = []
+    data = _move_locations(dict(raw), changes)
+    _resolve_recipe_conflict(data, changes)
+    derived_recipe, recipe_before = _derive_recipe(data, changes)
+    _drop_removed(data, changes)
+    _drop_refused(data, changes)
+    name, source = _set_name(data, old_path, name_override, fresh_name, changes)
+    _set_buckets(data, data["name"], changes)
+    secrets = _move_secrets(data, s3_vars, changes)
+    # name and recipe first, as init writes them.
+    data = {
+        **{k: data[k] for k in ("name", "recipe") if k in data},
+        **{k: v for k, v in data.items() if k not in ("name", "recipe")},
+    }
+    conv = Conversion(
+        data=data,
+        name=name,
+        name_source=source,
+        changes=changes,
+        secret_paths=secrets,
+        derived_recipe=derived_recipe,
+        recipe_before=recipe_before,
+    )
+    return conv, text
+
+
+# -- verification -------------------------------------------------------------
+
+
+@contextmanager
+def _placeholder_env(*texts: str, real: bool = False) -> Iterator[list[str]]:
+    """Each variable *texts* reference without a default set to its own
+    placeholder (or, with *real*, kept at its value when this shell sets
+    it), and unset where every reference has a default, as a load with
+    nothing exported would see it. Yields the variables that got a
+    placeholder; the environment is restored after."""
+    refs: dict[str, bool] = {}
+    for text in texts:
+        for m in _REF.finditer(text):
+            refs[m.group(1)] = refs.get(m.group(1), False) or m.group(2) is None
+    saved = {var: os.environ.get(var) for var in refs}
+    placed: list[str] = []
+    try:
+        for i, (var, needs_value) in enumerate(sorted(refs.items())):
+            if real and saved[var] is not None:
+                continue
+            os.environ.pop(var, None)
+            if needs_value:
+                os.environ[var] = f"lbplaceholder{i}"
+                placed.append(var)
+        yield placed
+    finally:
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
+
+
+def _problems(e: Exception) -> list[str]:
+    from pydantic import ValidationError
+
+    if not isinstance(e, ValidationError):
+        return [(str(e).splitlines() or [type(e).__name__])[-1]]
+    out = []
+    for err in e.errors(include_input=False):
+        parts = [str(x) for x in err["loc"]]
+        if parts[:2] == ["architecture", "workload"]:
+            parts = parts[1:]
+        loc = ".".join(parts)
+        msg = str(err["msg"]).removeprefix("Value error, ")
+        out.append(f"{loc}: {msg}" if loc else msg)
+    return out
+
+
+def load_text(text: str, purpose: Any, *, name: str | None = None) -> tuple[Any, list[str]]:
+    """*text* loaded as ``load_config`` would, without a file: flat keys
+    promoted, ``${VAR}`` substituted from the environment, and *name* used
+    when the text sets none (as ``--name`` is). Returns the model, or None
+    and the problems."""
+    from ._load_context import LoadPurpose
+    from .loader import _apply_flat_fields, _EnvLoader
+    from .schema import LakebenchConfig
+
+    loader = _EnvLoader(text)
+    try:
+        data = loader.get_single_data()
+    except (yaml.YAMLError, ValueError) as e:
+        return None, [f"not YAML: {_yaml_problem(e)}"]
+    finally:
+        loader.dispose()
+    if loader.malformed or loader.unresolved:
+        return None, ["unresolved or malformed ${VAR}"]
+    if not isinstance(data, dict):
+        return None, ["the top level is not a mapping"]
+    context = {"purpose": purpose, "allow_long_names": purpose != LoadPurpose.RUN}
+    try:
+        with _quiet():
+            data = _apply_flat_fields(data)
+            if name and not data.get("name"):
+                data["name"] = name
+            cfg = LakebenchConfig.model_validate(data, context=context)
+    except Exception as e:  # noqa: BLE001 -- every failure is reported as problems
+        return None, _problems(e)
+    return cfg, []
+
+
+def _model_path(path: tuple[str, ...]) -> tuple[str, ...]:
+    """A written path as the model stores it."""
+    if path[:1] == ("workload",):
+        path = ("architecture", *path)
+    if path[:3] == ("architecture", "pipeline", "continuous"):
+        path = ("architecture", "pipeline", "sustained", *path[3:])
+    return path
+
+
+def _flatten(node: Any, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], Any]:
+    if isinstance(node, dict) and node:
+        out: dict[tuple[str, ...], Any] = {}
+        for key, value in node.items():
+            out.update(_flatten(value, (*path, str(key))))
+        return out
+    return {path: node}
+
+
+def verify(old_text: str, new_text: str, conv: Conversion) -> list[str]:
+    """Why the new text does not load to what OLD loads to, or ``[]``.
+
+    Both are loaded for a read-only command with every referenced variable
+    at a placeholder. Their models must be equal, apart from the secrets
+    that became references, and so must their planned experiment
+    identities. A problem names a dotted path, never a value.
+    """
+    from lakebench.metrics.experiment import planned_experiment
+
+    from ._load_context import LoadPurpose
+
+    # Distinct placeholders first, so a reference renamed on the way cannot
+    # compare equal; a typed field (scale: ${SCALE}) needs a real value, so
+    # a failed load is retried with the variables this shell sets.
+    for real in (False, True):
+        with _placeholder_env(old_text, new_text, real=real) as placed:
+            old_cfg, old_problems = load_text(old_text, LoadPurpose.READ, name=conv.name)
+            if old_cfg is None:
+                continue
+            new_cfg, new_problems = load_text(new_text, LoadPurpose.READ)
+            if new_cfg is None:
+                return ["the converted config does not load: " + "; ".join(new_problems)]
+            skip = {_model_path(p) for p in conv.secret_paths}
+            if conv.derived_recipe:
+                skip.add(("recipe",))  # the value itself; what it sets is compared
+            old = _flatten(old_cfg.model_dump(mode="json"))
+            new = _flatten(new_cfg.model_dump(mode="json"))
+            differ = sorted(
+                _dotted(p)
+                for p in set(old) | set(new)
+                if p not in skip and (p not in old or p not in new or old[p] != new[p])
+            )
+            old_id = json.dumps(planned_experiment(old_cfg), sort_keys=True, default=str)
+            new_id = json.dumps(planned_experiment(new_cfg), sort_keys=True, default=str)
+            if old_id != new_id:
+                differ.append("the planned experiment identity")
+            return differ
+    unset = f" with placeholder values for {', '.join(placed)} (export them)" if placed else ""
+    raise InitFromError(f"the old config does not load{unset}: " + "; ".join(old_problems))
+
+
+def remaining_refusals(new_text: str) -> list[str]:
+    """What ``run`` still refuses in the new text (``deploy`` refuses all
+    but the benchmark settings), with this shell's variables."""
+    from ._load_context import LoadPurpose
+
+    with _placeholder_env(new_text, real=True):
+        cfg, problems = load_text(new_text, LoadPurpose.RUN)
+    return [] if cfg is not None else problems

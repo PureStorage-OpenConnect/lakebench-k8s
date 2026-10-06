@@ -55,8 +55,8 @@ class Journal:
 
     Sessions are keyed by deployment name (the ``name`` field in config).
     All commands for the same deployment (deploy, generate, run, destroy)
-    append to a single session file. A session is only closed by destroy
-    or clean data -- after which a new deploy starts a fresh session.
+    append to a single session file. A session is only closed by destroy,
+    after which a new deploy starts a fresh session.
 
     Usage::
 

@@ -30,9 +30,6 @@
 # REQUIRED: unique name for this deployment (also used as the K8s namespace)
 name: my-lakehouse
 
-# Optional description
-# description: "My Lakebench lakehouse deployment"
-
 # Recipe shorthand -- sets catalog + table_format + engine + query_engine in
 # one line.
 # Valid recipes:
@@ -45,19 +42,15 @@ name: my-lakehouse
 # See docs/recipes.md.
 recipe: polaris-iceberg-spark-trino
 
-# Config schema version (always 1)
-# version: 1
-
 # ============================================================================
 # IMAGES
 # ============================================================================
 # Container images for every component. Override for private registries.
 # See docs/datagen-custom-images.md for building your own datagen image.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:1.6.0    # release tag; :latest is not accepted
+#   datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04    # tag and digest; :latest is not accepted
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
-#   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:483
 #   polaris: apache/polaris:1.6.0                      # 1.3.0+ has the FlashBlade STS fix; 1.6.0 is current
 #   polaris_admin_tool: apache/polaris-admin-tool:1.6.0
@@ -86,10 +79,9 @@ platform:
       #   AWS S3:             https://s3.us-east-1.amazonaws.com
       endpoint: ""
 
-      # REQUIRED: S3 credentials (either inline or secret_ref)
+      # REQUIRED: S3 credentials, inline (environment substitution keeps them out of the file)
       access_key: ""
       secret_key: ""
-      # secret_ref: ""               # OR: name of an existing K8s Secret
 
       # region: us-east-1
       # path_style: true             # true for FlashBlade/MinIO, false for AWS S3
@@ -109,11 +101,10 @@ platform:
     ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
     # scratch:
     #   enabled: false
-    #   storage_class: px-csi-scratch    # Name of the StorageClass to use
-    #   size: 100Gi
-    #   create_storage_class: true       # If true, lakebench creates this StorageClass
-    #                                    # on deploy (requires cluster-admin). Set false
-    #                                    # if the SC already exists or is managed externally.
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. A cluster
+    #                                    # admin installs it once with
+    #                                    # `lakebench admin install-scratch-storage-class`.
+    #                                    # Each executor's PVC size is its job profile's.
     #   provisioner: pxd.portworx.com    # CSI provisioner. Examples:
     #                                    #   pxd.portworx.com (Portworx)
     #                                    #   rancher.io/local-path (local-path)
@@ -125,25 +116,14 @@ platform:
 
   # compute:
   #   spark:
-  #     operator:
-  #       install: false             # true = auto-install the Spark Operator.
-  #                                  # Default is false; run
-  #                                  # `lakebench admin install-spark-operator`
-  #                                  # once per cluster, or set true here.
+  #     operator:                    # Deploy never installs it; a cluster admin
+  #                                  # runs `lakebench admin install --component
+  #                                  # spark-operator` once per cluster.
   #       namespace: spark-operator
-  #       version: "2.5.1"
+  #       version: "2.5.1"           # Chart a fresh admin install uses
   #
-  #     driver:
-  #       cores: 4
-  #       memory: 8g
-  #
-  #     # Default executor sizing (proven at 1 TB+ scale). Do not shrink.
-  #     executor:
-  #       instances: 8
-  #       cores: 4
-  #       memory: 48g
-  #       memory_overhead: 12g       # Critical for stability
-  #
+  #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
+  #     ## in the job profiles, proven at 1 TB+ scale.
   #     ## Per-job executor count overrides (null = auto from scale factor).
   #     ## Per-executor sizing (cores, memory, PVC) stays fixed from the proven profiles.
   #     # bronze_executors: null
@@ -172,31 +152,22 @@ architecture:
     type: polaris                    # hive | polaris | none
     ## Polaris REST catalog settings (used when type: polaris)
     polaris:
-      # version: 1.6.0               # 1.3.0+ has the FlashBlade STS fix
-      # port: 8181
-      # REQUIRED for polaris. Each install must set its own OAuth2 client
-      # secret (LB-090): `deploy`, `run` and `destroy` each reload the config
-      # and must agree on the same value. Generate one with
-      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-      # then export it as LAKEBENCH_POLARIS_CLIENT_SECRET before running any
-      # lakebench command. The env-var pattern keeps the secret out of the
-      # config file and matches the other polaris-*.yaml examples.
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+      # Optional. Unset, deploy generates an OAuth2 client secret for this
+      # deployment and stores it in the Secret lakebench-polaris-client,
+      # where run and destroy read it. To choose your own, set client_secret
+      # through env-var substitution (LAKEBENCH_POLARIS_CLIENT_SECRET) so the
+      # secret stays out of the file; see docs/component-polaris.md.
+      port: 8181
       # resources:
       #   cpu: "1"
       #   memory: 2Gi
     ## Hive Metastore tuning (uncomment when catalog.type: hive)
     # hive:
-    #   operator:
-    #     install: false             # true = auto-install Stackable operators.
-    #                                # Requires cluster-admin. Installs commons,
-    #                                # listener, secret and hive operators.
+    #   operator:                    # Deploy never installs them; a cluster admin
+    #                                # runs `lakebench admin install --component
+    #                                # stackable` once per cluster.
     #     namespace: stackable
-    #     version: "25.7.0"
-    #   thrift:
-    #     min_threads: 10
-    #     max_threads: 50
-    #     client_timeout: 300s
+    #     version: "25.7.0"          # SDP a fresh admin install uses
     #   resources:
     #     cpu_min: 500m
     #     cpu_max: "2"
@@ -206,8 +177,6 @@ architecture:
   #   type: iceberg                  # iceberg | delta
   #   iceberg:
   #     version: "1.11.0"            # 1.11+ is the first release with a Spark 4.1 runtime and Java 17
-  #     file_format: parquet         # parquet | orc | avro
-  #     properties: {}               # Additional Iceberg table properties
 
   # query_engine:
   #   type: trino                    # trino | spark-thrift | duckdb | none
@@ -237,28 +206,6 @@ architecture:
   #   pattern: medallion             # medallion (streaming/batch/custom are deprecated)
   #   cycles: 1                      # Batch iterations (1 = full overwrite; 2..N = append/merge)
   #   pre_benchmark_maintenance: true
-  #   ## Medallion layer configuration
-  #   medallion:
-  #     bronze:
-  #       format: parquet
-  #       path_template: customer/interactions
-  #     silver:
-  #       format: iceberg
-  #       table_name: customer_interactions_enriched
-  #       partition_by:
-  #         - date
-  #       transforms:
-  #         - normalize_email
-  #         - normalize_phone
-  #         - geo_enrichment
-  #         - customer_segmentation
-  #         - quality_flags
-  #     gold:
-  #       format: iceberg
-  #       tables:
-  #         - name: customer_executive_dashboard
-  #           partition_by: [date]
-  #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
   #   ## Continuous pipeline settings (used when mode: continuous)
   #   continuous:
   #     bronze_trigger_interval: "30 seconds"
@@ -285,9 +232,11 @@ architecture:
   #   mode: power                    # power: single sequential stream (per-query latency)
   #                                  # throughput: N concurrent streams (aggregate QpH)
   #                                  # composite: geometric mean of power + throughput
-  #   streams: 4                     # Concurrent streams (throughput/composite only;
-  #                                  # ignored in power mode)
-  #   cache: hot                     # hot | cold
+  #                                  # `lakebench run` measures power only and refuses
+  #                                  # throughput, composite, cache: cold and streams
+  #                                  # above 1; `lakebench benchmark` runs them all.
+  #   streams: 4                     # Concurrent streams (lakebench benchmark only)
+  #   cache: hot                     # hot | cold (lakebench benchmark --cold)
   #   iterations: 3                  # Timed runs of each query. Median is used; 1 = quick run with no spread
 
   ## Table name overrides (namespace.table format)
@@ -333,7 +282,6 @@ workload:
   ## Customer360 workload overrides
   # customer360:
   #   unique_customers: null         # Override: derived from scale if null
-  #   date_range_days: null          # Override: defaults to 365 if null
 
 # ============================================================================
 # LAYER 3: OBSERVABILITY
@@ -341,11 +289,9 @@ workload:
 # Flat schema -- use top-level keys directly under observability:
 # observability:
 #   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
-#   prometheus_stack_enabled: true   # Prometheus collection
 #   dashboards_enabled: true         # Grafana dashboards
 #   retention: 7d                    # Prometheus data retention
 #   storage: 10Gi                    # Prometheus PVC size
-#   storage_class: ""                # PVC storage class (empty = default)
 #   chart_version: "87.19.2"         # kube-prometheus-stack Helm chart version
 #   pushgateway_enabled: true        # Per-deployment Pushgateway for live datagen metrics
 #   pushgateway_image: prom/pushgateway:v1.11.1
@@ -355,21 +301,15 @@ workload:
 # ============================================================================
 # SPARK CONFIGURATION OVERRIDES
 # ============================================================================
-# Proven defaults for S3A and shuffle. Override as needed.
+# Your own Spark keys, merged over the job defaults (each a key=value under
+# conf). Keys Lakebench sets for every job (shuffle partitions, the S3A
+# connection pool, catalog, jars, UI) are refused. The job defaults:
 # spark:
 #   conf:
-#     # S3A performance settings
-#     spark.hadoop.fs.s3a.connection.maximum: "500"
-#     spark.hadoop.fs.s3a.threads.max: "200"
-#     spark.hadoop.fs.s3a.fast.upload: "true"
 #     spark.hadoop.fs.s3a.multipart.size: "268435456"
 #     spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
 #     spark.hadoop.fs.s3a.attempts.maximum: "20"
 #     spark.hadoop.fs.s3a.retry.limit: "10"
 #     spark.hadoop.fs.s3a.retry.interval: "500ms"
-#     # Shuffle settings
-#     spark.sql.shuffle.partitions: "200"
-#     spark.default.parallelism: "200"
-#     # Memory settings
 #     spark.memory.fraction: "0.8"
 #     spark.memory.storageFraction: "0.3"

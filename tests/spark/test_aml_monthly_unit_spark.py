@@ -11,7 +11,9 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pyspark")
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+# Module-scoped fixtures below run scripts, so the module shares one
+# private script namespace.
+pytestmark = pytest.mark.usefixtures("load_script_module")
 
 CFG = {"lead_in_days": 14, "burn_in_months": 1, "history_days": 60}
 
@@ -52,7 +54,7 @@ ROWS = [
 
 
 @pytest.fixture(scope="module")
-def frames(spark):
+def frames(load_script_module, spark):
     import aml_features as af
 
     txns = spark.createDataFrame(

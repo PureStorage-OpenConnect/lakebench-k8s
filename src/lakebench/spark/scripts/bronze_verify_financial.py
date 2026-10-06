@@ -39,7 +39,7 @@ BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
 #     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
-# LB-165: prior to PR-F this script assumed the flat datagen_py layout
+# Prior to PR-F this script assumed the flat datagen_py layout
 # where the ROOT prefix directly held the pacs.008 files, and Spark
 # listing the ROOT hit the three subdirs and failed with
 # UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
@@ -54,7 +54,7 @@ PACS_PREFIX = env(
 # rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
-# LB-165 round 1 fixed only the pacs.008 read; round 2 (this) adds the
+# The first fix covered only the pacs.008 read; this one adds the
 # manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
@@ -77,18 +77,64 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 #   - bronze, empty, with the inferred schema plus ingest_ts. Registering the
 #     files present at preflight time would ingest each of them twice, since
 #     bronze-ingest streams every file under the prefix itself.
-#   - silver.transactions and silver.counterparty_edges, which silver-stream
-#     recreates. Rows left by an earlier batch or continuous run would
-#     otherwise be counted again next to the re-ingested corpus.
+#   - every silver table silver-stream writes (CONTINUOUS_SILVER_TABLES),
+#     which it recreates. Rows left by an earlier batch or continuous run
+#     would otherwise be counted again next to the re-ingested corpus, or
+#     carried into this run's statements and profiles.
 # A pod restart inside a run does not re-run the preflight, so it keeps its
 # checkpoints and tables.
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
 REGISTER = _REGISTER_MODE == "1"
 CONTINUOUS_RESET = _REGISTER_MODE == "schema"
+# Only the held-out check, nothing else: run --stage silver-build or
+# gold-finalize on the financial schema runs this first, so a stage subset
+# never reads a protected corpus either.
+CHECK_ONLY = _REGISTER_MODE == "check"
+# A corpus from a held-out (or spent) AML seed is refused before anything is
+# read or written (refuse_protected_corpus). Every batch run reads a corpus
+# that has its manifest, so a missing manifest refuses there. The continuous
+# preflight runs while this run's datagen is still writing (the manifest
+# lands last, and the config guard checked the seed it generates with), so
+# a missing manifest passes there, unless the run generates nothing
+# (LB_MANIFEST_REQUIRED=1, set by the CLI for --skip-generate).
+# The CLI may say either way (LB_MANIFEST_REQUIRED 0 or 1): the continuous
+# preflight and run --stage's check before a multi-cycle subset, whose
+# cycles generate their own corpus.
+_REQUIRED = env("LB_MANIFEST_REQUIRED", "")
+MANIFEST_REQUIRED = _REQUIRED == "1" if _REQUIRED in ("0", "1") else not CONTINUOUS_RESET
+# Prefix of the refusal; the CLI reads it in the driver log and exits 2.
+PROTECTED_REFUSAL = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
+# Prefix when the check itself could not run (a storage or Spark error): the
+# job still stops before reading the corpus, and the CLI reports a failure.
+PROTECTED_UNCHECKED = "LAKEBENCH-PROTECTED-CORPUS-UNCHECKED"
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
+SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+# Every silver table silver_stream_financial writes; the continuous reset
+# drops them all (its fresh-checkpoint refusal checks the same set).
+CONTINUOUS_SILVER_TABLES = (
+    SILVER_TXNS,
+    SILVER_EDGES,
+    SILVER_ENTITIES,
+    SILVER_ACCOUNTS,
+    SILVER_STATEMENTS,
+    SILVER_PROFILES,
+    SILVER_BATCH_VERSIONS,
+)
+# The gold tables gold-refresh writes, besides the TM tables (TM_TABLES):
+# until its first tick a reader would take the previous run's rows as this
+# run's (score_financial reads the run id from detection_status).
+CONTINUOUS_GOLD_TABLES = (
+    env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts"),
+    env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores"),
+    env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters"),
+    env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards"),
+    env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status"),
+)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 
 
@@ -119,7 +165,7 @@ def _with_location(writer):
 
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
-# add_files preflight thresholds (LB-110). At scale 100+ the pacs008/
+# add_files preflight thresholds. At scale 100+ the pacs008/
 # tree can be 700 GB and 700k+ files; add_files manifest generation
 # scans every file and holds per-file state on the driver, which OOMs
 # the default 4Gi bronze-verify executor. When either threshold is
@@ -232,9 +278,11 @@ def _continuous_reset(spark, df):
     # orphaned data in the silver bucket on every rerun. Entities and accounts
     # too: the continuous stream only appends dimension rows it has not seen,
     # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
-    # would otherwise survive the reset.
+    # would otherwise survive the reset. Statements are appended and profiles
+    # folded into what is there, so they go too, with the batch-versions
+    # sidecar.
     # _drop_owned_table falls back to a plain DROP where Polaris refuses PURGE.
-    for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
+    for t in CONTINUOUS_SILVER_TABLES:
         _drop_owned_table(spark, t)
     _with_location(
         df.limit(0)
@@ -248,7 +296,7 @@ def _continuous_reset(spark, df):
     ).create()
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
-        f"dropped {SILVER_TXNS}, {SILVER_EDGES}, {SILVER_ENTITIES}, {SILVER_ACCOUNTS}"
+        f"dropped {', '.join(CONTINUOUS_SILVER_TABLES)}"
     )
     # The previous run's manifest table must not outlive the reset: this
     # run's datagen writes a new schedule, and scoring against the old one
@@ -265,29 +313,35 @@ def _continuous_reset(spark, df):
     for t in TM_TABLES:
         _drop_owned_table(spark, t)
     log("Continuous reset: dropped the TM operations tables")
+    # The other gold tables are the previous run's alerts, scores, clusters,
+    # dashboards and detection status; gold-refresh recreates them empty.
+    for t in CONTINUOUS_GOLD_TABLES:
+        _drop_owned_table(spark, t)
+    log(f"Continuous reset: dropped {', '.join(CONTINUOUS_GOLD_TABLES)}")
 
 
 def _drop_owned_table(spark, table):
     """DROP a table whose files only it owns; PURGE only when that is proven.
 
-    LB-188: PURGE deletes every file the table metadata references, wherever it
+    PURGE deletes every file the table metadata references, wherever it
     sits, so it runs only for a table whose location is its own directory
     (named after the table, or Iceberg's ``name-<suffix>`` unique-location form)
     and disjoint from the raw datagen landing zone. A table whose location is
     unreadable, shared (a namespace or warehouse root), or overlaps the datagen
     path is dropped catalog-only and its files are kept.
 
-    Scope of the proof: the callers pass only this deployment's silver.* and TM
-    gold.* tables, all created ``CREATE TABLE ... USING iceberg`` with no
-    LOCATION and no ``add_files`` (verified in silver_build_financial.py and
-    tm_operations.py), in this deployment's own catalog. So their files live
+    Scope of the proof: the callers pass only this deployment's silver.*, TM
+    gold.* and gold-refresh gold.* tables, all created ``CREATE TABLE ...
+    USING iceberg`` with no LOCATION and no ``add_files`` (verified in
+    silver_build_financial.py, tm_operations.py and gold_finalize_financial.py),
+    in this deployment's own catalog. So their files live
     under the catalog warehouse and the name + datagen-disjoint check is enough
     to keep PURGE off the raw corpus and off a shared namespace root. It does
     NOT prove the location is under a deployment-owned bucket root the way c360's
     common.owned_table_dir does, because this script does not know the catalog
     warehouse root (Hive vs Polaris differ) and the tables are catalog-managed;
     a bucket-root check keyed on the warehouse is tracked for when it can be
-    verified live (BUGS LB-188 note). Not a live hazard today: with no LOCATION
+    verified live. Not a live hazard today: with no LOCATION
     and no add_files these tables cannot resolve to a foreign bucket.
 
     Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
@@ -331,12 +385,64 @@ def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
     )
 
 
+def protected_manifest_reason(spark, *, required: bool) -> str | None:
+    """Why the corpus under the bronze prefix may not be read, or None:
+    ``datagen_seed.manifest_protected_reason`` over every row of every
+    cycle's manifest (a held-out or spent recovered seed, a manifest the
+    corpus seed cannot be recovered from, an unreadable held-out record).
+    Only a manifest glob that matches no file counts as missing; any other
+    read error raises (the caller refuses). Names a role, never a seed."""
+    try:
+        from lakebench.config.datagen_seed import manifest_protected_reason
+    except ImportError:  # the Spark driver: the flat copy beside this script
+        from datagen_seed import manifest_protected_reason
+
+    path = BRONZE_URI + MANIFEST_PATH
+    jpath = spark._jvm.org.apache.hadoop.fs.Path(path)
+    found = jpath.getFileSystem(spark._jsc.hadoopConfiguration()).globStatus(jpath)
+    if found is None or len(found) == 0:
+        if required:
+            return (
+                "the corpus has no manifest, so it cannot be shown not to be a registered "
+                "held-out corpus"
+            )
+        log("Held-out check: no manifest yet (continuous datagen still writing); skipped")
+        return None
+    manifest = spark.read.parquet(path).select("typology_id", "seed")
+    return manifest_protected_reason(
+        (r["typology_id"], r["seed"]) for r in manifest.toLocalIterator()
+    )
+
+
+def refuse_protected_corpus(spark) -> None:
+    """Stop before any read or write when the corpus is a protected one."""
+    try:
+        reason = protected_manifest_reason(spark, required=MANIFEST_REQUIRED)
+    except Exception as e:  # noqa: BLE001 -- an unchecked corpus is not read
+        why = f"the manifest could not be checked ({type(e).__name__})"
+        log(f"ERROR: {PROTECTED_UNCHECKED}: {why}")
+        spark.stop()
+        raise SystemExit(f"{PROTECTED_UNCHECKED}: {why}") from None
+    if reason is None:
+        log("Held-out check: the corpus manifest comes from no held-out or spent seed")
+        return
+    log(f"ERROR: {PROTECTED_REFUSAL}: {reason}")
+    spark.stop()
+    raise SystemExit(f"{PROTECTED_REFUSAL}: {reason}")
+
+
 def main() -> None:
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import col
     from pyspark.sql.functions import max as max_
 
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
+    # First, before any namespace, table, ConfigMap or bronze read.
+    refuse_protected_corpus(spark)
+    if CHECK_ONLY:
+        log("Held-out check only (a stage subset follows); nothing else done")
+        spark.stop()
+        return
     # Hive does not pre-create namespaces the way the Polaris bootstrap does.
     ensure_namespaces(spark, CATALOG, (BRONZE_TABLE,))
     start_time = time.time()
@@ -421,7 +527,7 @@ def main() -> None:
         # 2. CTAS fallback: if add_files isn't supported by the catalog
         #    (e.g. Nessie REST prior to a certain version) OR the source
         #    parquet exceeds ADD_FILES_MAX_BYTES / ADD_FILES_MAX_FILES
-        #    (LB-110: add_files manifest generation OOMs a 4Gi executor
+        #    (add_files manifest generation OOMs a 4Gi executor
         #    at scale 100+), rewrite the data into the Iceberg table.
         #    Doubles S3 usage; operators can bump the thresholds or the
         #    executor sizing to keep zero-copy.
@@ -541,7 +647,7 @@ def main() -> None:
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
-        # Manifest registration (LB-165 round 2). One file, small; CTAS
+        # Manifest registration. One file, small; CTAS
         # unconditionally. Failure of the pacs.008 registration above
         # would have already raised, so if we're here the catalog and
         # the SparkSession are known good. Manifest failure is however

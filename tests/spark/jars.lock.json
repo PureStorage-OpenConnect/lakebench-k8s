@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "legs": {
+    "4.0": {
+      "pyspark": "4.0.1",
+      "jars": [
+        {
+          "coord": "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.11.0",
+          "sha256": "63c3b812549dc232c1920865ff42436df8604a9bbacd693930985c06bd97e6dc",
+          "kind": "iceberg"
+        },
+        {
+          "coord": "io.delta:delta-spark_2.13:4.0.0",
+          "sha256": "538511702aae0ef6973a6a70af3d4543c9009f8edbed786a00737e2d3cd7f04e",
+          "kind": "delta"
+        },
+        {
+          "coord": "io.delta:delta-storage:4.0.0",
+          "sha256": "9bdb9fb450f1e119eba53feb427f331b0d09072d26485b8273883ad72c9a2e1d",
+          "kind": "delta",
+          "transitive_of": "io.delta:delta-spark_2.13:4.0.0"
+        }
+      ]
+    },
+    "4.1": {
+      "pyspark": "4.1.1",
+      "jars": [
+        {
+          "coord": "org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.11.0",
+          "sha256": "d6ea6c5d099288daeb7d5a92061bd3d7d8f296492632b42378e5f2f0e3066242",
+          "kind": "iceberg"
+        },
+        {
+          "coord": "io.delta:delta-spark_4.1_2.13:4.1.0",
+          "sha256": "9b05d7a82196ee1f1073733a45a2faae59161e52b86ae918fe6742fad6eaf036",
+          "kind": "delta"
+        },
+        {
+          "coord": "io.delta:delta-storage:4.1.0",
+          "sha256": "6d0520ffcc35b582369f92c23fa24e14a5bb935cf6e31ed7f47c5046ae17cb25",
+          "kind": "delta",
+          "transitive_of": "io.delta:delta-spark_4.1_2.13:4.1.0"
+        }
+      ]
+    }
+  }
+}

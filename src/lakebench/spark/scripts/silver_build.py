@@ -10,6 +10,7 @@ Automatically selects the optimal processing strategy based on data size:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,20 +22,26 @@ from common import (
     SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
+    batch_id_last,
     c360_bronze_path,
+    c360_bronze_run_path,
     ensure_column,
     env,
     log,
+    one_line,
     path_size_gb_strict,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
+    table_exists,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
     lit,
+    regexp_extract,
     to_date,
+    when,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import min as min_
@@ -283,12 +290,13 @@ def apply_dynamic_config(spark, profile: DataProfile):
 
 
 def _table_exists(spark, table_name: str) -> bool:
-    """Check if an Iceberg table exists."""
-    try:
-        spark.table(table_name)
-        return True
-    except Exception:
-        return False
+    """Check if a catalog table exists (see common.table_exists).
+
+    Only a genuine not-found is False: any other error (a metastore timeout,
+    an unreadable metadata file) raises, so it cannot send a populated table
+    down the full-rebuild path.
+    """
+    return table_exists(spark, table_name)
 
 
 def rows_added_by_last_commit(spark, silver_tbl):
@@ -356,13 +364,71 @@ def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
     spark.sql(f"ALTER TABLE {silver_tbl} SET TBLPROPERTIES ({props_sql})")
 
 
+def tag_batch(df_bronze, cycle, appending):
+    """``df_bronze`` with ``_batch_id``: the cycle whose rows these are.
+
+    An append reads one cycle's files, so every row is that cycle's. A full
+    build can read several cycles' files (a later cycle that found no table
+    rebuilds from cycle 0 up), so each row takes the cycle in its file's name
+    (``part-c<n>-*`` is cycle n, any other name cycle 0; common.c360_bronze_path).
+    Tagging the whole rebuild with the current cycle made an operator retry,
+    which deletes that cycle's rows before re-appending them, delete all of it.
+    """
+    if appending:
+        return df_bronze.withColumn("_batch_id", lit(int(cycle)).cast("bigint"))
+    if int(cycle) > 0:
+        # A rebuild at a later cycle whose own files the name pattern does not
+        # find would tag every row 0, and a retry would then delete nothing
+        # and append the cycle twice. Refuse instead.
+        own = re.compile(rf"/part-c0*{int(cycle)}-[^/]*$")
+        if not any(own.search(f) for f in df_bronze.inputFiles()):
+            raise SilverAbort(
+                f"silver-build: rebuilding at cycle {cycle}, but no bronze file is named "
+                f"part-c{int(cycle):03d}-*; cannot tag rows by cycle"
+            )
+    n = regexp_extract(col("_metadata.file_path"), r"/part-c(\d+)-[^/]*$", 1)
+    return df_bronze.withColumn("_batch_id", when(n == "", lit(0)).otherwise(n).cast("bigint"))
+
+
+def drop_if_columns_move(spark, silver_tbl, silver_df):
+    """Drop an existing silver table whose columns are not *silver_df*'s, in
+    order, just before a full build writes it.
+
+    A Hive Metastore refuses a createOrReplace whose columns change type by
+    position (a table a continuous run wrote, with _stream_id; a table a 1.7
+    dev build wrote), and each refused attempt left its data files in the
+    bucket. On Hive and Polaris the drop is the catalog entry only: no file
+    is deleted, so no bucket ownership is at stake, and the old table's
+    files stay in the bucket (local mode's Hadoop catalog deletes the table
+    directory). A write that fails after the drop leaves no table; the next
+    run finds none and builds silver without --force-rebuild. A table with
+    the same columns (one 1.6 or this version wrote) keeps the atomic
+    replace, so a write that fails leaves the old table.
+    """
+    if not table_exists(spark, silver_tbl):
+        return
+    try:
+        existing = spark.table(silver_tbl).columns
+    except Exception as e:  # noqa: BLE001 -- unreadable: replace it from scratch
+        log(f"Full rebuild: cannot read {silver_tbl} columns ({one_line(e)})")
+        existing = None
+    if existing == silver_df.columns:
+        return
+    spark.sql(f"DROP TABLE IF EXISTS {silver_tbl}")
+    log(
+        f"Full rebuild: dropped {silver_tbl} (catalog entry only; its files stay in the "
+        "bucket): its columns differ"
+    )
+
+
 def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
 
-    B1: every row carries ``_batch_id = cycle`` so a re-submission of the
-    same cycle DELETEs the earlier attempt's rows before re-inserting them,
-    matching the DELETE + APPEND pattern silver_stream.py already uses.
-    Cycle 0 is the full rebuild (createOrReplace); cycles 1+ append.
+    B1: every row carries the ``_batch_id`` of its cycle (``tag_batch``) so a
+    re-submission of the same cycle DELETEs the earlier attempt's rows before
+    re-inserting them, matching the DELETE + APPEND pattern silver_stream.py
+    already uses. Cycle 0 is the full rebuild (createOrReplace); cycles 1+
+    append.
     """
     log("Executing SIMPLE strategy...")
 
@@ -375,8 +441,8 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     # missing env here is a plumbing break, not a legitimate greenfield.
     anchor = resolve_data_clock(df_bronze, strict=True)
 
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
-        "_batch_id", lit(int(cycle)).cast("bigint")
+    silver_df = batch_id_last(
+        apply_silver_transformations_anchored(tag_batch(df_bronze, cycle, appending), anchor)
     )
     silver_count = silver_df.count()
 
@@ -392,6 +458,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
+        drop_if_columns_move(spark, silver_tbl, silver_df)
         (
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
@@ -442,8 +509,8 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     anchor = resolve_data_clock(df_bronze, strict=True)
 
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
-        "_batch_id", lit(int(cycle)).cast("bigint")
+    silver_df = batch_id_last(
+        apply_silver_transformations_anchored(tag_batch(df_bronze, cycle, appending), anchor)
     )
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
@@ -464,6 +531,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
+        drop_if_columns_move(spark, silver_tbl, silver_df)
         writer = (
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
@@ -538,10 +606,15 @@ if incremental_mode:
 # writer DELETEs on the _batch_id key first.
 _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
 
-# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
-# build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
-bronze_source = c360_bronze_path(bronze_uri, appending)
+# Later cycles of a multi-cycle run append only their own bronze files. A
+# full build reads this run's files: every file in a single-cycle run, else
+# cycle 0's and cycles 1..k's (a later cycle that found no table), as
+# bronze-verify counts them, not files of later cycles an earlier run with
+# more cycles left under the prefix. Profile, size and read the same path.
+bronze_source = (
+    c360_bronze_path(bronze_uri, True) if appending else c360_bronze_run_path(bronze_uri)
+)
 log(f"Bronze source: {bronze_source}")
 
 # B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
@@ -553,8 +626,15 @@ _force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
 if not appending and _table_exists(spark, silver_tbl):
     try:
         _has_rows = spark.table(silver_tbl).limit(1).count() > 0
-    except Exception:  # noqa: BLE001
-        _has_rows = False
+    except Exception as e:  # noqa: BLE001
+        # A read that fails says nothing about the rows: counting it as
+        # empty rebuilt a populated table without --force-rebuild.
+        if not _force_rebuild:
+            raise SilverAbort(
+                f"silver-build: cannot tell whether {silver_tbl} holds rows ({one_line(e)}); "
+                "refusing a full rebuild without --force-rebuild"
+            ) from e
+        _has_rows = True
     if _has_rows and not _force_rebuild:
         raise SilverAbort(
             f"silver-build: refusing full rebuild of populated {silver_tbl}; "

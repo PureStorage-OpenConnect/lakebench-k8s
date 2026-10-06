@@ -1,0 +1,35 @@
+[lb] 2026-09-27T14:50:43.791435 - ============================================================
+[lb] 2026-09-27T14:50:43.791474 - Customer 360 Silver Build - Adaptive Transformation Pipeline
+[lb] 2026-09-27T14:50:43.791482 - ============================================================
+[lb] 2026-09-27T14:50:57.907378 - Creating Iceberg namespaces...
+[lb] 2026-09-27T14:50:59.698997 - Created namespace lakehouse.silver
+[lb] 2026-09-27T14:50:59.699108 - Target table: lakehouse.silver.customer_interactions_enriched
+[lb] 2026-09-27T14:50:59.699131 - Bronze source: s3a://runchar-bronze/customer/interactions/
+[lb] 2026-09-27T14:50:59.700236 - Profiling Bronze data (lightweight)...
+[lb] 2026-09-27T14:51:00.832571 -   Size from filesystem: 9.9 GB
+[lb] 2026-09-27T14:51:03.415279 -   Estimated rows: 2,599,787
+[lb] 2026-09-27T14:51:10.079287 -   Approx customers: 25,128
+[lb] 2026-09-27T14:51:10.079372 -   Date range: 2024-01-01 to 2024-12-31 (365 days)
+[lb] 2026-09-27T14:51:10.079402 -   Skew factor: 159.3
+[lb] 2026-09-27T14:51:10.079436 - Profile complete (lightweight, no shuffles)
+[lb] 2026-09-27T14:51:10.079921 - Auto-selected strategy: simple
+[lb] 2026-09-27T14:51:10.080515 - Dynamic shuffle partitions: 200
+[lb] 2026-09-27T14:51:10.081144 - Enabled AQE skew join handling
+[lb] 2026-09-27T14:51:10.081200 - Executing SIMPLE strategy...
+[lb] 2026-09-27T14:51:10.929259 - Bronze records: 2,478,560
+[lb] 2026-09-27T14:51:10.929344 - Data clock (recency anchor): 2024-12-31 from LB_DATA_CLOCK
+[lb] 2026-09-27T14:51:12.791744 - Writing 2,428,561 records to lakehouse.silver.customer_interactions_enriched
+[lb] 2026-09-27T14:51:40.774066 - ============================================================
+[lb] 2026-09-27T14:51:40.774142 - Customer 360 Silver Build COMPLETED
+[lb] 2026-09-27T14:51:40.774161 - ============================================================
+[lb] 2026-09-27T14:51:40.774185 - Strategy: simple
+[lb] 2026-09-27T14:51:40.774212 - Records written: 2,428,561
+[lb] 2026-09-27T14:51:40.774276 - Table: lakehouse.silver.customer_interactions_enriched
+[lb] 2026-09-27T14:51:40.774307 - Partitioned by: interaction_date
+[lb] 2026-09-27T14:51:40.774336 - Duration: 41.1s (0.7 min)
+[lb] 2026-09-27T14:51:40.774364 - === JOB METRICS: silver-build ===
+[lb] 2026-09-27T14:51:40.774384 - input_size_gb: 9.917
+[lb] 2026-09-27T14:51:40.774402 - input_rows: 2478560
+[lb] 2026-09-27T14:51:40.774422 - output_rows: 2428561
+[lb] 2026-09-27T14:51:40.774438 - elapsed_seconds: 41.1
+[lb] 2026-09-27T14:51:40.774453 - ============================================================

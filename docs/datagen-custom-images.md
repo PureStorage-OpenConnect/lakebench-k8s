@@ -1,8 +1,8 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`docker.io/sillidata/lb-datagen:1.6.0`, digest
-`sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a`) is built from
+The default image (`docker.io/sillidata/lb-datagen:2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`) is built from
 `datagen_rs/` (Rust) and produces both the Customer360 schema
 ([datagen-schema.md](datagen-schema.md)) and the Financial `pacs.008` schema,
 dispatched by `--schema`. You can build a custom image to add columns, change
@@ -45,7 +45,7 @@ From the repository root, build and push the image:
 cd datagen_rs
 
 # Build the image
-podman build -t your-registry/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t your-registry/lb-datagen:custom .
 
 # Push to your registry
 podman push your-registry/lb-datagen:custom
@@ -68,17 +68,39 @@ Setting `pull_policy: Always` is important after pushing a new image tag. Withou
 it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
-A custom image is not the frozen AML generator (`datagen-v2-rs-0.3`). The
-default image (tag `1.6.0`, digest
-`sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a`)
-is output-identical to the freeze but is not the registered-look image;
-registered looks use the frozen digest described in
-`docs/internal/aml-protocol.md`. The run records the image reference you configured, and AML results from a
+A custom image is not the AML generator the registered looks use
+(`datagen-v2-rs-0.3`). The default image (tag `2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`)
+is that image: it is byte-identical to the v1.6 image (tag `1.6.0`) on the
+five byte-compare cases, and the registered looks pin its digest
+(`docs/internal/aml-protocol.md`). The run records the image reference you configured, and AML results from a
 modified generator are not comparable with results from the frozen one.
 Freeze identity is defined by `MODEL_VERSION` in `datagen_rs/src/model.rs`:
 a rebuild that keeps `MODEL_VERSION` unchanged and produces byte-identical
 output at a fixed seed still belongs to the same freeze even under a
 different image tag.
+
+**Corpus identity of a custom image.** From v1.7 a run records a second
+corpus id, `corpus.id_v2`, taken from what the generator itself wrote
+rather than from the config: each datagen node leaves a completion marker
+under `<bronze prefix>/_corpus/` carrying a hash of the arguments it
+resolved, and the run hashes those markers together with the image's
+lineage. Two consequences for a custom image:
+
+- An image built from `datagen_rs/` older than the v1.7 generator writes no
+  markers. Its runs record `corpus.id_v2: null` with the reason in
+  `corpus.id_v2_unavailable`; only the v1 corpus id identifies their
+  corpus.
+- Lineage is the image digest the run read from `_corpus/series.json`,
+  mapped through `src/lakebench/config/datagen_lineage.yaml` when the run
+  is observed. A digest not listed there is its own lineage, so a rebuilt
+  image, even an output-identical one, gives a different corpus id. A row
+  that maps a rebuilt digest to the image it re-pins needs byte-compare
+  evidence: the five-case result file
+  `tests/fixtures/datagen_reference/compare-<first 12 hex>.json`, whose
+  sha256 the row pins (`evidence_sha256`) and which the unit suite checks.
+  Without an observed digest the lineage reads `declared:<image tag>`,
+  which never equals an observed one.
 
 ## Anatomy of `datagen_rs/`
 
@@ -86,24 +108,29 @@ The generator is a Rust crate. The files you are most likely to change:
 
 | File | Contents |
 |---|---|
-| `src/bin/generate.rs` | The `generate` binary: argument parsing, file-ID assignment per node (file `N` goes to node `N % total_nodes`), the rayon thread pool and the upload loop, for both schemas |
-| `src/schema.rs` | Arrow schemas: `customer360_schema()` (41 fields) and `pacs008_schema()` |
-| `src/customer360.rs` | `build_batch()`, which builds one Customer360 file: sessions, customer IDs, conditional nulls, dirty-data passes |
-| `src/customer360_realism.rs` | Customer360 value pools and weights (`INTERACTION_WEIGHTS`, `DATA_QUALITY_WEIGHTS`, `DATA_SOURCE_WEIGHTS`, `DIRTY_RATE_BY_SOURCE`, `CITIES`, `DIRTY_CITY_VARIANTS`, `DIRTY_STATE_VARIANTS`), the loyalty lookup (60% members, 70/20/10 tier split) and the truncated-Zipf `CustomerIdSampler` |
-| `src/writer.rs` | Parquet writer properties, `DG_COMPRESSION`, and the per-codec bytes-per-row tables that size files |
-| `src/model.rs`, `src/world.rs`, `src/typology.rs`, `src/party.rs` | The financial (AML) world model, planted typologies, party and account tables, and `MODEL_VERSION` |
-| `entrypoint.py` | Container entrypoint: maps the Kubernetes Job's arguments onto the binary, sizes threads from the pod CPU and memory limit, reads the node ID from `JOB_COMPLETION_INDEX` |
+| `datagen_rs/src/bin/generate.rs` | The `generate` binary: argument parsing, file-ID assignment per node (file `N` goes to node `N % total_nodes`), the rayon thread pool and the upload loop, for both schemas |
+| `datagen_rs/src/schema.rs` | Arrow schemas: `customer360_schema()` (41 fields) and `pacs008_schema()` |
+| `datagen_rs/src/customer360.rs` | `build_batch()`, which builds one Customer360 file: sessions, customer IDs, conditional nulls, dirty-data passes |
+| `datagen_rs/src/customer360_realism.rs` | Customer360 value pools and weights (`INTERACTION_WEIGHTS`, `DATA_QUALITY_WEIGHTS`, `DATA_SOURCE_WEIGHTS`, `DIRTY_RATE_BY_SOURCE`, `CITIES`, `DIRTY_CITY_VARIANTS`, `DIRTY_STATE_VARIANTS`), the loyalty lookup (60% members, 70/20/10 tier split) and the truncated-Zipf `CustomerIdSampler` |
+| `datagen_rs/src/writer.rs` | Parquet writer properties, `DG_COMPRESSION`, and the per-codec bytes-per-row tables that size files |
+| `datagen_rs/src/model.rs`, `datagen_rs/src/world.rs`, `datagen_rs/src/typology.rs`, `datagen_rs/src/party.rs` | The financial (AML) world model, planted typologies, party and account tables, and `MODEL_VERSION` |
+| `datagen_rs/entrypoint.py` | Container entrypoint: maps the Kubernetes Job's arguments onto the binary, sizes threads from the pod CPU and memory limit, reads the node ID from `JOB_COMPLETION_INDEX` |
 
 **To add a Customer360 column:** add the field to `customer360_schema()` in
-`src/schema.rs`, build the column in `build_batch()` in `src/customer360.rs`,
-and update the schema tests in `src/schema.rs`.
+`datagen_rs/src/schema.rs`, build the column in `build_batch()` in `datagen_rs/src/customer360.rs`,
+and update the schema tests in `datagen_rs/src/schema.rs`.
 
 **To change a distribution:** edit the weight arrays in
-`src/customer360_realism.rs`, or the transaction-amount log-normal parameters
-(mu 4.3, sigma 1.2) in `src/customer360.rs`.
+`datagen_rs/src/customer360_realism.rs`, or the transaction-amount log-normal parameters
+(mu 4.3, sigma 1.2) in `datagen_rs/src/customer360.rs`.
 
 The binary always writes the whole corpus up front; there is no separate
 continuous-mode path and no checkpoint-resume.
+
+A custom image that keeps `entrypoint.py` inherits its strict argument
+parsing: any flag the entrypoint does not declare exits 2, so a new flag
+needs a declaration there and an entry in the generator's per-schema flag
+table (`datagen_rs/src/bin/generate.rs`).
 
 ## Testing Locally
 
@@ -125,7 +152,17 @@ DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
 ```
 
 This writes a single 64 MB file, enough to verify schema changes, column
-types, and corruption patterns. Inspect the output with PyArrow:
+types, and corruption patterns. The financial schema also needs the held-out
+hash file, which a pod gets from the `lakebench-heldout-hashes` ConfigMap;
+locally, point `LB_HELDOUT_HASHES` at the tracked copy, or the binary exits 2:
+
+```bash
+LB_HELDOUT_HASHES=../src/lakebench/spark/data/aml/heldout_hashes.json \
+DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
+  --bucket test-bronze --seed 43 --scale 0.01 --threads 1
+```
+
+Inspect the Customer 360 output with PyArrow:
 
 ```python
 import pyarrow.parquet as pq
@@ -140,10 +177,31 @@ print(table.to_pandas().head())
 `datagen_rs/Dockerfile` is a two-stage build. Stage one compiles the
 `generate` binary in `rust:1.98.1-bookworm` (both base images are pinned by
 digest in the Dockerfile; `cargo build --release --locked
---bin generate`). Stage two is `python:3.14-slim` with `boto3`, the binary at
-`/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. S3
-credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
-`S3_ENDPOINT` in the pod environment.
+--bin generate`). Stage two is `python:3.14-slim` with the binary at
+`/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. The
+runtime base is part of the generator's identity: the binary uses its glibc
+math library, so another base can change corpus bytes. S3 credentials come
+from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `S3_ENDPOINT` in the pod
+environment.
+
+Build with `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)` (the build
+refuses to run without it): the image's
+OCI labels (`org.opencontainers.image.revision`, `.source`, `.version` and
+`io.lakebench.model-version`), `generate --version` and every per-node
+marker name that commit. `podman run <image> --version` prints
+`datagen_rs <model version> <commit>`; `--print-resolved-args` added to a
+Job's arguments prints the resolved corpus arguments and their hash as JSON
+and writes nothing. For the financial schema it still needs what a run
+needs before writing: the held-out hash file (`LB_HELDOUT_HASHES`, mounted
+from the repository's `src/lakebench/spark/data/aml/heldout_hashes.json`)
+and a seed (`--seed`, or `LB_DATAGEN_SEED` for a registered corpus).
+
+After its last file, each pod writes
+`<prefix>/_corpus/c<cycle>-node-<node>.json`: the files, rows and bytes it
+wrote, the seed (salted hash for the financial schema), and `corpus_args`,
+the arguments as the generator resolved them, including the parquet writer
+settings, with their sha256. Spark never reads it as data (the directory
+starts with `_`).
 
 Add Rust dependencies to `Cargo.toml` (and commit the updated `Cargo.lock`,
 since the build uses `--locked`).
@@ -154,7 +212,7 @@ since the build uses `--locked`).
 
 ```bash
 podman login docker.io
-podman build -t docker.io/youruser/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t docker.io/youruser/lb-datagen:custom .
 podman push docker.io/youruser/lb-datagen:custom
 ```
 
@@ -162,7 +220,7 @@ podman push docker.io/youruser/lb-datagen:custom
 
 ```bash
 podman login registry.example.com
-podman build -t registry.example.com/lakebench/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t registry.example.com/lakebench/lb-datagen:custom .
 podman push registry.example.com/lakebench/lb-datagen:custom
 ```
 
@@ -173,7 +231,7 @@ login and push commands.
 
 ```bash
 podman login -u $(oc whoami) -p $(oc whoami -t) image-registry.openshift-image-registry.svc:5000
-podman build -t image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom .
 podman push image-registry.openshift-image-registry.svc:5000/lakebench/lb-datagen:custom
 ```
 

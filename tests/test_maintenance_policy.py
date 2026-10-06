@@ -96,7 +96,7 @@ def test_skip_maintenance_stamps_a_distinct_id():
     import lakebench.cli._run as run_mod
     import lakebench.cli._sustained as sus
 
-    for src in (inspect.getsource(run_mod.run), inspect.getsource(sus._run_sustained)):
+    for src in (inspect.getsource(run_mod._run_once), inspect.getsource(sus._run_sustained)):
         assert "if skip_maintenance and collector.current_run is not None:" in src
         assert "collector.current_run.maintenance_policy_id = skipped_policy_id()" in src
     assert skipped_policy_id() == MAINTENANCE_POLICY_ID + "+skipped"
@@ -184,21 +184,6 @@ def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
     assert LEGACY_MAINTENANCE_POLICY_ID in html
 
 
-def test_lakebench_compare_warns_across_policies():
-    from lakebench.cli._compare import _build_comparison
-
-    a = {"run_id": "a", "pipeline_benchmark": {"scores": {}}}
-    b = {
-        "run_id": "b",
-        "pipeline_benchmark": {"scores": {}},
-        "maintenance_policy_id": MAINTENANCE_POLICY_ID,
-    }
-    assert any(
-        "maintenance policy differs" in w for w in _build_comparison("A", a, "B", b)["warnings"]
-    )
-    assert not _build_comparison("A", a, "B", dict(a))["warnings"]
-
-
 def test_turned_down_maintenance_is_a_fingerprint_difference(env):  # noqa: F811
     """pre_benchmark_maintenance: false is not the policy's maintenance."""
     import copy
@@ -240,39 +225,6 @@ def _eff_from_run(cfg, fail_orphan_on):
         mode="batch",
         outcomes=[*outcomes, {"kind": "compaction", "total": 2, "succeeded": 2}],
     )
-
-
-def test_failed_orphan_removal_is_failed_in_the_identity():
-    """Orphan removal failing on every table while expiry succeeds must not
-    be stamped as maintenance that ran (the sweep recorded expire=ran)."""
-    from tests.conftest import make_config
-
-    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
-    good = _eff_from_run(cfg, None)
-    bad = _eff_from_run(cfg, "lakehouse")
-    assert bad["operations"] == {
-        "expire_snapshots": "ran",
-        "remove_orphan_files": "failed",
-        "compaction": "ran",
-    }
-    assert "remove_orphan_files=failed" in bad["id"]
-    assert bad["expire"] == "failed"
-    assert any("remove_orphan_files: 0 of 2" in r for r in bad["reasons"])
-    assert good["id"] != bad["id"]
-
-
-def test_one_side_failed_orphan_removal_is_not_like_for_like():
-    from lakebench.metrics.experiment import condition_differences
-    from tests.conftest import make_config
-
-    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
-    good = _eff_from_run(cfg, None)
-    bad = _eff_from_run(cfg, "lakehouse")
-    a = {"effective_maintenance": good}
-    b = {"effective_maintenance": bad}
-    diffs = condition_differences(a, b)
-    assert any("effective maintenance" in d for d in diffs)
-    assert condition_differences(a, {"effective_maintenance": dict(good)}) == []
 
 
 def test_delta_identity_names_vacuum_and_compaction():
@@ -483,7 +435,9 @@ def _continuous_report(tmp_path, pb, fmt: str) -> str:
     m.pipeline_benchmark = pb
     storage.save_run(m)
     out = ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path).generate_report(m.run_id)
-    return out.read_text()
+    from tests.fixtures.report_goldens import page_text
+
+    return page_text(out.read_text())
 
 
 def test_report_shows_the_limitation_and_the_trend(tmp_path):

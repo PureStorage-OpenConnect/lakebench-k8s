@@ -14,10 +14,18 @@ modes documented there:
   package references, then compares actual vs. expected under the recorded
   tolerance bands.
 
-Exit codes:
-  0 -- pass (within tolerance)
-  1 -- performance drift exceeded
-  2 -- correctness violation (missing stages, scale_ratio mismatch, ...)
+Exit codes (see docs/exit-codes.md):
+  0  -- pass (within tolerance)
+  14 -- requirement unmet: correctness violation (missing stages,
+        scale_ratio mismatch, ...), performance drift outside its band, or
+        commit drift without --allow-commit-drift (2 and 1 in 1.6)
+  2  -- usage: a package or config that cannot be read or does not match,
+        or a registered look's package without --report
+  3  -- refused: a held-out corpus the package or config would regenerate,
+        an existing namespace or bucket, a replaced deployment
+  1  -- the reproduction could not run or its run could not be found
+  A registered look's package is never rerun: --report matching the look
+  record exits 0, a mismatch (or no recorded hash) 14
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
@@ -36,11 +45,13 @@ from rich.table import Table
 
 from lakebench.cli._helpers import (
     console,
+    esc,
     print_error,
     print_info,
     print_success,
     print_warning,
 )
+from lakebench.exit_codes import ExitCode, UsageError
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +69,8 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 }
 
 
-# Every enumerated metric carries an explicit (band, direction).
+# (band, direction) of a metric, from metrics/metric_registry.py (the one
+# source of metric metadata):
 #
 # band -- "correctness" or "performance". The verifier looks up the band
 #     here, not in the package, so a malformed or hostile package cannot
@@ -67,32 +79,9 @@ DEFAULT_TOLERANCES: dict[str, float] = {
 #     lower  -- lower-is-better; positive drift is bad.
 #     higher -- higher-is-better; negative drift is bad.
 #     exact  -- either direction of drift is bad (correctness signals like
-#               scale_ratio and ingest_ratio: 2x is a bug just as much as
-#               0.5x is).
-#
-# Adding a new metric without an entry in this table trips the completeness
-# self-check in _classify_direction() rather than silently defaulting to a
-# forgiving direction. That's F7 from the adversarial review.
-_METRIC_TABLE: dict[str, tuple[str, str]] = {
-    # Correctness -- exact match, zero tolerance by default.
-    "scale_ratio": ("correctness", "exact"),
-    "ingest_ratio": ("correctness", "exact"),
-    # Performance -- lower is better (durations).
-    "time_to_value_seconds": ("performance", "lower"),
-    "data_freshness_seconds": ("performance", "lower"),
-    "datagen_cpu_hr_per_tb": ("performance", "lower"),
-    # Performance -- higher is better (throughput, efficiency, QpH).
-    "pipeline_throughput_gb_per_second": ("performance", "higher"),
-    "compute_efficiency_gb_per_core_hour": ("performance", "higher"),
-    "composite_qph": ("performance", "higher"),
-    "sustained_throughput_rps": ("performance", "higher"),
-    "datagen_aggregate_mbps": ("performance", "higher"),
-    # Used by the performance-regression gate (lakebench.metrics.perf_gate).
-    # _extract_expected_numbers does not emit them, so reproduction packages
-    # are unchanged.
-    "datagen_mbps_per_pod": ("performance", "higher"),
-    "pre_compaction_qph": ("performance", "higher"),
-}
+#               scale_ratio: 2x is a bug just as much as 0.5x is; and every
+#               metric with no better side). ingest_ratio is a range guard
+#               (registry guard band), checked in _compare.
 
 # Per-query QpH (3600 / query seconds) lives in an open namespace keyed by
 # query name, for example ``query_qph_Q1_full_aggregation_scan``. Higher is
@@ -101,34 +90,61 @@ QUERY_QPH_PREFIX = "query_qph_"
 
 
 # Per-stage seconds live in an open namespace: the stage name comes from the
-# PipelineBenchmark stage list, which uses short names (bronze, silver, gold,
-# datagen, query) in batch mode and (bronze-ingest, silver-stream,
-# gold-refresh) in sustained mode. Any key matching STAGE_SECONDS_SUFFIX --
-# and not already in _METRIC_TABLE -- is classified as (performance, lower).
+# PipelineBenchmark stage list (bronze, silver, gold, datagen, query in both
+# modes). Any key matching STAGE_SECONDS_SUFFIX and not an enumerated
+# metric is a stage time.
 STAGE_SECONDS_SUFFIX = "_seconds"
+
+
+def _classify_direction(metric: str) -> tuple[str, str]:
+    """Return (band, direction) for a metric key, from the metric registry
+    (``metric_registry.reproduce_class``)."""
+    from lakebench.metrics.metric_registry import reproduce_class
+
+    return reproduce_class(metric)
+
+
+#: The metrics reproduce and the perf gate enumerate, with their (band,
+#: direction). A view of the registry, kept for callers that read the table.
+_METRIC_TABLE: dict[str, tuple[str, str]] = {
+    m: _classify_direction(m)
+    for m in (
+        "scale_ratio",
+        "ingest_ratio",
+        "time_to_value_seconds",
+        "data_freshness_seconds",
+        "datagen_cpu_hr_per_tb",
+        "pipeline_throughput_gb_per_second",
+        "compute_efficiency_gb_per_core_hour",
+        "composite_qph",
+        "sustained_throughput_rps",
+        "datagen_aggregate_mbps",
+        "datagen_mbps_per_pod",
+        "pre_compaction_qph",
+    )
+}
+
+
+def _meta_in_mode(metric: str, mode: str | None) -> Any:
+    """The registry entry of *metric* in the run's *mode*, or None for a
+    key the registry does not know (a mode-split key with no mode reads as
+    unknown)."""
+    from lakebench.metrics.metric_registry import ModeRequired, lookup
+
+    try:
+        return lookup(metric, mode)
+    except ModeRequired:
+        return None
+
+
+def _band_in_mode(metric: str, mode: str | None) -> str | None:
+    meta = _meta_in_mode(metric, mode)
+    return getattr(meta, "band", None)
 
 
 def _is_stage_seconds(metric: str) -> bool:
     """True for open-namespace per-stage duration metrics."""
     return metric.endswith(STAGE_SECONDS_SUFFIX) and metric not in _METRIC_TABLE
-
-
-def _classify_direction(metric: str) -> tuple[str, str]:
-    """Return (band, direction) for a metric key.
-
-    Enumerated metrics come from the table. Stage-seconds default to
-    (performance, lower). Anything else is treated as (performance, exact)
-    -- the safest default: a metric we don't recognise won't fabricate a
-    correctness failure, but a divergence in either direction will still
-    be caught. This shuts the door on F7's silent higher-is-better default.
-    """
-    if metric in _METRIC_TABLE:
-        return _METRIC_TABLE[metric]
-    if metric.startswith(QUERY_QPH_PREFIX):
-        return ("performance", "higher")
-    if _is_stage_seconds(metric):
-        return ("performance", "lower")
-    return ("performance", "exact")
 
 
 # Legacy set kept for tests / callers that reference it directly. The
@@ -212,14 +228,21 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
         if value is not None and value > 0:
             numbers[attr] = float(value)
 
-    # QpH -- prefer post-compaction, then the plain benchmark result
+    # QpH -- prefer post-compaction, then the plain benchmark result. A
+    # median over in-stream rounds that executed different query sets is no
+    # one QpH, so it is left out (metrics/collector.composite_qph_basis).
     post_qph = getattr(pb, "post_compaction_qph", 0.0) or 0.0
-    if post_qph > 0:
+    rounds = list(getattr(pb, "benchmark_rounds", None) or [])
+    blended = False
+    if rounds:
+        from lakebench.metrics.collector import composite_qph_basis
+
+        blended = bool(composite_qph_basis(rounds)[0].get("blended"))
+    qb = getattr(pb, "query_benchmark", None)
+    if not blended and post_qph > 0:
         numbers["composite_qph"] = float(post_qph)
-    else:
-        qb = getattr(pb, "query_benchmark", None)
-        if qb is not None and getattr(qb, "qph", 0) > 0:
-            numbers["composite_qph"] = float(qb.qph)
+    elif not blended and qb is not None and getattr(qb, "qph", 0) > 0:
+        numbers["composite_qph"] = float(qb.qph)
 
     # Per-stage seconds -- stage names come from live PipelineBenchmark
     # data (bronze/silver/gold/datagen/query for batch;
@@ -242,12 +265,24 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
     if cpu_hr_per_tb > 0:
         numbers["datagen_cpu_hr_per_tb"] = float(cpu_hr_per_tb)
 
-    return numbers
+    # A value that follows a configured one (a continuous stream stage's
+    # seconds are the window length) measures nothing a reproduce can check.
+    mode = getattr(pb, "pipeline_mode", None) or "batch"
+    return {k: v for k, v in numbers.items() if _band_in_mode(k, mode) != "config_bound"}
 
 
 def _run_query_set(metrics: Any) -> str | None:
-    """The query-set id of the run's QpH (the benchmark the QpH came from)."""
+    """The query-set id of the run's QpH (the benchmark the QpH came from):
+    the smaller set when every in-stream round missed the same query
+    (collector.executed_subset_query_set)."""
+    from lakebench.metrics.collector import executed_subset_query_set
+
     pb = getattr(metrics, "pipeline_benchmark", None)
+    subset = executed_subset_query_set(
+        list(getattr(pb, "benchmark_rounds", None) or []), getattr(metrics, "start_time", None)
+    )
+    if subset:
+        return subset
     for bench in (getattr(pb, "query_benchmark", None), getattr(metrics, "benchmark", None)):
         qs = getattr(bench, "query_set_id", None)
         if qs:
@@ -426,6 +461,10 @@ def _build_package(
             "source_run_id": getattr(metrics, "run_id", None),
             "deployment_name": getattr(metrics, "deployment_name", None),
             "pipeline_mode": pipeline_mode,
+            # The corpus role (calibration, evaluation, robustness, or None):
+            # a package from a held-out corpus whose seed is
+            # spent is verified against its look's report, never rerun.
+            "corpus_role": (experiment.get("corpus") or {}).get("corpus_role"),
             "config_reference": config_reference,
             "expected_numbers": numbers,
             # QpH is only reproducible over the same query set.
@@ -458,7 +497,15 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
     metrics = storage.load_run(run_id)
     if metrics is None:
         print_error(f"Run {run_id!r} not found in {storage.metrics_dir}")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
+    kind = getattr(metrics, "record_kind", "run")
+    if kind != "run":
+        print_error(
+            f"Run {run_id!r} is a {kind} record of run "
+            f"{metrics.parent_run_id}, not a run; a package reproduces a run: "
+            f"lakebench reproduce --record {metrics.parent_run_id} --write {write}"
+        )
+        raise typer.Exit(ExitCode.USAGE)
 
     try:
         package = _build_package(
@@ -468,7 +515,7 @@ def _record(run_id: str, write: Path, config_reference: str | None) -> None:
         )
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     write.parent.mkdir(parents=True, exist_ok=True)
     with write.open("w") as f:
@@ -514,6 +561,16 @@ def _load_package(path: Path) -> dict[str, Any]:
     meta = raw.get("reproduction_metadata")
     if not isinstance(meta, dict):
         raise ReproduceError("Package missing 'reproduction_metadata' section")
+
+    mode = meta.get("pipeline_mode", "batch")
+    if mode not in ("batch", "sustained", "continuous"):
+        raise ReproduceError(f"pipeline_mode must be batch or continuous, got {mode!r}")
+    ident_mode = (meta.get("experiment_identity") or {}).get("mode")
+    if ident_mode is not None and (ident_mode == "batch") != (mode == "batch"):
+        # The mode decides which values are gated; it must be the identity's.
+        raise ReproduceError(
+            f"pipeline_mode {mode!r} disagrees with the experiment identity's mode {ident_mode!r}"
+        )
 
     numbers = meta.get("expected_numbers")
     if not isinstance(numbers, dict) or not numbers:
@@ -637,11 +694,13 @@ def _compare(
     actual: dict[str, float],
     tolerances: dict[str, float],
     query_sets: tuple[str | None, str | None] | None = None,
+    mode: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Compare expected vs actual and return (rows, exit_code).
+    """Compare expected vs actual and return (rows, outcome).
 
     Rows are dicts with keys metric, expected, actual, drift_pct, band,
-    tolerance_pct, status. Exit code is 0/1/2 per the CLI contract.
+    tolerance_pct, status. ``outcome`` is 0 (pass), 1 (performance drift) or
+    2 (correctness violation); the command exits 14 for either drift.
     ``query_sets`` is (package, actual) query-set ids; QpH over different or
     unrecorded sets is refused (status ``incomparable``, a performance
     failure) rather than compared.
@@ -667,6 +726,43 @@ def _compare(
         band = _classify(metric)
         tol = corr_tol if band == "correctness" else perf_tol
         actual_value = actual.get(metric)
+        meta = _meta_in_mode(metric, mode)
+        if getattr(meta, "band", None) == "config_bound":
+            # An older package recorded a value that follows the config (a
+            # continuous stage's seconds are the window): shown, not gated.
+            rows.append(
+                {
+                    "metric": metric,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "drift_pct": None,
+                    "band": "config_bound",
+                    "tolerance_pct": None,
+                    "status": "ignored",
+                    "reason": "follows a configured value; not a measurement to reproduce",
+                }
+            )
+            continue
+        if getattr(meta, "band", None) == "guard" and meta.guard_range is not None:
+            # A range the run must sit in; the package's own value is only a
+            # record (two honest runs of one corpus differ by a few percent).
+            low, high = meta.guard_range
+            inside = actual_value is not None and low <= float(actual_value) <= high
+            rows.append(
+                {
+                    "metric": metric,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "drift_pct": None,
+                    "band": "guard",
+                    "tolerance_pct": None,
+                    "status": "pass" if inside else ("missing" if actual_value is None else "fail"),
+                    "reason": f"must lie in [{low}, {high}]",
+                }
+            )
+            if not inside:
+                correctness_failed = True
+            continue
         if "qph" in metric and not qph_ok:
             # Different recorded sets: a performance failure. A package that
             # predates query-set ids: not compared, not failed (re-record it).
@@ -725,15 +821,15 @@ def _compare(
                 performance_failed = True
 
     if correctness_failed:
-        exit_code = 2
+        outcome = 2
     elif performance_failed:
-        exit_code = 1
+        outcome = 1
     else:
-        exit_code = 0
-    return rows, exit_code
+        outcome = 0
+    return rows, outcome
 
 
-def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
+def _print_comparison(rows: list[dict[str, Any]], outcome: int) -> None:
     """Render the comparison table + verdict panel."""
     table = Table(show_header=True, header_style="bold", expand=False)
     table.add_column("Metric", style="cyan")
@@ -745,15 +841,15 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
 
     for row in rows:
         exp_s = f"{row['expected']:.2f}"
-        if row["actual"] is None or row.get("drift_pct") is None:
-            act_s = "-"
-            drift_s = "-"
-        else:
-            act_s = f"{row['actual']:.2f}"
-            drift_s = f"{row['drift_pct']:+.1f}%"
+        act_s = "-" if row["actual"] is None else f"{row['actual']:.2f}"
+        drift_s = "-" if row.get("drift_pct") is None else f"{row['drift_pct']:+.1f}%"
+        if row["band"] == "guard":
+            drift_s = str(row.get("reason") or "-")
         status = row["status"]
         if status == "pass":
             status_s = "[green]pass[/green]"
+        elif status == "ignored":
+            status_s = "[dim]ignored[/dim]"
         elif status == "missing":
             status_s = "[yellow]missing[/yellow]"
         elif status == "incomparable":
@@ -767,13 +863,13 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
     for row in rows:
         if row["status"] == "incomparable":
             console.print(
-                f"[yellow]{row['metric']} not compared: {row.get('reason')}. "
+                f"[yellow]{esc(row['metric'])} not compared: {esc(row.get('reason'))}. "
                 "Re-record the package on the current query set.[/yellow]"
             )
 
-    if exit_code == 0:
+    if outcome == 0:
         verdict = "[green]PASS -- every metric within tolerance[/green]"
-    elif exit_code == 1:
+    elif outcome == 1:
         verdict = "[yellow]FAIL -- performance drift over tolerance[/yellow]"
     else:
         verdict = "[red]FAIL -- correctness violation[/red]"
@@ -787,12 +883,14 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     F4: list_runs is a global view -- a parallel `lakebench run` in another
     shell would poison a simple set-diff. We filter by two attributes we
     control end-to-end: the deployment_name from the config we ran against,
-    and a start_time strictly after the watermark we captured before deploy.
+    and a start_time strictly after the watermark taken just before the run step.
     Both are stable across the metrics.json round trip.
     """
     candidates: list[tuple[str, str]] = []
     for row in storage.list_runs():
         if row.get("deployment_name") != deployment_name:
+            continue
+        if row.get("record_kind", "run") != "run":
             continue
         start_time = row.get("start_time")
         if not start_time:
@@ -824,77 +922,442 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
     return storage.load_run(candidates[0][1])
 
 
+def _refuse_existing(cfg: Any, config_file: Path) -> None:
+    """Refuse before deploy when anything reproduce would create already exists.
+
+    reproduce destroys only what it created in this invocation, and measures
+    against empty buckets, so it creates its namespace and buckets itself:
+    an existing namespace or bucket is refused, never destroyed or adopted.
+    A read error stops it (exit 4) rather than reading as absent; a context
+    conflict (the kubeconfig changed under the command) is raised as is.
+    """
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal, UsageError
+    from lakebench.k8s.target import ContextConflictError
+
+    k8s_cfg = cfg.platform.kubernetes
+    s3_cfg = cfg.platform.storage.s3
+    if not k8s_cfg.create_namespace:
+        raise UsageError(
+            "reproduce creates its own namespace, and this config sets "
+            "platform.kubernetes.create_namespace: false",
+            why="reproduce refuses an existing namespace and destroys only what it created",
+            next="set create_namespace: true in the config reproduce runs",
+            path="cli.bad_argument",
+        )
+    if not s3_cfg.create_buckets:
+        raise UsageError(
+            "reproduce creates its own buckets, and this config sets "
+            "platform.storage.s3.create_buckets: false",
+            why="reproduce measures against empty buckets it created and refuses existing ones",
+            next="set create_buckets: true in the config reproduce runs",
+            path="cli.bad_argument",
+        )
+
+    namespace = cfg.get_namespace()
+    try:
+        from lakebench.k8s import get_k8s_client
+
+        # Pins the process to the config's cluster context for every later call.
+        present = get_k8s_client(context=k8s_cfg.context, namespace=namespace).namespace_exists(
+            namespace
+        )
+    except ContextConflictError:
+        raise
+    except Exception as e:  # noqa: BLE001 -- unreadable is not absent
+        raise PrerequisiteError(
+            f"cannot check whether namespace {namespace} exists: {e}",
+            why="reproduce refuses an existing namespace, so it must read it first",
+            path="k8s.unreachable",
+        ) from e
+    if present:
+        raise SafetyRefusal(
+            f"reproduce needs a new deployment; namespace {namespace} exists "
+            "(or is still terminating from an earlier destroy)",
+            why="reproduce destroys only a deployment it created in this run",
+            next=f"lakebench destroy {config_file}, then re-run, or give the package's "
+            "config a new name",
+            path="reproduce.existing_namespace",
+        )
+
+    from lakebench.s3 import S3Client
+
+    s3 = S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+    if s3._init_error:
+        raise PrerequisiteError(
+            f"cannot check the buckets: {s3._init_error}",
+            why="reproduce refuses existing buckets, so it must read them first",
+            path="s3.unreachable",
+        )
+    for bucket in dict.fromkeys(
+        (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold)
+    ):
+        try:
+            exists = s3.bucket_exists(bucket)
+        except Exception as e:  # noqa: BLE001 -- 403 or unreachable is not absent
+            raise PrerequisiteError(
+                f"cannot check whether bucket {bucket} exists: {e}",
+                why="reproduce refuses existing buckets, so it must read them first",
+                path="s3.unreachable",
+            ) from e
+        if exists:
+            raise SafetyRefusal(
+                f"reproduce needs new buckets; bucket {bucket} exists",
+                why="reproduce measures against empty buckets it created, and destroys "
+                "only what it created",
+                next="give the package's config new bucket names, or, if the bucket is "
+                "left from an earlier deployment of yours, empty and delete it with your "
+                "S3 tools",
+                path="reproduce.existing_namespace",
+            )
+
+
+def _own_incarnation(cfg: Any, config_file: Path, own: str, *, after: str = "deploy") -> str:
+    """``uid#own`` when the namespace carries the nonce this reproduce deployed.
+
+    One ``read_namespace`` (a failed read is tried once more, so an API blip
+    after a long run does not discard it). The comparison is against
+    ``own``, never against a value read back, so a deploy that replaced ours
+    is refused, not taken over. ``after`` names the step just finished, for
+    the messages.
+    """
+    from kubernetes import client
+
+    from lakebench.config.deploy_state import read_namespace_identity
+    from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
+
+    namespace = cfg.get_namespace()
+    done = "deployed" if after == "deploy" else "deployed, generated and ran"
+    for attempt in (1, 2):
+        try:
+            ident = read_namespace_identity(client.CoreV1Api(), namespace)
+            break
+        except Exception as e:  # noqa: BLE001
+            if attempt == 1:
+                time.sleep(5)
+                continue
+            raise PrerequisiteError(
+                f"cannot read namespace {namespace} after {after}: {e}",
+                why="reproduce confirms the namespace carries its own nonce before it "
+                "reports or destroys anything",
+                next=f"reproduce {done} and destroyed nothing; check "
+                f"lakebench status {config_file}",
+                path="k8s.unreachable",
+            ) from e
+    if ident is None or not ident.uid or ident.nonce != own:
+        found = "no namespace" if ident is None else (ident.nonce or "no nonce")
+        raise SafetyRefusal(
+            f"namespace {namespace} does not carry the nonce this reproduce deployed "
+            f"({own}); found {found}",
+            why="another deploy replaced the deployment after this reproduce made it",
+            next=f"reproduce {done} and destroyed nothing; check which deployment "
+            "the namespace holds before destroying it",
+            path="reproduce.nonce_changed",
+        )
+    return f"{ident.uid}#{own}"
+
+
 def _run_pipeline(
     config_file: Path,
     timeout: int | None,
     keep: bool,
+    refusals: list[Any] | None = None,
 ) -> Any:
-    """Run destroy -> deploy -> generate -> run -> (optional) destroy, then
-    return the PipelineMetrics the pipeline just produced.
+    """Deploy -> generate -> run -> (optional) destroy, then return the
+    PipelineMetrics the pipeline just produced.
 
-    Delegates to the existing CLI command functions so the reproduce path
-    does not fork the pipeline plumbing.
+    Delegates to the existing CLI command bodies so the reproduce path does
+    not fork the pipeline plumbing.
 
-    F5: --keep controls only the POST-run tear-down. Every reproduce starts
-    with a destroy pass so the pipeline runs against empty buckets -- a
-    prior --keep run cannot silently contaminate scale_ratio or ingest_ratio.
+    reproduce destroys only what it created in this invocation. It refuses an
+    existing namespace or bucket (that is also what keeps its buckets empty,
+    so a prior --keep run cannot contaminate scale_ratio or ingest_ratio),
+    deploys with its own nonce and with ``require_new`` (a namespace or bucket
+    that appears meanwhile is refused, not adopted), confirms the namespace
+    carries that nonce, and passes ``uid#nonce`` to its destroy, which refuses
+    any other incarnation. A refused post-run destroy is appended to
+    ``refusals``; the caller reports it after the verdict.
 
     F4: the produced run is identified by deployment_name + start-time
     watermark, so a concurrent `lakebench run` in another shell cannot
     poison the comparison.
     """
-    from lakebench.cli._deploy import deploy as _deploy_cmd
-    from lakebench.cli._destroy import destroy as _destroy_cmd
+    import uuid
+
+    from lakebench.cli._deploy import _deploy_impl
+    from lakebench.cli._destroy import _destroy_impl
     from lakebench.cli._generate import generate as _generate_cmd
+    from lakebench.cli._helpers import _journal_safe, journal_open
     from lakebench.cli._run import run as _run_cmd
-    from lakebench.config import load_config
+    from lakebench.config import (
+        ConfigError,
+        ConfigProtectedCorpusError,
+        LoadPurpose,
+        load_config,
+    )
+    from lakebench.exit_codes import SafetyRefusal
+    from lakebench.journal import EventType
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
 
-    # F5: pre-destroy is idempotent-safe. destroy(--force) on a missing
-    # namespace returns implicitly (exit 0). A non-zero exit means a
-    # component partially failed to clean up (Iceberg drop, S3 multipart,
-    # PVC finalizer) -- bronze/silver/gold may still hold stale data.
-    # R2: swallowing that would let the pipeline run against contaminated
-    # buckets and quietly inflate scale_ratio close to expected, defeating
-    # F5's whole purpose. Only exit 0 (or missing exit_code) means "safe
-    # to proceed"; anything else is a real destroy failure.
+    # Load first: deploy and run refuse a nameless config or a removed key,
+    # and that refusal comes before any cluster read.
     try:
-        _destroy_cmd(config_file=config_file, force=True)
-    except typer.Exit as e:
-        exit_code = getattr(e, "exit_code", None)
-        if exit_code not in (0, None):
-            raise ReproduceError(
-                f"Pre-run destroy failed with exit code {exit_code}. "
-                "Refusing to deploy against a namespace that may still hold "
-                "stale data (scale_ratio and ingest_ratio would be unreliable). "
-                "Fix the destroy problem, then rerun reproduce."
-            ) from None
-        logger.info("pre-run destroy exited cleanly (exit_code=%s); continuing", exit_code)
+        cfg = load_config(config_file, purpose=LoadPurpose.RUN)
+    except ConfigProtectedCorpusError as e:
+        from lakebench.aml.look_guard import PATH
 
-    # Watermark BEFORE deploy, so any run started by this reproduce falls
-    # strictly after it. Load config once to get the deployment_name.
-    cfg = load_config(config_file)
+        raise UsageError(f"Refused: {e}", path=PATH) from None
+    except ConfigError as e:
+        raise ReproduceError(str(e)) from None
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(cfg, "reproduce")
+
+    # The run below would refuse a bad argument or combination (a bad
+    # timeout, investigator sessions on a batch config), but only after the
+    # deploy and generate: check run's rules first.
+    from lakebench.cli._run_args import RunArgs, validate_run_args
+
+    validate_run_args(RunArgs(timeout=timeout), cfg)
+
+    _refuse_existing(cfg, config_file)
+    namespace = cfg.get_namespace()
+
     deployment_name = cfg.name
-    start_watermark = datetime.now(timezone.utc)
+    own = uuid.uuid4().hex
+    try:
+        recorded = _deploy_impl(
+            config_file, yes=True, nonce=own, require_new=True, next_steps=False
+        )
+    except BaseException:
+        print_warning(
+            f"reproduce stopped at deploy and destroyed nothing; check "
+            f"`lakebench status {config_file}` before removing namespace {namespace}"
+        )
+        raise
+    if recorded != own:  # _deploy_impl records and stamps the nonce it is given
+        raise RuntimeError(f"deploy recorded nonce {recorded!r}, not this reproduce's {own!r}")
+    created = _own_incarnation(cfg, config_file, own)
+    print_info(f"reproduce created namespace {namespace} as {created}")
+    j = journal_open(config_file, config_name=cfg.name)
+    _journal_safe(
+        j.record,
+        EventType.REPRODUCE_CREATED_INCARNATION,
+        message=f"reproduce created namespace {namespace}",
+        command="reproduce",
+        success=True,
+        details={"namespace": namespace, "incarnation": created},
+    )
 
-    _deploy_cmd(config_file=config_file, yes=True)
-    _generate_cmd(config_file=config_file, wait=True, timeout=timeout or 14400, yes=True)
-    _run_cmd(config_file=config_file, yes=True, timeout=timeout)
+    try:
+        # A multi-cycle config generates each cycle inside the run (and
+        # `generate` refuses it); a single-cycle one generates first.
+        from lakebench.config.c360_run import run_cycles
 
-    result = _find_reproduce_run(storage, deployment_name, start_watermark)
-    if result is None:
-        raise ReproduceError("Could not load the run this reproduce produced")
+        if run_cycles(cfg) == 1:
+            _generate_cmd(config_file=config_file, timeout=timeout or 14400, yes=True)
+        # Watermark just before the run, so a run another shell started on
+        # this deployment during deploy or generate is not taken for ours.
+        start_watermark = datetime.now(timezone.utc)
+        _run_cmd(config_file=config_file, yes=True, timeout=timeout)
+        # The deployment must still be the one this reproduce made, --keep or
+        # not: a redeploy during generate or run means the measurement may
+        # not be ours, and nothing is destroyed.
+        _own_incarnation(cfg, config_file, own, after="run")
+        result = _find_reproduce_run(storage, deployment_name, start_watermark)
+        if result is None:
+            raise ReproduceError("Could not load the run this reproduce produced")
+    except SafetyRefusal:
+        raise  # says itself that nothing was destroyed
+    except BaseException:
+        print_warning(
+            f"reproduce stopped before its destroy; namespace {namespace} ({created}) is "
+            f"left: `lakebench destroy {config_file}` removes it while it is still that "
+            "deployment"
+        )
+        raise
 
     if not keep:
         try:
-            _destroy_cmd(config_file=config_file, force=True)
+            _destroy_impl(config_file, force=True, expected_incarnation=created)
+        except SafetyRefusal as e:
+            # Nothing was deleted: the namespace is no longer the one we made.
+            print_warning(f"destroy refused, namespace {namespace} kept: {e.what}")
+            if refusals is not None:
+                refusals.append(e)
         except typer.Exit as e:
             # A destroy failure should not mask a passing reproduce; log it.
-            print_warning(f"destroy exited with code {e.exit_code}; continuing")
+            if e.exit_code not in (0, None):
+                print_warning(f"destroy exited with code {e.exit_code}; continuing")
+        except Exception as e:  # noqa: BLE001
+            print_warning(
+                f"destroy failed ({e}); namespace {namespace} may be left: "
+                f"`lakebench destroy {config_file}`"
+            )
 
     return result
+
+
+def _post_destroy_refusal(refusals: list[Any]) -> None:
+    """Exit 3 when reproduce's own destroy was refused: its deployment was
+    replaced while it ran, so the measurement may not be its own either."""
+    if refusals:
+        from lakebench.exit_codes import SafetyRefusal
+
+        raise SafetyRefusal(
+            "the deployment this reproduce created was replaced before its destroy; "
+            "nothing was destroyed",
+            why=str(refusals[0].what),
+            next="check which deployment the namespace holds, and re-run reproduce on a "
+            "new namespace",
+            path="reproduce.nonce_changed",
+        )
+
+
+def _package_roles(meta: dict[str, Any]) -> list[Any]:
+    """Every role a package states: its recorded role, its experiment
+    identity's ``corpus role`` and its run-start inputs' role."""
+    ident = meta.get("experiment_identity") or {}
+    inputs = (meta.get("config_snapshot") or {}).get("experiment_inputs") or {}
+    corpus = (inputs.get("corpus") if isinstance(inputs, dict) else None) or {}
+    return [meta.get("corpus_role"), ident.get("corpus role"), corpus.get("corpus_role")]
+
+
+def _package_corpus(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
+    """(workload, corpus role, seed) of a package: the first role it states
+    (a held-out one wins), and the seed as the experiment identity holds
+    it."""
+    from lakebench.config import datagen_seed
+
+    ident = meta.get("experiment_identity") or {}
+    roles = [r for r in _package_roles(meta) if r is not None]
+    held = [r for r in roles if r in datagen_seed.PROTECTED_ROLES]
+    role = held[0] if held else (roles[0] if roles else None)
+    return ident.get("workload"), role, ident.get("seed")
+
+
+def _spent_look(meta: dict[str, Any]) -> tuple[str, Any] | None:
+    """Whether the package is from a held-out corpus, as ``("verify", look
+    entry or None)``, ``("refuse", reason)``, or None for an ordinary
+    package.
+
+    A package that states an evaluation or robustness role anywhere, or a
+    financial package whose seed is held out, spent or has a recorded look
+    (whatever role it states), is never rerun: a spent seed is verified
+    against its look's report, and an unspent held-out seed is refused. A
+    seed this cannot read as an integer (a recorded ``seed_ref`` form) is
+    refused for a held-out role, and an unreadable look record refuses
+    every financial package. Never prints a seed."""
+    from lakebench.config import datagen_seed
+
+    workload, role, seed = _package_corpus(meta)
+    protected = role in datagen_seed.PROTECTED_ROLES
+    if not protected and workload != "financial":
+        return None
+    try:
+        looks = datagen_seed.load_looks()
+        spent_set = datagen_seed.spent_seeds()
+        datagen_seed._heldout()  # the held-out hashes must be readable
+    except Exception as e:  # noqa: BLE001 -- unreadable: fail closed
+        return (
+            "refuse",
+            f"the look record cannot be read ({type(e).__name__}); a "
+            f"{role or 'financial'} package is not reproduced without it",
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        if protected:
+            return (
+                "refuse",
+                f"the {role} package's seed cannot be checked against the look record",
+            )
+        # A recorded form (digit text, a salted hash, {seed_ref, role}) that
+        # names a held-out seed cannot be matched to its look: refused.
+        from lakebench.aml.look_guard import recorded_seed_role
+
+        try:
+            held_form = recorded_seed_role(seed)
+        except Exception:  # noqa: BLE001 -- unreadable: fail closed
+            held_form = "unreadable"
+        if held_form is not None:
+            return ("refuse", "a held-out corpus whose look has not run is never reproduced")
+        return None
+    mine = [e for e in looks if int(e["seed"]) == seed]
+    done = [e for e in mine if e.get("state") == "complete"]
+    if done:
+        return ("verify", done[0])
+    if any(e.get("state") == "burned" for e in mine):
+        return (
+            "refuse",
+            "the package's seed was retired without a completed look (burned); its corpus is "
+            "never reproduced",
+        )
+    if mine:
+        return ("verify", mine[0])
+    if seed in spent_set:
+        return ("verify", None)
+    try:
+        held = datagen_seed.heldout_role(seed) is not None
+    except Exception:  # noqa: BLE001 -- unreadable: fail closed
+        held = True
+    if protected or held:
+        return ("refuse", "a held-out corpus whose look has not run is never reproduced")
+    return None
+
+
+def _redact_seed_text(text: str) -> str:
+    """A config error with any digit run that names a held-out, spent or
+    looked-at seed replaced, so a refusal never prints one (every digit run
+    of four or more digits when the held-out record cannot be read)."""
+    import re
+
+    from lakebench.config import datagen_seed
+
+    try:
+        datagen_seed._heldout()
+    except Exception:  # noqa: BLE001 -- unreadable: hide every long number
+        return re.sub(r"\b\d{4,}\b", "<seed>", text)
+    return re.sub(
+        r"\b\d+\b",
+        lambda m: "<seed>" if datagen_seed.seed_is_protected(int(m.group(0))) else m.group(0),
+        text,
+    )
+
+
+def _verify_spent_look(entry: Any, role: Any, report: Path | None) -> None:
+    """A registered look's package: compare ``--report``'s sha256 with the
+    look record's ``report_sha256``; nothing is deployed or run."""
+    import hashlib
+
+    what = f"{role or 'held-out'} look"
+    print_info(f"  this package is from a registered {what}: verify-only, nothing is run")
+    if report is None:
+        print_error(
+            f"A registered {what} is never rerun. Pass --report PATH (the look's report) "
+            "to check it against the look record."
+        )
+        raise typer.Exit(ExitCode.USAGE)
+    recorded = (entry or {}).get("report_sha256") if isinstance(entry, dict) else None
+    if not recorded:
+        print_error(f"The look record holds no report sha256 for this {what}; nothing to check.")
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
+    try:
+        digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    except OSError as e:
+        print_error(f"Cannot read --report {report}: {e}")
+        raise typer.Exit(ExitCode.USAGE) from None
+    if digest != recorded:
+        print_error(f"--report does not match the {what}'s recorded report (sha256 differs).")
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
+    console.print(Panel(f"[green]Report matches the recorded {esc(what)}[/green]", expand=False))
 
 
 def _verify(
@@ -904,15 +1367,32 @@ def _verify(
     keep: bool,
     dry_run: bool,
     allow_commit_drift: bool,
+    report: Path | None = None,
 ) -> None:
-    """Load a package, run the pipeline, compare, exit with 0/1/2."""
+    """Load a package, run the pipeline, compare; exit 0, or 14 outside
+    tolerance. A registered look's package is verified against its report
+    only (``_spent_look``)."""
     try:
         package = _load_package(package_path)
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
 
     meta = package["reproduction_metadata"]
+    look = _spent_look(meta)
+    if look is not None:
+        kind, detail = look
+        if kind == "refuse":
+            print_error(f"Refused: {detail}.")
+            from lakebench.cli._exit import note_exit_paths
+
+            note_exit_paths(["reproduce.held_out"])
+            raise typer.Exit(ExitCode.REFUSED)
+        _verify_spent_look(detail, _package_corpus(meta)[1], report)
+        return
+    if report is not None:
+        print_error("--report applies only to a package from a registered look")
+        raise typer.Exit(ExitCode.USAGE)
     expected = meta["expected_numbers"]
     tolerances = meta.get("tolerance_pct") or DEFAULT_TOLERANCES
 
@@ -923,7 +1403,7 @@ def _verify(
     print_info(f"  metrics recorded: {len(expected)}")
 
     # F3: commit drift means the code path measured is not the code path
-    # the package claims. Exit 2 (correctness) unless the caller opts in.
+    # the package claims. Exit 14 (requirement unmet) unless the caller opts in.
     # R4: normalise both sides to a 7-char prefix -- a hand-edited package
     # might carry a 40-char full SHA, and _current_commit_sha returns a
     # 7-char short SHA. Direct equality would spuriously fire on the same
@@ -949,32 +1429,42 @@ def _verify(
                 "The measured code path is not the one this package claims. "
                 f"Check out {recorded_sha} or pass --allow-commit-drift."
             )
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.REQUIREMENT_UNMET)  # reproduce.commit_drift
 
     try:
         config_file = _resolve_config_path(package, config_override, package_path)
     except ReproduceError as e:
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.USAGE) from None
     print_info(f"  config: {config_file}")
 
-    # Refuse before a multi-hour run that would be refused afterwards.
-    try:
-        from lakebench.config import load_config
+    # Refuse before a multi-hour run that would be refused afterwards, and
+    # before the pre-run destroy: a config that deploy and run would refuse
+    # (no name, a removed key) must not reach that destroy.
+    from lakebench.config import ConfigError, LoadPurpose, load_config
 
-        _iterations = load_config(config_file).architecture.benchmark.iterations
-    except Exception:  # noqa: BLE001 -- the run itself reports config errors
-        _iterations = None
+    try:
+        _cfg = load_config(config_file, purpose=LoadPurpose.RUN)
+    except ConfigError as e:
+        print_error(_redact_seed_text(str(e)))
+        raise typer.Exit(ExitCode.USAGE) from None
+    # The config may describe another corpus than the package: one that names
+    # a protected corpus is refused (exit 2); a registered look is verified
+    # with --report instead, never regenerated.
+    from lakebench.aml.look_guard import refuse_if_protected
+
+    refuse_if_protected(_cfg, "reproduce")
+    _iterations = _cfg.architecture.benchmark.iterations
     _mismatch = _sample_mismatch(meta, _iterations)
     if _mismatch:
         print_error(_mismatch)
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
     _mismatch = _policy_refusal(meta, MAINTENANCE_POLICY_ID)
     if _mismatch:
         print_error(_mismatch)
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if not meta.get("experiment_identity"):
         from lakebench.metrics.experiment import NO_PROVENANCE
 
@@ -982,7 +1472,7 @@ def _verify(
             f"The package cannot be verified: {NO_PROVENANCE} (it was recorded before "
             "packages carried an experiment identity); record it again from a current run."
         )
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     if dry_run:
         print_warning("--dry-run set: package validation only, no pipeline run")
@@ -990,11 +1480,13 @@ def _verify(
         console.print(Panel("[green]Package parsed cleanly[/green]", title="Dry run", expand=False))
         return
 
+    refusals: list[Any] = []
     try:
-        metrics = _run_pipeline(config_file, timeout, keep)
+        metrics = _run_pipeline(config_file, timeout, keep, refusals)
     except ReproduceError as e:
+        # The pipeline did not run cleanly, or its run could not be found.
         print_error(str(e))
-        raise typer.Exit(2) from None
+        raise typer.Exit(ExitCode.FAILED) from None
 
     _mismatch = (
         _sample_mismatch(meta, _benchmark_samples(metrics))
@@ -1002,17 +1494,26 @@ def _verify(
         or _experiment_refusal(meta, metrics)
     )
     if _mismatch:
+        # The run that just finished does not match the package's protocol.
         print_error(_mismatch)
-        raise typer.Exit(2)
+        _post_destroy_refusal(refusals)
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
     actual = _measure_actual_numbers(metrics)
-    rows, exit_code = _compare(
-        expected, actual, tolerances, (meta.get("query_set_id"), _run_query_set(metrics))
+    rows, outcome = _compare(
+        expected,
+        actual,
+        tolerances,
+        (meta.get("query_set_id"), _run_query_set(metrics)),
+        mode=meta.get("pipeline_mode") or "batch",
     )
-    _print_comparison(rows, exit_code)
+    _print_comparison(rows, outcome)
+    _post_destroy_refusal(refusals)
 
-    if exit_code != 0:
-        raise typer.Exit(exit_code)
+    if outcome != 0:
+        # _compare's verdict is 2 (correctness) or 1 (performance); both are
+        # a reproduction outside its tolerance, 14 in the exit-code table.
+        raise typer.Exit(ExitCode.REQUIREMENT_UNMET)
 
 
 # ---------------------------------------------------------------------------
@@ -1070,8 +1571,8 @@ def reproduce(
             "--keep",
             help=(
                 "Verify mode: do not destroy the deployment after the run. "
-                "Note: reproduce always destroys BEFORE the run to guarantee "
-                "fresh buckets; --keep only affects post-run cleanup."
+                "reproduce never destroys before the run: it refuses an "
+                "existing namespace or bucket, and destroys only what it created."
             ),
         ),
     ] = False,
@@ -1081,7 +1582,7 @@ def reproduce(
             "--allow-commit-drift",
             help=(
                 "Verify mode: run even when HEAD differs from the recorded "
-                "commit. Default is to refuse with exit 2 -- comparing numbers "
+                "commit. Default is to refuse with exit 14 -- comparing numbers "
                 "across code paths cannot claim to reproduce anything."
             ),
         ),
@@ -1093,6 +1594,16 @@ def reproduce(
             help="Verify mode: parse the package and exit without running the pipeline",
         ),
     ] = False,
+    report: Annotated[
+        Path | None,
+        typer.Option(
+            "--report",
+            help=(
+                "Verify mode, registered looks only: the look's report; its sha256 "
+                "is checked against the look record and nothing is run"
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Record or verify a reproduction package.
 
@@ -1104,8 +1615,12 @@ def reproduce(
 
     Verify mode: loads a package, runs the pipeline against the referenced
     config, and compares actuals against expected under the recorded
-    tolerance bands. Exits 0 on pass, 1 on performance drift, 2 on
-    correctness violation.
+    tolerance bands. Exits 0 on pass and 14 on performance or correctness
+    drift. ``ingest_ratio`` is a range guard ([0.95, 1.05]), and values that
+    follow the config (continuous stage seconds) are not gated. A package
+    from a registered evaluation or robustness look is never rerun: pass
+    ``--report PATH`` and its sha256 is checked against the look record
+    (0 on a match, 14 on a mismatch, 2 without ``--report``).
 
         lakebench reproduce path/to/package.yaml [--config CONFIG]
 
@@ -1115,17 +1630,20 @@ def reproduce(
     if record is not None or write is not None:
         if record is None or write is None:
             print_error("Record mode requires both --record RUN_ID and --write PATH")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
         if package is not None:
             print_error("Positional PACKAGE cannot be combined with --record")
-            raise typer.Exit(2)
+            raise typer.Exit(ExitCode.USAGE)
+        if report is not None:
+            print_error("--report applies to verify mode only")
+            raise typer.Exit(ExitCode.USAGE)
         _record(record, write, config_reference)
         return
 
     # Verify mode -- positional package required.
     if package is None:
         print_error("Verify mode requires a PACKAGE path (or use --record/--write)")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     _verify(
         package_path=package,
@@ -1134,4 +1652,5 @@ def reproduce(
         keep=keep,
         dry_run=dry_run,
         allow_commit_drift=allow_commit_drift,
+        report=report,
     )

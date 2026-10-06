@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    ensure_alert_columns,
     env,
     log,
     sealed_txns_filter,
@@ -30,14 +31,7 @@ from pyspark.sql import SparkSession
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
-# Same W1 vertex cap the batch gold_finalize path honours (LB-119). Threaded
-# into rules that accept it so replaying W1 uses the configured cap, not the
-# rule's hard-coded default -- otherwise replay and gold_finalize disagree on
-# whether W1 runs for a 5M-8M-vertex snapshot.
-try:
-    _W1_MAX_VERTICES = int(env("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
-except ValueError:
-    _W1_MAX_VERTICES = 8_000_000
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 
 
 def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> int:
@@ -68,33 +62,37 @@ def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> i
     return result[0].snapshot_id
 
 
+def read_at_snapshot_id(spark, fq_table: str, snapshot_id: int):
+    """``fq_table`` as of Iceberg snapshot ``snapshot_id``.
+
+    SQL ``VERSION AS OF``: Iceberg 1.11 removed the ``snapshot-id`` read
+    option, so ``spark.read.option("snapshot-id", ...)`` failed before any
+    rule ran on Spark 4.x with the default Iceberg.
+    """
+    return spark.sql(f"SELECT * FROM {fq_table} VERSION AS OF {int(snapshot_id)}")
+
+
 def _empty_alerts_df(spark):
-    """Empty gold.alerts-shaped DataFrame. Schema mirrors
-    gold_finalize_financial.py DDL_ALERTS exactly so a
-    writeTo(...).createOrReplace() on the alerts table preserves the
-    downstream contract with score_financial (related_txn_ids field
-    must exist even when empty)."""
-    schema = (
-        "alert_id STRING, "
-        "rule_id STRING, "
-        "rule_version STRING, "
-        "model_id STRING, "
-        "model_version STRING, "
-        "entity_id BIGINT, "
-        "related_txn_ids ARRAY<STRING>, "
-        "related_entity_ids ARRAY<BIGINT>, "
-        "alert_ts TIMESTAMP, "
-        "alert_score DOUBLE, "
-        "priority STRING, "
-        "status STRING, "
-        "disposition STRING, "
-        "alert_type STRING, "
-        "run_id STRING, "
-        "narrative STRING, "
-        "evidence MAP<STRING, STRING>, "
-        "detected_ts TIMESTAMP"
-    )
+    """Empty gold.alerts-shaped DataFrame (detection_rules.ALERT_COLUMNS)."""
+    from detection_rules import ALERT_COLUMNS
+
+    schema = ", ".join(f"{name} {ddl_type}" for name, ddl_type, _ in ALERT_COLUMNS)
     return spark.createDataFrame([], schema)
+
+
+def _target_ddl(fq_table: str) -> str:
+    """CREATE TABLE IF NOT EXISTS for the replay target: gold.alerts'
+    columns (detection_rules.ALERT_COLUMNS) and partitioning."""
+    from detection_rules import ALERT_COLUMNS
+
+    cols = ",\n".join(
+        f"    {name:<18} {ddl_type}{'' if nullable else ' NOT NULL'}"
+        for name, ddl_type, nullable in ALERT_COLUMNS
+    )
+    return (
+        f"CREATE TABLE IF NOT EXISTS {fq_table} (\n{cols}\n) USING iceberg "
+        f"PARTITIONED BY (months(alert_ts))\nTBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})"
+    )
 
 
 def main() -> None:
@@ -133,7 +131,7 @@ def main() -> None:
     snap = resolve_snapshot_id(spark, CATALOG, SILVER_TXNS, args.depth_months)
     log(f"Resolved snapshot: {snap}")
 
-    historical_raw = spark.read.option("snapshot-id", snap).table(f"{CATALOG}.{SILVER_TXNS}")
+    historical_raw = read_at_snapshot_id(spark, f"{CATALOG}.{SILVER_TXNS}", snap)
     # I10: hide mid-batch crash rows from the historical replay too. A batch
     # whose transactions committed but whose versions row never landed must
     # not surface as a "detectable" window during a later replay. The
@@ -146,7 +144,13 @@ def main() -> None:
 
     # Rule dispatch. Rule functions in detection_rules.py accept a silver
     # DataFrame + params and return a gold.alerts-shaped DataFrame.
-    from detection_rules import RuleSkipped, cleanup_w1_checkpoints, get_rule, known_rules
+    from detection_rules import (
+        RuleSkipped,
+        cleanup_w1_checkpoints,
+        get_rule,
+        known_rules,
+        rule_params,
+    )
 
     rule_fn = get_rule(args.rule)
     if rule_fn is None:
@@ -156,21 +160,19 @@ def main() -> None:
     replay_run_id = str(uuid.uuid4())
     log(f"Running {args.rule} with run_id={replay_run_id}")
 
-    # Rule functions accept keyword args -- pass threshold when provided
-    # (rule signature varies but all accept run_id).
-    kwargs = {"run_id": replay_run_id}
+    # The parameters gold-finalize uses (detection_rules.rule_params: run_id,
+    # silver.entities for the customer-scoped rules, the configured W1
+    # vertex cap), plus the threshold override when given. Filtered by the
+    # rule's real signature, never its local names.
+    try:
+        silver_entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
+    except Exception as e:  # noqa: BLE001 -- customer-scoped rules then skip
+        log(f"silver.entities not readable ({e}); customer-scoped rules will skip")
+        silver_entities = None
+    kwargs = rule_params(rule_fn, replay_run_id, silver_entities)
     if args.threshold is not None:
         # w2_structuring interprets threshold as count. Others may ignore.
         kwargs["threshold_count"] = int(args.threshold)
-    # Thread the configured W1 vertex cap; the signature filter below drops
-    # it for rules that don't accept it, so this is safe for every rule.
-    if _W1_MAX_VERTICES > 0:
-        kwargs["max_vertices"] = _W1_MAX_VERTICES
-    # Filter by the rule's real SIGNATURE parameters, not the code object's
-    # local-variable names (which also include function-body locals).
-    # Matches the primitive gold_finalize deliberately uses, so a future
-    # rule whose internal local collides with a kwarg name can't get the
-    # value mis-injected here.
     import inspect
 
     _params = inspect.signature(rule_fn).parameters
@@ -199,41 +201,12 @@ def main() -> None:
     # Bootstrap the target with the full alerts schema + partition spec
     # (months(alert_ts)) via CREATE IF NOT EXISTS. Preserves partitioning
     # on repeat runs.
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {args.output_alerts} (
-            alert_id           STRING NOT NULL,
-            rule_id            STRING NOT NULL,
-            rule_version       STRING NOT NULL,
-            model_id           STRING NOT NULL,
-            model_version      STRING NOT NULL,
-            entity_id          BIGINT NOT NULL,
-            related_txn_ids    ARRAY<STRING>,
-            related_entity_ids ARRAY<BIGINT>,
-            alert_ts           TIMESTAMP NOT NULL,
-            alert_score        DOUBLE,
-            priority           STRING,
-            status             STRING,
-            disposition        STRING,
-            alert_type         STRING,
-            run_id             STRING NOT NULL,
-            narrative          STRING,
-            evidence           MAP<STRING, STRING>,
-            detected_ts        TIMESTAMP
-        ) USING iceberg PARTITIONED BY (months(alert_ts))
-        TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
-    """)
-    # LB-125 upgrade guard: rules now emit detected_ts, so a pre-existing
-    # target table (reused catalog, or gold.alerts created before detected_ts)
-    # must gain the column or the append below fails on schema mismatch. Check
-    # the live schema and add only when missing -- Spark/Iceberg has no
-    # `ADD COLUMN IF NOT EXISTS` for columns.
-    try:
-        _cols = [f.name for f in spark.table(args.output_alerts).schema.fields]
-        if "detected_ts" not in _cols:
-            spark.sql(f"ALTER TABLE {args.output_alerts} ADD COLUMNS (detected_ts TIMESTAMP)")
-            log(f"[startup] added detected_ts to {args.output_alerts} (reused-catalog upgrade)")
-    except Exception as e:  # noqa: BLE001
-        log(f"[startup] detected_ts upgrade check on {args.output_alerts} skipped: {e}")
+    spark.sql(_target_ddl(args.output_alerts))
+    # Reused target (an older replay table): missing trailing columns are
+    # appended; a table whose columns differ otherwise fails here.
+    from detection_rules import ALERT_COLUMNS
+
+    ensure_alert_columns(spark, args.output_alerts, ALERT_COLUMNS)
     # Delete-then-append scoped to THIS rule's rows. Multiple rules coexist
     # in the same alerts table keyed by rule_id (W2, W3, W4 append side by
     # side). Re-running the same rule replaces only its own rows, not

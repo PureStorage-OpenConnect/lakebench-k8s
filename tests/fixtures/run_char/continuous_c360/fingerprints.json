@@ -1,0 +1,171 @@
+{
+ "Q1_full_aggregation_scan": {
+  "adapted_sql_sha": "a28fcc92039f15c0",
+  "approx": {
+   "3": 66380566.73,
+   "4": 151.86
+  },
+  "approx_w": {
+   "3": 67518409.98486899,
+   "4": 154.46306419779802
+  },
+  "cols": 5,
+  "engine": "trino",
+  "exact": "04635dc9b2e0c492",
+  "quanta": {
+   "3": 0.01,
+   "4": 0.01
+  },
+  "rows": 1,
+  "spec": "rf2"
+ },
+ "Q2_filtered_aggregation": {
+  "adapted_sql_sha": "3606b15edd93d7f4",
+  "approx": {
+   "4": 16464608.7
+  },
+  "approx_w": {
+   "4": 23829436.68442223
+  },
+  "cols": 5,
+  "engine": "trino",
+  "exact": "d312393a3ea6402c",
+  "quanta": {
+   "4": 0.01
+  },
+  "rows": 455,
+  "spec": "rf2"
+ },
+ "Q3_customer_segmentation": {
+  "adapted_sql_sha": "3bbefc8f6167c5ad",
+  "approx": {
+   "3": 66380566.73,
+   "4": 37.81,
+   "5": 40227.35
+  },
+  "approx_w": {
+   "3": 102444974.44616814,
+   "4": 55.916635097780016,
+   "5": 61878.949186078666
+  },
+  "cols": 6,
+  "engine": "trino",
+  "exact": "bfcf99f10d445498",
+  "quanta": {
+   "3": 0.01,
+   "4": 0.01,
+   "5": 0.01
+  },
+  "rows": 12,
+  "spec": "rf2"
+ },
+ "Q4_churn_risk_analysis": {
+  "adapted_sql_sha": "186991779fad9dae",
+  "approx": {
+   "5": 0.0,
+   "6": 13.5
+  },
+  "approx_w": {
+   "5": 0.0,
+   "6": 22.03775473616127
+  },
+  "cols": 7,
+  "engine": "trino",
+  "exact": "5953b65c626cc696",
+  "quanta": {
+   "5": 0.01,
+   "6": 0.01
+  },
+  "rows": 6,
+  "spec": "rf2"
+ },
+ "Q5_revenue_trend_ma7": {
+  "adapted_sql_sha": "38eb0335e9afec9f",
+  "approx": {
+   "2": 16289308.03,
+   "4": 16331345.59,
+   "5": 36615.0
+  },
+  "approx_w": {
+   "2": 24348502.15235408,
+   "4": 24388699.169126395,
+   "5": 54644.99682892152
+  },
+  "cols": 6,
+  "engine": "trino",
+  "exact": "457ae80cbc0e4686",
+  "quanta": {
+   "2": 0.01,
+   "4": 0.01,
+   "5": 1.0
+  },
+  "rows": 90,
+  "spec": "rf2"
+ },
+ "Q6_customer_rfm": {
+  "adapted_sql_sha": "864fb6811e91367a",
+  "approx": {
+   "2": 95303.06,
+   "3": 110.0,
+   "4": 459.0
+  },
+  "approx_w": {
+   "2": 168281.01503062848,
+   "3": 183.1718664981421,
+   "4": 582.5706688558067
+  },
+  "cols": 5,
+  "engine": "trino",
+  "exact": "b606eac07568fec3",
+  "quanta": {
+   "2": 0.01,
+   "3": 0.1,
+   "4": 1.0
+  },
+  "rows": 6,
+  "spec": "rf2"
+ },
+ "Q7_channel_conversion_funnel": {
+  "adapted_sql_sha": "55c780c73df5e40d",
+  "approx": {
+   "6": 256.99,
+   "7": 66380566.73,
+   "8": 8.35
+  },
+  "approx_w": {
+   "6": 380.55552079395784,
+   "7": 98327192.07839638,
+   "8": 12.366328566911399
+  },
+  "cols": 9,
+  "engine": "trino",
+  "exact": "67ad3d2879de7513",
+  "quanta": {
+   "6": 0.01,
+   "7": 0.01,
+   "8": 0.01
+  },
+  "rows": 5,
+  "spec": "rf2"
+ },
+ "Q9_executive_dashboard": {
+  "adapted_sql_sha": "e36917a11dffae0c",
+  "approx": {
+   "6": -10006.750000000002,
+   "7": -1.7000000000000033
+  },
+  "approx_w": {
+   "6": -32898.63010192448,
+   "7": 9.213906555412594
+  },
+  "cols": 8,
+  "engine": "trino",
+  "exact": "401e6d7e93cdd882",
+  "quanta": {
+   "6": 0.01,
+   "7": 0.1
+  },
+  "rows": 30,
+  "spec": "rf2"
+ }
+}

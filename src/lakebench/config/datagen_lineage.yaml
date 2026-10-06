@@ -1,0 +1,38 @@
+# Datagen image lineage, the input of corpus id v2 (read by
+# metrics/corpus_identity.py).
+#
+# Corpus id v2 hashes the lineage of the image that generated a corpus: the
+# image digest, mapped through this table to the first digest of a chain of
+# output-neutral re-pins. A digest not listed here is its own lineage, so an
+# unlisted re-pin reads as a different corpus (the safe direction).
+#
+# A row whose digest equals its canonical is a root and needs no evidence.
+# Any other row names its byte-compare result and pins its sha256:
+#
+#   - digest: sha256:<re-pinned image, 64 hex>
+#     canonical: sha256:<a root row's digest>
+#     evidence: tests/fixtures/datagen_reference/compare-<first 12 hex of digest>.json
+#     evidence_sha256: "<sha256 of that file>"   # quoted: an all-digit hash is a YAML int
+#     build_commit: "<datagen_rs commit the image was built from>"   # optional
+#
+# The compare file holds the five cases F0, F1, C0, F2, C2, each equal with
+# _corpus/ excluded, on development seeds 43 (F) and 42 (C), as the datagen
+# byte-compare writes it (metrics/corpus_identity.validate_compare_file
+# states the rules). The unit suite checks
+# every pinned file on every commit, since the wheel does not ship tests/.
+# The digest is the one the datagen pods report as their imageID.
+lineage:
+  # docker.io/sillidata/lb-datagen:1.6.0, the v1.6 release image (registry
+  # manifest digest, equal to the pod imageID of run 20261001-091952-6d10e4).
+  - digest: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+    canonical: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+  # docker.io/sillidata/lb-datagen:2a36ae21, the v1.7 release image, built
+  # from integrate 2a36ae2162d0672c8a46173bc70da448cac497ae with
+  # LB_BUILD_COMMIT set and pushed 2026-10-05. Five-case byte-compare
+  # against 1.6.0 (F0, F1, C0, F2, C2; _corpus/ excluded) equal on
+  # 2026-10-05 (podman, local MinIO, held-out hash file mounted).
+  - digest: sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
+    canonical: sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
+    evidence: tests/fixtures/datagen_reference/compare-0502b7002999.json
+    evidence_sha256: "c87605e7ac00051fc279017a35f02529953389ba29d994de4ca941aad8ecb671"
+    build_commit: "2a36ae2162d0672c8a46173bc70da448cac497ae"

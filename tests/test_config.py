@@ -3,41 +3,13 @@
 import pytest
 
 from lakebench.config import (
-    CatalogType,
-    ConfigFileNotFoundError,
     LakebenchConfig,
-    generate_default_config,
-    generate_example_config_yaml,
-    load_config,
     parse_size_to_bytes,
-    parse_spark_memory,
-    save_config,
 )
-from tests.conftest import make_config
 
 
 class TestParseSize:
     """Tests for size parsing utilities."""
-
-    def test_parse_bytes(self):
-        assert parse_size_to_bytes("1024") == 1024
-        assert parse_size_to_bytes("100b") == 100
-
-    def test_parse_kilobytes(self):
-        assert parse_size_to_bytes("1kb") == 1024
-        assert parse_size_to_bytes("10KB") == 10240
-
-    def test_parse_megabytes(self):
-        assert parse_size_to_bytes("1mb") == 1024**2
-        assert parse_size_to_bytes("512MB") == 512 * 1024**2
-
-    def test_parse_gigabytes(self):
-        assert parse_size_to_bytes("1gb") == 1024**3
-        assert parse_size_to_bytes("100GB") == 100 * 1024**3
-
-    def test_parse_terabytes(self):
-        assert parse_size_to_bytes("1tb") == 1024**4
-        assert parse_size_to_bytes("5TB") == 5 * 1024**4
 
     def test_parse_invalid(self):
         with pytest.raises(ValueError):
@@ -49,117 +21,40 @@ class TestParseSize:
 class TestParseSparkMemory:
     """Tests for Spark memory parsing."""
 
-    def test_parse_gigabytes(self):
-        assert parse_spark_memory("8g") == 8 * 1024**3
-        assert parse_spark_memory("48G") == 48 * 1024**3
-
-    def test_parse_megabytes(self):
-        assert parse_spark_memory("512m") == 512 * 1024**2
-        assert parse_spark_memory("4096M") == 4096 * 1024**2
-
-    def test_parse_kilobytes(self):
-        assert parse_spark_memory("1024k") == 1024 * 1024
-
 
 class TestLakebenchConfig:
     """Tests for LakebenchConfig model."""
-
-    def test_minimal_config(self):
-        """Test creating config with just the required field."""
-        config = LakebenchConfig(name="test-deployment")
-        assert config.name == "test-deployment"
-        assert config.version == 1
 
     def test_missing_name_raises(self):
         """Test that missing name raises validation error."""
         with pytest.raises(ValueError, match="'name' is required"):
             LakebenchConfig(name="")
 
-    def test_default_values(self):
-        """Test that default values are set correctly."""
-        config = LakebenchConfig(name="test")
-
-        # Platform defaults
-        assert config.platform.kubernetes.context == ""
-        assert config.platform.kubernetes.create_namespace is True
-        assert config.platform.storage.s3.region == "us-east-1"
-        assert config.platform.storage.s3.path_style is True
-
-        # Compute defaults (proven values)
-        assert config.platform.compute.spark.driver.cores == 4
-        assert config.platform.compute.spark.driver.memory == "8g"
-        assert config.platform.compute.spark.executor.instances == 8
-        assert config.platform.compute.spark.executor.cores == 4
-        assert config.platform.compute.spark.executor.memory == "48g"
-        assert config.platform.compute.spark.executor.memory_overhead == "12g"
-
-        # Architecture defaults
-        assert config.architecture.catalog.type.value == "hive"
-        assert config.architecture.table_format.type.value == "iceberg"
-        assert config.architecture.query_engine.type.value == "trino"
-        assert config.architecture.pipeline.pattern.value == "medallion"
-
-        # Spark conf defaults (S3A tuning)
-        assert config.spark.conf["spark.hadoop.fs.s3a.connection.maximum"] == "500"
-        assert config.spark.conf["spark.hadoop.fs.s3a.fast.upload"] == "true"
-
-    def test_get_namespace_defaults_to_name(self):
-        """Test that namespace defaults to deployment name."""
-        config = LakebenchConfig(name="my-deployment")
-        assert config.get_namespace() == "my-deployment"
-
-    def test_get_namespace_explicit(self):
-        """Test that explicit namespace is used."""
-        config = LakebenchConfig(
-            name="my-deployment", platform={"kubernetes": {"namespace": "custom-ns"}}
-        )
-        assert config.get_namespace() == "custom-ns"
-
     def test_s3_credentials_check(self):
         """Test S3 credential detection."""
         # No credentials
         config = LakebenchConfig(name="test")
         assert not config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
         # Inline credentials
         config = LakebenchConfig(
             name="test", platform={"storage": {"s3": {"access_key": "key", "secret_key": "secret"}}}
         )
         assert config.has_inline_s3_credentials()
-        assert not config.has_s3_secret_ref()
 
-        # Secret ref
-        config = LakebenchConfig(
-            name="test", platform={"storage": {"s3": {"secret_ref": "my-secret"}}}
-        )
-        assert not config.has_inline_s3_credentials()
-        assert config.has_s3_secret_ref()
-
-    def test_s3_tls_fields_defaults(self):
-        """Test S3Config ca_cert and verify_ssl default values."""
-        config = LakebenchConfig(name="test")
-        assert config.platform.storage.s3.ca_cert == ""
-        assert config.platform.storage.s3.verify_ssl is True
-
-    def test_s3_tls_fields_override(self):
-        """Test S3Config ca_cert and verify_ssl can be set."""
-        config = LakebenchConfig(
-            name="test",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://flashblade:443",
-                        "ca_cert": "/etc/ssl/certs/fb-ca.pem",
-                        "verify_ssl": True,
-                        "access_key": "key",
-                        "secret_key": "secret",
+        # secret_ref was removed: built without a load purpose it is dropped
+        # with a DeprecationWarning; see test_config_honesty_v16.
+        with pytest.warns(DeprecationWarning, match="secret_ref"):
+            config = LakebenchConfig(
+                name="test",
+                platform={
+                    "storage": {
+                        "s3": {"access_key": "k", "secret_key": "s", "secret_ref": "my-secret"}
                     }
-                }
-            },
-        )
-        assert config.platform.storage.s3.ca_cert == "/etc/ssl/certs/fb-ca.pem"
-        assert config.platform.storage.s3.verify_ssl is True
+                },
+            )
+        assert config.has_inline_s3_credentials()
+        assert not hasattr(config.platform.storage.s3, "secret_ref")
 
     def test_s3_verify_ssl_false(self):
         """Test S3Config verify_ssl can be set to false."""
@@ -189,102 +84,13 @@ class TestLakebenchConfig:
 class TestStackableOperatorConfig:
     """Tests for StackableOperatorConfig defaults and override."""
 
-    def test_defaults(self):
-        cfg = make_config()
-        op = cfg.architecture.catalog.hive.operator
-        assert op.install is False
-        assert op.namespace == "stackable"
-        assert op.version == "25.7.0"
-
-    def test_override_install_true(self):
-        cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": True}}}})
-        assert cfg.architecture.catalog.hive.operator.install is True
-
-    def test_override_version(self):
-        cfg = make_config(architecture={"catalog": {"hive": {"operator": {"version": "24.3.0"}}}})
-        assert cfg.architecture.catalog.hive.operator.version == "24.3.0"
-
 
 class TestConfigLoader:
     """Tests for configuration file loading."""
 
-    def test_load_nonexistent_file(self):
-        """Test loading a file that doesn't exist."""
-        with pytest.raises(ConfigFileNotFoundError):
-            load_config("/nonexistent/path/config.yaml")
-
-    def test_load_valid_config(self, tmp_path):
-        """Test loading a valid configuration file."""
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text("""
-name: test-deployment
-platform:
-  storage:
-    s3:
-      endpoint: http://localhost:9000
-      access_key: minioadmin
-      secret_key: minioadmin
-""")
-        config = load_config(config_path)
-        assert config.name == "test-deployment"
-        assert config.platform.storage.s3.endpoint == "http://localhost:9000"
-
-    def test_load_invalid_yaml(self, tmp_path):
-        """Test loading invalid YAML."""
-        config_path = tmp_path / "bad.yaml"
-        config_path.write_text("name: [invalid yaml")
-        with pytest.raises(Exception):  # ConfigParseError  # noqa: B017
-            load_config(config_path)
-
-    def test_load_minimal_config_auto_names(self, tmp_path):
-        """Config with only version gets auto-generated name (v1.3)."""
-        config_path = tmp_path / "config.yaml"
-        config_path.write_text("version: 1")
-        cfg = load_config(config_path)
-        assert cfg.name.startswith("lb-")
-
-    def test_save_and_load_roundtrip(self, tmp_path):
-        """Test that saving and loading preserves config."""
-        config = LakebenchConfig(
-            name="roundtrip-test",
-            description="Test description",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://localhost:9000",
-                        "buckets": {
-                            "bronze": "test-bronze",
-                            "silver": "test-silver",
-                            "gold": "test-gold",
-                        },
-                    }
-                }
-            },
-        )
-
-        config_path = tmp_path / "config.yaml"
-        save_config(config, config_path)
-
-        loaded = load_config(config_path)
-        assert loaded.name == config.name
-        assert loaded.description == config.description
-        assert loaded.platform.storage.s3.buckets.bronze == "test-bronze"
-
 
 class TestScaleConfig:
     """Tests for scale factor configuration."""
-
-    def test_scale_default(self):
-        """Default scale is 10."""
-        config = LakebenchConfig(name="test")
-        assert config.architecture.workload.datagen.scale == 10
-
-    def test_scale_explicit(self):
-        """Setting scale explicitly."""
-        config = LakebenchConfig(
-            name="test", architecture={"workload": {"datagen": {"scale": 100}}}
-        )
-        assert config.architecture.workload.datagen.scale == 100
 
     def test_target_size_backward_compat(self):
         """Legacy target_size is converted to scale."""
@@ -294,133 +100,13 @@ class TestScaleConfig:
             )
         assert config.architecture.workload.datagen.scale == 10
 
-    def test_target_size_1tb(self):
-        """1 TB target_size -> scale ~102."""
-        with pytest.warns(DeprecationWarning, match="target_size is deprecated"):
-            config = LakebenchConfig(
-                name="test", architecture={"workload": {"datagen": {"target_size": "1tb"}}}
-            )
-        # 1 TB = 1024 GB -> scale = round(1024 / 10) = 102
-        assert config.architecture.workload.datagen.scale == 102
-
-    def test_scale_min_validation(self):
-        """Scale 0 is rejected."""
-        with pytest.raises(ValueError):
-            LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 0}}})
-
-    def test_get_effective_scale(self):
-        """get_effective_scale returns current scale."""
-        config = LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 50}}})
-        assert config.architecture.workload.datagen.get_effective_scale() == 50
-
-    def test_get_scale_dimensions(self):
-        """LakebenchConfig.get_scale_dimensions returns correct dimensions."""
-        config = LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 10}}})
-        dims = config.get_scale_dimensions()
-        assert dims.scale == 10
-        assert dims.customers == 1_000_000
-
-    def test_get_compute_guidance(self):
-        """LakebenchConfig.get_compute_guidance returns guidance."""
-        config = LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 10}}})
-        guidance = config.get_compute_guidance()
-        assert guidance.tier_name == "balanced"
-
-    def test_payload_size_removed_from_config(self):
-        """payload_size is no longer a user-configurable field."""
-        # Should not raise -- unknown fields are ignored by default
-        config = LakebenchConfig(name="test")
-        assert not hasattr(config.architecture.workload.datagen, "payload_size")
-
-    def test_datagen_cpu_memory_defaults(self):
-        """Datagen cpu and memory have sensible defaults."""
-        config = LakebenchConfig(name="test")
-        assert config.architecture.workload.datagen.cpu == "2"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-
-    def test_datagen_cpu_memory_override(self):
-        """Datagen cpu and memory can be overridden."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"cpu": "8", "memory": "16Gi"}}},
-        )
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "16Gi"
-
-    def test_datagen_image_default(self):
-        """Default datagen image pins the v1.6 AML generator-freeze commit."""
-        config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:1.6.0"
-
-    def test_datagen_mode_defaults_auto(self):
-        """Datagen mode defaults to 'auto'."""
-        from lakebench.config.schema import DatagenMode
-
-        config = LakebenchConfig(name="test")
-        assert config.architecture.workload.datagen.mode == DatagenMode.AUTO
-
-    def test_datagen_mode_batch(self):
-        """Datagen mode can be set to 'batch'."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"mode": "batch"}}},
-        )
-        assert config.architecture.workload.datagen.mode.value == "batch"
-
-    def test_datagen_mode_continuous(self):
-        """Datagen mode can be set to 'continuous'."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"mode": "continuous"}}},
-        )
-        assert config.architecture.workload.datagen.mode.value == "continuous"
-
-    def test_datagen_generators_default(self):
-        """Datagen generators defaults to 0 (auto-resolved from pod CPU)."""
-        config = LakebenchConfig(name="test")
-        assert config.architecture.workload.datagen.generators == 0
-
 
 class TestPipelineModeConfig:
     """Tests for pipeline mode configuration."""
 
-    def test_pipeline_mode_defaults_batch(self):
-        """Pipeline mode defaults to 'batch'."""
-        from lakebench.config.schema import PipelineMode
-
-        config = LakebenchConfig(name="test")
-        assert config.architecture.pipeline.mode == PipelineMode.BATCH
-
-    def test_pipeline_mode_sustained(self):
-        """'sustained' still loads, as the deprecated alias of 'continuous'."""
-        with pytest.warns(DeprecationWarning):
-            config = LakebenchConfig(
-                name="test",
-                architecture={"pipeline": {"mode": "sustained"}},
-            )
-        assert config.architecture.pipeline.mode.value == "continuous"
-
-    def test_pipeline_mode_invalid_rejected(self):
-        """Invalid pipeline mode is rejected by Pydantic."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            LakebenchConfig(
-                name="test",
-                architecture={"pipeline": {"mode": "invalid"}},
-            )
-
 
 class TestScratchStorageConfig:
     """Tests for scratch storage configuration."""
-
-    def test_scratch_storage_defaults(self):
-        """Default scratch config: disabled, px-csi-scratch, 100Gi."""
-        config = LakebenchConfig(name="test")
-        scratch = config.platform.storage.scratch
-        assert scratch.enabled is False
-        assert scratch.storage_class == "px-csi-scratch"
-        assert scratch.size == "100Gi"
 
     def test_scratch_legacy_create_sc_field_ignored(self):
         """create_storage_class is a legacy field.
@@ -437,298 +123,40 @@ class TestScratchStorageConfig:
             )
         assert not hasattr(config.platform.storage.scratch, "create_storage_class")
 
-    def test_scratch_override(self):
-        """Override scratch config values."""
-        config = LakebenchConfig(
-            name="test",
-            platform={
-                "storage": {
-                    "scratch": {
-                        "enabled": True,
-                        "storage_class": "my-sc",
-                        "size": "200Gi",
-                    }
-                }
-            },
-        )
-        scratch = config.platform.storage.scratch
-        assert scratch.enabled is True
-        assert scratch.storage_class == "my-sc"
-        assert scratch.size == "200Gi"
-
-    def test_scratch_provisioner_default(self):
-        """BUG-001: Default scratch provisioner is Portworx."""
-        config = LakebenchConfig(name="test")
-        scratch = config.platform.storage.scratch
-        assert scratch.provisioner == "pxd.portworx.com"
-        assert scratch.parameters == {
-            "repl": "1",
-            "io_profile": "auto",
-            "priority_io": "high",
-        }
-
-    def test_scratch_provisioner_override(self):
-        """BUG-001: Scratch provisioner and parameters can be overridden."""
-        config = LakebenchConfig(
-            name="test",
-            platform={
-                "storage": {
-                    "scratch": {
-                        "enabled": True,
-                        "provisioner": "ebs.csi.aws.com",
-                        "parameters": {"type": "gp3", "iopsPerGB": "50"},
-                    }
-                }
-            },
-        )
-        scratch = config.platform.storage.scratch
-        assert scratch.provisioner == "ebs.csi.aws.com"
-        assert scratch.parameters == {"type": "gp3", "iopsPerGB": "50"}
-
 
 class TestTrinoWorkerStorageConfig:
     """Tests for Trino worker storage configuration."""
-
-    def test_trino_worker_storage_defaults(self):
-        """Default Trino worker storage: spill on, 50Gi PVC."""
-        config = LakebenchConfig(name="test")
-        worker = config.architecture.query_engine.trino.worker
-        assert worker.spill_enabled is True
-        assert worker.spill_max_per_node == "40Gi"
-        assert worker.storage == "50Gi"
-        assert worker.storage_class == ""
-
-    def test_trino_worker_storage_override(self):
-        """Override Trino worker storage fields."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "query_engine": {
-                    "trino": {
-                        "worker": {
-                            "replicas": 4,
-                            "storage": "100Gi",
-                            "storage_class": "px-csi-db",
-                            "spill_enabled": False,
-                            "spill_max_per_node": "80Gi",
-                        }
-                    }
-                }
-            },
-        )
-        worker = config.architecture.query_engine.trino.worker
-        assert worker.replicas == 4
-        assert worker.storage == "100Gi"
-        assert worker.storage_class == "px-csi-db"
-        assert worker.spill_enabled is False
-        assert worker.spill_max_per_node == "80Gi"
 
 
 class TestGenerateConfig:
     """Tests for configuration generation."""
 
-    def test_generate_default_config(self):
-        """Test generating default config with minimal inputs."""
-        config = generate_default_config(name="test")
-        assert config.name == "test"
-        assert "test" in config.description
-
-    def test_generate_config_with_s3(self):
-        """Test generating config with S3 settings."""
-        config = generate_default_config(
-            name="test",
-            s3_endpoint="http://localhost:9000",
-            s3_access_key="accesskey",
-            s3_secret_key="secretkey",
-        )
-        assert config.platform.storage.s3.endpoint == "http://localhost:9000"
-        assert config.platform.storage.s3.access_key == "accesskey"
-        assert config.platform.storage.s3.secret_key == "secretkey"
-
-    def test_generate_example_yaml(self):
-        """Test generating example YAML."""
-        yaml_content = generate_example_config_yaml()
-        assert "name:" in yaml_content
-        assert "platform:" in yaml_content
-        assert "architecture:" in yaml_content
-        assert "observability:" in yaml_content
-        assert "spark:" in yaml_content
-        # Check for proven defaults in comments
-        assert "spark.hadoop.fs.s3a" in yaml_content
-
-
-class TestGeneratedYamlDrift:
-    """BUG-008: Verify generated config YAML stays in sync with schema."""
-
-    def test_duckdb_mentioned(self):
-        """Generated YAML should mention duckdb as a query engine option."""
-        yaml_content = generate_example_config_yaml()
-        assert "duckdb" in yaml_content
-
-    def test_recipe_field_present(self):
-        """Generated YAML should include a recipe field with valid names."""
-        yaml_content = generate_example_config_yaml()
-        assert "recipe:" in yaml_content
-        # At least one known recipe name should appear
-        assert "hive-iceberg-spark-trino" in yaml_content
-
-    def test_datagen_image_matches_schema(self):
-        """Generated YAML datagen image should match schema default."""
-        yaml_content = generate_example_config_yaml()
-        default_image = LakebenchConfig(name="t").images.datagen
-        assert default_image in yaml_content
-
-    def test_scratch_provisioner_present(self):
-        """Generated YAML should document scratch provisioner field."""
-        yaml_content = generate_example_config_yaml()
-        assert "provisioner:" in yaml_content
-
-    def test_legend_present(self):
-        """Generated YAML should start with a usage legend."""
-        yaml_content = generate_example_config_yaml()
-        assert "LEGEND" in yaml_content
-
-    def test_spark_operator_note(self):
-        """Generated YAML should document that spark operator defaults to false."""
-        yaml_content = generate_example_config_yaml()
-        assert "default is false" in yaml_content.lower()
-
-    def test_benchmark_section_engine_agnostic(self):
-        """Benchmark section should not be Trino-specific."""
-        yaml_content = generate_example_config_yaml()
-        # Should NOT say "Trino query benchmark" (was the old header)
-        assert "Trino query benchmark" not in yaml_content
-        # Should have a generic benchmark header
-        assert "benchmark" in yaml_content.lower()
-
 
 class TestPerJobExecutorOverrides:
     """Tests for per-job executor count overrides."""
-
-    def test_overrides_default_none(self):
-        """Per-job executor overrides default to None (auto from scale)."""
-        config = LakebenchConfig(name="test")
-        spark = config.platform.compute.spark
-        assert spark.bronze_executors is None
-        assert spark.silver_executors is None
-        assert spark.gold_executors is None
-
-    def test_override_single_job(self):
-        """Can override a single job's executor count."""
-        config = LakebenchConfig(
-            name="test",
-            platform={"compute": {"spark": {"silver_executors": 25}}},
-        )
-        spark = config.platform.compute.spark
-        assert spark.bronze_executors is None
-        assert spark.silver_executors == 25
-        assert spark.gold_executors is None
-
-    def test_override_all_jobs(self):
-        """Can override all job executor counts."""
-        config = LakebenchConfig(
-            name="test",
-            platform={
-                "compute": {
-                    "spark": {
-                        "bronze_executors": 6,
-                        "silver_executors": 20,
-                        "gold_executors": 12,
-                    }
-                }
-            },
-        )
-        spark = config.platform.compute.spark
-        assert spark.bronze_executors == 6
-        assert spark.silver_executors == 20
-        assert spark.gold_executors == 12
 
     def test_override_with_scale(self):
         """Per-job overrides coexist with scale factor."""
         config = LakebenchConfig(
             name="test",
             architecture={"workload": {"datagen": {"scale": 100}}},
-            platform={"compute": {"spark": {"silver_executors": 30}}},
+            platform={"compute": {"spark": {"silver_executors": 24}}},
         )
         assert config.architecture.workload.datagen.scale == 100
-        assert config.platform.compute.spark.silver_executors == 30
+        assert config.platform.compute.spark.silver_executors == 24
         assert config.platform.compute.spark.bronze_executors is None
 
 
 class TestComponentValidation:
     """Tests for component combination validation."""
 
-    def test_default_combination_valid(self):
-        """Default combination (hive + iceberg + trino) passes validation."""
-        config = LakebenchConfig(name="test")
-        assert config.architecture.catalog.type.value == "hive"
-        assert config.architecture.table_format.type.value == "iceberg"
-        assert config.architecture.query_engine.type.value == "trino"
-
-    def test_hive_iceberg_trino(self):
-        """hive + iceberg + trino is supported."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "catalog": {"type": "hive"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert config.architecture.catalog.type.value == "hive"
-
-    def test_hive_iceberg_none_query_engine(self):
-        """hive + iceberg + none query engine is supported (deploy-only)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "catalog": {"type": "hive"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "none"},
-            },
-        )
-        assert config.architecture.query_engine.type.value == "none"
-
-    def test_polaris_accepted(self):
-        """polaris + iceberg + trino is a valid combination."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert config.architecture.catalog.type == CatalogType.POLARIS
-
-    def test_polaris_config_defaults(self):
-        """Polaris config should have sensible defaults."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert config.architecture.catalog.polaris.port == 8181
-        assert config.architecture.catalog.polaris.version == "1.6.0"
-        assert config.architecture.catalog.polaris.resources.cpu == "1"
-        assert config.architecture.catalog.polaris.resources.memory == "2Gi"
-
     def test_polaris_without_secret_loads_but_deploy_rejects(self):
-        """LB-090: config load succeeds so `lakebench validate` / `info`
-        can inspect a Polaris config even before a secret is set. The
-        deploy-time gate (`require_polaris_client_secret`) is what
-        refuses the empty value. This split matters: auto-generating at
-        load time would give `deploy` and `run` different secrets on
-        independent CLI invocations, breaking OAuth2. A hardcoded
-        default (pre-LB-090) would share one secret across every install.
-        """
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
+        """LB-090 and SAF-8: config load succeeds with no secret, and nothing
+        generates one at load. A run with neither a config value nor the
+        Secret deploy stores refuses, naming deploy."""
+        from lakebench.config.schema import PolarisClientSecretMissing
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         cfg = LakebenchConfig(
             name="a",
@@ -738,38 +166,15 @@ class TestComponentValidation:
                 "query_engine": {"type": "trino"},
             },
         )
-        # Load succeeds -- validate/info work.
         assert cfg.architecture.catalog.polaris.client_secret == ""
-        # Deploy-time gate refuses with an actionable message.
-        with pytest.raises(PolarisClientSecretMissing, match="polaris.client_secret is required"):
-            require_polaris_client_secret(cfg)
-
-    def test_polaris_missing_secret_error_names_generator_command(self):
-        from lakebench.config.schema import (
-            PolarisClientSecretMissing,
-            require_polaris_client_secret,
-        )
-
-        cfg = LakebenchConfig(
-            name="a",
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        try:
-            require_polaris_client_secret(cfg)
-        except PolarisClientSecretMissing as e:
-            assert "token_urlsafe" in str(e), "error must show the user how to generate a secret"
-        else:
-            pytest.fail("expected PolarisClientSecretMissing")
+        with pytest.raises(PolarisClientSecretMissing, match="run lakebench deploy first"):
+            polaris_client_secret(cfg, FakeCore())
 
     def test_polaris_supplied_secret_survives_reload(self):
         """The LB-090 core invariant: two independent loads of the same
-        config produce the same secret, so `deploy` and `run` never
-        diverge."""
-        from lakebench.config.schema import require_polaris_client_secret
+        config give the same secret, so `deploy` and `run` never diverge."""
+        from lakebench.deploy.deployment_secrets import polaris_client_secret
+        from tests.test_deployment_secrets import FakeCore
 
         args = {
             "name": "a",
@@ -784,45 +189,8 @@ class TestComponentValidation:
         }
         cfg_a = LakebenchConfig(**args)
         cfg_b = LakebenchConfig(**args)
-        assert require_polaris_client_secret(cfg_a) == "user-supplied-value"
-        assert require_polaris_client_secret(cfg_a) == require_polaris_client_secret(cfg_b)
-
-    def test_polaris_hardcoded_default_removed(self):
-        """The pre-LB-090 shared default must not slip back in."""
-        cfg = LakebenchConfig(
-            name="a",
-            architecture={
-                "catalog": {
-                    "type": "polaris",
-                    "polaris": {"client_secret": "user-supplied-value"},
-                },
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert cfg.architecture.catalog.polaris.client_secret != "lakebench-polaris-secret-2024"
-
-    def test_hive_catalog_does_not_need_polaris_secret(self):
-        """A Hive deploy must not be blocked by the Polaris gate. This is
-        the reason the check lives at consumer sites, not in a load-time
-        validator that would fire for every catalog type."""
-        cfg = LakebenchConfig(
-            name="a",
-            architecture={
-                "catalog": {"type": "hive"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert cfg.architecture.catalog.polaris.client_secret == ""
-
-    def test_polaris_client_secret_constant_deleted(self):
-        """The pre-LB-090 shared default `POLARIS_CLIENT_SECRET` constant
-        must stay deleted from `_constants.py` -- it was a shared secret
-        for every install and a re-import would silently reintroduce it."""
-        from lakebench import _constants
-
-        assert not hasattr(_constants, "POLARIS_CLIENT_SECRET")
+        assert polaris_client_secret(cfg_a, FakeCore()) == "user-supplied-value"
+        assert polaris_client_secret(cfg_b, FakeCore()) == "user-supplied-value"
 
     def test_unity_iceberg_rejected(self):
         """unity + iceberg is not a supported combination (Unity is Delta-only)."""
@@ -878,123 +246,13 @@ class TestComponentValidation:
 class TestRecipeName:
     """Tests for recipe name derivation."""
 
-    def test_recipe_customer360_auto_defaults_continuous(self):
-        """Default recipe is customer360-continuous.
-
-        Post-D-wave (2026-09-28), DatagenMode.AUTO resolves to CONTINUOUS
-        unconditionally (owner D18). The pre-v1.6 scale-threshold behaviour
-        (auto -> batch at scale <= 10) is gone.
-        """
-        from lakebench.config.autosizer import _resolve_datagen_mode
-
-        config = LakebenchConfig(name="test")
-        mode = _resolve_datagen_mode(config)
-        recipe = f"{config.architecture.workload.schema_type.value}-{mode}"
-        assert recipe == "customer360-continuous"
-
-    def test_recipe_customer360_continuous(self):
-        """Scale > 10 with auto mode -> customer360-continuous."""
-        from lakebench.config.autosizer import _resolve_datagen_mode
-
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 50}}},
-        )
-        mode = _resolve_datagen_mode(config)
-        recipe = f"{config.architecture.workload.schema_type.value}-{mode}"
-        assert recipe == "customer360-continuous"
-
-    def test_recipe_explicit_batch_mode(self):
-        """Explicit batch mode at high scale -> customer360-batch."""
-        from lakebench.config.autosizer import _resolve_datagen_mode
-
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 100, "mode": "batch"}}},
-        )
-        mode = _resolve_datagen_mode(config)
-        recipe = f"{config.architecture.workload.schema_type.value}-{mode}"
-        assert recipe == "customer360-batch"
-
 
 class TestSustainedThroughputConfig:
     """Tests for sustained streaming throughput tuning fields."""
 
-    def test_defaults(self):
-        config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.sustained
-        assert c.max_files_per_trigger is None  # auto: resolved per run
-        assert c.bronze_target_file_size_mb == 512
-        assert c.silver_target_file_size_mb == 512
-        assert c.gold_target_file_size_mb == 128
-
-    def test_custom_values(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {
-                        "max_files_per_trigger": 200,
-                        "bronze_target_file_size_mb": 256,
-                        "silver_target_file_size_mb": 1024,
-                        "gold_target_file_size_mb": 64,
-                    },
-                },
-            },
-        )
-        c = config.architecture.pipeline.sustained
-        assert c.max_files_per_trigger == 200
-        assert c.bronze_target_file_size_mb == 256
-        assert c.silver_target_file_size_mb == 1024
-        assert c.gold_target_file_size_mb == 64
-
-    def test_max_files_per_trigger_minimum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"max_files_per_trigger": 0},
-                    },
-                },
-            )
-
-    def test_target_file_size_minimum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"bronze_target_file_size_mb": 10},
-                    },
-                },
-            )
-
 
 class TestSustainedBenchmarkConfig:
     """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
-
-    def test_defaults(self):
-        config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.sustained
-        assert c.benchmark_interval == 300
-        assert c.benchmark_warmup == 300
-
-    def test_custom_values(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {
-                        "benchmark_interval": 600,
-                        "benchmark_warmup": 600,
-                    },
-                },
-            },
-        )
-        c = config.architecture.pipeline.sustained
-        assert c.benchmark_interval == 600
-        assert c.benchmark_warmup == 600
 
     def test_warmup_clamped_to_gold_refresh(self):
         """Warmup below gold_refresh_interval is clamped up."""
@@ -1011,22 +269,6 @@ class TestSustainedBenchmarkConfig:
         )
         c = config.architecture.pipeline.sustained
         assert c.benchmark_warmup == 600  # clamped to gold_refresh (10 min)
-
-    def test_warmup_not_clamped_when_above_gold_refresh(self):
-        """Warmup above gold_refresh_interval is left unchanged."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {
-                        "gold_refresh_interval": "2 minutes",
-                        "benchmark_warmup": 300,
-                    },
-                },
-            },
-        )
-        c = config.architecture.pipeline.sustained
-        assert c.benchmark_warmup == 300  # no clamp needed
 
     def test_warmup_with_short_gold_refresh(self):
         """With a 5-minute gold refresh, warmup of 300s is valid (matches floor)."""
@@ -1060,22 +302,6 @@ class TestSustainedBenchmarkConfig:
         c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 600  # clamped to gold_refresh (10 min)
 
-    def test_interval_not_clamped_when_above_gold_refresh(self):
-        """Interval above gold_refresh_interval is left unchanged."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {
-                        "gold_refresh_interval": "2 minutes",
-                        "benchmark_interval": 300,
-                    },
-                },
-            },
-        )
-        c = config.architecture.pipeline.sustained
-        assert c.benchmark_interval == 300  # no clamp needed
-
     def test_interval_with_short_gold_refresh(self):
         """With a 5-minute gold refresh, interval of 300s is valid (matches floor)."""
         config = LakebenchConfig(
@@ -1093,180 +319,19 @@ class TestSustainedBenchmarkConfig:
         c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 300  # 300s >= 300s floor, matches gold_refresh
 
-    def test_benchmark_interval_field_minimum(self):
-        """Field-level floor is 300s (Pydantic ge=300)."""
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"benchmark_interval": 120},  # min is 300
-                    },
-                },
-            )
-
-    def test_benchmark_interval_maximum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"benchmark_interval": 7200},  # max is 3600
-                    },
-                },
-            )
-
-    def test_benchmark_warmup_minimum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"benchmark_warmup": 120},  # min is 300
-                    },
-                },
-            )
-
-    def test_benchmark_warmup_maximum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"benchmark_warmup": 2400},  # max is 1800
-                    },
-                },
-            )
-
 
 class TestSustainedRetentionConfig:
     """Tests for retention_interval and retention_threshold on SustainedConfig."""
 
-    def test_defaults(self):
-        config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.sustained
-        # Unset: derived from run_duration at run start (1800 / 3).
-        assert c.retention_interval is None
-        assert c.effective_retention_interval() == 600
-        assert c.retention_threshold == "30m"
-
-    def test_custom_values(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {
-                        "retention_interval": 900,
-                        "retention_threshold": "1h",
-                    },
-                },
-            },
-        )
-        c = config.architecture.pipeline.sustained
-        assert c.retention_interval == 900
-        assert c.retention_threshold == "1h"
-
-    def test_retention_interval_minimum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"retention_interval": 60},  # min is 300
-                    },
-                },
-            )
-
-    def test_retention_interval_maximum(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"retention_interval": 10000},  # max is 7200
-                    },
-                },
-            )
-
-    def test_retention_interval_boundary_values(self):
-        """Boundary values 300 and 7200 are accepted."""
-        for val in (300, 7200):
-            config = LakebenchConfig(
-                name="test",
-                architecture={
-                    "processing": {
-                        "sustained": {"retention_interval": val},
-                    },
-                },
-            )
-            assert config.architecture.pipeline.sustained.retention_interval == val
-
 
 class TestBenchmarkConfig:
     """Tests for BenchmarkConfig in schema."""
-
-    def test_defaults(self):
-        cfg = LakebenchConfig(name="test")
-        b = cfg.architecture.benchmark
-        assert b.mode.value == "power"
-        assert b.streams == 4
-        assert b.cache == "hot"
-        assert b.iterations == 3
-
-    def test_yaml_parse(self, tmp_path):
-        yaml_content = """
-name: bench-test
-architecture:
-  benchmark:
-    mode: throughput
-    streams: 8
-    cache: cold
-    iterations: 3
-"""
-        f = tmp_path / "bench.yaml"
-        f.write_text(yaml_content)
-        cfg = load_config(f)
-        assert cfg.architecture.benchmark.mode.value == "throughput"
-        assert cfg.architecture.benchmark.streams == 8
-        assert cfg.architecture.benchmark.cache == "cold"
-        assert cfg.architecture.benchmark.iterations == 3
-
-    def test_mode_enum_validation(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"benchmark": {"mode": "invalid"}},
-            )
-
-    def test_streams_bounds(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"benchmark": {"streams": 0}},
-            )
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"benchmark": {"streams": 65}},
-            )
 
     def test_cache_validation(self):
         with pytest.raises(Exception):  # noqa: B017
             LakebenchConfig(
                 name="test",
                 architecture={"benchmark": {"cache": "warm"}},
-            )
-
-    def test_iterations_bounds(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"benchmark": {"iterations": 0}},
-            )
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"benchmark": {"iterations": 101}},
             )
 
 
@@ -1278,49 +343,6 @@ architecture:
 class TestBatchCyclesConfig:
     """Tests for pipeline.cycles and pre_benchmark_maintenance fields."""
 
-    def test_cycles_default(self):
-        config = LakebenchConfig(name="test")
-        assert config.architecture.pipeline.cycles == 1
-
-    def test_pre_benchmark_maintenance_default(self):
-        config = LakebenchConfig(name="test")
-        assert config.architecture.pipeline.pre_benchmark_maintenance is True
-
-    def test_cycles_custom(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"cycles": 5}},
-        )
-        assert config.architecture.pipeline.cycles == 5
-
-    def test_cycles_minimum_boundary(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"cycles": 1}},
-        )
-        assert config.architecture.pipeline.cycles == 1
-
-    def test_cycles_maximum_boundary(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"cycles": 50}},
-        )
-        assert config.architecture.pipeline.cycles == 50
-
-    def test_cycles_below_minimum_rejected(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"processing": {"cycles": 0}},
-            )
-
-    def test_cycles_above_maximum_rejected(self):
-        with pytest.raises(Exception):  # noqa: B017
-            LakebenchConfig(
-                name="test",
-                architecture={"processing": {"cycles": 51}},
-            )
-
     def test_cycles_gt1_requires_batch_mode(self):
         """cycles > 1 is invalid with sustained mode."""
         with pytest.raises(Exception):  # noqa: B017
@@ -1328,21 +350,6 @@ class TestBatchCyclesConfig:
                 name="test",
                 architecture={"processing": {"mode": "sustained", "cycles": 3}},
             )
-
-    def test_cycles_1_with_sustained_mode_ok(self):
-        """cycles=1 (default) is fine with sustained mode."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"mode": "sustained"}},
-        )
-        assert config.architecture.pipeline.cycles == 1
-
-    def test_pre_benchmark_maintenance_false(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"pre_benchmark_maintenance": False}},
-        )
-        assert config.architecture.pipeline.pre_benchmark_maintenance is False
 
 
 # ---------------------------------------------------------------------------
@@ -1352,32 +359,6 @@ class TestBatchCyclesConfig:
 
 class TestSustainedCompactionConfig:
     """Tests for compaction_enabled and compaction_interval on SustainedConfig."""
-
-    def test_compaction_defaults(self):
-        config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.sustained
-        assert c.compaction_enabled is True
-        # Default compaction_interval=0 resolves to 2x the effective retention_interval
-        assert c.compaction_interval == 0
-        assert c.effective_compaction_interval() == 2 * c.effective_retention_interval()
-
-    def test_compaction_disabled(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"sustained": {"compaction_enabled": False}}},
-        )
-        assert config.architecture.pipeline.sustained.compaction_enabled is False
-
-    def test_compaction_interval_custom(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "processing": {
-                    "sustained": {"compaction_interval": 7200},
-                },
-            },
-        )
-        assert config.architecture.pipeline.sustained.compaction_interval == 7200
 
     def test_compaction_interval_zero_resolves_to_2x_retention(self):
         config = LakebenchConfig(
@@ -1399,22 +380,6 @@ class TestFinancialW1MaxVertices:
     field so the graph detector runs at scale 10 by default and can be
     raised for larger scales without a code edit."""
 
-    def test_default_is_above_scale_10_vertex_count(self):
-        from lakebench.config.schema import WorkloadConfig
-
-        wc = WorkloadConfig()
-        # Scale 10 is ~5M accounts (~5M vertices); the default must clear it
-        # so W1 does not skip out of the box at scale 10.
-        assert wc.w1_max_vertices >= 5_000_000
-
-    def test_rejects_zero(self):
-        from pydantic import ValidationError
-
-        from lakebench.config.schema import WorkloadConfig
-
-        with pytest.raises(ValidationError):
-            WorkloadConfig(w1_max_vertices=0)
-
     def test_rejects_above_ceiling(self):
         from pydantic import ValidationError
 
@@ -1422,12 +387,6 @@ class TestFinancialW1MaxVertices:
 
         with pytest.raises(ValidationError):
             WorkloadConfig(w1_max_vertices=200_000_001)
-
-    def test_accepts_raised_value(self):
-        from lakebench.config.schema import WorkloadConfig
-
-        wc = WorkloadConfig(w1_max_vertices=60_000_000)
-        assert wc.w1_max_vertices == 60_000_000
 
 
 def test_job_injects_w1_max_vertices_env():

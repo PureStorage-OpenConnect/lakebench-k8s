@@ -7,60 +7,21 @@ refuses this at startup with a SilverAbort (uniform silver exit contract).
 
 from __future__ import annotations
 
-import glob
-import os
-import sys
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("pyspark")
 
-_JARS = os.environ.get("LB_SPARK_TEST_JARS", "")
-_NEEDED = ("iceberg-spark-runtime",)
-
-
-def _have_jars() -> bool:
-    if not _JARS or not Path(_JARS).is_dir():
-        return False
-    names = [p.name for p in Path(_JARS).glob("*.jar")]
-    return all(any(n.startswith(k) for n in names) for k in _NEEDED)
-
-
-pytestmark = pytest.mark.skipif(
-    not _have_jars(), reason="LB_SPARK_TEST_JARS with Iceberg jars not set"
-)
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
 @pytest.fixture(scope="module")
-def spark(tmp_path_factory):
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    wh = tmp_path_factory.mktemp("aml-refuse-wh")
-    jars = ",".join(sorted(glob.glob(os.path.join(_JARS, "*.jar"))))
-    s = (
-        SparkSession.builder.master("local[2]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.jars", jars)
-        .config("spark.sql.shuffle.partitions", "2")
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config("spark.sql.catalog.ice", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.ice.type", "hadoop")
-        .config("spark.sql.catalog.ice.warehouse", f"file://{wh}")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
+def spark(spark_session, iceberg_catalog, tmp_path_factory):
+    iceberg_catalog(spark_session, "ice", tmp_path_factory.mktemp("aml-refuse-wh"))
+    return spark_session
 
 
 def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path):
     """Populated silver.transactions + fresh checkpoint -> SilverAbort."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
@@ -78,7 +39,6 @@ def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path):
 
 def test_refuse_accepts_single_str_arg(spark, tmp_path):
     """Backwards compatibility: str signature still works."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
@@ -90,7 +50,6 @@ def test_refuse_accepts_single_str_arg(spark, tmp_path):
 
 def test_refuse_no_op_when_all_tables_empty(spark, tmp_path):
     """Empty tables + fresh checkpoint: no refusal."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
     from common import refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")

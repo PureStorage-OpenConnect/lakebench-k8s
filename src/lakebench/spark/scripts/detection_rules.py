@@ -97,6 +97,44 @@ RULE_VERSION = "1.0.0"
 MODEL_ID = "lb-rules"
 MODEL_VERSION = "1.0.0"
 
+#: The gold.alerts columns in table order: (name, DDL type, nullable). The
+#: one source for every rule's alert frame (_alert_frame), the empty frame
+#: (_empty_alerts_df) and gold_finalize_financial.DDL_ALERTS. The driver
+#: writes alerts with a positional INSERT ... SELECT *, so this order is the
+#: table's. New columns are appended, never inserted.
+ALERT_COLUMNS = (
+    ("alert_id", "STRING", False),
+    ("rule_id", "STRING", False),
+    ("rule_version", "STRING", False),
+    ("model_id", "STRING", False),
+    ("model_version", "STRING", False),
+    ("entity_id", "BIGINT", False),
+    ("related_txn_ids", "ARRAY<STRING>", True),
+    ("related_entity_ids", "ARRAY<BIGINT>", True),
+    ("alert_ts", "TIMESTAMP", False),
+    ("alert_score", "DOUBLE", True),
+    ("priority", "STRING", True),
+    ("status", "STRING", True),
+    ("disposition", "STRING", True),
+    ("alert_type", "STRING", True),
+    ("run_id", "STRING", False),
+    ("narrative", "STRING", True),
+    ("evidence", "MAP<STRING, STRING>", True),
+    ("detected_ts", "TIMESTAMP", True),
+    ("reason_codes", "ARRAY<STRING>", True),
+)
+
+#: The count or size at which a rule's alert is HIGH priority. The priority
+#: expressions and the matching reason codes (aml_reason_codes) both read it,
+#: so a code always means "a HIGH-priority alert of that kind".
+HIGH_PRIORITY_CUTOFFS = {
+    "W1_connected_components": 8,
+    "W2_structuring": 6,
+    "W3_round_tripping": 4,
+    "W4_risk_propagation": 3,
+    "W17_layering_chain": 5,
+}
+
 # Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
 # with RULE_TARGETS in src/lakebench/benchmark/aml_queries.py (the
 # orchestrator-side authority); a consistency test asserts they match, because
@@ -242,6 +280,79 @@ def _suspicious_amount_expr():
         cond = (col("txn_currency") == lit(ccy)) & (col("txn_amount").between(floor, thr))
         when_expr = cond if when_expr is None else (when_expr | cond)
     return when_expr
+
+
+def _alert_frame(
+    df: DataFrame,
+    *,
+    rule_id: str,
+    entity_id,
+    related_txn_ids,
+    related_entity_ids,
+    alert_ts,
+    alert_score,
+    priority,
+    alert_type,
+    run_id,
+    narrative,
+    evidence,
+    reason_codes=None,
+    reason_key: str | None = None,
+) -> DataFrame:
+    """``df`` projected to gold.alerts: every rule returns through here, so
+    no rule chooses the column order (the driver's INSERT is positional).
+
+    ``rule_id`` is the rule id (a str); every other keyword is a Column,
+    and ``run_id`` may also be a str. ``reason_codes`` is the rule's
+    conditional codes (aml_reason_codes.reason_expr); the alert's
+    ``reason_codes`` column is its rule's base code followed by them, so
+    every alert carries at least one code.
+    Keyword-only, so a column left out is a TypeError, which the driver
+    records as the rule's error, never as zero alerts. The helper supplies
+    ``alert_id`` (a uuid), the rule and model versions, ``status`` OPEN, a
+    NULL ``disposition`` and ``detected_ts`` (wall clock at rule execution:
+    detection time in batch, the far end of time to detect in continuous).
+    Every value is cast to its ALERT_COLUMNS type and named.
+    """
+    if not isinstance(rule_id, str):
+        raise TypeError(f"_alert_frame rule_id must be a str, got {type(rule_id).__name__}")
+    from aml_reason_codes import BASE_CODE, reason_expr
+    from pyspark.sql.functions import array_distinct, array_union, coalesce
+
+    if reason_codes is None:
+        reason_codes = reason_expr(reason_key or rule_id)
+    codes = array_distinct(
+        array_union(
+            array(lit(BASE_CODE[rule_id])),
+            coalesce(reason_codes, expr("cast(array() as array<string>)")),
+        )
+    )
+    if isinstance(run_id, str):
+        run_id = lit(run_id)
+    values = {
+        "alert_id": expr("uuid()"),
+        "rule_id": lit(rule_id),
+        "rule_version": lit(RULE_VERSION),
+        "model_id": lit(MODEL_ID),
+        "model_version": lit(MODEL_VERSION),
+        "entity_id": entity_id,
+        "related_txn_ids": related_txn_ids,
+        "related_entity_ids": related_entity_ids,
+        "alert_ts": alert_ts,
+        "alert_score": alert_score,
+        "priority": priority,
+        "status": lit("OPEN"),
+        "disposition": lit(None),
+        "alert_type": alert_type,
+        "run_id": run_id,
+        "narrative": narrative,
+        "evidence": evidence,
+        "detected_ts": current_timestamp(),
+        "reason_codes": codes,
+    }
+    return df.select(
+        *[values[name].cast(ddl_type).alias(name) for name, ddl_type, _ in ALERT_COLUMNS]
+    )
 
 
 def w2_structuring(
@@ -409,9 +520,11 @@ def w2_structuring(
                 array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
                     "_all_txns"
                 ),
+                # Sorted before the cut, so the kept senders are the same on
+                # every run.
                 expr(
-                    f"slice(array_distinct(flatten(collect_list(_related_entity_ids))), "
-                    f"1, {int(max_txns_per_alert)})"
+                    f"slice(array_sort(array_distinct(flatten(collect_list("
+                    f"_related_entity_ids)))), 1, {int(max_txns_per_alert)})"
                 ).alias("_related_entity_ids"),
                 min_("first_ts").alias("first_ts"),
                 max_("last_ts").alias("last_ts"),
@@ -437,45 +550,51 @@ def w2_structuring(
         )
         windowed = windowed.unionByName(by_bene)
 
-    alerts = windowed.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W2_structuring").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity_id"),
+    alerts = _alert_frame(
+        windowed,
+        rule_id="W2_structuring",
+        entity_id=col("entity_id"),
         # Deduplicate defensively (Spark collect_list preserves duplicates).
-        array_distinct(col("related_txn_ids")).alias("related_txn_ids"),
+        related_txn_ids=array_distinct(col("related_txn_ids")),
         # Cast the set -> list of BIGINT for the array<bigint> DDL column.
-        expr("cast(_related_entity_ids as array<bigint>)").alias("related_entity_ids"),
-        col("last_ts").alias("alert_ts"),
+        related_entity_ids=expr("cast(_related_entity_ids as array<bigint>)"),
+        alert_ts=col("last_ts"),
         # Alert score: 0.5 baseline + 0.05 * (count - threshold), capped 0.95.
-        expr(f"least(0.95, 0.5 + (suspicious_count - {int(threshold_count)}) * 0.05)")
-        .cast("double")
-        .alias("alert_score"),
-        when(col("suspicious_count") >= 6, lit("HIGH"))
+        alert_score=expr(
+            f"least(0.95, 0.5 + (suspicious_count - {int(threshold_count)}) * 0.05)"
+        ).cast("double"),
+        priority=when(
+            col("suspicious_count") >= HIGH_PRIORITY_CUTOFFS["W2_structuring"], lit("HIGH")
+        )
         .when(col("suspicious_count") >= 4, lit("MED"))
-        .otherwise(lit("LOW"))
-        .alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        col("_type").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        col("_narrative").alias("narrative"),
-        map_from_arrays(
-            array(lit("rule"), lit("threshold"), lit("window_hours"), lit("aggregation")),
+        .otherwise(lit("LOW")),
+        alert_type=col("_type"),
+        run_id=lit(run_id),
+        narrative=col("_narrative"),
+        # txn_total is the alert's full count of in-band payments;
+        # txns_truncated says the beneficiary kind's cap cut related_txn_ids
+        # (the originator kind is never cut).
+        evidence=map_from_arrays(
+            array(
+                lit("rule"),
+                lit("threshold"),
+                lit("window_hours"),
+                lit("aggregation"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+            ),
             array(
                 lit("W2_structuring"),
                 lit(str(threshold_count)),
                 lit(str(window_hours)),
                 col("_aggregation"),
+                col("suspicious_count").cast("string"),
+                (
+                    (col("_aggregation") == lit("beneficiary"))
+                    & (col("suspicious_count") > lit(int(max_txns_per_alert)))
+                ).cast("string"),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
     return _customers_only(alerts, customers)
 
@@ -1144,31 +1263,25 @@ def w3_round_tripping(
         budget.discard()
         raise
     alerts = found.withColumn("hops", size(col("uetrs")))
-    return alerts.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W3_round_tripping").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("start").alias("entity_id"),
-        col("uetrs").alias("related_txn_ids"),
-        col("nodes").alias("related_entity_ids"),
-        col("ts_last").alias("alert_ts"),
+    return _alert_frame(
+        alerts,
+        rule_id="W3_round_tripping",
+        entity_id=col("start"),
+        related_txn_ids=col("uetrs"),
+        related_entity_ids=col("nodes"),
+        alert_ts=col("ts_last"),
         # Longer cycles are more deliberate. Bounded [0.6, 0.9].
-        expr("least(0.9, 0.5 + 0.1 * hops)").cast("double").alias("alert_score"),
-        when(col("hops") >= 4, lit("HIGH"))
+        alert_score=expr("least(0.9, 0.5 + 0.1 * hops)").cast("double"),
+        priority=when(col("hops") >= HIGH_PRIORITY_CUTOFFS["W3_round_tripping"], lit("HIGH"))
         .when(col("hops") >= 3, lit("MED"))
-        .otherwise(lit("LOW"))
-        .alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("round_tripping").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        .otherwise(lit("LOW")),
+        alert_type=lit("round_tripping"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Funds returned to entity ', cast(start as string), ' through ', "
             "cast(hops as string), ' transfers ending ', cast(ts_last as string))"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(
                 lit("rule"),
                 lit("hops"),
@@ -1183,12 +1296,7 @@ def w3_round_tripping(
                 lit(str(total_window_days)),
                 lit(str(max_out_degree)),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
 
 
@@ -1404,34 +1512,28 @@ def w17_layering_chain(
             col("ts_q"),
         )
     )
-    return merged.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W17_layering_chain").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity").alias("entity_id"),
-        col("uetrs").alias("related_txn_ids"),
-        col("nodes").alias("related_entity_ids"),
+    return _alert_frame(
+        merged,
+        rule_id="W17_layering_chain",
+        entity_id=col("entity"),
+        related_txn_ids=col("uetrs"),
+        related_entity_ids=col("nodes"),
         # When the chain first qualified (see _advance), not when its last
         # onward hop happened: scoring bounds alert_ts by the planted window.
-        col("ts_q").alias("alert_ts"),
+        alert_ts=col("ts_q"),
         # Longer chains are more deliberate. Bounded [0.6, 0.9].
-        expr("least(0.9, 0.3 + 0.1 * hops)").cast("double").alias("alert_score"),
-        when(col("hops") >= 5, lit("HIGH"))
+        alert_score=expr("least(0.9, 0.3 + 0.1 * hops)").cast("double"),
+        priority=when(col("hops") >= HIGH_PRIORITY_CUTOFFS["W17_layering_chain"], lit("HIGH"))
         .when(col("hops") >= 4, lit("MED"))
-        .otherwise(lit("LOW"))
-        .alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("layering_chain").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        .otherwise(lit("LOW")),
+        alert_type=lit("layering_chain"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Entity ', cast(entity as string), ' passed on funds along ', "
             "cast(hops as string), ' transfers (', cast(feeders as string), "
             "' feeding credit(s)) ending ', cast(ts_last as string))"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(
                 lit("rule"),
                 lit("hops"),
@@ -1450,10 +1552,7 @@ def w17_layering_chain(
                 lit(str(max_forward_ratio)),
                 lit(str(max_out_degree)),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution, appended LAST to match the
-        # gold.alerts DDL column order (positional INSERT ... SELECT *).
-        current_timestamp().alias("detected_ts"),
+        ),
     )
 
 
@@ -1462,6 +1561,7 @@ def w4_risk_propagation(
     velocity_hours: int = 6,
     forward_ratio: float = 0.8,
     run_id: str = "unknown",
+    max_txns_per_alert: int = 1000,
 ) -> DataFrame:
     """Detect rapid pass-through: entity B receives funds from A and
     forwards >= forward_ratio of them to some entity C, all within
@@ -1472,8 +1572,16 @@ def w4_risk_propagation(
     C != A (which would require another join step); a self-loop that
     just cycles back also fires, treated as a subset of round-tripping.
 
-    Emits one alert per B (the intermediate entity) with related_txn_ids
-    = [incoming_uetr, outgoing_uetr] pair.
+    Emits one alert per B (the intermediate entity). related_txn_ids holds
+    the uetrs of every matched incoming and outgoing payment, and
+    related_entity_ids every A and C, each sorted and cut to the first
+    max_txns_per_alert (an evidence bound, the same value as W2's: without it
+    a hub's arrays grow with the corpus). The evidence map carries the full
+    counts, txn_total and entity_total, and txns_truncated and
+    entities_truncated ('true' when the cap cut the list). Scoring matches
+    planted transactions against related_txn_ids, so a truncated hub alert
+    can miss planted payments past the cut: recall is reported as bounded by
+    this cap when any W4 alert was truncated (score_financial).
     """
     from pyspark.sql.functions import unix_timestamp
 
@@ -1532,45 +1640,59 @@ def w4_risk_propagation(
         min_("ts_in").alias("first_ts"),
         max_(col("amt_out") / col("amt_in")).alias("max_forward_ratio"),
     )
-    return per_entity.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W4_risk_propagation").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("b").alias("entity_id"),
-        array_distinct(expr("concat(uetrs_in, uetrs_out)")).alias("related_txn_ids"),
-        # cast(set as array<bigint>) via expr for compat with older Spark
-        expr("cast(array_union(as_set, cs_set) as array<bigint>)").alias("related_entity_ids"),
-        col("last_ts").alias("alert_ts"),
+    # Sorted, so the kept prefix is the same on every run whatever order the
+    # collect_* produced.
+    cap = int(max_txns_per_alert)
+    per_entity = per_entity.withColumn(
+        "_txns", array_sort(array_distinct(expr("concat(uetrs_in, uetrs_out)")))
+    ).withColumn(
+        "_entities", array_sort(expr("cast(array_union(as_set, cs_set) as array<bigint>)"))
+    )
+    return _alert_frame(
+        per_entity,
+        rule_id="W4_risk_propagation",
+        entity_id=col("b"),
+        related_txn_ids=expr(f"slice(_txns, 1, {cap})"),
+        related_entity_ids=expr(f"slice(_entities, 1, {cap})"),
+        alert_ts=col("last_ts"),
         # Score clamped to [0, 0.95] so downstream percentile aggregations
         # don't skew from >1 values (see W3 fix). max_forward_ratio -
         # threshold is scaled and offset from 0.7 baseline.
-        expr(f"least(0.95, 0.7 + (max_forward_ratio - {forward_ratio}) * 0.15)")
-        .cast("double")
-        .alias("alert_score"),
-        when(col("chain_count") >= 3, lit("HIGH"))
+        alert_score=expr(f"least(0.95, 0.7 + (max_forward_ratio - {forward_ratio}) * 0.15)").cast(
+            "double"
+        ),
+        priority=when(
+            col("chain_count") >= HIGH_PRIORITY_CUTOFFS["W4_risk_propagation"], lit("HIGH")
+        )
         .when(col("chain_count") >= 2, lit("MED"))
-        .otherwise(lit("LOW"))
-        .alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("risk_propagation").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        .otherwise(lit("LOW")),
+        alert_type=lit("risk_propagation"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Rapid pass-through at entity ', cast(b as string), ': ', "
             "cast(chain_count as string), ' incoming/outgoing chains, first ', "
             "cast(first_ts as string), ' last ', cast(last_ts as string))"
-        ).alias("narrative"),
-        map_from_arrays(
-            array(lit("rule"), lit("velocity_hours"), lit("forward_ratio")),
-            array(lit("W4_risk_propagation"), lit(str(velocity_hours)), lit(str(forward_ratio))),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
+        evidence=map_from_arrays(
+            array(
+                lit("rule"),
+                lit("velocity_hours"),
+                lit("forward_ratio"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+                lit("entity_total"),
+                lit("entities_truncated"),
+            ),
+            array(
+                lit("W4_risk_propagation"),
+                lit(str(velocity_hours)),
+                lit(str(forward_ratio)),
+                size(col("_txns")).cast("string"),
+                (size(col("_txns")) > lit(cap)).cast("string"),
+                size(col("_entities")).cast("string"),
+                (size(col("_entities")) > lit(cap)).cast("string"),
+            ),
+        ),
     )
 
 
@@ -1880,39 +2002,35 @@ def w1_connected_components(
     # case, filtered out earlier).
     with_txns = components.join(edge_aggs, "component", "inner")
 
-    alerts = with_txns.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W1_connected_components").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
+    alerts = _alert_frame(
+        with_txns,
+        rule_id="W1_connected_components",
         # No single entity owns a cluster alert -- pick the min id
         # deterministically so replay is stable across runs.
-        col("component").alias("entity_id"),
-        col("related_txn_ids"),
-        expr("cast(entity_ids as array<bigint>)").alias("related_entity_ids"),
-        col("last_ts").alias("alert_ts"),
+        entity_id=col("component"),
+        related_txn_ids=col("related_txn_ids"),
+        related_entity_ids=expr("cast(entity_ids as array<bigint>)"),
+        alert_ts=col("last_ts"),
         # Larger components ~= higher risk. Bounded 0.5-0.95.
-        expr(
+        alert_score=expr(
             "cast(least(0.95, 0.5 + 0.05 * cast(component_size - "
             + str(min_cluster_size)
             + " as double)) as double)"
-        ).alias("alert_score"),
-        when(col("component_size") >= 8, lit("HIGH"))
+        ),
+        priority=when(
+            col("component_size") >= HIGH_PRIORITY_CUTOFFS["W1_connected_components"], lit("HIGH")
+        )
         .when(col("component_size") >= 5, lit("MED"))
-        .otherwise(lit("LOW"))
-        .alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("cluster").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        .otherwise(lit("LOW")),
+        alert_type=lit("cluster"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Connected component of ', cast(component_size as string), "
             "' entities (min id ', cast(component as string), "
             "') active between ', cast(first_ts as string), ' and ', "
             "cast(last_ts as string))"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(
                 lit("rule"),
                 lit("min_cluster_size"),
@@ -1933,12 +2051,7 @@ def w1_connected_components(
                 col("txn_total").cast("string"),
                 (col("txn_total") > lit(int(max_txns_per_alert))).cast("string"),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
     # ``labels`` is checkpointed, so everything downstream (components,
     # edges_tagged, alerts) reads the materialised labels rather than
@@ -2256,33 +2369,37 @@ def _screen_txns(silver_txns: DataFrame, silver_entities: DataFrame) -> DataFram
     )
 
 
+def screen_base_frame(silver_txns: DataFrame, silver_entities: DataFrame | None) -> DataFrame:
+    """The screening input W5 and W6 both build (_screen_txns over the
+    resolved silver.entities), for a driver that runs both to build once and
+    pass to each as ``screen_base``. Raises RuleSkipped as the rules would
+    when the entity master is unreadable."""
+    spark = silver_txns.sparkSession
+    return _screen_txns(silver_txns, _entities_frame(spark, silver_entities, "W5/W6"))
+
+
 def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, score, priority):
     """gold.alerts rows for per-transaction screening hits (one alert per
     transaction, on its best-matching entry)."""
     best = Window.partitionBy("uetr").orderBy(col("similarity").desc(), col("list_id"))
     h = hits.withColumn("_rn", row_number().over(best)).filter(col("_rn") == 1)
-    return h.select(
-        expr("uuid()").alias("alert_id"),
-        lit(rule_id).alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity_id"),
-        array(col("uetr")).alias("related_txn_ids"),
-        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
-        col("txn_timestamp").alias("alert_ts"),
-        score.cast("double").alias("alert_score"),
-        (lit(priority) if isinstance(priority, str) else priority).alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit(alert_type).alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+    return _alert_frame(
+        h,
+        rule_id=rule_id,
+        entity_id=col("entity_id"),
+        related_txn_ids=array(col("uetr")),
+        related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
+        alert_ts=col("txn_timestamp"),
+        alert_score=score.cast("double"),
+        priority=lit(priority) if isinstance(priority, str) else priority,
+        alert_type=lit(alert_type),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Beneficiary ', coalesce(rptd_beneficiary_name, ''), ' matches watchlist "
             "entry ', list_id, ' (', match_mode, ', similarity ', "
             "cast(round(similarity, 3) as string), ') on transaction ', uetr)"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(
                 lit("rule"),
                 lit("list_id"),
@@ -2297,9 +2414,7 @@ def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, 
                 col("match_mode"),
                 expr("cast(round(similarity, 4) as string)"),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution, last to match the DDL order.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
 
 
@@ -2307,6 +2422,7 @@ def w5_sanctions_match(
     silver_txns: DataFrame,
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
+    screen_base: DataFrame | None = None,
 ) -> DataFrame:
     """Sanctions screen: payments to a party on the corpus sanctions list.
 
@@ -2331,7 +2447,8 @@ def w5_sanctions_match(
     silver_entities = _entities_frame(spark, silver_entities, "W5")
     customers = _customer_ids(spark, silver_entities, "W5")
     wl = _load_watchlist(spark, "sanctions", "W5")
-    txns = _screen_txns(silver_txns, silver_entities)
+    # screen_base: the same frame, built once for W5 and W6 by the driver.
+    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
     matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
@@ -2354,39 +2471,43 @@ def w5_sanctions_match(
         min_(col("list_version")).alias("list_version"),
         max_(col("rptd_beneficiary_name")).alias("rptd_beneficiary_name"),
     )
-    rescreen = grouped.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W5_sanctions_match").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity_id"),
-        expr(f"slice(transform(array_sort(_txns), x -> x.uetr), 1, {RESCREEN_MAX_RELATED})").alias(
-            "related_txn_ids"
+    rescreen = _alert_frame(
+        grouped,
+        rule_id="W5_sanctions_match",
+        reason_key="W5_sanctions_match:rescreen",
+        entity_id=col("entity_id"),
+        related_txn_ids=expr(
+            f"slice(transform(array_sort(_txns), x -> x.uetr), 1, {RESCREEN_MAX_RELATED})"
         ),
-        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
-        expr("cast(version_published_date as timestamp)").alias("alert_ts"),
-        (lit(0.5) + lit(0.45) * col("similarity")).cast("double").alias("alert_score"),
-        lit("HIGH").alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("sanctions_rescreen").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
+        alert_ts=expr("cast(version_published_date as timestamp)"),
+        alert_score=(lit(0.5) + lit(0.45) * col("similarity")).cast("double"),
+        priority=lit("HIGH"),
+        alert_type=lit("sanctions_rescreen"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Rescreen on list version ', cast(list_version as string), ': prior "
             "counterparty ', coalesce(rptd_beneficiary_name, ''), ' matches new entry ', "
             "list_id, ' (', cast(size(_txns) as string), ' prior payments)')"
-        ).alias("narrative"),
-        map_from_arrays(
-            array(lit("rule"), lit("list_id"), lit("list_version"), lit("match_mode")),
+        ),
+        evidence=map_from_arrays(
+            array(
+                lit("rule"),
+                lit("list_id"),
+                lit("list_version"),
+                lit("match_mode"),
+                lit("txn_total"),
+                lit("txns_truncated"),
+            ),
             array(
                 lit("W5_sanctions_match"),
                 col("list_id"),
                 col("list_version").cast("string"),
                 lit("rescreen"),
+                size(col("_txns")).cast("string"),
+                (size(col("_txns")) > lit(RESCREEN_MAX_RELATED)).cast("string"),
             ),
-        ).alias("evidence"),
-        current_timestamp().alias("detected_ts"),
+        ),
     )
     return _customers_only(txn_alerts.unionByName(rescreen), customers)
 
@@ -2404,6 +2525,7 @@ def w6_pep_counterparty(
     silver_txns: DataFrame,
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
+    screen_base: DataFrame | None = None,
 ) -> DataFrame:
     """PEP screen: payments to a party on the corpus PEP list, by the same
     fuzzy screen as W5 (transaction screen only).
@@ -2417,7 +2539,8 @@ def w6_pep_counterparty(
     silver_entities = _entities_frame(spark, silver_entities, "W6")
     customers = _customer_ids(spark, silver_entities, "W6")
     wl = _load_watchlist(spark, "pep", "W6")
-    txns = _screen_txns(silver_txns, silver_entities)
+    # screen_base: the same frame, built once for W5 and W6 by the driver.
+    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
     matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
@@ -2533,40 +2656,29 @@ def w7_cross_border_high_risk(
         )
     )
 
-    alerts = hits.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W7_cross_border_high_risk").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity_id"),
-        array(col("uetr")).alias("related_txn_ids"),
-        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
-        col("txn_timestamp").alias("alert_ts"),
-        when(col("risk_tier") == "black", lit(0.90))
+    alerts = _alert_frame(
+        hits,
+        rule_id="W7_cross_border_high_risk",
+        entity_id=col("entity_id"),
+        related_txn_ids=array(col("uetr")),
+        related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
+        alert_ts=col("txn_timestamp"),
+        alert_score=when(col("risk_tier") == "black", lit(0.90))
         .otherwise(lit(0.60))
-        .cast("double")
-        .alias("alert_score"),
-        when(col("risk_tier") == "black", lit("HIGH")).otherwise(lit("MED")).alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("cross_border_high_risk").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+        .cast("double"),
+        priority=when(col("risk_tier") == "black", lit("HIGH")).otherwise(lit("MED")),
+        alert_type=lit("cross_border_high_risk"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Cross-border transaction to ', bene_country, ' (', "
             "case when risk_tier = 'synthetic_corridor' then 'synthetic high-risk corridor' "
             "else concat('FATF ', risk_tier, ' list') end, ') for ', cast(amount as string), "
             "' on ', cast(txn_timestamp as string))"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(lit("rule"), lit("country"), lit("risk_tier")),
             array(lit("W7_cross_border_high_risk"), col("bene_country"), col("risk_tier")),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
     return _customers_only(alerts, customers)
 
@@ -2624,80 +2736,43 @@ def w8_dormant_reactivation(
         & (expr("coalesce(txn_amount_usd, txn_amount) >= " + str(amount_threshold_usd)))
     )
 
-    alerts = hits.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W8_dormant_reactivation").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("originator_id").alias("entity_id"),
-        array(col("uetr")).alias("related_txn_ids"),
-        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
-        col("txn_timestamp").alias("alert_ts"),
-        lit(0.70).cast("double").alias("alert_score"),
-        lit("MED").alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("dormant_reactivation").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
+    alerts = _alert_frame(
+        hits,
+        rule_id="W8_dormant_reactivation",
+        entity_id=col("originator_id"),
+        related_txn_ids=array(col("uetr")),
+        related_entity_ids=expr("array(cast(beneficiary_id as bigint))"),
+        alert_ts=col("txn_timestamp"),
+        alert_score=lit(0.70).cast("double"),
+        priority=lit("MED"),
+        alert_type=lit("dormant_reactivation"),
+        run_id=lit(run_id),
+        narrative=expr(
             "concat('Originator ', cast(originator_id as string), ' reactivated after ', "
             "cast(round((unix_timestamp(txn_timestamp) - unix_timestamp(prev_ts)) / 86400.0, 0) "
             "as string), ' days with USD ', cast(txn_amount_usd as string))"
-        ).alias("narrative"),
-        map_from_arrays(
+        ),
+        evidence=map_from_arrays(
             array(lit("rule"), lit("dormant_days"), lit("amount_threshold_usd")),
             array(
                 lit("W8_dormant_reactivation"),
                 lit(str(dormant_days)),
                 lit(str(amount_threshold_usd)),
             ),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+        ),
     )
     return _customers_only(alerts, customers)
 
 
 def _empty_alerts_df(spark, run_id: str) -> DataFrame:
-    """Zero-row DataFrame with the gold.alerts schema, for the case
-    where a rule declines to run (e.g. W1 above max_vertices)."""
-    from pyspark.sql.types import (
-        ArrayType,
-        BooleanType,  # noqa: F401
-        DoubleType,
-        LongType,
-        MapType,
-        StringType,
-        StructField,
-        StructType,
-        TimestampType,
-    )
+    """Zero-row DataFrame with the gold.alerts schema (ALERT_COLUMNS), for
+    the case where a rule declines to run (e.g. W1 above max_vertices)."""
+    from pyspark.sql.types import StructField, StructType, _parse_datatype_string
 
     schema = StructType(
         [
-            StructField("alert_id", StringType(), False),
-            StructField("rule_id", StringType(), False),
-            StructField("rule_version", StringType(), False),
-            StructField("model_id", StringType(), False),
-            StructField("model_version", StringType(), False),
-            StructField("entity_id", LongType(), True),
-            StructField("related_txn_ids", ArrayType(StringType()), True),
-            StructField("related_entity_ids", ArrayType(LongType()), True),
-            StructField("alert_ts", TimestampType(), True),
-            StructField("alert_score", DoubleType(), True),
-            StructField("priority", StringType(), True),
-            StructField("status", StringType(), True),
-            StructField("disposition", StringType(), True),
-            StructField("alert_type", StringType(), True),
-            StructField("run_id", StringType(), True),
-            StructField("narrative", StringType(), True),
-            StructField("evidence", MapType(StringType(), StringType()), True),
-            # LB-125: last column, matching every rule projection + the DDL.
-            StructField("detected_ts", TimestampType(), True),
+            StructField(name, _parse_datatype_string(ddl_type), nullable)
+            for name, ddl_type, nullable in ALERT_COLUMNS
         ]
     )
     return spark.createDataFrame([], schema)
@@ -2723,6 +2798,37 @@ def get_rule(rule_id: str):
 
 def known_rules() -> list[str]:
     return list(_RULE_DISPATCH.keys())
+
+
+def w1_max_vertices() -> int:
+    """The configured W1 vertex cap (``LB_FINANCIAL_W1_MAX_VERTICES``,
+    default 8,000,000; an unparseable value reads as the default)."""
+    import os
+
+    try:
+        return int(os.environ.get("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
+    except ValueError:
+        return 8_000_000
+
+
+def rule_params(fn, run_id: str, silver_entities=None) -> dict:
+    """The keyword arguments a rule is called with, the same in gold-finalize,
+    replay and reproduce: ``run_id``; ``silver_entities`` when the rule
+    accepts it and a frame is given; and ``max_vertices`` from the
+    configured W1 cap when the rule accepts it and the cap is positive (a
+    non-positive value keeps the rule's own default, so a mis-set variable
+    cannot disable W1). Parameters come from the rule's signature, never its
+    local names."""
+    import inspect
+
+    sig = inspect.signature(fn).parameters
+    params: dict = {"run_id": run_id}
+    if "silver_entities" in sig and silver_entities is not None:
+        params["silver_entities"] = silver_entities
+    cap = w1_max_vertices()
+    if "max_vertices" in sig and cap > 0:
+        params["max_vertices"] = cap
+    return params
 
 
 # Guard against ruff unused-import warnings for symbols exported for callers.

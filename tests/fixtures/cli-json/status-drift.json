@@ -1,0 +1,19 @@
+{
+  "schema": "lb-cli/1",
+  "command": "status",
+  "exit_code": 1,
+  "data": {
+    "namespace": "ops",
+    "verdict": "drift",
+    "components": [
+      {"name": "lakebench-postgres", "kind": "StatefulSet", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-hive-metastore-default", "kind": "StatefulSet", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-trino-coordinator", "kind": "Deployment", "state": "ok", "detail": "1/1 replicas"},
+      {"name": "lakebench-trino-worker", "kind": "StatefulSet", "state": "unready", "detail": "1/2 replicas"}
+    ],
+    "datagen": null
+  },
+  "errors": [
+    {"code": 1, "path": null, "what": "Drift: lakebench-trino-worker not ready or not found", "why": null, "next": null, "where": null}
+  ]
+}

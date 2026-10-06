@@ -1,3 +1,9 @@
+# LEGACY PACKAGE -- `lakebench reproduce` refuses to verify it (exit 2).
+# It has no experiment_identity and no maintenance_policy_id (so it counts as
+# the legacy maintenance policy), it was recorded at commit ead6722, and its
+# config_reference names an example that does not exist. Kept for history
+# only; it is not evidence for this version. Re-record from a current run
+# (see README.md in this directory).
 schema_version: 1
 reproduction_metadata:
   commit_sha: ead6722

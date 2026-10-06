@@ -1,0 +1,240 @@
+"""Old command names and flags: the ones that still work, and the ones refused.
+
+Two tables are the one list of what 1.7 renamed or removed from the CLI:
+
+* ``ALIASES``: an old command that still runs its replacement. It prints
+  exactly one stderr line naming the new command (``alias_notice``), then
+  runs it. ``ALIASED_FLAGS`` holds the flags that still parse but do
+  nothing, each with its one line.
+* ``REFUSED``: an old command, or a command with an argument, that is
+  refused with exit 2 (``alias.refused``, or the command's own path) and the
+  replacement, without echoing any argument. ``REFUSED_FLAGS`` holds the
+  refused flags of commands that remain.
+
+The commands read their lines from here. The documentation lint fails on a
+doc line that uses any entry, so docs only ever show the live command.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated
+
+import typer
+
+from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._helpers import DEPRECATED_SHORT_F_HELP, print_error, warn_deprecated_short_f
+from lakebench.exit_codes import ExitCode, UsageError
+
+#: When the aliases stop working.
+REMOVED_IN = "v1.8"
+
+
+@dataclass(frozen=True)
+class Alias:
+    """``target``: the command line that replaces the old one."""
+
+    target: str
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """``replacement``: what to run instead, or None when nothing replaces
+    it; ``reason``: why it was removed."""
+
+    replacement: str | None
+    reason: str
+
+
+ALIASES: dict[str, Alias] = {
+    # Its --format passes through, table by default.
+    "results": Alias("report --format table"),
+    "admin install-spark-operator": Alias("admin install --component spark-operator"),
+    "admin install-scratch-storage-class": Alias("admin install --component scratch-storage-class"),
+}
+
+
+@dataclass(frozen=True)
+class FlagAlias:
+    """A flag that still parses: ``replacement`` is the flag to use instead
+    (None: drop it), ``note`` what it does now."""
+
+    replacement: str | None
+    note: str
+
+
+#: The release whose commands ``DEPRECATED_COMMANDS`` hid.
+DEPRECATED_SINCE = "1.3"
+
+#: Commands hidden and marked deprecated since 1.3 (Click prints its own
+#: notice), kept as verbs in 1.7: the command each points to.
+DEPRECATED_COMMANDS: dict[str, str] = {
+    "info": "config show",
+    "recommend": "config recommend",
+}
+
+#: Flags that still parse. init's wizard flags print their note and write
+#: the default config.
+_WIZARD = FlagAlias(
+    None, "the init wizard is removed; init writes a default config (see init --help)"
+)
+ALIASED_FLAGS: dict[str, dict[str, FlagAlias]] = {
+    "init": dict.fromkeys(("--interactive", "-i", "--advanced"), _WIZARD),
+    "run": {"--sustained": FlagAlias("--continuous", "a deprecated alias; prints a warning")},
+    "recommend": dict.fromkeys(
+        ("--extended", "-e"), FlagAlias("--slow-datagen", "a deprecated alias; prints a warning")
+    ),
+}
+
+#: Hidden on purpose, not renamed or removed: the deprecated ``-f`` short
+#: flags (cli/_helpers.py), init's ``--no-interactive`` (accepted silently:
+#: it asks for what init always does) and two flags for harnesses that only
+#: add a refusal.
+HIDDEN_FLAGS: dict[str, tuple[str, ...]] = {
+    "*": ("-f",),
+    "init": ("--no-interactive",),
+    "deploy": ("--require-new",),
+    "destroy": ("--expect-incarnation",),
+}
+
+_RECLAIM = (
+    "; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first "
+    "(an owner action)"
+)
+_REASON_CORPUS = "a run regenerates its own corpus, so the corpus a record names is the one it read"
+_EVIDENCE = Refusal(None, "run records and journals are evidence, and the CLI does not delete them")
+
+REFUSED: dict[str, Refusal] = {
+    "config upgrade": Refusal(
+        "lakebench init --from OLD.yaml -o NEW.yaml",
+        "it rewrote configs lossily and wrote secrets in plaintext",
+    ),
+    "clean bronze": Refusal(
+        "lakebench run CONFIG --generate --regenerate" + _RECLAIM, _REASON_CORPUS
+    ),
+    "clean data": Refusal(
+        "lakebench clean silver CONFIG and lakebench clean gold CONFIG, then "
+        "lakebench run CONFIG --generate --regenerate" + _RECLAIM,
+        _REASON_CORPUS,
+    ),
+    "clean metrics": _EVIDENCE,
+    "clean journal": _EVIDENCE,
+    "compare": Refusal(
+        "lakebench report RUN_A and lakebench report RUN_B, then read the two reports side by side",
+        "comparing runs is left to the reader, and each report states the data, recipe, "
+        "versions, result fingerprints and caps needed to judge a comparison",
+    ),
+}
+
+_INIT_CREDENTIALS = Refusal(
+    "export LAKEBENCH_S3_ACCESS_KEY and LAKEBENCH_S3_SECRET_KEY (or the names "
+    "--credentials-env PREFIX gives)",
+    "init writes a reference to the variable, never the key",
+)
+
+#: Refused flags of commands that remain (each command refuses its own).
+REFUSED_FLAGS: dict[str, dict[str, Refusal]] = {
+    "init": {"--access-key": _INIT_CREDENTIALS, "--secret-key": _INIT_CREDENTIALS},
+    "clean": dict.fromkeys(("--metrics-dir", "-m"), _EVIDENCE),
+}
+
+
+def alias_notice(old: str) -> None:
+    """The one stderr line an alias prints before running its target."""
+    target = ALIASES[old].target
+    typer.echo(
+        f"`lakebench {old}` is now `lakebench {target}`; the old name is removed in {REMOVED_IN}",
+        err=True,
+    )
+
+
+def refusal(old: str, *, path: str = "alias.refused") -> UsageError:
+    """The error a refused command raises: what was removed, why, and what
+    to run instead. Never carries an argument the caller gave."""
+    r = REFUSED[old]
+    return UsageError(
+        f"`lakebench {old}` is removed: {r.reason}",
+        next=r.replacement or "nothing replaces it",
+        path=path,
+    )
+
+
+def results(
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[RUN|CONFIG]",
+            help="A run id or a configuration YAML file, as for `report`",
+            show_default=False,
+        ),
+    ] = None,
+    metrics_dir: Annotated[
+        Path,
+        typer.Option(
+            "--metrics",
+            "-m",
+            help="Directory containing run subdirectories",
+        ),
+    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
+    run_id: Annotated[
+        str | None,
+        typer.Option(
+            "--run",
+            "-r",
+            help="Specific run ID (default: latest)",
+        ),
+    ] = None,
+    output_format: Annotated[
+        str | None,
+        typer.Option(
+            "--format",
+            "-o",
+            help="Output format: table, json, csv (default: table)",
+        ),
+    ] = None,
+    format_short_f: Annotated[
+        str | None,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
+    ] = None,
+) -> None:
+    """Alias of `lakebench report --format table` (removed in v1.8)."""
+    alias_notice("results")
+    if format_short_f is not None:
+        warn_deprecated_short_f("--format / -o")
+        if output_format is not None and output_format != format_short_f:
+            print_error(f"both --format {output_format} and -f {format_short_f} given")
+            raise typer.Exit(ExitCode.USAGE)
+        output_format = format_short_f
+    from lakebench.cli import report
+
+    report(
+        target=target,
+        metrics_dir=metrics_dir,
+        run_id=run_id,
+        list_runs=False,
+        render=False,
+        output_path=None,
+        force=False,
+        summary=False,
+        output_format=output_format or "table",
+    )
+
+
+def compare(ctx: typer.Context) -> None:
+    """Removed in 1.7: refused with the replacement, whatever it is given."""
+    raise refusal("compare")
+
+
+def register(app: typer.Typer) -> None:
+    """Add the top-level aliases and refused commands to *app*, hidden from
+    help and the generated reference. The ``admin`` aliases live in
+    ``cli/_admin.py`` and ``config upgrade`` in ``cli/_config.py``; both read
+    these tables."""
+    app.command("results", hidden=True)(results)
+    app.command(
+        "compare",
+        hidden=True,
+        add_help_option=False,
+        context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    )(compare)

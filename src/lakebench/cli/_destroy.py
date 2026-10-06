@@ -12,21 +12,24 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
+from lakebench.cli._exit import note_exit_paths, refusal_paths, refused_result_code
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
+    LoadPurpose,
     load_config,
 )
+from lakebench.exit_codes import ExitCode, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
+    esc,
     journal_open,
     print_error,
     print_info,
@@ -34,6 +37,7 @@ from ._helpers import (
     resolve_config_path,
     stdin_is_tty,
 )
+from ._nameless import NAME_OPTION_HELP, guard_nameless
 
 
 def _build_destroy_list(cfg) -> str:
@@ -83,28 +87,19 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         )
         if not typer.confirm("Proceed?"):
             print_info("Destruction cancelled")
-            raise typer.Exit(EXIT_DECLINED)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
     try:
         removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
     except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
         print_error(f"Local destroy failed: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.FAILED)  # noqa: B904
 
     print_success(f"Removed {removed} container(s)")
     if remove_data:
         print_info(f"Deleted {used_workdir}")
     else:
         print_info(f"Data kept in {used_workdir} (--remove-data to delete)")
-
-
-# Exit code when everything else succeeded but the namespace was still
-# Terminating at --namespace-timeout (LB-157). Distinct from 1 (a step
-# failed) so scripts can wait and re-check instead of treating it as broken.
-# 3 is reserved for EXIT_DECLINED (a declined confirmation prompt), which
-# destroy also returns; a wrapper that retries destroy on exit 3 would
-# otherwise loop when a human answers `n` under a TTY.
-EXIT_NAMESPACE_STILL_TERMINATING = 4
 
 
 def destroy(
@@ -196,12 +191,16 @@ def destroy(
                 "after the delete is issued (PVC and pod finalizers can "
                 "hold it for minutes). A namespace still terminating at "
                 "the deadline is not reported as deleted and destroy exits "
-                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait, so "
-                f"destroy exits {EXIT_NAMESPACE_STILL_TERMINATING} unless "
+                f"{int(ExitCode.INCOMPLETE)}. 0 skips the wait, so "
+                f"destroy exits {int(ExitCode.INCOMPLETE)} unless "
                 "the namespace is already gone."
             ),
         ),
     ] = 600,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
     keep_buckets: Annotated[
         bool,
         typer.Option(
@@ -217,6 +216,17 @@ def destroy(
             ),
         ),
     ] = False,
+    expect_incarnation: Annotated[
+        str | None,
+        typer.Option(
+            "--expect-incarnation",
+            hidden=True,
+            help=(
+                "Refuse unless the namespace is this incarnation (UID#NONCE). "
+                "For harnesses that deployed it; it only adds a refusal."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
@@ -227,33 +237,108 @@ def destroy(
     """
     if force_short_f:
         force = deprecated_short_f_force("--force or -y", force)
+    if expect_incarnation is not None:
+        _check_incarnation_token(expect_incarnation)
+        if local:
+            raise UsageError(
+                "--expect-incarnation does not apply to --local: a local stack has no "
+                "namespace to check"
+            )
+    _destroy_impl(
+        resolve_config_path(config_file, file_option),
+        force=force,
+        local=local,
+        workdir=workdir,
+        remove_data=remove_data,
+        allow_unverified_cluster=allow_unverified_cluster,
+        force_legacy=force_legacy,
+        namespace_timeout=namespace_timeout,
+        name=name,
+        keep_buckets=keep_buckets,
+        expected_incarnation=expect_incarnation,
+    )
+
+
+def _check_incarnation_token(token: str) -> None:
+    """``UID#NONCE`` with both parts set, or a usage error (exit 2)."""
+    uid, sep, nonce = token.partition("#")
+    if not sep or not uid or not nonce or "#" in nonce:
+        raise UsageError(
+            f"--expect-incarnation {token!r} is not UID#NONCE",
+            next="pass the namespace's UID and its lakebench.deployment/deploy-nonce, "
+            "joined by '#'",
+            path="cli.bad_argument",
+        )
+
+
+def _destroy_impl(
+    config_file: Path,
+    *,
+    force: bool = False,
+    local: bool = False,
+    workdir: Path | None = None,
+    remove_data: bool = False,
+    allow_unverified_cluster: bool = False,
+    force_legacy: bool = False,
+    namespace_timeout: int = 600,
+    name: str | None = None,
+    keep_buckets: bool = False,
+    expected_incarnation: str | None = None,
+) -> None:
+    """The body of ``destroy``, callable with an expected incarnation.
+
+    ``expected_incarnation`` (``uid#nonce``) only adds a refusal: when the
+    namespace is not that incarnation, nothing is deleted and
+    ``SafetyRefusal`` (``destroy.incarnation_mismatch``, exit 3) is raised,
+    whatever ``force`` says. ``reproduce`` passes the incarnation it created.
+    """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file, file_option)
+    if expected_incarnation is not None and local:
+        raise UsageError(
+            "--expect-incarnation does not apply to --local: a local stack has no "
+            "namespace to check"
+        )
 
     # Load configuration
     try:
         # A namespace too long to finish deploying (LB-153) still has to be
         # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, allow_long_names=True)
+        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
             console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     if local:
         _destroy_local_mode(cfg, workdir, remove_data, force)
         return
 
     namespace = cfg.get_namespace()
+
+    # A nameless config destroys only a deployment it can prove is its own
+    # (its state or stamps); the incarnation it proved is the only one destroy may touch.
+    verified_incarnation = guard_nameless(cfg, config_file, allow_absent=False)
+    caller_expected = expected_incarnation is not None
+    if expected_incarnation is not None:
+        if verified_incarnation is not None and verified_incarnation != expected_incarnation:
+            from lakebench.exit_codes import SafetyRefusal
+
+            raise SafetyRefusal(
+                f"Destroy NOT started: namespace {namespace} is {verified_incarnation}, "
+                f"not the expected {expected_incarnation}. Nothing was changed.",
+                next="check which deployment the namespace now holds before destroying it",
+                path="destroy.incarnation_mismatch",
+            )
+        verified_incarnation = expected_incarnation
 
     # Confirmation
     if not force:
@@ -269,13 +354,13 @@ def destroy(
             confirm = typer.confirm("Are you sure you want to proceed?")
             if not confirm:
                 print_info("Destruction cancelled")
-                raise typer.Exit(EXIT_DECLINED)
+                raise typer.Exit(ExitCode.NOT_CONFIRMED)
         else:
             print_error(
-                "Refusing to destroy without --force in non-interactive mode. "
-                "Pass --force to skip confirmation."
+                "Refusing to destroy without --yes in non-interactive mode. "
+                "Pass --yes to skip confirmation."
             )
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.NOT_CONFIRMED)
 
     console.print(
         Panel(
@@ -295,7 +380,7 @@ def destroy(
         "spark-jobs": "Cleaning up jobs and pods",
         "spark-pods": "Cleaning up jobs and pods",
         "datagen-jobs": "Cleaning up jobs and pods",
-        "iceberg-tables": "Cleaning data",
+        "table-cleanup": "Cleaning data",
         "s3-buckets": "Cleaning data",
         "observability": "Removing infrastructure",
         "trino": "Removing infrastructure",
@@ -303,9 +388,12 @@ def destroy(
         "duckdb": "Removing infrastructure",
         "hive": "Removing infrastructure",
         "polaris": "Removing infrastructure",
+        "unity": "Removing infrastructure",
         "postgres": "Removing infrastructure",
+        "spark-scripts": "Removing infrastructure",
         "rbac": "Removing infrastructure",
         "scratch-sc": "Removing infrastructure",
+        "category1": "Removing infrastructure",
         "namespace": "Removing namespace",
     }
     _dg_current_group = ""
@@ -340,7 +428,8 @@ def destroy(
                     details={"component": component, "status": "skipped"},
                 )
         elif status == DeploymentStatus.SUCCESS:
-            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            # A step reported done without a start shows 0.0s, not -0.0s.
+            elapsed = max(0.0, time.time() - _dg_step_start.pop(component, time.time()))
             console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,
@@ -350,7 +439,7 @@ def destroy(
                 details={"component": component, "status": "success"},
             )
         elif status == DeploymentStatus.FAILED:
-            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            elapsed = max(0.0, time.time() - _dg_step_start.pop(component, time.time()))
             console.print(f"    [red]x[/red] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,
@@ -370,11 +459,33 @@ def destroy(
             force_legacy=force_legacy,
             namespace_wait_timeout=namespace_timeout,
             delete_buckets=not keep_buckets,
+            expected_incarnation=verified_incarnation,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904  kube config did not load
+
+    mismatch = next((r for r in results if (r.details or {}).get("incarnation_mismatch")), None)
+    if mismatch is not None:
+        # Nothing was deleted: a refusal (exit 3), not a partial teardown.
+        from lakebench.exit_codes import SafetyRefusal
+
+        _journal_safe(j.end_command, success=False, message=mismatch.message)
+        _journal_safe(j.close_session)
+        raise SafetyRefusal(
+            mismatch.message,
+            why=(
+                "the namespace is not the incarnation the caller expected (another "
+                "deploy replaced it, or the expected value is wrong)"
+                if caller_expected and (mismatch.details or {}).get("found")
+                else "the namespace was redeployed after this command checked it"
+                if (mismatch.details or {}).get("found")
+                else "the namespace is gone (another destroy may have finished it)"
+            ),
+            next="check which deployment the namespace now holds before destroying it",
+            path="destroy.incarnation_mismatch",
+        )
 
     # Summary
     destroy_elapsed = int(time.time() - destroy_start)
@@ -430,13 +541,14 @@ def destroy(
                 expand=False,
             )
         )
-        raise typer.Exit(EXIT_NAMESPACE_STILL_TERMINATING)
+        note_exit_paths(["destroy.namespace_terminating"])
+        raise typer.Exit(ExitCode.INCOMPLETE)
     elif failed == 0:
         console.print(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
                 f"{left_note}"
-                f"\n\nTo re-deploy: [bold]lakebench deploy[/bold]",
+                f"\n\nTo re-deploy: [bold]lakebench deploy {esc(config_file)}[/bold]",
                 title=(
                     f"Destroy Complete; {len(left_registered)} tables left registered"
                     if left_registered
@@ -454,4 +566,5 @@ def destroy(
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        note_exit_paths(refusal_paths(results))
+        raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)

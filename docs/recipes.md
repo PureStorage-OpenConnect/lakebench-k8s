@@ -9,13 +9,19 @@ Instead of setting `catalog`, `table_format`, `pipeline_engine`, and `query_engi
 ```yaml
 name: my-lakehouse
 recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
-architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # every Polaris recipe needs one
 ```
 
-Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
+Polaris recipes need no `client_secret`: `deploy` generates one per
+deployment and stores it in the namespace.
+
+Recipe defaults merge without overwriting: images, versions and engine
+resources set in the config always take precedence. The four components a
+recipe sets (`architecture.catalog.type`, `architecture.table_format.type`,
+`architecture.pipeline_engine`, `architecture.query_engine.type`) may be
+left out or written with the recipe's value; a different value is refused
+at load, naming both keys. A config with no `recipe:`, or `recipe: default`,
+still resolves to `hive-iceberg-spark-trino` with a deprecation note; v1.8
+requires `recipe:`. The 11 recipe names are listed in the table below.
 
 ## Quick Reference
 
@@ -28,10 +34,10 @@ The short names in the first column are the section headings below; the
 | **Standard Headless** | `hive-iceberg-spark-none` | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
 | **Spark SQL** | `hive-iceberg-spark-thrift` | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
 | **DuckDB** | `hive-iceberg-spark-duckdb` | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
-| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
-| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
+| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
+| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
+| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
 | **Hive Delta Trino** | `hive-delta-spark-trino` | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
 | **Hive Delta Spark SQL** | `hive-delta-spark-thrift` | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
 | **Hive Delta Headless** | `hive-delta-spark-none` | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
@@ -70,13 +76,10 @@ architecture:
 
 **Does not deploy:** Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. Either set `architecture.catalog.hive.operator.install: true` or install them with:
+**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. A cluster admin installs them once with:
 
 ```bash
-for op in commons-operator listener-operator secret-operator hive-operator; do
-  helm install $op oci://oci.stackable.tech/sdp-charts/$op \
-    --version 25.7.0 --namespace stackable --create-namespace
-done
+lakebench admin install --component stackable lakebench.yaml
 ```
 
 ---
@@ -165,7 +168,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore.
 
-**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+, and `architecture.catalog.polaris.client_secret` set in the config (every Polaris recipe; `deploy` and `run` refuse a Polaris config without it).
+**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0) and Trino 454+. The client secret is generated per deployment unless `architecture.catalog.polaris.client_secret` sets one.
 
 **Caveats:** The bootstrap Job always creates the catalog with `stsUnavailable=true` and `pathStyleAccess=true` (needed on FlashBlade and other non-AWS S3). Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
 
@@ -264,31 +267,34 @@ release tree), **unverified** (valid, not release-validated) or
 This table is generated from the code:
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|
-| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
-| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
-| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
-| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
-| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
-| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `hive-delta-spark-none` | unverified [1] | unverified [1] | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified [2] | unverified [1] | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified [2] | unverified [2] | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-none` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `hive-iceberg-spark-trino` | unverified [2] | unverified [2] | unverified [2] | unverified [2] |
+| `polaris-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | unverified [2] |
 
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- [1] unverified: not in this release's validation matrix.
+- [2] unverified: in this release's validation matrix; no validation run is listed yet.
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
 - AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
 
 <!-- END GENERATED: support-states -->
 
 ## Using `lakebench config recommend`
 
-The `config recommend` command shows sizing guidance for your cluster: the scale factor it can hold, or what a larger scale needs. It does not select a recipe, but it helps size the deployment. It takes an optional config file, used to detect the pipeline mode (default `lakebench.yaml`):
+The `config recommend` command shows sizing guidance for your cluster: the largest scale it can hold for your config, and what a larger scale needs. It sizes the config as written (its recipe, workload, mode and datagen settings) at each scale, with the same function the `run` capacity preflight uses. It does not select a recipe, but it helps size the deployment. It takes an optional config file (default `lakebench.yaml`); a config that does not load is an error:
 
 ```bash
 lakebench config recommend
@@ -316,9 +322,6 @@ platform:
       gold_executors: 12
 
 architecture:
-  catalog:
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}   # required for Polaris
   query_engine:
     trino:
       worker:
@@ -336,7 +339,7 @@ observability:
   enabled: true                        # deploy Prometheus + Grafana
 ```
 
-Recipe defaults are merged via `_deep_setdefault` -- your explicit values always take precedence. See the [Configuration Reference](configuration.md) for the full YAML schema.
+Recipe defaults are merged via `_deep_setdefault`: your explicit values take precedence, except the four recipe-owned components, which must agree with the recipe. See the [Configuration Reference](configuration.md) for the full YAML schema.
 
 ## Cross-References
 

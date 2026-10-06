@@ -286,3 +286,121 @@ class TestAddRefusesTerminatingNamespace:
             mgr._add_namespace_to_watch_impl("my-ns")
         assert run.called
         assert slept == [0.5]
+
+
+class TestPinnedContext:
+    """SAF-7: a kubeconfig rewritten under destroy surfaces as a
+    WatchListMutationError, so destroy keeps the namespace and names the
+    recovery, instead of an untyped error after a half-done upgrade."""
+
+    def test_conflict_before_the_first_mutation_modifies_nothing(self):
+        from lakebench.k8s.target import ContextConflictError
+
+        mgr = _mgr()
+        cm_ctx = MagicMock()
+        cm_ctx.__enter__ = MagicMock(return_value=MagicMock())
+        cm_ctx.__exit__ = MagicMock(return_value=False)
+        precondition = MagicMock()
+        with (
+            patch(
+                "lakebench.k8s.target.cli_args",
+                side_effect=ContextConflictError("one cluster context per process"),
+            ),
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
+            patch.object(mgr, "_remove_namespace_from_watch_impl") as impl,
+        ):
+            with pytest.raises(WatchListMutationError, match="NOT modified"):
+                mgr._remove_namespace_from_watch_locked("my-ns", precondition=precondition)
+        # Checked under the lease, before the precondition and any mutation.
+        cm_ctx.__enter__.assert_called_once()
+        precondition.assert_not_called()
+        impl.assert_not_called()
+
+    def test_add_refuses_on_a_context_conflict(self):
+        from lakebench.k8s.target import ContextConflictError
+
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
+            patch(
+                "lakebench.k8s.target.cli_args",
+                side_effect=ContextConflictError("one cluster context per process"),
+            ),
+            patch.object(mgr, "_add_namespace_to_watch_impl") as impl,
+        ):
+            assert mgr._add_namespace_to_watch("my-ns") is False
+        impl.assert_not_called()
+
+    @pytest.mark.parametrize("raised", ["timeout", "lease_hold"])
+    def test_add_fails_closed_after_the_pin_check_on_a_leased_timeout(self, raised):
+        """The pinned-context check passes, then a command runs out of the
+        lease's time: the add reports failure, not an exception, so deploy
+        does not read the namespace as watched (merge of CC-7 and LEASE)."""
+        import subprocess
+
+        from lakebench.k8s.lease_state import LeaseHoldExceeded
+
+        exc = (
+            subprocess.TimeoutExpired(["helm"], 30)
+            if raised == "timeout"
+            else LeaseHoldExceeded("lease hold budget spent")
+        )
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
+            patch("lakebench.k8s.target.cli_args", return_value=[]) as pin,
+            patch.object(mgr, "_add_namespace_to_watch_impl", side_effect=exc) as impl,
+        ):
+            assert mgr._add_namespace_to_watch("my-ns") is False
+        pin.assert_called_once()
+        impl.assert_called_once()
+
+    def test_add_conflict_after_the_upgrade_fails_closed_and_names_repair(self, caplog):
+        """A kubeconfig rewritten after the helm upgrade (before the
+        OpenShift patches) must not escape as a raw error."""
+        from lakebench.k8s.target import ContextConflictError
+
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
+            patch("lakebench.k8s.target.cli_args", return_value=[]),
+            patch.object(
+                mgr,
+                "_add_namespace_to_watch_impl",
+                side_effect=ContextConflictError("one cluster context per process"),
+            ),
+            caplog.at_level("ERROR"),
+        ):
+            assert mgr._add_namespace_to_watch("my-ns") is False
+        assert "admin repair-operator" in caplog.text
+        assert "partly modified" in caplog.text
+
+    def test_conflict_mid_sequence_names_repair_operator(self):
+        from lakebench.k8s.target import ContextConflictError
+
+        mgr = _mgr()
+        cm_ctx = MagicMock()
+        cm_ctx.__enter__ = MagicMock(return_value=MagicMock())
+        cm_ctx.__exit__ = MagicMock(return_value=False)
+        with (
+            patch("lakebench.k8s.target.cli_args", return_value=[]),
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
+            patch.object(
+                mgr,
+                "_remove_namespace_from_watch_impl",
+                side_effect=ContextConflictError("one cluster context per process"),
+            ),
+        ):
+            with pytest.raises(WatchListMutationError) as ei:
+                mgr._remove_namespace_from_watch_locked("my-ns")
+        assert "partly modified" in str(ei.value)
+        assert "admin repair-operator" in str(ei.value)
+
+    def test_run_refuses_a_tool_given_as_a_path(self):
+        mgr = _mgr()
+        with patch.object(mgr_mod.subprocess, "run") as run:
+            with pytest.raises(ValueError, match="by name"):
+                mgr._run(["/usr/bin/kubectl", "get", "pods"])
+        run.assert_not_called()

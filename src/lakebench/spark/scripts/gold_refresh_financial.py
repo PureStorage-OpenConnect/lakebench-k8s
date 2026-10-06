@@ -94,11 +94,14 @@ import signal
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 
 from bronze_verify_financial import MANIFEST_TABLE, register_manifest
 from common import (
     TTD_SNAPSHOT_UNKNOWN,
+    SealedFilterError,
     TtdBaseline,
+    ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -106,6 +109,7 @@ from common import (
     log,
     one_line,
     sealed_txns_filter,
+    sealed_txns_filter_at,
     table_exists,
     ttd_line,
 )
@@ -153,6 +157,9 @@ SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
+GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
 TM_PARAMS = params_from_env()
 # The CLI's continuous window length (0: unknown), so the TM layer times a
@@ -200,6 +207,12 @@ CONTINUOUS_SKIPPED_RULES = (
 )
 
 _SHUTDOWN = False
+# When stop_requested last logged a read error: it polls once a second, so a
+# lasting S3 error is logged once a minute, not every second.
+_MARKER_ERROR_LOGGED_AT = 0.0
+# Name of the drain marker the CLI writes under CHECKPOINT_LOCATION; its body
+# is the run id it is meant for (cli/_aml_post.py).
+STOP_MARKER = "_lb_stop"
 
 
 def _install_signal_handlers() -> None:
@@ -238,13 +251,12 @@ def _bootstrap_gold_tables(spark) -> None:
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
-    try:
-        cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
-        if "detected_ts" not in cols:
-            spark.sql(f"ALTER TABLE {CATALOG}.{GOLD_ALERTS} ADD COLUMNS (detected_ts TIMESTAMP)")
-            log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
-    except Exception as e:  # noqa: BLE001
-        log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+    # Reused-catalog upgrade, as gold_finalize_financial does: missing
+    # trailing ALERT_COLUMNS are appended; a table whose columns differ in
+    # any other way fails bootstrap, before the first tick writes positionally.
+    from detection_rules import ALERT_COLUMNS
+
+    ensure_alert_columns(spark, f"{CATALOG}.{GOLD_ALERTS}", ALERT_COLUMNS)
 
 
 def _newest_ingest_epoch_s(spark, fq_table):
@@ -450,17 +462,42 @@ def _prior_alerts_snapshot(spark):
     return _current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}")
 
 
+def _token(snapshot):
+    """How a tick record names a snapshot: the id, or ``none`` / ``unknown``."""
+    if snapshot is None:
+        return "none"
+    if snapshot == TTD_SNAPSHOT_UNKNOWN:
+        return "unknown"
+    return str(int(snapshot))
+
+
 def _pin_silver(spark):
-    """(txns, snapshot id, row count, newest ingest_ts in epoch seconds) of
-    silver.transactions at its current snapshot.
+    """(txns, txns snapshot, versions_used, row count, newest ingest_ts in
+    epoch seconds) of silver.transactions at its current snapshot, filtered
+    to sealed micro-batches by the versions table at ONE snapshot.
 
     The rules, the baseline and the time-to-detect lookup read this one
     frame, so they all see the same transactions, and the newest ingest_ts
     is exactly the newest row detection saw. Two readers do not: W2 reads
     silver.entities live (a customer row landing mid-tick can only add an
-    alert), and the TM pass pins silver again itself when it runs. Without a
-    snapshot (empty table, or the lookup failed) the table is read as it is
-    and the probes fall back to the live table, as before the pin.
+    alert), and the TM pass pins silver again itself when it runs.
+
+    The sealed filter reads the versions table ``VERSION AS OF`` the
+    snapshot captured right after the transactions snapshot
+    (``sealed_txns_filter_at``), so the covered scorer, given the same two
+    ids, sees exactly the sealed set detection saw. ``versions_used`` is that
+    id only when the pinned filter was built; otherwise (no versions
+    snapshot, a failed lookup, or a pinned read that raised) the tick falls
+    back to today's current-state filter and ``versions_used`` is ``none`` or
+    ``unknown``, so a tick record never carries an id detection did not use.
+    Without a transactions snapshot (empty table, or the lookup failed) the
+    table is read as it is and the probes fall back to the live table.
+
+    The sixth element is the time-travel record of the transactions snapshot
+    (``snapshot_record``), from the snapshot metadata only; None without a
+    snapshot. The row count falls back to ``iceberg_table_stats`` for the
+    tick's ``silver_rows`` log when the summary has no count, but that value
+    is the current table's, not the snapshot's, so the record never takes it.
     """
     fq = f"{CATALOG}.{SILVER_TXNS}"
     sid = _current_snapshot(spark, fq)
@@ -470,24 +507,30 @@ def _pin_silver(spark):
         # frame. Fallback path (no pinned snapshot) still filters.
         return (
             sealed_txns_filter(spark, spark.table(fq), CATALOG, SILVER_BATCH_VERSIONS),
-            None,
+            sid,
+            _token(sid),
             rows,
             _newest_ingest_epoch_s(spark, fq),
+            None,
         )
-    # I10: filter the pinned snapshot the same way. The versions read is
-    # against CURRENT state; a batch sealed after this pin but before the
-    # filter runs correctly becomes visible on the next tick.
-    txns = sealed_txns_filter(
-        spark, read_at_snapshot(spark, fq, sid), CATALOG, SILVER_BATCH_VERSIONS
-    )
-    rows = None
-    try:
-        r = spark.sql(
-            f"SELECT summary['total-records'] AS n FROM {fq}.snapshots WHERE snapshot_id = {sid}"
-        ).collect()
-        rows = int(r[0]["n"]) if r and r[0]["n"] is not None else None
-    except Exception as e:  # noqa: BLE001
-        log(f"[metrics] row count of {fq} at {sid} unavailable: {one_line(e)}")
+    vsid = _current_snapshot(spark, f"{CATALOG}.{SILVER_BATCH_VERSIONS}")
+    pinned = read_at_snapshot(spark, fq, sid)
+    txns = None
+    versions_used = _token(vsid)
+    if isinstance(vsid, int) and not isinstance(vsid, bool):
+        try:
+            txns = sealed_txns_filter_at(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS, vsid)
+        except (TypeError, SealedFilterError) as e:
+            log(
+                f"[metrics] pinned versions read at {vsid} failed, filtering current: {one_line(e)}"
+            )
+            versions_used = "unknown"
+    if txns is None:
+        # I10: today's current-state filter; a batch sealed after this pin
+        # but before the filter runs becomes visible on the next tick.
+        txns = sealed_txns_filter(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS)
+    tt = snapshot_record(spark, fq, sid)
+    rows = tt["total_records"]
     if rows is None:
         rows, _ = iceberg_table_stats(spark, fq)
     try:
@@ -496,7 +539,94 @@ def _pin_silver(spark):
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] newest ingest_ts of {fq} unavailable: {one_line(e)}")
         newest = None
-    return txns, sid, rows, newest
+    return txns, sid, versions_used, rows, newest, tt
+
+
+def _summary_int(value):
+    """A snapshot summary value (a string in Iceberg's summary map) as an int,
+    or None when it is absent or not an integer."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshot_record(spark, fq, sid):
+    """The time-travel record of ``fq`` at snapshot ``sid``, read from the
+    snapshot's metadata only (one query on ``{fq}.snapshots``, no data scan):
+    ``{snapshot, committed_at, total_records, pos_deletes, eq_deletes,
+    count_source}``. ``committed_at`` is ISO 8601 UTC. ``total_records`` is
+    the summary's ``total-records``: the sum of the record counts of the data
+    files live at ``sid``, deletes not subtracted, so it equals the live row
+    count only when ``pos_deletes`` and ``eq_deletes`` (the summary's
+    deleted-row totals) are 0, as under the copy-on-write tables Lakebench
+    creates. ``count_source`` is ``summary`` when ``total_records`` is
+    present, else ``unavailable``; the fields the summary does carry are kept
+    either way. A failed or empty lookup leaves every field None, and nothing
+    is ever filled in from the current table."""
+    rec = {
+        "snapshot": sid,
+        "committed_at": None,
+        "total_records": None,
+        "pos_deletes": None,
+        "eq_deletes": None,
+        "count_source": "unavailable",
+    }
+    try:
+        r = spark.sql(
+            "SELECT unix_micros(committed_at) AS committed_us, "
+            "summary['total-records'] AS n, "
+            "summary['total-position-deletes'] AS pos, "
+            "summary['total-equality-deletes'] AS eq "
+            f"FROM {fq}.snapshots WHERE snapshot_id = {sid}"
+        ).collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] snapshot summary of {fq} at {sid} unavailable: {one_line(e)}")
+        return rec
+    if not r:
+        log(f"[metrics] snapshot {sid} of {fq} not in its snapshots table")
+        return rec
+    row = r[0]
+    us = _summary_int(row["committed_us"])
+    if us is not None:
+        stamp = datetime.fromtimestamp(us // 1_000_000, timezone.utc)
+        rec["committed_at"] = stamp.replace(microsecond=us % 1_000_000).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+    rec["total_records"] = _summary_int(row["n"])
+    rec["pos_deletes"] = _summary_int(row["pos"])
+    rec["eq_deletes"] = _summary_int(row["eq"])
+    if rec["total_records"] is not None:
+        rec["count_source"] = "summary"
+    return rec
+
+
+def tt_record_line(cycle, table, rec):
+    """The tick's time-travel record line (metrics/tick_records.py
+    parse_tick_records): the snapshot detection read and its metadata
+    counts, for the post-run time-travel read. ``null`` for an unknown
+    value."""
+
+    def v(x):
+        return "null" if x is None else x
+
+    return (
+        f"Cycle {cycle}: tt-record table={table} snapshot={_token(rec['snapshot'])} "
+        f"committed_at={v(rec['committed_at'])} total_records={v(rec['total_records'])} "
+        f"pos_deletes={v(rec['pos_deletes'])} eq_deletes={v(rec['eq_deletes'])} "
+        f"count_source={rec['count_source']} run={RUN_ID}"
+    )
+
+
+def tick_pinned_line(cycle, sid, entities_sid, accounts_sid, versions_used, at_s):
+    """The tick record's first line (metrics/collector.py parse_tick_records):
+    the snapshots this tick's detection read."""
+    return (
+        f"Cycle {cycle}: pinned txns={_token(sid)} entities={_token(entities_sid)} "
+        f"accounts={_token(accounts_sid)} versions={versions_used} at={at_s:.3f} run={RUN_ID}"
+    )
 
 
 def _log_time_to_detect(spark, cycle, base, detected_s, silver=None, detected_by_rule=None) -> bool:
@@ -606,7 +736,24 @@ def run_tick(spark, state, cycle) -> dict:
     if not state.manifest_ready:
         state.manifest_ready = register_manifest(spark)
     # Pinned before anything reads silver, so every reader sees this corpus.
-    txns, _, silver_rows, newest_ingest_s = _pin_silver(spark)
+    pinned_at = time.time()
+    txns, sid, versions_used, silver_rows, newest_ingest_s, tt = _pin_silver(spark)
+    # The tick record: the snapshots this tick read (entities and accounts by
+    # metadata only; W2 still reads entities live), for the covered scorer.
+    log(
+        tick_pinned_line(
+            cycle,
+            sid,
+            _current_snapshot(spark, f"{CATALOG}.{SILVER_ENTITIES}"),
+            _current_snapshot(spark, f"{CATALOG}.{SILVER_ACCOUNTS}"),
+            versions_used,
+            pinned_at,
+        )
+    )
+    if tt is not None:
+        # Metadata counts of the pinned snapshot, for the time-travel read
+        # after the window; nothing on the tick path scans it.
+        log(tt_record_line(cycle, SILVER_TXNS, tt))
     newest_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
     if silver_rows == 0:
         log(f"Cycle {cycle}: Silver table is empty, skipping")
@@ -631,6 +778,12 @@ def run_tick(spark, state, cycle) -> dict:
         skipped_rules=CONTINUOUS_SKIPPED_RULES,
     )
     detection_end_s = time.time()
+    # The alerts and statuses this tick committed: the covered scorer reads
+    # gold.alerts and the detection status at exactly these snapshots.
+    log(
+        f"Cycle {cycle}: committed alerts={_token(_current_snapshot(spark, f'{CATALOG}.{GOLD_ALERTS}'))}"
+        f" status={_token(_current_snapshot(spark, f'{CATALOG}.{GOLD_STATUS}'))} run={RUN_ID}"
+    )
     detection = detection or {}
     rule_times = detection.get("rules", {})
     # Everything in the pass but the rules and the status/projection writes:
@@ -682,6 +835,7 @@ def run_tick(spark, state, cycle) -> dict:
     elapsed = time.time() - tick
     log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
     log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
+    log(f"Cycle {cycle}: completed run={RUN_ID}")
     # Collector line formats (LB-136). Freshness: how long ago the newest row
     # this tick's detection saw entered bronze, i.e. how stale the alerts are
     # against the input. Reported when silver moved on, and also whenever
@@ -759,6 +913,62 @@ def run_tick(spark, state, cycle) -> dict:
     return phases
 
 
+def _stop_marker_path() -> str:
+    return GOLD_CHECKPOINT.rstrip("/") + "/" + STOP_MARKER
+
+
+def stop_requested(spark) -> bool:
+    """Whether the CLI asked this run to drain: the marker exists under the
+    checkpoint and its body is this run's id (a marker meant for another run
+    of the deployment is ignored). A read error counts as absent, logged:
+    stopping on a transient S3 error would end detection mid-window."""
+    if not GOLD_CHECKPOINT:
+        return False
+    try:
+        jvm = spark._jvm
+        path = jvm.org.apache.hadoop.fs.Path(_stop_marker_path())
+        fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+        if not fs.exists(path):
+            return False
+        stream = fs.open(path)
+        try:
+            body = jvm.org.apache.commons.io.IOUtils.toString(stream, "UTF-8")
+        finally:
+            stream.close()
+        return str(body).strip() == RUN_ID
+    except Exception as e:  # noqa: BLE001 -- absent, and say so
+        global _MARKER_ERROR_LOGGED_AT
+        if time.time() - _MARKER_ERROR_LOGGED_AT >= 60:
+            _MARKER_ERROR_LOGGED_AT = time.time()
+            log(f"[drain] stop marker unreadable, treated as absent: {one_line(e)}")
+        return False
+
+
+def _idle_after_drain(spark, last_cycle, at_start=False) -> None:
+    """Report the drain, free the executors, and keep the pod (and its log)
+    until the CLI deletes the application. If this script exited the operator
+    would move the SparkApplication to COMPLETED and delete the pod before
+    the CLI reads the drain line (and would NOT auto-rerun it either:
+    streaming jobs use ``restartPolicy OnFailure`` with
+    ``onFailureRetries=0``). The drain line is logged again every minute so
+    it stays at the tail of the log the CLI polls whatever Spark logs while
+    it stops."""
+    where = "stop marker present at start; " if at_start else ""
+    line = f"Drain complete: {where}last completed cycle {last_cycle} run={RUN_ID}"
+    log(line)
+    try:
+        spark.stop()
+    except Exception as e:  # noqa: BLE001
+        log(f"[drain] spark.stop failed: {one_line(e)}")
+    log(line)
+    waited = 0
+    while not _SHUTDOWN:
+        time.sleep(1.0)
+        waited += 1
+        if waited % 60 == 0:
+            log(line)
+
+
 def main() -> None:
     _install_signal_handlers()
     spark = SparkSession.builder.appName("lb-gold-refresh-financial").getOrCreate()
@@ -771,6 +981,14 @@ def main() -> None:
     log(f"Max consecutive failures: {MAX_CONSECUTIVE_FAILURES}")
     log("=" * 60)
 
+    # If this process started on top of an already-drained run (stop marker
+    # present), do no further work. The streaming policy
+    # (OnFailure, onFailureRetries=0) will not restart this script after a
+    # drain; the check is kept for defence in depth.
+    if stop_requested(spark):
+        _idle_after_drain(spark, 0, at_start=True)
+        return
+
     _bootstrap_gold_tables(spark)
 
     # Earlier runs' alerts are cleared by run_detection_rules on each tick,
@@ -778,12 +996,17 @@ def main() -> None:
     consecutive_failures = 0
     state = TickState.start(spark)
     cycle = 0
+    last_completed = 0
+    draining = False
 
-    while not _SHUTDOWN:
+    while not _SHUTDOWN and not draining:
+        if stop_requested(spark):
+            break
         tick = time.time()
         cycle += 1
         try:
             run_tick(spark, state, cycle)
+            last_completed = cycle
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1
@@ -797,13 +1020,23 @@ def main() -> None:
                 spark.stop()
                 sys.exit(1)
 
-        # Sleep in short steps so a signal is honoured within ~1s.
-        remaining = max(0.0, REFRESH_S - (time.time() - tick))
-        while remaining > 0 and not _SHUTDOWN:
-            step = min(1.0, remaining)
-            time.sleep(step)
-            remaining -= step
+        # Sleep in short steps to a deadline, so a signal or the drain
+        # marker is honoured within about a second and the marker read's own
+        # time does not stretch the refresh interval.
+        deadline = tick + REFRESH_S
+        while not _SHUTDOWN:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            if stop_requested(spark):
+                draining = True
+                break
+            time.sleep(min(1.0, remaining))
 
+    if not _SHUTDOWN:
+        # The drain marker: the current tick finished; report and wait.
+        _idle_after_drain(spark, last_completed)
+        return
     log("SIGTERM/SIGINT received; refresh loop exiting cleanly")
     spark.stop()
 

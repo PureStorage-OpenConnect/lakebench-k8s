@@ -35,10 +35,17 @@ support state records the band.
 
 These values assume the Customer360 workload schema (the default). The
 financial (AML) schema has 111,111 entities and about 26.7 M transactions per
-scale unit. Its size estimate (`src/lakebench/config/scale.py`) is about
-8.4 GB of pacs.008 Parquet per scale unit, measured on the pre-freeze
-generator; v1.6 has no size measurements on the frozen generator (deferred
-to v1.7).
+scale unit. Its size (`src/lakebench/config/scale.py`) is measured, not
+linear: with the default 64 MB files on the v1.6 generator, the pacs.008
+Parquet bronze-verify read was 8.47 GB at scale 1 (AML batch runs
+20260928-103055-de1772 and 20260929-221146-9d5345) and 93.6 GB at scale 10
+(20260929-214442-825153). Rows are linear in scale; bytes per row grow from
+about 318 to 351 between the two. Between them the size per unit is
+interpolated in log scale; below scale 1 it is the scale-1 value and above
+scale 10 the scale-10 value. Two scale-100 runs on another setup read 0.4%
+(128 MB files, 20260929-000406-85b404) and 1.8% (an earlier generator,
+20260925-104703-c02890) above that. `scale_ratio` divides the bronze a run
+read by this size.
 
 Set the scale in your config file:
 
@@ -48,11 +55,45 @@ workload:
     scale: 100    # ~1 TB of bronze data
 ```
 
+## Batch and continuous are different workloads, not two speeds of the same thing
+
+Lakebench runs the same stage graph two ways. They answer different
+questions, and their numbers are not comparable:
+
+- **Batch** (`pipeline.mode: batch`) answers "how fast can my system
+  process this corpus?" The whole corpus is in bronze before the pipeline
+  starts; silver and gold run as hard as they can; the headline is wall
+  clock and throughput against the full corpus.
+- **Continuous** (`pipeline.mode: continuous`) answers "with data arriving
+  at this rate for this long, does my system keep up and how fresh is the
+  result?" The generator paces the same corpus across `run_duration`, and
+  silver and gold run as concurrent streams; the headline is data freshness
+  and whether silver fell behind.
+
+**Scale sets pressure, not wall clock.** `workload.datagen.scale` sets the
+corpus size (Customer 360 is ~10 GB per scale unit; AML is measured per
+scale, see `src/lakebench/config/scale.py`). In continuous mode that same
+corpus is spread across `pipeline.continuous.run_duration` (default 30 min),
+so a higher scale raises offered load per second, not the length of the
+run. In batch mode a higher scale raises wall clock.
+
+**The continuous throughput number is the offered load, not system
+capacity.** `sustained_throughput_rps` in the report is the rate the
+generator fed the pipeline (scale divided by window), not how fast the
+system could have gone unbounded. When `intake_limit` reads `trickle_rate`
+the system was never pushed past the configured rate; `pipeline_saturated`
+tells you whether silver kept up with that rate.
+
+Picking which to run:
+- Compare systems on batch when you want raw throughput on a fixed corpus.
+- Pick continuous and vary scale when you want to find where a system
+  starts falling behind, or to measure freshness under a steady load.
+- Do not read a batch number against a continuous number.
+
 ## Command Flags
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
@@ -83,9 +124,15 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    total data to generate.
 2. Generates synthetic Parquet files using the configured workload schema
    (Customer360 by default).
-3. Writes files directly to S3 at the path
-   `s3://<bronze-bucket>/<path_template>/` (default path template:
-   `customer/interactions`; the financial schema writes under `pacs008`).
+3. Writes files directly to S3 under a fixed prefix the Spark stages read:
+   `s3://<bronze-bucket>/customer/interactions/` for Customer 360 and
+   `s3://<bronze-bucket>/pacs008/` for the financial schema. v1.7 removed
+   the `medallion.bronze.path_template` key: the Customer 360 Spark stages
+   always read `customer/interactions/` whatever it said, so a custom bronze
+   layout is not supported. (The financial stages did read it, through
+   `LB_FINANCIAL_BRONZE_PREFIX`.) A config that still names the fixed layout
+   loads with a note; another layout is refused by the commands that change
+   data.
 4. Reports completion status back to Kubernetes.
 
 The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery
@@ -121,11 +168,10 @@ The default for `datagen.mode: auto` moved from `batch` (at scale <= 10)
 to `continuous` (at every scale). Same-seed corpora remain byte-identical;
 only the S3 upload pattern changed. If a run depended on batch-style
 bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`
-explicitly. Measured 2026-09-28: `continuous` is faster than `batch` at
-scale 1 for `customer360` (upload-generation overlap) and 10-16% slower
-at scale 10 because per-file multipart overhead grows with file count.
-Choose the mode from file count and network profile rather than accepting
-the default.
+explicitly. `continuous` overlaps generation with upload and `batch`
+uploads whole files once each is written. No measurement of the speed
+difference is published yet; choose the mode from file count and network
+profile rather than accepting the default.
 
 ### `--delivery-mode` (internal render arg)
 
@@ -212,25 +258,80 @@ kubectl logs -n <namespace> -l job-name=lakebench-datagen --tail=50
 
 ## Re-running Data Generation
 
-`lakebench generate` (and `run --generate`) refuses to write into a bronze
-prefix that already holds data: it exits 2 and names the prefix, so an
-existing corpus is never overwritten by accident. To regenerate, pass
-`--regenerate`, which empties the whole bronze bucket (and aborts dangling
-multipart uploads) before datagen starts:
+`lakebench generate` (and `run --generate`, and a multi-cycle run before
+its first cycle) refuses to write into a bronze datagen prefix that already
+holds data: it exits 3 (refused) and names the prefix, so an existing corpus is never
+overwritten by accident. What it does next depends on whether this
+deployment owns the bronze bucket: it carries this deployment's and this
+cluster's stamp (a tag, or on FlashBlade the `.lakebench/owner.json` marker),
+or this namespace's created-buckets record lists it (a bucket 1.6 created,
+stamped on the next deploy). A multi-cycle run takes the same rule before
+cycle 0 (1.6 cleared an owned prefix silently) and takes `--regenerate`
+without `--generate`; the continuous run refuses any bucket it does not own
+before it starts (exit 3, or 4 when ownership cannot be checked).
+
+| Bucket | Prefix | Flag | Result |
+|---|---|---|---|
+| owned | empty | any | generate |
+| owned | holds data | none | exit 3 |
+| owned | holds data | `--regenerate` | clear the datagen prefix (and abort its incomplete multipart uploads), then generate |
+| not owned | empty | any | generate |
+| not owned | holds data | none | exit 3: pass `--allow-stale-bronze`, or clear the prefix yourself |
+| not owned | holds data | `--regenerate` | exit 3: Lakebench never empties a bucket this deployment did not create |
+| not owned | holds data | `--allow-stale-bronze` | generate over it; `metrics.json` records `datagen.stale_bronze` and the report says "bronze held N objects before generate; rows may be over-counted" |
 
 ```bash
-lakebench generate my-config.yaml --wait --regenerate
+lakebench generate my-config.yaml --regenerate
 ```
 
-To keep the existing corpus instead, run the pipeline with `run
---skip-generate`, or without `--generate`.
+`--regenerate` clears only the datagen prefix; other data in the bucket
+(stream checkpoints, another workload's prefix) stays. To keep the existing
+corpus instead, run the pipeline with `run --skip-generate`, or without
+`--generate` (single-cycle; a multi-cycle run keeps it only with
+`--skip-generate`, and a multi-cycle AML run cannot reuse it).
 
-The deployer also clears the datagen prefix before the first cycle when
-this deployment created the bronze bucket (LB-185), so a smaller generate
-never inherits a larger earlier generate's `part-*` files. It does not
-touch a bucket it did not create or one with `create_buckets: false`; for
-those, empty the bronze data yourself (`lakebench clean bronze
-my-config.yaml`) or use `--regenerate`.
+Every generate writes a corpus series marker,
+`<datagen prefix>/_corpus/series.json`: the cycle count, the cycles whose
+datagen Job finished, each cycle's window, the generation parameters and the
+image digest the datagen pods ran. It is written when the generate starts,
+with no cycle finished, and updated after each cycle's Job succeeds, so an
+interrupted generate leaves a marker that says so; the clears of the prefix
+(`--regenerate`, a fresh generate, a continuous reset) first write a
+marker that says a clear is under way and keep it until the clear is
+done. A prefix holding only that marker counts as empty. A run that reuses the
+corpus is refused (exit 3) when the marker is unfinished or describes
+another cycle count, window or generation than the config's; see "Reusing a
+corpus" under `run` in the [CLI reference](cli-reference.md#run). No Spark
+stage reads `_corpus/`. `lakebench generate` refuses a multi-cycle config
+(exit 2): `run` generates each cycle before its stages.
+
+The deployer applies the same rule before the first cycle: it
+clears the datagen prefix of an owned bucket, so a smaller generate never
+inherits a larger earlier generate's `part-*` files, and refuses a non-empty
+prefix in any other bucket unless the gate allowed it (`--allow-stale-bronze`
+on a prefix that already held objects). Before
+1.7 it skipped such a bucket silently and silver over-counted the stale
+files. Before the gate lists or clears the prefix, `generate`, `run
+--generate` and a multi-cycle run delete an earlier `lakebench-datagen` Job
+and wait until none of its pods (label `app=lakebench-datagen`) is still
+running, since a pod in its grace period could otherwise land a file in the
+cleared prefix that silver would count as this run's. The wait is bounded
+at five minutes; a pod still running then refuses with exit 3
+(`datagen.pods_live`), and pods that cannot be listed exit 4. A
+continuous run does the same before its reset clears the raw prefix. The
+deployer then follows the gate's decision, not the `--allow-stale-bronze`
+flag: objects that appear after the gate found the prefix empty are
+refused.
+
+A continuous run's own datagen never takes `--allow-stale-bronze`
+(`run --continuous --generate-only` does): its reset has already cleared
+the datagen prefix, so objects found there were put there since by another
+writer, and the refusal (exit 3) says to re-run once nothing writes there.
+A `run` without datagen after a `generate --allow-stale-bronze`
+records the same `datagen.stale_bronze` (the generate leaves the note under
+`lakebench-output/datagen/`). Every generate that proceeds clears the
+silver-state `bronze_data_clock`, since bronze is being replaced; the next
+bronze-verify writes it again.
 
 ## Configuration Options
 
@@ -273,16 +374,16 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:1.6.0`, digest
-`sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a`,
+The default image (`docker.io/sillidata/lb-datagen:2a36ae21`, digest
+`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`,
 generator version `datagen-v2-rs-0.3`; output-identical to the v1.6 AML
-generator freeze but not the registered-look image, see
-`docs/internal/aml-protocol.md`) is built from the `datagen_rs/` directory in this repository. To build and push a custom
+generator freeze on the five byte-compare cases, and the registered-look
+image, see `docs/internal/aml-protocol.md`) is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:
 
 ```bash
 cd datagen_rs/
-podman build -t my-registry/my-datagen:latest .
+podman build --build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD) -t my-registry/my-datagen:latest .
 podman push my-registry/my-datagen:latest
 ```
 
@@ -307,7 +408,8 @@ workload:
 ```
 
 Customer360 produces approximately 10 GB of bronze data per scale unit;
-financial is estimated at about 8.4 GB (pre-freeze measurement, see above).
+financial about 8.5 GB at scale 1 and 9.4 GB per unit from scale 10 (measured
+to scale 10, see above).
 The domain dimensions (number of entities, events per entity, date range)
 vary by schema and are defined in `src/lakebench/config/scale.py`; the Arrow
 schemas are in `datagen_rs/src/schema.rs`. `schema: custom` is rejected at

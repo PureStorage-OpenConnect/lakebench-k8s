@@ -75,6 +75,13 @@ spec:
                 secretKeyRef:
                   name: lakebench-s3-credentials
                   key: secretKey
+{% if catalog_type == "polaris" %}
+            - name: POLARIS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-polaris-client
+                  key: clientSecret
+{% endif %}
           volumeMounts:
             - name: config
               mountPath: /etc/trino/config.properties

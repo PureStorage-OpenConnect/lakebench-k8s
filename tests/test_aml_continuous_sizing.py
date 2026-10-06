@@ -147,7 +147,7 @@ def test_counts_scale_and_respect_the_cap(scale, silver, gold):
 
 @pytest.mark.parametrize(
     ("scale", "cores", "memory"),
-    [(1, 118, 980), (10, 118, 980), (100, 222, 1948)],
+    [(1, 118, 990), (10, 118, 990), (100, 222, 1958)],
 )
 def test_peak_requirements(scale, cores, memory):
     """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
@@ -258,6 +258,7 @@ def _capacity_k8s(cores):
         largest_node_cpu_millicores=cores * 1000 // 8,
         largest_node_memory_bytes=432 * 1024**3,
     )
+    _free_from_total(k8s)
     return k8s
 
 
@@ -273,9 +274,17 @@ def test_manifest_deploys_the_override(job, instances):
 
 
 class TestPreflightBetweenOldAndNewMinimum:
-    """A cluster between the old AML continuous minimum (54 cores) and the
-    new one (118) runs degraded with a warning naming the capped stages,
-    rather than failing preflight."""
+    """A cluster between the capped AML continuous request and the full one
+    runs degraded with a warning naming the capped stages, rather than
+    failing preflight.
+
+    The preflight sizes the config as ``run`` does (CC-22: auto-sizing on a
+    copy against the cluster), so datagen is 4 pods x 8 cores here even
+    though this test's config is not resolved in place. The capped request
+    is then 82 cores (81 before lb-deps was counted in it); before CC-22 an unresolved config was checked with the
+    schema's datagen defaults and passed from 57 cores, a cluster on which
+    ``run`` itself is refused.
+    """
 
     GIB = 1024**3
 
@@ -289,9 +298,10 @@ class TestPreflightBetweenOldAndNewMinimum:
         )
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             return _check_cluster_capacity(_config("financial", 10))
 
-    @pytest.mark.parametrize("cores", [60, 80, 100, 117])
+    @pytest.mark.parametrize("cores", [82, 100, 117, 160])
     def test_runs_degraded_with_a_warning(self, cores):
         r = self._check(cores)
         assert r.passed
@@ -299,10 +309,12 @@ class TestPreflightBetweenOldAndNewMinimum:
         assert "silver-stream" in r.message or "gold-refresh" in r.message
 
     def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
-        """At 54 cores the capped streams plus Trino, Hive/Postgres and
-        datagen need 57: the run would hang Pending, so preflight fails."""
+        """The capped streams plus Trino, Hive/Postgres, lb-deps and datagen
+        (4 pods x 8 cores, as run sizes them) need 82: below that the run
+        would hang Pending, so preflight fails."""
         assert not self._check(54).passed
-        assert self._check(57).passed
+        assert not self._check(81).passed
+        assert self._check(82).passed
 
     @pytest.mark.parametrize("cores", [30, 37])
     def test_c360_below_the_capped_request_still_fails(self, cores):
@@ -313,6 +325,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(cores * 1000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(_config("customer360", 10)).passed
 
     def test_an_explicit_count_is_counted_uncapped(self):
@@ -326,6 +339,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(80_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(cfg).passed
 
     def test_a_driver_override_is_counted(self):
@@ -336,9 +350,10 @@ class TestPreflightBetweenOldAndNewMinimum:
         def run(driver_cores):
             cfg = _config("financial", 10)
             cfg.platform.compute.spark.driver_cores = driver_cores
-            cap = ClusterCapacity(57_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+            cap = ClusterCapacity(82_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
             with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
                 get_client.return_value.get_cluster_capacity.return_value = cap
+                _free_from_total(get_client.return_value)
                 return _check_cluster_capacity(cfg).passed
 
         assert run(None)
@@ -376,4 +391,83 @@ class TestPreflightBetweenOldAndNewMinimum:
         cap = ClusterCapacity(20_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
+            _free_from_total(get_client.return_value)
             assert not _check_cluster_capacity(cfg).passed
+
+
+# -- driver pod overhead (LB-227) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("heap", "mib"),
+    [("32g", 32768 + 13107), ("8g", 8192 + 3276), ("2g", 2048 + 819), ("512m", 512 + 384)],
+)
+def test_driver_pod_counts_spark_non_jvm_overhead(heap, mib):
+    """Spark on Kubernetes gives a Python driver max(0.4 x heap, 384 MiB) of
+    overhead when the manifest sets none (BasicDriverFeatureStep)."""
+    from lakebench.modules.pipeline_engines.spark.job import _driver_pod_bytes
+
+    assert _driver_pod_bytes(heap) == mib * 1024**2
+
+
+@pytest.mark.parametrize("schema", ["financial", "customer360"])
+def test_manifest_sets_no_driver_overhead(schema):
+    # The count above holds only while the manifest leaves the overhead to Spark.
+    cfg = _config(schema, 1)
+    for jt in _STAGES + (JobType.BRONZE_VERIFY, JobType.SILVER_BUILD, JobType.GOLD_FINALIZE):
+        m = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(jt)
+        assert m["spec"]["type"] == "Python"
+        assert "memoryOverheadFactor" not in m["spec"]
+        assert "memoryOverhead" not in m["spec"]["driver"]
+        conf = m["spec"]["sparkConf"]
+        assert not [k for k in conf if "memoryOverhead" in k and "driver" in k]
+        assert "spark.kubernetes.memoryOverheadFactor" not in conf
+
+
+@pytest.mark.parametrize("schema", ["financial", "customer360"])
+def test_continuous_budget_counts_driver_overhead(schema, monkeypatch):
+    from lakebench.config.schema import parse_spark_memory
+    from lakebench.modules.pipeline_engines.spark import job as job_mod
+
+    cfg = _config(schema, 1)
+    with_overhead = job_mod.streaming_request_under_budget(cfg, 10_000_000).memory_gb
+    monkeypatch.setattr(job_mod, "_driver_pod_bytes", parse_spark_memory)
+    heap_only = job_mod.streaming_request_under_budget(cfg, 10_000_000).memory_gb
+    overhead = (
+        sum(
+            max(
+                int(
+                    0.4
+                    * parse_spark_memory(get_job_profile(jt.value, schema)["driver_memory"])
+                    / 2**20
+                ),
+                384,
+            )
+            for jt in _STAGES
+        )
+        * 2**20
+    )
+    assert with_overhead - heap_only in (overhead // 1024**3, -(-overhead // 1024**3))
+    assert with_overhead > heap_only
+
+
+def test_peak_rounds_driver_overhead_up():
+    # silver-build at scale 1: 8 x 60 GiB executors + a 44.8 GiB driver pod.
+    peak = compute_peak_requirements(1, "batch")
+    sb = next(r for r in peak.per_job if r.job_type == "silver-build")
+    assert sb.memory_gb == 525  # 524.8 GiB, never rounded down
+
+
+def _free_from_total(k8s_mock):
+    """The preflight reads free capacity: make the mock report the capacity
+    its get_cluster_capacity returns as both free and allocatable (one node
+    with the largest node's resources free), with no published scratch."""
+    from lakebench.k8s.client import FreeCapacity, ScratchCapacity
+
+    def _free(**_kw):
+        cap = k8s_mock.get_cluster_capacity.return_value
+        node = (cap.largest_node_cpu_millicores, cap.largest_node_memory_bytes)
+        return FreeCapacity(free=cap, allocatable=cap, free_by_node=(node,))
+
+    k8s_mock.get_free_capacity.side_effect = _free
+    k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")

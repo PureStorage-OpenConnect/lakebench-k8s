@@ -43,7 +43,8 @@ platform:
 
     scratch:
       enabled: true
-      # ENG-2C.10 autosizer bumps this to 200Gi for financial silver_build.
+      # Autosizer picks per-job scratch sizes: silver-build 300Gi, and the
+      # financial profile raises bronze-verify to 500Gi.
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>
 
   compute:
@@ -54,17 +55,11 @@ platform:
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
-      # Generate one with:
-      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+    # polaris.client_secret is optional: deploy generates one per deployment
+    # and stores it in the Secret lakebench-polaris-client.
 
   pipeline:
     mode: batch
-    medallion:
-      bronze:
-        format: parquet
-        path_template: pacs008     # <-- datagen + bronze_verify both read here
 
   tables:
     bronze: default.pacs008_raw

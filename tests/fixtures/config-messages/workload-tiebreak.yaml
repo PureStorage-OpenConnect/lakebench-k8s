@@ -1,0 +1,4 @@
+name: t
+workload:
+  customer360:
+    mode: batch

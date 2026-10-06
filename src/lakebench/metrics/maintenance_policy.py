@@ -29,15 +29,29 @@ Policy history:
   files after commit (previous-versions-max 50). Tables created by an
   earlier version and reused keep their old properties.
 
-A run with ``--skip-maintenance`` is stamped ``<id>+skipped``: it ran no
-table maintenance, so it compares with nothing measured under the policy.
+v1.7 keeps ``m2-2026-09-26``: Trino optimize on a table with more
+than 90 identity partitions runs as chunks of at most 90 partitions, so it
+no longer fails on the connector's 100-writer limit. The operation, its
+threshold and the tables it covers are what m2 already intended; only a
+failure stopped it. Compaction outcomes now count tables (a table succeeds
+when every chunk does) and name each failed table.
 
-Bump MAINTENANCE_POLICY_ID whenever what maintenance does, when it runs, or
-how long it may take changes, and add a line above.
+A run with ``--skip-maintenance`` is stamped ``<id>+skipped``: it ran no
+table maintenance, so the perf gate matches it with nothing measured under
+the policy. The identity reads two runs that each skipped every operation
+under one policy (``+skipped``, or ``pre_benchmark_maintenance`` off in
+batch) as the same maintenance (comparability.maintenance_equal).
+
+Bump MAINTENANCE_POLICY_ID whenever the maintenance policy changes (which
+operations run, at what retention or threshold, on which tables, when, and
+under what time bounds), and add a line above. A fix that makes the current
+policy's operations succeed as intended, like the v1.7 chunking, does not
+bump it; the run's effective maintenance records what actually happened.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -82,6 +96,10 @@ def policy_mismatch(expected: str | None, actual: str | None) -> str | None:
     )
 
 
+#: The per-statement query id in a Trino error ("Query 20260929_..._abcde
+#: failed: "), dropped so the same error in two rounds reads as one.
+_QUERY_ID = re.compile(r"Query \S+ failed: ")
+
 #: Coarse per-operation classes for the effective maintenance identity.
 RAN = "ran"
 #: The operation executed, but at a retention no file written inside the
@@ -116,6 +134,46 @@ OPERATION_KIND = {
 }
 # Worst first: the coarse per-kind class is the worst of its operations.
 _SEVERITY = (FAILED, NOT_RUN, SKIPPED_BY_USER, NOT_SUPPORTED, RAN_NO_EFFECT, RAN)
+
+
+def compaction_label(effective: Mapping[str, Any]) -> str | None:
+    """``<operation>:<param values>`` of the compaction a run's effective
+    maintenance records (``trino_optimize:128MB``,
+    ``iceberg_rewrite_data_files``), or None when it records none."""
+    detail = (((effective.get("detail") or {}).get("operations") or {}).get("compaction")) or {}
+    return operation_label(detail)
+
+
+def operation_label(detail: Any) -> str | None:
+    """``<operation>:<param values>`` of one recorded compaction entry
+    (``detail.operations.compaction``). A mixed entry names each operation,
+    ``mixed(iceberg_rewrite_data_files+trino_optimize:128MB)``, so two
+    different mixes never read the same."""
+    if not isinstance(detail, Mapping) or not detail.get("operation"):
+        return None
+    if detail["operation"] == "mixed":
+        parts = sorted(p for p in (operation_label(o) for o in detail.get("operations") or []) if p)
+        return f"mixed({'+'.join(parts)})"
+    params = detail.get("params") or {}
+    values = (
+        # ";" so the label never adds a "," to the comma-separated id.
+        ";".join(str(v) for _k, v in sorted(params.items())) if isinstance(params, Mapping) else ""
+    )
+    return f"{detail['operation']}:{values}" if values else str(detail["operation"])
+
+
+def with_compaction_operation(effective: dict[str, Any]) -> dict[str, Any]:
+    """*effective* with ``compaction=ran(<operation>:<params>)`` in its ``id``
+    when the compaction operation is recorded (``detail_id`` reads on, off
+    or partial and is left as it is). Only exp2 blocks carry it: an exp1 id
+    never moves, and its operation is derived at read time
+    (metrics/comparability.compaction_operation)."""
+    label = compaction_label(effective)
+    if label is None or not isinstance(effective.get("id"), str):
+        return effective
+    out = dict(effective)
+    out["id"] = re.sub(r"\bcompaction=ran\b(?!\()", f"compaction={RAN}({label})", out["id"])
+    return out
 
 
 def operations_for(table_format: str | None) -> tuple[str, ...]:
@@ -176,6 +234,15 @@ def effective_maintenance(
     An operation is never ``not_supported`` when a statement for it
     executed: an executed operation is ``ran``, ``ran_no_effect`` or (when
     no statement succeeded) ``failed``.
+
+    Compaction outcomes recorded from v1.7 count tables (``unit:
+    "tables"``), carry ``failures`` (``{table, statement, error}``) and
+    ``statements``; each failed table adds "compaction failed on <table>:
+    <error>" to ``reasons``, and ``detail`` gains ``compaction_failures``
+    (the table list) and ``compaction_statements`` (the statements
+    attempted). ``failed`` still means no statement succeeded, so a table
+    whose chunks partly succeeded is partial: it stays ``ran`` in ``id`` and
+    reads ``partial`` in ``detail_id``.
 
     ``ran_no_effect`` assumes the window is shorter than the 7 d retention;
     a longer continuous run under-claims (it reads no effect where VACUUM
@@ -279,6 +346,11 @@ def effective_maintenance(
                     reasons.append(f"{op}: never reached (the run ended before maintenance)")
                     continue
                 total = ok = 0
+                # Outcomes counted per table (v1.7) still decide
+                # ``failed`` by statements, so the id rule is unchanged: a
+                # table whose chunks partly succeeded is partial, not failed.
+                stmt_total = stmt_ok = 0
+                unit = "statements"
                 for o in mine:
                     if o.get("kind") != kind:
                         continue
@@ -290,16 +362,27 @@ def effective_maintenance(
                     else:
                         total += int(o.get("total") or 0)
                         ok += int(o.get("succeeded") or 0)
+                        if o.get("unit") == "tables":
+                            unit = "table compactions"
+                        stmt_total += int(o.get("statements_total", o.get("total")) or 0)
+                        stmt_ok += int(o.get("statements_succeeded", o.get("succeeded")) or 0)
                 # A round or phase that raised counts as one failed attempt.
-                total += sum(1 for o in mine if o.get("error"))
-                if total == 0 or ok == 0:
+                raised = sum(1 for o in mine if o.get("error"))
+                total += raised
+                if kind == "expire" or not stmt_total:
+                    stmt_total, stmt_ok = total, ok
+                else:
+                    stmt_total += raised
+                if stmt_total == 0 or stmt_ok == 0:
                     op_cls[op], detail[op] = FAILED, "off"
                     reasons.append(
-                        f"{op}: no statement ran" if total == 0 else f"{op}: 0 of {total} succeeded"
+                        f"{op}: no statement ran"
+                        if stmt_total == 0
+                        else f"{op}: 0 of {stmt_total} statements succeeded"
                     )
                 elif ok < total:
                     detail[op] = "partial"
-                    reasons.append(f"{op}: {ok} of {total} statements succeeded")
+                    reasons.append(f"{op}: {ok} of {total} {unit} succeeded")
     if live_vacuum and op_cls.get("vacuum") == RAN:
         retention = ", ".join((per_op.get("vacuum") or {}).get("applied_retention") or []) or (
             ", ".join(sorted(applied)) or "the 7 d default"
@@ -315,6 +398,35 @@ def effective_maintenance(
             else "vacuum runs at Delta's 7 d default while streams are live: no file "
             "written in the window is eligible"
         )
+    # Which tables compaction failed on, and what ran: a partial
+    # compaction stays out of ``id`` and is named here and in ``reasons``.
+    compaction_detail: dict[str, Any] = {}
+    compaction_records = [
+        o for o in (outcomes or []) if o.get("kind") == "compaction" and "statements" in o
+    ]
+    if compaction_records:
+        failed_tables: list[str] = []
+        statements: list[str] = []
+        # One reason per (table, error), with a count: a chunk that fails
+        # every round of a long run is one line, not one per round.
+        failure_counts: dict[tuple[str, str], int] = {}
+        for o in compaction_records:
+            for f in o.get("failures") or []:
+                table = str(f.get("table") or "unknown")
+                error = _QUERY_ID.sub("", str(f.get("error") or "no error text"))
+                if table not in failed_tables:
+                    failed_tables.append(table)
+                failure_counts[(table, error)] = failure_counts.get((table, error), 0) + 1
+            for sql in o.get("statements") or []:
+                if sql not in statements:
+                    statements.append(str(sql))
+        for (table, error), count in failure_counts.items():
+            times = f" ({count} times)" if count > 1 else ""
+            reasons.append(f"compaction failed on {table}: {error}{times}")
+        compaction_detail = {
+            "compaction_failures": failed_tables,
+            "compaction_statements": statements,
+        }
     limitations: list[str] = []
     if fmt == "delta" and continuous:
         limitations.append(DELTA_CONTINUOUS_LIMITATION)
@@ -323,6 +435,30 @@ def effective_maintenance(
         detail_parts.append("stopped")
         reasons.append("pre-benchmark maintenance stopped on its budget")
     coarse = {k: _worst([v for op, v in op_cls.items() if OPERATION_KIND[op] == k]) for k in both}
+    # The compaction operation and its parameters as the run's compaction
+    # calls recorded them (from the builders that wrote the SQL): Trino
+    # optimize with its threshold is a different maintenance from Iceberg
+    # rewrite_data_files defaults.
+    # Calls that ran no statement say nothing about what ran; two engines
+    # (one call falling back to the other) are recorded as mixed.
+    named = {
+        (str(o["operation"]), tuple(sorted((o.get("params") or {}).items())))
+        for o in (outcomes or [])
+        if o.get("kind") == "compaction"
+        and o.get("operation")
+        and int(o.get("statements_succeeded", o.get("succeeded")) or 0) > 0
+    }
+    if named and op_cls.get("compaction") == RAN:
+        if len(named) == 1:
+            ((op_name, params),) = named
+            entry: dict[str, Any] = {"operation": op_name, "params": dict(params)}
+        else:
+            entry = {
+                "operation": "mixed",
+                "params": {},
+                "operations": [{"operation": n, "params": dict(p)} for n, p in sorted(named)],
+            }
+        per_op.setdefault("compaction", {}).update(entry)
     return {
         "id": f"{policy}:" + ",".join(f"{op}={op_cls[op]}" for op in ops),
         "detail_id": f"{policy}:" + ",".join(detail_parts),
@@ -333,6 +469,7 @@ def effective_maintenance(
             **detail,
             **({"applied_retention": sorted(applied)} if applied else {}),
             **({"operations": per_op} if per_op else {}),
+            **compaction_detail,
         },
         "basis": "recorded outcomes"
         if outcomes is not None

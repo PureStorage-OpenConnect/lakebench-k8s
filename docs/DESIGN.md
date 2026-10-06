@@ -220,9 +220,10 @@ alone changes them.
 1. **Correctness before comparison.** Performance results are valid only when
    the workload completed correctly, and a performance comparison is invalid
    when the compared runs produced different workload results.
-   `lakebench compare` then shows the evidence, gives a NOT COMPARABLE
-   verdict, suppresses any winner or performance conclusion, and exits
-   non-zero.
+   Every run's report shows the evidence (a result fingerprint per query,
+   and for an AML batch run its alert set), so a reader can see whether two
+   runs produced the same results; the perf gate and `reproduce` refuse a
+   run whose query results differ from their reference.
 2. **Non-degenerate pass.** A successful exit is not evidence if the output
    is empty, degenerate, skipped or otherwise invalid. Every stage and every
    gate checks what it produced, not that it returned.

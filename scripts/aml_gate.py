@@ -12,6 +12,7 @@ DG_LOCAL_DIR set: ``bronze/pacs008/part-*.parquet``, ``bronze/party.parquet``,
 
 Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
 
+    LB_HELDOUT_HASHES=src/lakebench/spark/data/aml/heldout_hashes.json \\
     DG_LOCAL_DIR=/scratch/c datagen_rs/target/release/generate \\
         --bucket bronze --prefix pacs008/ --seed 43 --scale 2
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
@@ -32,6 +33,9 @@ hosts and never feed D8). ``--l2-sensitivity`` adds the ungated l2 refits.
 Spent seeds are refused, and so are the evaluation and robustness seeds unless
 ``--registered <role>`` marks this as the registered gate run for that role
 (the report then records the look under ``registered_look``). A registered
+evaluation or robustness look takes its seed from ``--seed-file PATH`` (one
+integer, a file only its owner can read), never from ``--seed``, so the
+held-out seed is on no command line. A registered
 look appends its seed to src/lakebench/spark/data/aml/aml_registered_looks.json
 before any model is fitted and its report sha256 before the verdict is
 printed; commit that file after the look. The manifest is
@@ -121,15 +125,44 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def read_seed_file(path: Path) -> int:
+    """The corpus seed from an owner-only file (one integer). The file must be
+    a regular file that neither group nor others can read, so a held-out seed
+    is never on a command line or in a world-readable file. Errors never
+    print the file's content."""
+    import stat
+
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"--seed-file {path} is not a regular file")
+    if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise ValueError(
+            f"--seed-file {path} is readable by group or others "
+            f"(mode {stat.S_IMODE(st.st_mode):o}); chmod 600 it"
+        )
+    text = Path(path).read_text().strip()
+    try:
+        seed = int(text)
+    except ValueError:
+        raise ValueError(
+            f"--seed-file {path} does not hold one integer (content not shown)"
+        ) from None
+    if not 0 <= seed <= sys.maxsize:  # the generator's i64 range on a 64-bit host
+        raise ValueError(
+            f"--seed-file {path} holds a seed outside the 64-bit seed range (not shown)"
+        )
+    return seed
+
+
 def seed_guard_error(
     claimed, registered, matched, counts_only=False, claim_verified=None
 ) -> str | None:
-    """Why the gate must refuse this corpus, or None (AML-GOALS R3).
+    """Why the gate must refuse this corpus, or None.
 
-    ``matched`` lists the guarded seeds (spent, evaluation, robustness) the
-    manifest's instance seeds come from: the corpus's real seed if it is a
-    guarded one, whatever ``--seed`` claims, so omitting or misstating
-    ``--seed`` does not get an evaluation corpus scored.
+    ``matched`` describes the guarded seeds (spent, evaluation, robustness)
+    the manifest comes from, whatever ``--seed`` claims: seeds, or the role
+    ``corpus_verdict`` recovered from every manifest row. So omitting or
+    misstating ``--seed`` does not get an evaluation corpus scored.
     """
     from lakebench.config.datagen_seed import _corpora, aml_seed_error
 
@@ -138,57 +171,48 @@ def seed_guard_error(
     )
 
 
+def report_seed(seed):
+    """The corpus seed as a report records it. A held-out seed with no
+    recorded look (a counts-only smoke run on it) is recorded as its salted
+    hash, so the report never carries a live look seed; any other seed, and a
+    held-out seed once its look is recorded, is recorded as given."""
+    from lakebench.config.datagen_seed import heldout_role, seed_ref, spent_seeds
+
+    if seed is None or heldout_role(seed) is None or int(seed) in spent_seeds():
+        return seed
+    return seed_ref("financial", seed)
+
+
 def ledger_path() -> Path:
-    """An append-only record of look claims outside the checkout, so a
-    reverted or stashed aml_registered_looks.json cannot un-spend a seed on
-    this host (LB_AML_LOOKS_LEDGER overrides the location)."""
-    return Path(
-        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
-    )
+    """The out-of-tree, append-only record of look claims
+    (``datagen_seed.looks_ledger_path``; LB_AML_LOOKS_LEDGER overrides it)."""
+    from lakebench.config.datagen_seed import looks_ledger_path
+
+    return looks_ledger_path()
 
 
 def seed_ever_recorded(seed: int) -> str | None:
-    """Why ``seed`` already has a look anywhere this host can see, or None:
-    the out-of-tree ledger, or any commit on any branch that added it to the
-    tracked record."""
-    from lakebench.config.datagen_seed import looks_path
+    """Why ``seed`` already has a look anywhere this host can see, or None
+    (``datagen_seed.seed_ever_recorded``: the look ledger, then the git
+    history of the tracked record). Never names a seed by value."""
+    from lakebench.config.datagen_seed import seed_ever_recorded as _ever
 
-    led = ledger_path()
-    if led.is_file():
-        for line in led.read_text().splitlines():
-            if line.strip() and int(json.loads(line)["seed"]) == int(seed):
-                return f"seed {seed} is in the look ledger {led}"
-    rec = looks_path()
-    hits = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(ROOT),
-            "log",
-            "--all",
-            "--format=%H",
-            "-S",
-            f'"seed": {int(seed)}',
-            "--",
-            str(rec.relative_to(ROOT)),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if hits:
-        return f"seed {seed} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
-    return None
+    return _ever(seed)
+
+
+def registered_corpus_problem(role, seed, generator_image, corpus) -> str | None:
+    """The corpus must be the bytes a recorded `generate --registered-corpus`
+    wrote, on pods running --generator-image (datagen_seed's rule)."""
+    from lakebench.config.datagen_seed import registered_corpus_problem as _problem
+
+    return _problem(role, seed, generator_image, corpus)
 
 
 def append_ledger(entry: dict) -> None:
-    """Append ``entry`` to the ledger and fsync it (raises on failure)."""
-    led = ledger_path()
-    led.parent.mkdir(parents=True, exist_ok=True)
-    with open(led, "a") as f:
-        f.write(json.dumps(entry) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
+    """Append ``entry`` to the look ledger and fsync it (raises on failure)."""
+    from lakebench.config.datagen_seed import append_looks_ledger
+
+    append_looks_ledger(entry)
 
 
 def clean_checkout_error() -> str | None:
@@ -292,7 +316,20 @@ def main(argv=None) -> int:
         print(" ".join(f"{k}=={v}" for k, v in pinned_deps().items()))
         return 0
     ap.add_argument("corpus", type=Path, help="corpus root (contains bronze/ and manifest/)")
-    ap.add_argument("--seed", type=int, default=None, help="corpus seed (provenance only)")
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="corpus seed (provenance and the claim check); a held-out seed is refused here "
+        "and must come from --seed-file",
+    )
+    ap.add_argument(
+        "--seed-file",
+        type=Path,
+        default=None,
+        help="a file holding the corpus seed, readable by its owner only; a registered "
+        "evaluation or robustness look takes its seed from here, never from --seed",
+    )
     ap.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     ap.add_argument("--prereg", type=Path, default=None, help="pre-registration JSON path")
     ap.add_argument("--driver-memory", default="12g")
@@ -368,6 +405,34 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.seed is not None:
+        # A held-out seed never belongs on a command line (owner, 10-03), in
+        # any mode: it is visible to every process on the host and lands in
+        # shell history.
+        from lakebench.config.datagen_seed import heldout_role
+
+        try:
+            held = heldout_role(args.seed) is not None
+        except (OSError, ValueError):
+            held = True
+        if held:
+            print(
+                "refusing: --seed names a held-out seed (or the held-out record cannot be "
+                "read); pass a held-out seed with --seed-file",
+                file=sys.stderr,
+            )
+            return 1
+    if args.seed_file is not None:
+        if args.seed is not None:
+            print("refusing: give the seed once (--seed or --seed-file)", file=sys.stderr)
+            return 1
+        try:
+            file_seed = read_seed_file(args.seed_file)
+        except (OSError, ValueError) as e:
+            print(f"refusing: {e}", file=sys.stderr)
+            return 1
+    else:
+        file_seed = None
     if args.generator_image is None and (
         args.d8_shard is not None or args.registered in ("evaluation", "robustness")
     ):
@@ -416,7 +481,31 @@ def main(argv=None) -> int:
         # The look record, the predictions and the pre-registration are read
         # from this checkout: they must be the committed ones, or a look in
         # another worktree (or a reverted record) goes unseen.
-        err = clean_checkout_error() or seed_ever_recorded(args.seed)
+        # The held-out seed stays off the command line (owner, 10-03): it is
+        # read from an owner-only file.
+        if args.seed is not None:
+            print(
+                "refusing: a registered look takes its seed from --seed-file, never from --seed "
+                "(a command line is visible to every process on the host)",
+                file=sys.stderr,
+            )
+            return 1
+        if args.seed_file is None:
+            print("refusing: a registered look needs --seed-file", file=sys.stderr)
+            return 1
+    if file_seed is not None:
+        args.seed = file_seed
+    if args.registered in ("evaluation", "robustness"):
+        try:
+            err = (
+                clean_checkout_error()
+                or seed_ever_recorded(args.seed)
+                or registered_corpus_problem(
+                    args.registered, args.seed, args.generator_image, args.corpus
+                )
+            )
+        except (OSError, ValueError) as e:
+            err = f"the look history could not be checked: {e}"
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1
@@ -496,20 +585,28 @@ def main(argv=None) -> int:
         manifest = af.read_manifest(spark, manifest_src)
         af.check_manifest(manifest)
         seed_check = af.corpus_seed_check(manifest, args.seed)
-        from lakebench.config.datagen_seed import protected_seeds, spent_seeds
+        from lakebench.config.datagen_seed import CorpusSeedError, corpus_verdict
 
-        guarded = sorted(spent_seeds() | set(protected_seeds()))
-        # Any matching instance seed counts: a corpus that mixes a guarded
-        # seed's instances with others is still that seed's corpus.
-        matched = [
-            g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0
-        ]
+        # The corpus seed is recovered from every manifest row and checked
+        # against heldout_hashes.json: a corpus that mixes a guarded seed's
+        # instances with others is still that seed's corpus.
+        try:
+            verdict = corpus_verdict(
+                (
+                    (r["typology_id"], r["seed"])
+                    for r in manifest.select("typology_id", "seed").toLocalIterator()
+                ),
+                claimed=args.seed,
+            )
+        except (CorpusSeedError, OSError, ValueError) as e:
+            print(f"refusing: {e}", file=sys.stderr)
+            return 1
         err = seed_guard_error(
             args.seed,
             args.registered,
-            matched,
+            [verdict.role] if verdict.role is not None else [],
             args.counts_only,
-            claim_verified=seed_check["matched_share"] == 1,
+            claim_verified=verdict.matches_claim is True,
         )
         if err:
             print(f"refusing: {err}", file=sys.stderr)
@@ -598,6 +695,9 @@ def main(argv=None) -> int:
                 err = (
                     clean_checkout_error()
                     or seed_ever_recorded(args.seed)
+                    or registered_corpus_problem(
+                        args.registered, args.seed, args.generator_image, corpus
+                    )
                     or predictions_error(args.generator_image)
                 )
                 if err:
@@ -663,7 +763,7 @@ def main(argv=None) -> int:
             "library_version_mismatch": mismatch,
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
-            "corpus_seed_check": seed_check,
+            "corpus_seed_check": {**seed_check, "claimed_seed": report_seed(args.seed)},
             "robustness_stamp": stamp,
             "corpus_scale": scale_info,
             "d8_shard": shard_info,
@@ -672,7 +772,7 @@ def main(argv=None) -> int:
             "diagnostic": bool(args.diagnostic),
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
-            "corpus_seed": args.seed,
+            "corpus_seed": report_seed(args.seed),
             "git_sha": _git_sha(),
             **af.manifest_provenance(manifest),
             "n_entities": int(features.count()),
@@ -694,6 +794,11 @@ def main(argv=None) -> int:
         collect_outputs=args.out is not None and not args.counts_only,
         l2_values=si["l2_sensitivity"]["values"] if args.l2_sensitivity else None,
     )
+    if report_seed(args.seed) != args.seed:
+        # The gate labels by the recorded seed, which is now a hash.
+        from lakebench.config.datagen_seed import heldout_role
+
+        report["corpus_role"] = heldout_role(args.seed)
     outputs = report.pop("_model_outputs", None)
     if outputs is not None:
         # Absolute, so the paths recorded in the report resolve from anywhere
@@ -761,7 +866,8 @@ def main(argv=None) -> int:
             "git_sha": report["provenance"].get("git_sha"),
             "prereg_version": report.get("prereg_version"),
         }
-    seed_ok = seed_check["matched_share"] == 1
+    # Every manifest row, not the 200-row sample the report field holds.
+    seed_ok = verdict.matches_claim is True
     if args.seed is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":

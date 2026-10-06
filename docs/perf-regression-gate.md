@@ -11,7 +11,7 @@ to Kubernetes or S3.
 | Piece | Path | What it holds |
 |---|---|---|
 | Pinned configs | `benchmarks/perf/*.yaml` | One per workload and mode that matters, every sizing knob explicit |
-| Baseline store | `benchmarks/perf/baselines.yaml` | Accepted numbers per pinned config, with run id, git sha, config hash |
+| Baseline store | `benchmarks/perf/baselines.yaml` | Accepted numbers per pinned config, with run id, git sha, config hash, fingerprint version and dependency pinset (store `schema_version` 2; a schema 1 store still loads, its entries read as fingerprint version 1, and the next `record` writes schema 2) |
 | Gate logic | `src/lakebench/metrics/perf_gate.py` | Fingerprints, guards, compare, record |
 | CLI | `scripts/perf_gate.py` | `status`, `compare`, `record`, `seed`, `gate` |
 | Release check | `scripts/release_gate.py` check `perf-baselines` | Fails the release on a regression or a missing required baseline |
@@ -20,15 +20,34 @@ Pinned configs today:
 
 | Name | Workload | Mode | Scale | Required by the release gate | Baseline |
 |---|---|---|---|---|---|
-| `c360-batch-s10` | Customer 360 | batch | 10 | no (v1.6) | accepted, but poll-timed (pre-v1.6), so every current run is refused against it |
+| `c360-batch-s10` | Customer 360 (Hive) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
 | `c360-continuous-s10` | Customer 360 | continuous | 10 | no (v1.6) | pending first run |
 | `aml-batch-s1` | AML (financial) | batch | 1 | no | pending first run |
+| `aml-batch-s10` | AML (financial) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
+| `c360-batch-s10-polaris` | Customer 360 (Polaris) | batch | 10 | from the v1.7 data commit | pending first run (v1.7 re-baseline) |
 
-v1.6 has no performance baselines. The re-baseline of the pinned configs on
-the v1.6 tree is deferred to v1.7, so no config is required and the
+v1.6 has no performance baselines. The v1.7 re-baseline records
+`aml-batch-s10`, `c360-batch-s10` and `c360-batch-s10-polaris` (three runs each) on
+the freeze tree; the post-freeze data commit accepts their baselines and
+marks exactly these three required. Until then no config is required and the
 `perf-baselines` release check reports each config as `warn` without failing
-the release. Which configs become required again, and when AML joins them, is
-set with the v1.7 re-baseline.
+the release. `c360-batch-s10-polaris` is `c360-batch-s10` with the Polaris
+catalog and nothing else changed, so the pair compares the catalog alone;
+both run Spark 4.0, the only minor Polaris is validated on, so the Hive
+side of the pair is outside the release matrix's versions and reads
+unverified. The three pins name the tree's default datagen image (a test
+holds them equal) and seed 42 (Customer 360) or 43 (AML).
+
+A baseline is one run: `record` accepts one record. For the re-baseline,
+each config runs once as `lakebench run --generate --repeat 3`; repetition
+1 (the one that generates, so it carries the datagen figures) is recorded
+as the baseline, labelled n=1, and all three records are checked in under
+`uat/perf/`, where the release check compares the newest against the
+baseline. That comparison is within one series (same deployment and
+corpus, minutes apart), so a v1.7 pass is evidence of repeatability, not of
+the absence of a regression against an earlier release. Moving the tree's
+default datagen image moves the pins with it and invalidates every
+accepted baseline, which must then be recorded again.
 
 ## How "like for like" is enforced
 
@@ -38,16 +57,54 @@ Two hashes, both recorded with the baseline:
   not count; any value does. If the pinned file changes after a baseline was
   recorded, compare refuses until a new baseline is recorded.
 - **`fingerprint_hash`** is the sha256 of the sizing-relevant part of the
-  `config_snapshot` a run records in `metrics.json`: scale, recipe, Spark
-  driver, executor and per-job executor counts, datagen scale, mode,
-  parallelism and file size, images, Trino coordinator and workers,
-  continuous-mode trigger intervals, benchmark mode, scratch storage, and the
-  maintenance settings (`pre_benchmark_maintenance`, `retention_interval`,
-  `retention_threshold`, `compaction_enabled`, `compaction_interval`).
+  `config_snapshot` a run records in `metrics.json`. Fingerprint version 2
+  (from v1.7) covers: scale, recipe, per-job executor count overrides,
+  datagen scale, mode, parallelism and file size, images, Trino coordinator
+  and workers, continuous-mode trigger intervals, the benchmark that ran
+  (for `lakebench run`: one hot power pass with one stream, the config's
+  `iterations` and the `maintenance_settle` settings), scratch storage with
+  the per-job scratch sizes, the maintenance settings
+  (`pre_benchmark_maintenance`, `retention_interval`, `retention_threshold`,
+  `compaction_enabled`, `compaction_interval`), and `fingerprint_inputs`:
+  - `job_profiles`: per Spark job of the run's mode, the driver cores and
+    memory, executor cores, memory, overhead and count, and scratch size
+    its manifest asks for (job profile, scale-derived count, overrides);
+    the count is the one before the continuous concurrent budget;
+  - `owned_conf`: per Spark job, the `sparkConf` its manifest writes,
+    without the keys that name where a deployment lives (S3 endpoint,
+    warehouse and catalog URIs, metastore URI, jar URLs) and without any
+    key that can hold a credential;
+  - the query engine's sizing block (Trino workers with spill and storage,
+    Spark Thrift or DuckDB cores and memory) and the catalog's resources.
+
   The snapshot is taken after autosizing and any cluster capping, so it is
-  what actually ran. A run whose fingerprint differs from the pinned
-  config's is refused, and the refusal names each differing field (for
-  example `trino.worker.replicas: pinned 2, run 8`).
+  what actually ran, and `fingerprint_version` and `fingerprint_inputs` are
+  stamped into it when the run starts: the gate reads them and never
+  rebuilds them, so a record keeps the fingerprint of the code that ran it.
+  A run whose fingerprint differs from the pinned config's is refused, and
+  the refusal names each differing field (for example
+  `trino.worker.replicas: pinned 2, run 8`). A change to a job profile or
+  to the conf Lakebench writes moves the pinned config's fingerprint too, so
+  its baseline is refused until re-recorded.
+- **Proven sizing only.** A pinned config must size its run by the job
+  profiles: each `*_executors` it sets must equal the count the profile asks
+  for at the pinned scale, and it sets no driver override; `load_pinned`
+  refuses it otherwise. A run whose recorded overrides differ from the
+  profile's counts, or that carries a driver override or an executor
+  override bound (`limits.bound_kinds`), is refused as a run and as a
+  baseline, as it is for release evidence.
+- **Fingerprint version.** A run recorded before v1.7 has no
+  `fingerprint_version` (version 1) and is refused by name ("run predates
+  fingerprint v2"); a baseline recorded under version 1 is refused the same
+  way ("baseline predates fingerprint v2") until the v1.7 re-baseline
+  re-records it.
+- **Dependency set.** Each baseline stores the dependency pinset of its run
+  (`provenance.deps.pinset_sha256`). The gate compares a pinned config with
+  itself, so a run on another set differs from the baseline in its jars
+  alone, which is not like for like: it is refused ("dependency set differs
+  from the baseline"). `record` refuses a run that records no pinset. Runs
+  record the pinset once the in-deployment dependency server lands in v1.7;
+  until then no run can be recorded as a baseline.
 
 Defaults are not part of `config_hash`, which is why each pinned file sets
 every knob itself; `tests/test_perf_gate.py` fails if one is left to a
@@ -76,6 +133,12 @@ numbers; do not compare across clusters.
 
 A run is refused, never compared, when:
 
+- its corpus is a protected AML corpus or is not shown to be outside the
+  held-out corpora (`look_guard.protected_record_reason`, fail closed: a
+  held-out role or seed, a withheld or unreadable seed, an AML record with
+  no seed). That reason is the only one given, and a baseline whose
+  identity names such a seed refuses every run the same way. No refusal
+  prints a seed: a seed difference reads `seed differs (values withheld)`;
 - it did not succeed;
 - it is a local run (`lakebench run --local`), which the fingerprint does not
   otherwise tell apart from a cluster run;
@@ -102,10 +165,16 @@ A run is refused, never compared, when:
   end-of-run result check over the settled corpus (see "Continuous Gate" and
   "Result check" in `benchmarking.md`); a run whose corpus did not settle, or
   whose result fingerprints differ from the baseline's, is refused like a
-  batch run;
-- its datagen fleet reported `data_quality` other than `complete`;
-- its snapshot records a `config_sha256` that is not the pinned file's. Runs
-  do not record this field yet; see "Known gaps";
+  batch run. An AML batch run from 1.7 must also carry its alert-set
+  fingerprint (`experiment.results.alert_set`, see
+  [aml-scoring.md](aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same));
+  the gate requires it but does not yet compare it with the baseline's;
+- its datagen fleet reported `data_quality` other than `complete` (from 1.7
+  a continuous run that generates records its own fleet, read at window end:
+  datagen pods removed by their TTL before then make it `partial` or
+  `empty`);
+- its snapshot records a `config_sha256` that is not the pinned file's, or
+  (a v1.7 run) records none;
 - it is a batch run whose time to value was taken differently from the
   baseline's (from stage timestamps in one, from the scorecard in the other),
   or whose stages carry no timestamps while its datagen stage is stale or
@@ -118,8 +187,9 @@ A run is refused, never compared, when:
   poll-timed; re-record it (`scripts/perf_gate.py record --replace`) from a
   v1.6 run;
 - it is a multi-cycle batch run (`cycles` above 1). Cycles 2 onwards generate
-  data between gold and the next bronze, inside the time-to-value span, and
-  `cycles` is not in the snapshot for the fingerprint to catch;
+  data between gold and the next bronze (unless the run reused its corpus
+  with `--skip-generate`); from 1.7 time to value leaves that datagen out,
+  but `cycles` is not in the snapshot for the fingerprint to catch;
 - its batch stage timestamps span less time than the stages' own seconds add
   up to. Runs recorded before v1.6 carry naive local timestamps, so this is a
   clock change (a DST fall-back) during the run; a spring-forward lengthens the
@@ -139,8 +209,10 @@ Within a comparable run, some numbers are left out rather than trusted:
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier
   `generate`) or when only one of the baseline and the run has a datagen
-  stage. `datagen_seconds` stays when it is the run's own generate time
-  (`lakebench run --generate` writes no sidecar but attaches the last one). Generate once and run several times is a normal workflow. Nothing
+  stage. `datagen_seconds` stays when it is the run's own generate time (a
+  record from before 1.7, where `lakebench run --generate` attached the last
+  sidecar instead of its own fleet; from 1.7 a run that generates records its
+  own pods' fleet and writes the sidecar). Generate once and run several times is a normal workflow. Nothing
   else is dropped with them: for batch runs time to value and GB/s are
   recomputed from the pipeline stages' own timestamps with the datagen stage
   left out, and GB/core-hr counts batch or continuous stages only. From v1.6
@@ -172,9 +244,9 @@ reads faster, so the drift between them is a bias, and a gate that exits
 nonzero on regression should refuse rather than warn. `lakebench reproduce`
 applies the same rule against the package's `benchmark_samples_per_query`
 (1 for packages recorded before it existed) and refuses before running the
-pipeline when the config asks for a different count. `lakebench compare`
-warns instead: it runs two configs the user chose, and the sample count may
-be what is being compared.
+pipeline when the config asks for a different count. Two runs with
+different counts are not like-for-like (benchmark iterations are an
+execution condition).
 
 `maintenance_value_pct` is reported by `lakebench run` but not gated. It is
 (post - pre) / pre, and both halves are gated on their own
@@ -194,10 +266,10 @@ compared with itself, or with an older run, proves nothing.
 
 ## Metrics and tolerances
 
-The metric set and each metric's direction come from
-`lakebench.cli._reproduce` (`_METRIC_TABLE`, `_classify_direction`), the same
-classification `lakebench reproduce` uses. Only the performance band is
-compared.
+The metric set and each metric's direction come from the metric registry
+(`metrics/metric_registry.reproduce_class`), the same classification
+`lakebench reproduce` uses.
+Only the performance band is compared.
 
 | Metric | Direction | Default tolerance |
 |---|---|---|
@@ -222,6 +294,10 @@ Per-config overrides go in the store entry:
 
 ## Record a baseline
 
+For the v1.7 re-baseline series, see the paragraph on it under "Pinned
+configs today": one `lakebench run --generate --repeat 3`, repetition 1
+recorded. The single-run procedure below records any other config.
+
 1. Run the pinned config as-is on the reference cluster. Identity and
    credentials come from the environment, so the file does not change:
 
@@ -235,7 +311,7 @@ Per-config overrides go in the store entry:
    export LAKEBENCH_PERF_NAME=perf-c360-batch-s10
    export LAKEBENCH_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
    lakebench deploy   benchmarks/perf/c360-batch-s10.yaml
-   lakebench generate benchmarks/perf/c360-batch-s10.yaml --wait
+   lakebench generate benchmarks/perf/c360-batch-s10.yaml
    lakebench run      benchmarks/perf/c360-batch-s10.yaml
    lakebench destroy  benchmarks/perf/c360-batch-s10.yaml --force
    ```
@@ -293,13 +369,14 @@ run as `uat/perf/run-<id>/metrics.json` alongside `uat/results-<version>.md`.
 ## Known gaps
 
 The fingerprint can only compare what `build_config_snapshot` records. Some
-knobs that move numbers are not in it: datagen CPU, the datagen timestamp
-range, Trino spill settings, table format versions, and the Spark Thrift
-size. Pinning them in the file covers runs of the file itself, but a run of an
-edited copy with the same snapshot is not caught until runs record the sha256
-of the config file they used (`config_sha256` in the snapshot), which the gate
-already checks when present. The datagen sidecar does not record the image
-that wrote it, so a run that reuses a recent sidecar from a different image is
+knobs that move numbers are not in it, such as datagen CPU and the datagen
+timestamp range; the config-file sha256 covers them for runs of a pinned
+file. Code-default changes outside the Spark manifest's conf and sizing are
+not fingerprinted: the Spark pods' environment, the restart policy, and the
+continuous bronze-verify preflight and AML scoring jobs, which are not
+stages the gate times. A change there is compared, not refused, like any
+other code change. The gate does not compare the datagen image the fleet
+record names, so a run that reuses a recent sidecar from a different image is
 not caught either.
 
 Continuous runs are not checked for realised executor counts.

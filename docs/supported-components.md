@@ -1,8 +1,8 @@
 # Supported Components
 
 Lakebench deploys and manages the following components. The versions listed
-below are **defaults** -- every component image and library version can be
-overridden in your YAML config. See [Overriding Versions](#overriding-versions)
+below are **defaults**. Every component image and library version can be
+overridden in the YAML config; see [Overriding Versions](#overriding-versions)
 at the bottom of this page, or the [Configuration](configuration.md) reference
 for the full YAML schema.
 
@@ -12,7 +12,7 @@ for the full YAML schema.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or a Spark 3.5 image (a Java 11 tag such as `3.5.4-python3` gets Iceberg 1.10.1; a java17 tag gets 1.11.0) | Pipeline processing (bronze, silver, gold stages) |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.1.1-python3` (default for the Hive recipes), `4.0.2-python3` (default for the Polaris recipes and `hive-delta-spark-thrift`), or a Spark 3.5 image (a Java 11 tag such as `3.5.4-python3` gets Iceberg 1.10.1; a java17 tag gets 1.11.0) | Pipeline processing (bronze, silver, gold stages) |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
@@ -38,8 +38,9 @@ must be installed cluster-wide. See [Getting Started](getting-started.md#catalog
 for Helm commands.
 
 **Polaris:** No operator needed -- Lakebench deploys it directly as a
-Kubernetes Deployment with a bootstrap Job. The config must set
-`architecture.catalog.polaris.client_secret`; it has no default.
+Kubernetes Deployment with a bootstrap Job. Its client secret and DB password
+are generated per deployment unless the config sets
+`architecture.catalog.polaris.client_secret`.
 
 See [Hive Reference](component-hive.md) and
 [Operators and Catalogs](operators-and-catalogs.md) for version compatibility
@@ -65,7 +66,7 @@ Customer 360 workload only: the AML workload is Iceberg-only.
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Trino | 483 | `trinodb/trino:483` | Distributed SQL engine for interactive analytics |
-| Spark Thrift Server | 3.5.x / 4.0.x / 4.1.x (same as Spark) | Same image as `images.spark` (default `apache/spark:4.0.2-python3`) | Spark-native SQL via HiveServer2 JDBC |
+| Spark Thrift Server | 3.5.x / 4.0.x / 4.1.x (same as Spark) | Same image as `images.spark` (default per recipe: `4.1.1-python3` on Hive, `4.0.2-python3` on Polaris and `hive-delta-spark-thrift`) | Spark-native SQL via HiveServer2 JDBC |
 | DuckDB | 1.5.5 (pinned by `duckdb.version`) | `python:3.11-slim`, DuckDB pip-installed at that version | Lightweight single-pod analytics engine |
 
 Each recipe uses at most one query engine (or `none` for ETL-only
@@ -132,7 +133,7 @@ Every recipe deploys PostgreSQL, its catalog (Hive Metastore or Polaris), its
 query engine (none for the `-none` recipes) and runs Spark for the pipeline.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -166,10 +167,9 @@ these limits:
 - An explicit Iceberg or Delta version must be in the compatibility list for
   the Spark minor, or config load fails. Iceberg 1.11+ needs a Java 17 Spark
   image.
-- `images.hive` does not change the Hive that runs: the Stackable HiveCluster
-  runs Hive 3.1.3 (see [Hive Reference](component-hive.md)).
-- The Polaris version that runs is the tag of `images.polaris`, not
-  `architecture.catalog.polaris.version`.
+- The Hive that runs is not configurable: the Stackable HiveCluster runs
+  Hive 3.1.3 (see [Hive Reference](component-hive.md)).
+- The Polaris version that runs is the tag of `images.polaris`.
 
 For example:
 
@@ -177,7 +177,6 @@ For example:
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  hive: apache/hive:3.1.3
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim
@@ -187,5 +186,12 @@ architecture:
     iceberg:
       version: "1.11.0"
 ```
+
+`images.pull_policy` (default `Always`) is the pull policy of the pods
+Lakebench renders with it, Spark, Trino and datagen among them, so a tag
+pushed again is pulled again there. Lakebench sets no pull policy on the
+Unity, Pushgateway and Stackable Hive pods. A private registry needs an
+`imagePullSecret` on the namespace's service accounts; Lakebench does not
+set one.
 
 See [Configuration](configuration.md) for the full YAML reference.

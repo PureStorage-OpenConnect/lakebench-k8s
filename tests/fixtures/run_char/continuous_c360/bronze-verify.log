@@ -1,0 +1,7 @@
+[lb] 2026-10-01T15:05:19.760124 - ============================================================
+[lb] 2026-10-01T15:05:19.760173 - Continuous reset (no verification)
+[lb] 2026-10-01T15:05:19.760185 - ============================================================
+[lb] 2026-10-01T15:05:21.255516 - Continuous reset: lakehouse.default.bronze_raw does not exist
+[lb] 2026-10-01T15:05:21.331810 - Continuous reset: lakehouse.silver.customer_interactions_enriched does not exist
+[lb] 2026-10-01T15:05:21.406932 - Continuous reset: lakehouse.gold.customer_executive_dashboard does not exist
+[lb] 2026-10-01T15:05:21.407335 - Continuous reset complete: 0 of 3 tables dropped

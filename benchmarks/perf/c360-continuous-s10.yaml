@@ -16,7 +16,7 @@ name: ${LAKEBENCH_PERF_NAME:-perf-c360-cont-s10}
 recipe: hive-iceberg-spark-trino
 
 images:
-  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   trino: trinodb/trino:483
@@ -41,21 +41,12 @@ platform:
     scratch:
       enabled: true
       storage_class: px-csi-scratch
-      size: 100Gi
 
   compute:
     postgres:
       storage: 10Gi
       storage_class: px-csi-db
     spark:
-      driver:
-        cores: 4
-        memory: 8g
-      executor:
-        instances: 4
-        cores: 4
-        memory: 16g
-        memory_overhead: 4g
       # Per-job executor counts, equal to the scale-10 auto values today
       # (get_executor_count). Pinned so a profile change shows up as a
       # config change, not as a performance change.
@@ -134,4 +125,3 @@ architecture:
     cache: hot
     # In-stream rounds take one sample per query; the rounds are the repeats.
     iterations: 1
-    streams: 4

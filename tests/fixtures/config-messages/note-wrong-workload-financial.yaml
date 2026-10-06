@@ -1,0 +1,6 @@
+name: t
+recipe: hive-iceberg-spark-trino
+workload:
+  schema: financial
+  customer360:
+    unique_customers: 5000

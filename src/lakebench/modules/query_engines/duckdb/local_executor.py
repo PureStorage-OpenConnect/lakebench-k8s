@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_DUCKDB_IMAGE = "docker.io/python:3.11-slim"
 
 # Kept in step with DuckDBConfig.version. A floating install means two runs
-# weeks apart can query with different engines, which `compare` would report
-# as a result rather than as drift.
+# weeks apart can query with different engines, which would read as a
+# result rather than as drift.
 DEFAULT_DUCKDB_VERSION = "1.5.5"
 
 

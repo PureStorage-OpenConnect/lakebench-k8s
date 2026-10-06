@@ -14,42 +14,38 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 import pytest
+from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
 
-_HERE = Path(__file__).resolve().parent
-_SCRIPTS = _HERE.parents[1] / "src/lakebench/spark/scripts"
-
-sys.path.insert(0, str(_HERE))
-from _d_full_helpers import iceberg_jar  # noqa: E402
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def test_replay_is_idempotent_in_a_fresh_jvm():
-    jar = iceberg_jar()
-    if jar is None:
-        pytest.skip("no iceberg-spark-runtime-4.0 jar available (set LB_TEST_ICEBERG_JAR)")
-    res = subprocess.run(
-        [sys.executable, __file__, jar], capture_output=True, text=True, timeout=600
-    )
-    assert res.returncode == 0, res.stdout[-4000:] + res.stderr[-4000:]
+def test_replay_is_idempotent_in_a_fresh_jvm(spark_subprocess, spark_jars):
+    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Row count unchanged across the replay.
-    assert out["row_count_after_first"] == out["row_count_after_replay"], out
-    # Per-iban running-balance state unchanged: the row-hash of every entry
-    # (iban, entry_seq, bal_before, bal_after, txn_id, cdt_dbt_ind) matches.
-    assert out["row_hash_after_first"] == out["row_hash_after_replay"], out
-    # current_balance unchanged.
-    assert out["current_balance_after_first"] == out["current_balance_after_replay"], out
+    assert not problems(out), out
 
 
-def _run(jar):
+def problems(out):
+    """The guard's checks on the child's JSON, as named failures: the row
+    count, the row hash of every entry (iban, entry_seq, bal_before,
+    bal_after, txn_id, cdt_dbt_ind) and current_balance are unchanged by the
+    replay. The parity mutation check reads them too."""
+    found = []
+    for name in ("row_count", "row_hash", "current_balance"):
+        if out[f"{name}_after_first"] != out[f"{name}_after_replay"]:
+            found.append(name)
+    if not out["row_count_after_first"]:
+        found.append("no_rows")
+    return found
+
+
+def _run(jars):
     from datetime import timedelta
 
     from _d_full_helpers import (
@@ -62,7 +58,7 @@ def _run(jar):
     )
 
     with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jar)
+        spark = build_spark(work, jars)
         bootstrap_catalog(spark)
         for iban in ("GB01", "US02"):
             seed_account(spark, iban)
@@ -84,14 +80,18 @@ def _run(jar):
 
         for bid in (0, 1, 2):
             df = bronze_batch(spark, rows_by_batch[bid])
-            ss._merge_batch(df, bid)
+            foreach_batch_harness(spark, ss._merge_batch, df, bid)
 
         snapshot_after_first = _snapshot(spark)
 
-        # Simulate Structured Streaming's foreachBatch retry: replay batch 2
-        # under the SAME query id (job group) and the same batchId.
+        # Simulate Structured Streaming's retry: a failed batch stops its
+        # query, and the restarted query (same query id, new run id, which
+        # Spark uses as the job group) runs batch 2 again as its first batch.
+        # Within one run no batch repeats, so the replay check runs only on a
+        # run's first batch (common.replay_possible).
+        spark.sparkContext.setJobGroup("stream-run-2", "test")
         df_replay = bronze_batch(spark, rows_by_batch[2])
-        ss._merge_batch(df_replay, 2)
+        foreach_batch_harness(spark, ss._merge_batch, df_replay, 2)
 
         snapshot_after_replay = _snapshot(spark)
 
@@ -128,6 +128,9 @@ def _snapshot(spark):
 
 
 if __name__ == "__main__":
-    sys.path[:0] = [str(_SCRIPTS), str(_HERE)]
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # Run by spark_subprocess, which puts the scripts and tests/spark on
+    # PYTHONPATH and passes the jar classpath.
+    import _parity_mutation
+
+    _parity_mutation.install()
     _run(sys.argv[1])

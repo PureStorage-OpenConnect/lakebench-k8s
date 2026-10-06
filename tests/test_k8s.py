@@ -10,6 +10,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import point_kubeconfig_at, write_kubeconfig
+
+
+@pytest.fixture(autouse=True)
+def _fake_kubeconfig(tmp_path, monkeypatch):
+    """A kubeconfig whose current context is ``my-context`` (no cluster)."""
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"my-context": "https://a.example:6443"}, current="my-context")
+    point_kubeconfig_at(monkeypatch, path)
+
+
 # ===========================================================================
 # K8sClient static helpers
 # ===========================================================================
@@ -56,23 +67,25 @@ class TestK8sClientParsers:
 class TestK8sClientInit:
     """Tests for K8sClient initialization."""
 
-    def test_connection_error(self):
+    def test_connection_error(self, tmp_path, monkeypatch):
         from lakebench.k8s.client import K8sClient, K8sConnectionError
 
-        with patch("lakebench.k8s.client.config") as mock_config:
-            mock_config.load_incluster_config.side_effect = Exception("not in cluster")
-            mock_config.load_kube_config.side_effect = Exception("no kubeconfig")
-            mock_config.ConfigException = Exception
-            with pytest.raises(K8sConnectionError):
-                K8sClient()
+        point_kubeconfig_at(monkeypatch, tmp_path / "missing")
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        with pytest.raises(K8sConnectionError):
+            K8sClient()
 
     def test_with_context(self):
         from lakebench.k8s.client import K8sClient
 
-        with patch("lakebench.k8s.client.config") as mock_config:
+        with (
+            patch("lakebench.k8s.target._k8s_config.load_kube_config") as load,
+            patch("lakebench.k8s.target._kubeconfig_cluster_block", return_value=None),
+        ):
             with patch("lakebench.k8s.client.client"):
                 K8sClient(context="my-context")
-                mock_config.load_kube_config.assert_called_once_with(context="my-context")
+                assert load.call_count == 1
+                assert load.call_args.kwargs["context"] == "my-context"
 
 
 class TestK8sClientNamespace:
@@ -337,14 +350,10 @@ class TestSecurityVerifier:
         mock_k8s = MagicMock()
         verifier = SecurityVerifier(mock_k8s)
 
-        with patch("lakebench.k8s.security.k8s_client", create=True):
-            mock_api_ext = MagicMock()
-            mock_crds = MagicMock()
-            mock_crds.items = []  # No OpenShift CRDs
-            mock_api_ext.list_custom_resource_definition.return_value = mock_crds
-            with patch("kubernetes.client.ApiextensionsV1Api", return_value=mock_api_ext):
-                result = verifier.detect_platform()
-                assert result == PlatformType.VANILLA
+        apis = MagicMock()
+        apis.get_api_versions.return_value = MagicMock(groups=[])  # no security.openshift.io
+        with patch("kubernetes.client.ApisApi", return_value=apis):
+            assert verifier.detect_platform(strict=True) == PlatformType.VANILLA
 
     def test_security_check_result_passed(self):
         from lakebench.k8s.security import PlatformType, SecurityCheckResult

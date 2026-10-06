@@ -99,7 +99,14 @@ def test_custom_workload_is_refused(tmp_path):
 def test_top_level_workload_is_canonical(tmp_path):
     cfg = _quiet(
         load_config,
-        _write(tmp_path, {"name": "t", "workload": {"schema": "financial"}}),
+        _write(
+            tmp_path,
+            {
+                "name": "t",
+                "recipe": "hive-iceberg-spark-trino",
+                "workload": {"schema": "financial"},
+            },
+        ),
     )
     assert cfg.workload.schema_type.value == "financial"
     assert cfg.architecture.workload is cfg.workload
@@ -138,10 +145,11 @@ def test_both_locations_that_disagree_are_refused(tmp_path):
 
 
 def test_flat_scale_lands_in_the_top_level_block(tmp_path):
-    cfg = _quiet(
-        load_config,
-        _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}}),
-    )
+    # Flat keys are deprecated in v1.7 (CFG-4 notes): still promoted, with a note.
+    with pytest.warns(DeprecationWarning, match="flat 'scale' is deprecated"):
+        cfg = load_config(
+            _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}})
+        )
     assert cfg.workload.datagen.scale == 7
 
 
@@ -250,20 +258,25 @@ def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
     ],
 )
 def test_dead_field_set_warns_no_effect_and_v17_removal(overrides, field):
+    # Superseded by CFG-9: the v1.6 dead fields are removed in v1.7. Built
+    # without a load purpose they are dropped with a warning; load_config
+    # refuses them for the commands that change data (test_cfg9_removals).
     with pytest.warns(DeprecationWarning) as rec:
         make_config(**overrides)
     msgs = [str(w.message) for w in rec]
     hit = [m for m in msgs if field in m]
     assert hit, msgs
-    assert "has no effect" in hit[0] and "removed in v1.7" in hit[0]
+    assert "is no longer used" in hit[0]
 
 
-def test_dead_fields_at_default_do_not_warn():
-    _quiet(
-        make_config,
-        images={"prometheus": "prom/prometheus:v2.48.0"},
-        observability={"reports": {"enabled": True}},
-    )
+def test_dead_fields_at_default_are_dropped_with_an_old_default_note():
+    with pytest.warns(DeprecationWarning) as rec:
+        make_config(
+            images={"prometheus": "prom/prometheus:v2.48.0"},
+            observability={"reports": {"enabled": True}},
+        )
+    msgs = [str(w.message) for w in rec if "old default" in str(w.message)]
+    assert len(msgs) == 2, msgs
 
 
 def test_pipeline_pattern_other_than_medallion_warns():
@@ -544,8 +557,13 @@ def test_deploy_reuses_an_existing_release_without_modifying_it(_lock):
     assert "shared cluster component" in result.message
 
 
-def test_deploy_installs_into_the_shared_namespace_only_when_absent(_lock):
-    from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE, ObservabilityDeployer
+def test_deploy_never_installs_the_shared_stack(_lock):
+    """DEP-3: deploy only verifies the shared stack, so a missing one fails
+    the step naming the admin command, with no install and no lease (it
+    writes nothing outside its own namespace). Reverted (v1.6), deploy
+    helm-installed it under the lease."""
+    from lakebench.deploy.engine import DeploymentStatus
+    from lakebench.deploy.observability import ObservabilityDeployer
 
     calls = []
 
@@ -556,17 +574,12 @@ def test_deploy_installs_into_the_shared_namespace_only_when_absent(_lock):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     deployer = ObservabilityDeployer(_obs_engine())
-    with (
-        patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run),
-        patch("lakebench.deploy.observability._find_helm_service", return_value=None),
-        patch.object(ObservabilityDeployer, "_is_openshift", return_value=False),
-    ):
-        deployer.deploy()
-    installs = [c for c in calls if c[:2] == ["helm", "install"]]
-    assert len(installs) == 1
-    assert installs[0][installs[0].index("--namespace") + 1] == OBSERVABILITY_NAMESPACE
-    assert not [c for c in calls if c[:2] == ["helm", "upgrade"]]
-    assert _lock.called
+    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
+        result = deployer.deploy()
+    assert result.status == DeploymentStatus.FAILED
+    assert "lakebench admin install --component observability" in result.message
+    assert [c[:2] for c in calls] == [["helm", "list"]]
+    assert not _lock.called
 
 
 def test_deploy_does_not_install_when_the_lookup_fails(_lock):
@@ -587,9 +600,9 @@ def test_deploy_does_not_install_when_the_lookup_fails(_lock):
 
 
 def test_helm_values_do_not_pin_scraping_to_one_namespace():
-    from lakebench.deploy.observability import ObservabilityDeployer
+    from lakebench.deploy.observability import build_helm_values
 
-    values = ObservabilityDeployer(_obs_engine())._build_helm_values("dep-a")
+    values = build_helm_values(_obs_engine().config.observability)
     assert not any("NamespaceSelector" in k for k in values)
 
 
@@ -602,15 +615,15 @@ def test_example_configs_load_quietly():
 
 
 def test_config_template_uses_canonical_keys():
-    from lakebench.config.loader import generate_example_config_yaml
+    from lakebench.cli._init import first_day_config
 
-    text = generate_example_config_yaml()
+    text = first_day_config(name="tmpl")
     assert re.search(r"(?m)^workload:", text)
     assert not re.search(r"(?m)^  workload:", text)
     assert "iot" not in text
     assert "sustained:" not in text
     parsed = yaml.safe_load(text)
-    parsed["name"] = "tmpl"
+    parsed["platform"]["storage"]["s3"].update(access_key="a", secret_key="b")
     _quiet(LakebenchConfig.model_validate, parsed)
 
 
@@ -683,31 +696,37 @@ def test_errors_name_the_continuous_block_the_user_wrote(tmp_path):
     assert "architecture.pipeline.continuous.run_duration" in str(exc.value)
 
 
-def test_install_waits_for_prometheus_after_the_lease_and_fails_if_not_ready(_lock):
+def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
     from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE, ObservabilityDeployer
+    from lakebench.deploy.observability import (
+        HELM_RELEASE_NAME,
+        OBSERVABILITY_NAMESPACE,
+        ObservabilityDeployer,
+    )
 
     order = []
-    _lock.return_value.__exit__.side_effect = lambda *a: order.append("lease released")
     # The wait helper now accepts a `context=` kwarg (LB-ux-safety C1: every
     # kubectl invocation must pin the configured kube-context).
     _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
 
     def fake_run(cmd, **kw):
-        if cmd[:2] == ["helm", "list"]:
-            return _helm_list_result([])
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return _helm_list_result(
+            [
+                {
+                    "name": HELM_RELEASE_NAME,
+                    "namespace": OBSERVABILITY_NAMESPACE,
+                    "status": "deployed",
+                }
+            ]
+        )
 
     deployer = ObservabilityDeployer(_obs_engine())
-    with (
-        patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run),
-        patch("lakebench.deploy.observability._find_helm_service", return_value=None),
-        patch.object(ObservabilityDeployer, "_is_openshift", return_value=False),
-    ):
+    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
         result = deployer.deploy()
-    assert order == ["lease released", f"wait {OBSERVABILITY_NAMESPACE}"]
+    assert order == [f"wait {OBSERVABILITY_NAMESPACE}"]
     assert result.status == DeploymentStatus.FAILED
     assert "not Ready" in result.message
+    assert not _lock.called
 
 
 def test_recipe_config_on_java11_image_falls_back_to_a_java11_iceberg():

@@ -6,7 +6,7 @@
 
 // mimalloc: glibc malloc fragments under the per-thread file builders and
 // grows RSS for the whole run (cluster, scale 100: pod 0 14.5 -> 7.2 GiB,
-// workers 10.8 -> 6.8 GiB with byte-identical output). LB-204.
+// workers 10.8 -> 6.8 GiB with byte-identical output).
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -23,6 +23,7 @@ use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
+use datagen_rs::heldout::HeldOut;
 use datagen_rs::kyc::is_customer;
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_p;
@@ -78,18 +79,199 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
-    let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len() {
-        if args[i] == flag {
-            if let Some(v) = args.get(i + 1) {
-                if let Ok(p) = v.parse() {
-                    return p;
-                }
+/// Every value given for `flag`: `--flag value` and `--flag=value`. A
+/// `--flag` with nothing after it gives None. argv is read as
+/// `check_known_flags` and `robustness::flag_in_argv` read it: a bare flag
+/// takes no value, and any other `--name` consumes the next token as its
+/// value, so a value is never read as a flag.
+fn flag_values(args: &[String], flag: &str) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) if a.starts_with("--") => (n, Some(v.to_string())),
+            _ => (a.as_str(), None),
+        };
+        let bare = FINANCIAL_BARE.contains(&name) || C360_BARE.contains(&name);
+        let value = match (&inline, bare || !name.starts_with("--")) {
+            (Some(_), _) => {
+                i += 1;
+                inline
             }
+            (None, true) => {
+                i += 1;
+                None
+            }
+            (None, false) => {
+                i += 2;
+                args.get(i - 1).cloned()
+            }
+        };
+        if name == flag {
+            out.push(value);
         }
     }
-    default
+    out
+}
+
+/// `flag` parsed strictly: absent gives `default`; present but not parseable,
+/// given without a value, or given twice exits 2 naming the flag. (The old
+/// lenient `arg()` fell back to the default on a typo.)
+fn strict_arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
+    let args: Vec<String> = std::env::args().collect();
+    match flag_values(&args, flag).as_slice() {
+        [] => default,
+        [Some(v)] => v.parse().unwrap_or_else(|_| {
+            eprintln!("{flag} cannot be parsed; got {v:?}");
+            std::process::exit(2);
+        }),
+        [None] => {
+            eprintln!("{flag} needs a value");
+            std::process::exit(2);
+        }
+        _ => {
+            eprintln!("{flag} is given more than once");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// A float flag via `strict_arg` that must also be finite: `nan` and `inf`
+/// parse as f64 but serialize as null in `corpus_args`, so two different
+/// corpora would hash alike.
+fn strict_f64(flag: &str, default: f64) -> f64 {
+    let v: f64 = strict_arg(flag, default);
+    if !v.is_finite() {
+        eprintln!("{flag} must be a finite number; got {v}");
+        std::process::exit(2);
+    }
+    v
+}
+
+/// Flags that take a value, per schema; every other `--flag` exits 2. The
+/// entrypoint renders only these (`datagen_rs/entrypoint.py`).
+const FINANCIAL_FLAGS: &[&str] = &[
+    "--schema",
+    "--bucket",
+    "--prefix",
+    "--seed",
+    "--scale",
+    "--corpus-months",
+    "--file-size-mb",
+    "--bytes-per-row",
+    "--node-id",
+    "--total-nodes",
+    "--mode",
+    "--threads",
+    "--delivery-mode",
+    "--cycle",
+    "--cycles",
+];
+const C360_FLAGS: &[&str] = &[
+    "--schema",
+    "--bucket",
+    "--prefix",
+    "--seed",
+    "--cycle",
+    "--cycles",
+    "--target-tb",
+    "--file-size-mb",
+    "--node-id",
+    "--total-nodes",
+    "--scale",
+    "--customer-id-max",
+    "--dirty-ratio",
+    "--duplicate-email-pct",
+    "--timestamp-start",
+    "--timestamp-end",
+    "--threads",
+    "--workers",
+    "--delivery-mode",
+];
+/// Flags that take no value, per schema.
+const FINANCIAL_BARE: &[&str] = &[
+    "--robustness-perturbation",
+    "--print-resolved-args",
+    "--version",
+];
+const C360_BARE: &[&str] = &["--print-resolved-args", "--version"];
+
+/// `--print-resolved-args`: print the resolved corpus arguments (the marker's
+/// `corpus_args` and its hash) and exit 0, before any S3 client or file.
+fn print_resolved_args_requested() -> bool {
+    bare_flag_given("--print-resolved-args")
+}
+
+/// A bare flag given as a flag (never as another flag's value).
+fn bare_flag_given(flag: &str) -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    !flag_values(&args, flag).is_empty()
+}
+
+/// Print the resolved arguments and exit when `--print-resolved-args` was
+/// given.
+fn maybe_print_resolved_args(corpus_args: &serde_json::Value) {
+    if print_resolved_args_requested() {
+        println!(
+            "{}",
+            datagen_rs::corpus::resolved_args_document(corpus_args)
+        );
+        std::process::exit(0);
+    }
+}
+
+/// Write this node's marker last: its presence means the node finished.
+fn write_marker(
+    sink: &S3Sink,
+    corpus_args: &serde_json::Value,
+    cycle: u64,
+    node_id: i64,
+    totals: datagen_rs::corpus::NodeTotals,
+) {
+    let doc = datagen_rs::corpus::marker_json(
+        corpus_args,
+        cycle,
+        node_id,
+        totals,
+        &datagen_rs::corpus::utc_now(),
+    );
+    sink.put(
+        &datagen_rs::corpus::marker_key(cycle, node_id),
+        doc.into_bytes(),
+    );
+}
+
+/// Refuse (exit 2) any `--flag` the schema does not know, a bare flag given a
+/// value, and any stray positional argument. The value of a stray token is
+/// never printed (it could be a seed).
+fn check_known_flags(schema: &str) {
+    let (values, bare) = match schema {
+        "financial" => (FINANCIAL_FLAGS, FINANCIAL_BARE),
+        _ => (C360_FLAGS, C360_BARE),
+    };
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        let Some(rest) = a.strip_prefix("--") else {
+            eprintln!("unexpected argument at position {i} (value not shown); flags start with --");
+            std::process::exit(2);
+        };
+        let name = format!("--{}", rest.split('=').next().unwrap_or(""));
+        if bare.contains(&name.as_str()) {
+            if a.contains('=') {
+                eprintln!("{name} takes no value");
+                std::process::exit(2);
+            }
+            i += 1;
+        } else if values.contains(&name.as_str()) {
+            i += if a.contains('=') { 1 } else { 2 };
+        } else {
+            eprintln!("unknown flag {name} for the {schema} schema");
+            std::process::exit(2);
+        }
+    }
 }
 
 /// --cycle, strictly: absent means 0, but a present value that does not parse
@@ -116,16 +298,13 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
     let args: Vec<String> = std::env::args().collect();
     // Accept `--cycle N` and `--cycle=N`; anything else that names the flag
     // but does not parse is an error, never a silent cycle 0.
-    let eq = format!("{flag}=");
-    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
-        if a == flag {
-            Some(args.get(i + 1).cloned().unwrap_or_default())
-        } else {
-            a.strip_prefix(eq.as_str()).map(str::to_string)
+    let raw: String = match flag_values(&args, flag).as_slice() {
+        [] => return default,
+        [one] => one.clone().unwrap_or_default(),
+        _ => {
+            eprintln!("{flag} is given more than once");
+            std::process::exit(2);
         }
-    });
-    let Some(raw) = raw else {
-        return default;
     };
     match raw.parse::<u64>() {
         Ok(c) if c <= max => c,
@@ -139,36 +318,91 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
 /// Seeds the AML pre-registration has spent (corpora.spent_seeds). Defence in
 /// depth for manual Jobs and direct runs: lakebench refuses the full,
 /// current list from the pre-registration before it ever launches datagen;
-/// tests/test_datagen_seed.py checks this list stays a subset of it.
+/// tests/test_datagen_seed.py checks this list stays a subset of it. The hash
+/// file's `spent` list is unioned with it, so an old file cannot un-spend a
+/// seed and a newly spent one needs no image.
 const SPENT_SEEDS: &[i64] = &[42, 50_000_042];
 
-/// --seed for the financial schema: required, strictly parsed, never a spent
-/// seed. The lenient `arg()` would turn a typo into the old default 42.
-fn financial_seed() -> i64 {
+/// Environment variable a registered (held-out) corpus's seed arrives in, from
+/// a Kubernetes Secret, so it is in no Job argument and no command line.
+const SEED_ENV: &str = "LB_DATAGEN_SEED";
+
+/// --seed for the financial schema, or `LB_DATAGEN_SEED` when --seed is
+/// absent: required, strictly parsed, never a spent seed. Both at once is
+/// refused, and a bad environment value is never echoed. The lenient `arg()`
+/// would turn a typo into the old default 42.
+fn financial_seed(held: &HeldOut) -> i64 {
     let args: Vec<String> = std::env::args().collect();
-    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
-        if a == "--seed" {
-            Some(args.get(i + 1).cloned().unwrap_or_default())
-        } else {
-            a.strip_prefix("--seed=").map(str::to_string)
+    let raw: Option<String> = match flag_values(&args, "--seed").as_slice() {
+        [] => None,
+        [one] => Some(one.clone().unwrap_or_default()),
+        _ => {
+            eprintln!("--seed is given more than once");
+            std::process::exit(2);
         }
-    });
-    let Some(raw) = raw else {
-        eprintln!("--seed is required for the financial schema (AML seeds are pre-registered)");
-        std::process::exit(2);
     };
-    let Ok(seed) = raw.parse::<i64>() else {
-        eprintln!("--seed must be an integer; got {raw:?}");
-        std::process::exit(2);
+    // Literal name, so every environment read is visible to a source scan.
+    let env = std::env::var("LB_DATAGEN_SEED").ok();
+    let seed = match (raw, env) {
+        (Some(_), Some(_)) => {
+            eprintln!("the seed is given both as --seed and in {SEED_ENV}; pass it once");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            eprintln!(
+                "--seed (or {SEED_ENV}) is required for the financial schema \
+                 (AML seeds are pre-registered)"
+            );
+            std::process::exit(2);
+        }
+        (Some(raw), None) => {
+            let Ok(seed) = raw.parse::<i64>() else {
+                eprintln!("--seed must be an integer; got {raw:?}");
+                std::process::exit(2);
+            };
+            seed
+        }
+        (None, Some(env)) => match env.trim().parse::<i64>() {
+            Ok(seed) if seed >= 0 => seed,
+            _ => {
+                eprintln!("{SEED_ENV} is not a non-negative integer (value not shown)");
+                std::process::exit(2);
+            }
+        },
     };
-    if SPENT_SEEDS.contains(&seed) {
+    if SPENT_SEEDS.contains(&seed) || held.is_spent(seed) {
+        // Spent seeds are public, but a spent held-out seed is still never
+        // echoed into a pod log.
         eprintln!(
-            "--seed {seed} is spent in the AML pre-registration (corpora.spent_seeds); \
-             use the calibration seed or another unregistered seed"
+            "--seed names a spent seed (corpora.spent_seeds or the held-out hash file's spent \
+             list); use the calibration seed or another unregistered seed"
         );
         std::process::exit(2);
     }
     seed
+}
+
+/// The held-out hash file named by `LB_HELDOUT_HASHES` (a ConfigMap on the
+/// pod). The financial schema never runs without it: missing, unreadable or
+/// malformed exits 2 before anything is written. The compiled floor does not
+/// replace the file.
+fn heldout_or_exit() -> HeldOut {
+    let env = datagen_rs::heldout::ENV;
+    // Literal name, so every environment read is visible to a source scan.
+    let Ok(path) = std::env::var("LB_HELDOUT_HASHES") else {
+        eprintln!("held-out hash file {env} is not set; refusing to generate a financial corpus");
+        std::process::exit(2);
+    };
+    match HeldOut::load(&path) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "held-out hash file {env}={path} unreadable: {e}; refusing to generate a \
+                 financial corpus"
+            );
+            std::process::exit(2);
+        }
+    }
 }
 
 use datagen_rs::robustness::FLAG as ROBUSTNESS_FLAG;
@@ -188,8 +422,8 @@ fn robustness_flag() -> bool {
 
 /// The perturbation for the financial driver (see
 /// robustness::perturbation_for_seed for the seed rules).
-fn financial_perturbation(seed: i64) -> Perturbation {
-    match perturbation_for_seed(seed, robustness_flag()) {
+fn financial_perturbation(seed: i64, held: &HeldOut) -> Perturbation {
+    match perturbation_for_seed(seed, robustness_flag(), held) {
         Ok(p) => {
             if p != Perturbation::NONE {
                 eprintln!(
@@ -251,6 +485,15 @@ enum DeliveryMode {
     Continuous,
 }
 
+impl DeliveryMode {
+    fn name(self) -> &'static str {
+        match self {
+            DeliveryMode::Batch => "batch",
+            DeliveryMode::Continuous => "continuous",
+        }
+    }
+}
+
 fn parse_delivery_mode() -> DeliveryMode {
     // Default is continuous (Wave 2 D-wave, follow-up 2026-09-28). Live smoke
     // (16 pods at scale 1 on FlashBlade) confirmed batch and continuous
@@ -258,7 +501,7 @@ fn parse_delivery_mode() -> DeliveryMode {
     // binary default matches the K8s template and Python entrypoint defaults
     // and matches owner D18. Legacy raw-CLI callers who need the pre-flip
     // behaviour can pass --delivery-mode batch explicitly.
-    let s: String = arg("--delivery-mode", "continuous".to_string());
+    let s: String = strict_arg("--delivery-mode", "continuous".to_string());
     match s.as_str() {
         "batch" => DeliveryMode::Batch,
         "continuous" => DeliveryMode::Continuous,
@@ -276,7 +519,7 @@ fn parse_delivery_mode() -> DeliveryMode {
 /// delivery mode. Returns the object size in bytes. Uses `writer_properties`
 /// so codec choice is uniform across every parquet emitted; row-group size
 /// is the parquet-crate default (~1M rows). Continuous mode reuses the
-/// S3Sink::put_multipart path proven for party/account since LB-107.
+/// S3Sink::put_multipart path proven for party/account (objects over 5 GiB).
 fn write_bronze_file(
     sink: &S3Sink,
     key: &str,
@@ -292,17 +535,18 @@ fn write_bronze_file(
             sz
         }
         DeliveryMode::Continuous => {
-            let props = writer_properties();
-            let mut mpu = sink.put_multipart(key);
-            {
-                let mut w = ArrowWriter::try_new(&mut mpu, batch.schema(), Some(props)).unwrap();
-                w.write(batch).unwrap();
-                w.close().unwrap();
-            }
-            let sz = mpu.bytes_written();
-            mpu.finish()
-                .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e));
-            sz
+            // A failed upload or completion rebuilds the file from the same
+            // batch (deterministic bytes) and uploads it again on the same
+            // key, after 2, 4 and 8 s; only then does the pod fail. Dropping
+            // a failed writer aborts its upload.
+            datagen_rs::s3sink::write_parquet_retrying(
+                &format!("continuous mpu key={key}"),
+                || sink.put_multipart(key),
+                batch,
+                writer_properties,
+                |s| std::thread::sleep(std::time::Duration::from_secs(s)),
+            )
+            .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e))
         }
     }
 }
@@ -312,7 +556,18 @@ fn main() {
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
     // choice before invoking us, but keep a defensive check here too so a
     // typo doesn't fall through to the pacs.008 path silently.
-    let schema: String = arg("--schema", "financial".to_string());
+    if bare_flag_given("--version") {
+        println!(
+            "datagen_rs {} {}",
+            datagen_rs::model::MODEL_VERSION,
+            datagen_rs::corpus::build_commit()
+        );
+        std::process::exit(0);
+    }
+    let schema: String = strict_arg("--schema", "financial".to_string());
+    if matches!(schema.as_str(), "financial" | "customer360") {
+        check_known_flags(&schema);
+    }
     match schema.as_str() {
         "financial" => pacs008_main(),
         "customer360" => customer360_main(),
@@ -332,14 +587,15 @@ fn pacs008_main() {
     // Direct-to-S3: pod holds no state. --bucket / --prefix name where the files
     // go, S3 creds and endpoint come from env (AWS_ACCESS_KEY_ID,
     // AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, AWS_REGION).
-    let bucket: String = arg("--bucket", String::new());
-    let prefix: String = arg("--prefix", String::new());
+    let bucket: String = strict_arg("--bucket", String::new());
+    let prefix: String = strict_arg("--prefix", String::new());
     if bucket.is_empty() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed = financial_seed();
-    let perturb = financial_perturbation(seed);
+    let held = heldout_or_exit();
+    let seed = financial_seed(&held);
+    let perturb = financial_perturbation(seed, &held);
     // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
     // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
@@ -347,20 +603,20 @@ fn pacs008_main() {
     let (cycle_n, cycles) = cycle_args();
     let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
     let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
-    let scale: f64 = arg("--scale", 0.01);
-    let corpus_months: i64 = arg("--corpus-months", 60);
+    let scale: f64 = strict_f64("--scale", 1.0);
+    let corpus_months: i64 = strict_arg("--corpus-months", 60);
     // Default 64 matches DatagenConfig.file_size ("64mb"), the template's
     // default(64) fallback, and entrypoint.py's default, so raw-CLI
     // reproducers and pod runs pick the same file size when
     // --file-size-mb is omitted. The historical pre-M6 default was 32
     // for the financial K8s YAMLs; aligned to 64 on 2026-09-28.
-    let file_size_mb: i64 = arg("--file-size-mb", 64);
+    let file_size_mb: i64 = strict_arg("--file-size-mb", 64);
     // Bytes/row is used only to size total_files from total_txns. If the flag
     // is not passed we pick a codec-aware default from writer::pacs008_bytes_per_row_default
     // (a single scalar was wrong under any codec other than the one it was
     // measured against -- see writer.rs for the measured table).
     //
-    // The generic `arg()` helper silently falls back to the default on parse
+    // A lenient parse would silently fall back to the default on parse
     // failure, which would let `--bytes-per-row abc` or `1e-999` (subnormal
     // underflow -> 0.0) or `-0.0` (== 0.0) silently take the codec default.
     // Distinguish "flag absent" from "flag present but unparseable"
@@ -368,14 +624,19 @@ fn pacs008_main() {
     // the override, absent uses the codec default.
     let bytes_per_row: f64 = {
         let args: Vec<String> = std::env::args().collect();
-        let mut present: Option<&str> = None;
-        for i in 0..args.len() {
-            if args[i] == "--bytes-per-row" {
-                if let Some(v) = args.get(i + 1) {
-                    present = Some(v.as_str());
-                }
+        let given = flag_values(&args, "--bytes-per-row");
+        let present: Option<&str> = match given.as_slice() {
+            [] => None,
+            [Some(v)] => Some(v.as_str()),
+            [None] => {
+                eprintln!("--bytes-per-row needs a value");
+                std::process::exit(2);
             }
-        }
+            _ => {
+                eprintln!("--bytes-per-row is given more than once");
+                std::process::exit(2);
+            }
+        };
         match present {
             None => {
                 let d = pacs008_bytes_per_row_default();
@@ -398,18 +659,19 @@ fn pacs008_main() {
             },
         }
     };
-    let node_id: i64 = arg("--node-id", 0);
-    let total_nodes: i64 = arg("--total-nodes", 1);
+    let node_id: i64 = strict_arg("--node-id", 0);
+    let total_nodes: i64 = strict_arg("--total-nodes", 1);
     // Work split: "all" (node 0 also writes the reference zones), "bronze"
     // (transactions only -- every pod balanced), "reference" (party/account/
     // manifest only, on a dedicated pod). Offloading reference removes the
     // node-0 straggler so bronze pods finish together.
-    let mode: String = arg("--mode", "all".to_string());
+    let mode: String = strict_arg("--mode", "all".to_string());
     // Delivery mode is orthogonal to work split (Wave 2 D3, 2026-09-28):
     // batch (default) writes each bronze file as one S3 PUT; continuous
     // streams parquet row-groups through S3 multipart. Corpus content is
     // identical at fixed seed; verified by row-identity test in cycles.rs.
     let delivery = parse_delivery_mode();
+    eprintln!("delivery_mode={}", delivery.name());
     // Reject typos explicitly so an operator's `--mode brozne` does not
     // silently succeed with zero files written (previously it fell through
     // to do_bronze=false, do_reference=false and exit 0 -- caught by an
@@ -457,7 +719,7 @@ fn pacs008_main() {
     // rather than the host-visible core count (rayon's default reflects CPU
     // affinity, not the Kubernetes CFS quota, so it oversubscribes and gets
     // throttled). 0 leaves rayon's default / RAYON_NUM_THREADS.
-    let threads: usize = arg("--threads", 0usize);
+    let threads: usize = strict_arg("--threads", 0usize);
     if threads > 0 {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -492,6 +754,25 @@ fn pacs008_main() {
     // Validate S3 config + build the sink BEFORE the multi-minute world build,
     // so bad creds / missing endpoint surface in milliseconds. Building the
     // sink also proves the tokio runtime and object_store client init cleanly.
+    // The corpus arguments as resolved (defaults and parsed values, the
+    // writer settings from the environment), for the marker and for
+    // --print-resolved-args, which exits here before any S3 client.
+    let corpus_args = serde_json::json!({
+        "schema": "financial",
+        "seed_ref": held.seed_ref(seed),
+        "cycles": cycles,
+        "total_nodes": total_nodes,
+        "file_size_mb": file_size_mb,
+        "delivery_mode": delivery.name(),
+        "model_version": datagen_rs::model::MODEL_VERSION,
+        "writer": datagen_rs::writer::WriterSettings::from_env().to_json(),
+        "scale": scale,
+        "corpus_months": corpus_months,
+        "mode": mode,
+        "robustness_perturbation": perturb != Perturbation::NONE,
+        "bytes_per_row": bytes_per_row,
+    });
+    maybe_print_resolved_args(&corpus_args);
     let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
@@ -499,7 +780,7 @@ fn pacs008_main() {
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
     let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
-    // Screening track (AML-GOALS #50): the watchlist and its external
+    // Screening track: the watchlist and its external
     // counterparties, from their own salted streams. Attaching them adds
     // entities above the population and changes no population column.
     let screening = datagen_rs::screening::build(w.population, seed, start_us, end_us);
@@ -543,7 +824,7 @@ fn pacs008_main() {
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
-    // LB-204 memory: every pod schedules the whole typology/screening set (RNG
+    // Memory: every pod schedules the whole typology/screening set (RNG
     // order, inst_uids and the manifest depend on the complete schedule), but a
     // pod only ever *emits* the files it owns (`fid % total_nodes == node_id`,
     // and only in --mode all/bronze). Keep the full per-file COUNT -- n_typ_total
@@ -761,7 +1042,7 @@ fn pacs008_main() {
         lo as u64
     }
 
-    // Screening payments (AML-GOALS #50), planted after the base row count
+    // Screening payments, planted after the base row count
     // above is fixed, so they are added on top of the corpus rather than
     // taken from it: every base, scheduled and typology row keeps its content
     // and uid. Originators are activity-weighted customers outside any
@@ -876,7 +1157,7 @@ fn pacs008_main() {
         // Party and account are the same for every cycle (the world and the
         // schedule are the one-shot ones), so only cycle 0 writes them.
         // Party and account stream through a real S3 multipart upload
-        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
+        // (objects over 5 GiB). ArrowWriter emits parquet in row-group chunks
         // into MpuWriter, which enqueues 5 MiB parts against S3 as they
         // fill. Whole-object size is no longer bounded by process RAM
         // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
@@ -1243,6 +1524,23 @@ fn pacs008_main() {
         build_s, 100.0 * build_s / cpu_tot, write_s, 100.0 * write_s / cpu_tot, up_s
     );
 
+    // A reference-only pod (a raw split run; Lakebench always renders
+    // --mode all) is not one of the corpus's nodes: its marker would take
+    // bronze node 0's key, so it writes none.
+    if mode != "reference" {
+        write_marker(
+            &sink,
+            &corpus_args,
+            cycle_n,
+            node_id,
+            datagen_rs::corpus::NodeTotals {
+                files_written,
+                rows_written,
+                bytes_written: total_bytes,
+            },
+        );
+    }
+
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
     // `LB_METRICS_JSON `.
@@ -1254,6 +1552,7 @@ fn pacs008_main() {
         cpu_request_millicores: read_cpu_request_millicores(),
         bucket: bucket.clone(),
         prefix: prefix.clone(),
+        delivery_mode: delivery.name().to_string(),
         scale: Some(scale),
         corpus_months: Some(corpus_months),
         population: Some(pop as u64),
@@ -1314,20 +1613,20 @@ fn customer360_main() {
         eprintln!("{ROBUSTNESS_FLAG} applies to the financial schema only");
         std::process::exit(2);
     }
-    let bucket: String = arg("--bucket", String::new());
-    let prefix: String = arg("--prefix", "customer/interactions/".to_string());
+    let bucket: String = strict_arg("--bucket", String::new());
+    let prefix: String = strict_arg("--prefix", "customer/interactions/".to_string());
     if bucket.is_empty() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed: i64 = arg("--seed", 42);
+    let seed: i64 = strict_arg("--seed", 42);
     // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
     // suffixes the keys; 0 reproduces a run without --cycle.
-    let cycle_n: u64 = cycle_arg();
+    let (cycle_n, c360_cycles) = cycle_args();
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale sizes only the customer id space (when
     // --customer-id-max is absent); target_tb drives file count.
-    let target_tb: f64 = arg("--target-tb", 0.1);
+    let target_tb: f64 = strict_f64("--target-tb", 0.1);
     if !target_tb.is_finite() || target_tb <= 0.0 {
         eprintln!(
             "--target-tb must be a positive finite number; got {}",
@@ -1335,7 +1634,7 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
-    let file_size_mb: i64 = arg("--file-size-mb", 64);
+    let file_size_mb: i64 = strict_arg("--file-size-mb", 64);
     if file_size_mb < 1 {
         eprintln!("--file-size-mb must be >= 1; got {}", file_size_mb);
         std::process::exit(2);
@@ -1348,9 +1647,9 @@ fn customer360_main() {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        arg("--node-id", env_default)
+        strict_arg("--node-id", env_default)
     };
-    let total_nodes: i64 = arg("--total-nodes", 1);
+    let total_nodes: i64 = strict_arg("--total-nodes", 1);
     if total_nodes < 1 || node_id < 0 || node_id >= total_nodes {
         eprintln!(
             "--total-nodes must be >= 1 and --node-id in [0, total_nodes); got node_id={} total_nodes={}",
@@ -1363,9 +1662,9 @@ fn customer360_main() {
     // customers per scale unit, matching scale.py (E4). It was a fixed 500K
     // at every scale. Either way it must fit the pod's memory.
     let mem_limit = customer360::pod_memory_limit_bytes();
-    let customer_id_max: u64 = match arg::<u64>("--customer-id-max", 0) {
+    let customer_id_max: u64 = match strict_arg::<u64>("--customer-id-max", 0) {
         0 => {
-            let scale: f64 = arg("--scale", 1.0);
+            let scale: f64 = strict_f64("--scale", 1.0);
             customer360::customer_id_max_for_scale_within(scale, mem_limit)
         }
         n => customer360::check_id_space_fits_memory(n, mem_limit).map(|_| n),
@@ -1376,19 +1675,21 @@ fn customer360_main() {
     });
     // payload_kb was a CLI knob (--payload-kb) that had only ever been
     // calibrated at 2, so any other value silently mis-sized rows_per_file
-    // and the refuse path exited 2. Dropped 2026-09-28 (LB-191 companion,
-    // Wave 1 C3): no shipped template ever passed a different value, and a
+    // and the refuse path exited 2. Dropped 2026-09-28: no shipped template ever passed a different value, and a
     // future need for variable payload comes back with real per-payload
     // calibration in customer360_bytes_per_row_default(). Config::payload_kb
     // stays as a Rust-visible field so unit tests can build small_cfg with
     // payload_kb=1. The old --payload-kb CLI value (if any) is ignored.
     let payload_kb: usize = 2;
-    let dirty_ratio: f64 = arg("--dirty-ratio", 0.08);
-    let duplicate_email_pct: f64 = arg("--duplicate-email-pct", 0.10);
+    // Recorded in the corpus arguments; it sizes the id space only when
+    // --customer-id-max is absent.
+    let c360_scale: f64 = strict_f64("--scale", 1.0);
+    let dirty_ratio: f64 = strict_f64("--dirty-ratio", 0.08);
+    let duplicate_email_pct: f64 = strict_f64("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
     // the Python c360 defaults.
-    let ts_start_str: String = arg("--timestamp-start", "2024-01-01".to_string());
-    let ts_end_str: String = arg("--timestamp-end", "2025-01-01".to_string());
+    let ts_start_str: String = strict_arg("--timestamp-start", "2024-01-01".to_string());
+    let ts_end_str: String = strict_arg("--timestamp-end", "2025-01-01".to_string());
     let ts_start_us = parse_date_to_us(&ts_start_str).unwrap_or_else(|| {
         eprintln!(
             "--timestamp-start must be YYYY-MM-DD; got {:?}",
@@ -1410,9 +1711,9 @@ fn customer360_main() {
     // Rayon pool: honor --threads if set, fall back to --workers for K8s Job
     // templates that don't yet know about --threads. 0 leaves rayon's default.
     let threads: usize = {
-        let t = arg::<usize>("--threads", 0);
+        let t = strict_arg::<usize>("--threads", 0);
         if t == 0 {
-            arg::<usize>("--workers", 0)
+            strict_arg::<usize>("--workers", 0)
         } else {
             t
         }
@@ -1426,9 +1727,27 @@ fn customer360_main() {
     // Delivery mode (Wave 2 D3, 2026-09-28); see the pacs008 branch for the
     // full semantic. Default batch preserves the current pinned-digest tests.
     let delivery = parse_delivery_mode();
+    eprintln!("delivery_mode={}", delivery.name());
 
-    let sink = S3Sink::from_env(&bucket, &prefix);
-
+    // The corpus arguments as resolved, for the marker and for
+    // --print-resolved-args, which exits here before any S3 client.
+    let corpus_args = serde_json::json!({
+        "schema": "customer360",
+        "seed_ref": seed.to_string(),
+        "cycles": c360_cycles,
+        "total_nodes": total_nodes,
+        "file_size_mb": file_size_mb,
+        "delivery_mode": delivery.name(),
+        "model_version": datagen_rs::model::MODEL_VERSION,
+        "writer": datagen_rs::writer::WriterSettings::from_env().to_json(),
+        "target_tb": target_tb,
+        "customer_id_max": customer_id_max,
+        "scale": c360_scale,
+        "dirty_ratio": dirty_ratio,
+        "duplicate_email_pct": duplicate_email_pct,
+        "timestamp_start": ts_start_str,
+        "timestamp_end": ts_end_str,
+    });
     let t0 = std::time::Instant::now();
     let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;
     let bytes_per_row = customer360_bytes_per_row_default();
@@ -1456,6 +1775,10 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
+    // Every argument check is above, so a printed resolution is one the run
+    // would accept.
+    maybe_print_resolved_args(&corpus_args);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     // Build the loyalty lookup + customer_id sampler ONCE, then share via Arc
     // across rayon workers. Same lookup used by every file so
@@ -1567,6 +1890,18 @@ fn customer360_main() {
         up_s
     );
 
+    write_marker(
+        &sink,
+        &corpus_args,
+        cycle_n,
+        node_id,
+        datagen_rs::corpus::NodeTotals {
+            files_written,
+            rows_written,
+            bytes_written: total_bytes,
+        },
+    );
+
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
     // `LB_METRICS_JSON `.
@@ -1578,6 +1913,7 @@ fn customer360_main() {
         cpu_request_millicores: read_cpu_request_millicores(),
         bucket: bucket.clone(),
         prefix: prefix.clone(),
+        delivery_mode: delivery.name().to_string(),
         target_tb: Some(target_tb),
         customer_id_max: Some(customer_id_max),
         dirty_ratio: Some(dirty_ratio),
@@ -1641,5 +1977,160 @@ mod tests {
         assert_eq!(parse_date_to_us("2024-01-32"), None);
         assert_eq!(parse_date_to_us(""), None);
         assert_eq!(parse_date_to_us("abc"), None);
+    }
+}
+
+#[cfg(test)]
+mod classification {
+    //! Every generator flag and environment variable is either in the
+    //! marker's `corpus_args` or excluded for a reason, so a new knob cannot
+    //! be left out of corpus identity silently.
+    use super::{C360_BARE, C360_FLAGS, FINANCIAL_BARE, FINANCIAL_FLAGS};
+
+    /// (flag, corpus_args key it lands in, or None with the reason).
+    const FLAG_CLASS: &[(&str, Result<&str, &str>)] = &[
+        ("--schema", Ok("schema")),
+        ("--seed", Ok("seed_ref")),
+        ("--scale", Ok("scale")),
+        ("--corpus-months", Ok("corpus_months")),
+        ("--file-size-mb", Ok("file_size_mb")),
+        ("--bytes-per-row", Ok("bytes_per_row")),
+        ("--total-nodes", Ok("total_nodes")),
+        ("--mode", Ok("mode")),
+        ("--delivery-mode", Ok("delivery_mode")),
+        ("--cycles", Ok("cycles")),
+        ("--robustness-perturbation", Ok("robustness_perturbation")),
+        ("--target-tb", Ok("target_tb")),
+        ("--customer-id-max", Ok("customer_id_max")),
+        ("--dirty-ratio", Ok("dirty_ratio")),
+        ("--duplicate-email-pct", Ok("duplicate_email_pct")),
+        ("--timestamp-start", Ok("timestamp_start")),
+        ("--timestamp-end", Ok("timestamp_end")),
+        ("--bucket", Err("destination")),
+        ("--prefix", Err("destination")),
+        (
+            "--node-id",
+            Err("per node, recorded in the marker's node_id"),
+        ),
+        ("--cycle", Err("per cycle, recorded in the marker's cycle")),
+        (
+            "--threads",
+            Err("thread count; output is thread-invariant (pinned)"),
+        ),
+        ("--workers", Err("thread count alias")),
+        ("--print-resolved-args", Err("a mode that writes nothing")),
+        ("--version", Err("a mode that writes nothing")),
+    ];
+
+    /// (variable, in corpus_args, reason when not).
+    const ENV_CLASS: &[(&str, Result<&str, &str>)] = &[
+        ("DG_COMPRESSION", Ok("writer")),
+        ("DG_STATS", Ok("writer")),
+        ("DG_DICT", Ok("writer")),
+        ("DG_PAGESZ", Ok("writer")),
+        ("DG_ROW_GROUP", Ok("writer")),
+        ("LB_DATAGEN_SEED", Ok("seed_ref")),
+        ("DG_LOCAL_DIR", Err("destination")),
+        ("S3_ENDPOINT", Err("destination")),
+        ("AWS_REGION", Err("destination")),
+        ("S3_PATH_STYLE", Err("transport")),
+        ("S3_VERIFY_SSL", Err("transport")),
+        ("S3_CA_CERT", Err("transport")),
+        (
+            "DG_S3_IO_THREADS",
+            Err("upload concurrency; part boundaries do not change bytes"),
+        ),
+        ("AWS_ACCESS_KEY_ID", Err("credentials, never hashed")),
+        ("AWS_SECRET_ACCESS_KEY", Err("credentials, never hashed")),
+        ("JOB_COMPLETION_INDEX", Err("the node id's source")),
+        ("LB_RUN_ID", Err("metrics only")),
+        ("LB_PUSHGATEWAY_URL", Err("metrics only")),
+        ("LB_POD_CPU_REQUEST_MILLI", Err("metrics only")),
+        (
+            "LB_HELDOUT_HASHES",
+            Err("a check input; seed_ref carries the salted seed"),
+        ),
+    ];
+
+    fn keys(schema: &str) -> Vec<&'static str> {
+        let common = [
+            "schema",
+            "seed_ref",
+            "cycles",
+            "total_nodes",
+            "file_size_mb",
+            "delivery_mode",
+            "model_version",
+            "writer",
+        ];
+        let extra: &[&str] = if schema == "financial" {
+            &[
+                "scale",
+                "corpus_months",
+                "mode",
+                "robustness_perturbation",
+                "bytes_per_row",
+            ]
+        } else {
+            &[
+                "target_tb",
+                "customer_id_max",
+                "scale",
+                "dirty_ratio",
+                "duplicate_email_pct",
+                "timestamp_start",
+                "timestamp_end",
+            ]
+        };
+        common.iter().chain(extra.iter()).copied().collect()
+    }
+
+    #[test]
+    fn every_known_flag_is_classified() {
+        for (schema, table) in [
+            ("financial", [FINANCIAL_FLAGS, FINANCIAL_BARE].concat()),
+            ("customer360", [C360_FLAGS, C360_BARE].concat()),
+        ] {
+            for flag in table {
+                let class = FLAG_CLASS.iter().find(|(f, _)| *f == flag);
+                let Some((_, class)) = class else {
+                    panic!("{schema} flag {flag} is neither in corpus_args nor excluded");
+                };
+                if let Ok(key) = class {
+                    assert!(keys(schema).contains(key), "{schema} {flag} -> {key}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_env_read_is_classified() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut names = std::collections::BTreeSet::new();
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    for needle in ["env::var(\"", "env::var_os(\""] {
+                        for part in text.split(needle).skip(1) {
+                            if let Some(end) = part.find('"') {
+                                names.insert(part[..end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(names.len() >= 15, "the scan found too few reads: {names:?}");
+        for n in &names {
+            assert!(
+                ENV_CLASS.iter().any(|(k, _)| k == n),
+                "{n} is read but neither in corpus_args nor excluded"
+            );
+        }
     }
 }

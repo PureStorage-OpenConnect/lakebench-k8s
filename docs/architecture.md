@@ -163,16 +163,21 @@ register and serve Iceberg tables identically.
 Spark jobs are submitted as `SparkApplication` custom resources managed by the
 Kubeflow Spark Operator (v2.x). Lakebench does not rely on the operator's
 webhook for volumes, because it does not inject them from the
-SparkApplication spec. The scripts ConfigMap and emptyDir volumes are
+SparkApplication spec. The scripts ConfigMaps and emptyDir volumes are
 declared in driver and executor pod templates, and scratch PVCs are attached
 through `spark.kubernetes.*.volumes.persistentVolumeClaim.*` conf properties.
 See [component-spark.md](component-spark.md#spark-operator).
 
-Pipeline scripts are packaged into a `lakebench-spark-scripts` ConfigMap and
-mounted at `/opt/spark/scripts` in every Spark pod. The driver and executor
+Pipeline scripts ship in one ConfigMap per role (`lakebench-scripts-common`,
+`-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate` and `-aml-data`), projected
+together at `/opt/spark/scripts` in every Spark pod. `run` applies them before
+any job is submitted and refuses to start if a listed file is missing from the
+package or a map is over 80% of the 1 MiB ConfigMap limit; see
+[component-spark.md](component-spark.md). The driver and executor
 pods run as UID 185 (the `spark` user in the `apache/spark` base image).
-On OpenShift, an `anyuid` SCC is automatically bound to the
-`lakebench-spark-runner` service account.
+On OpenShift, `deploy` grants the `anyuid` SCC to the
+`lakebench-spark-runner` and `lakebench-postgres` service accounts through the
+Kubernetes API, and fails if the grant is refused.
 
 ### Trino
 
@@ -254,7 +259,7 @@ workload: support is judged per workload x recipe x mode (see
 [Compatibility Matrix](compatibility-matrix.md#support-states)).
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -303,21 +308,25 @@ The deployment engine creates resources in a strict dependency order:
 4. **S3 buckets** -- creates the deployment's buckets
 5. **Scratch StorageClass check** -- verifies the scratch class exists (if
    scratch is enabled); it never creates it. A cluster admin installs it once
-   with `lakebench admin install-scratch-storage-class`
+   with `lakebench admin install --component scratch-storage-class`
 6. **PostgreSQL** -- StatefulSet with persistent volume
 7. **Hive Metastore** -- skipped unless the catalog is Hive
 8. **Polaris** -- skipped unless the catalog is Polaris
 9. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
 10. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
     combination)
-11. **Spark Operator** -- verifies the shared operator (or installs a missing
-    one when `platform.compute.spark.operator.install: true`) and adds the
-    namespace to its watch list under the cluster lease
-12. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
-13. **Spark Thrift Server** -- if selected
-14. **DuckDB** -- if selected
-15. **Observability** -- one step for Prometheus, Grafana and the
-    deployment's Pushgateway (if enabled)
+11. **Spark Operator** -- verifies the shared operator (deploy never installs
+    it; `lakebench admin install --component spark-operator` does) and adds
+    the namespace to its watch list under the cluster lease
+12. **Dependency server** -- the `lb-deps` Deployment, Service and PVC in
+    the namespace: resolves the jars and wheels once per request and serves
+    them read-only; deploy waits until it is Ready and records the set
+13. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
+14. **Spark Thrift Server** -- if selected
+15. **DuckDB** -- if selected
+16. **Observability** -- checks the shared Prometheus and Grafana release
+    (installed by `lakebench admin install --component observability`) and
+    applies the deployment's PodMonitors and Pushgateway (if enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods
 first, then table removal from the catalog (metadata only, no table

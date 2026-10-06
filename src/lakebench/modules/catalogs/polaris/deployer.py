@@ -20,6 +20,16 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from lakebench.deploy import deadline as deploy_deadline
+from lakebench.deploy.deployment_secrets import (
+    DeploymentSecretError,
+    ensure_polaris_client_secret,
+    ensure_polaris_db_password,
+    polaris_role_exists,
+    psql_command_ok,
+    scram_sha256_verifier,
+    sync_role_password,
+)
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus, image_tag
 from lakebench.k8s import WaitStatus, wait_for_deployment_ready
 
@@ -86,7 +96,8 @@ class PolarisDeployer:
             )
 
         try:
-            # Step 1: Create polaris database in PostgreSQL
+            # Step 1: Create polaris database in PostgreSQL, with this
+            # deployment's own DB password and client secret.
             self._create_polaris_db(namespace)
 
             # Step 2: Deploy server + service
@@ -121,7 +132,9 @@ class PolarisDeployer:
                     self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Step 5: Wait for bootstrap job completion
-            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=600)
+            bootstrap_result = self._wait_for_bootstrap_job(
+                namespace, timeout_seconds=deploy_deadline.clamp(600)
+            )
 
             if not bootstrap_result:
                 return DeploymentResult(
@@ -148,6 +161,13 @@ class PolarisDeployer:
                 detail=polaris_version,
             )
 
+        except DeploymentSecretError as e:
+            return DeploymentResult(
+                component="polaris",
+                status=DeploymentStatus.FAILED,
+                message=str(e),
+                elapsed_seconds=time.time() - start,
+            )
         except Exception as e:
             logger.exception("Polaris deployment failed")
             return DeploymentResult(
@@ -186,15 +206,32 @@ class PolarisDeployer:
                     )
                 )
 
-            # Create user (idempotent via DO block)
-            resp = _exec_psql(
-                "hive",
-                "DO $$ BEGIN "
-                "IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'polaris') THEN "
-                "CREATE USER polaris WITH PASSWORD 'lakebench-polaris-2024'; "
-                "END IF; END $$;",
+            # An existing polaris role means Polaris was bootstrapped
+            # before (a v1.6 deployment keeps its client secret); an
+            # unreadable answer stops the deploy.
+            role_exists = polaris_role_exists(_exec_psql)
+            password = ensure_polaris_db_password(
+                core_v1, self.config, namespace, role_exists=role_exists
             )
-            logger.info(f"Create polaris user: {resp}")
+            ensure_polaris_client_secret(core_v1, self.config, namespace, fresh=not role_exists)
+            if role_exists:
+                # The Secret is the authority: make the role match it, so a
+                # wrong v1.6 guess or a lost Secret cannot lock Polaris out.
+                sync_role_password(_exec_psql, "polaris", password)
+            else:
+                # Only a SCRAM verifier crosses the exec request and the logs.
+                resp = _exec_psql(
+                    "hive",
+                    f"CREATE USER polaris WITH PASSWORD '{scram_sha256_verifier(password)}';",
+                )
+                if not psql_command_ok(resp, "CREATE ROLE") and polaris_role_exists(_exec_psql):
+                    # An overlapping deploy created it first: sync to the Secret.
+                    sync_role_password(_exec_psql, "polaris", password)
+                elif not psql_command_ok(resp, "CREATE ROLE"):
+                    raise DeploymentSecretError(
+                        "could not create the polaris role in lakebench-postgres-0; check the "
+                        "pod, then re-run deploy"
+                    )
 
             # Create database (idempotent -- check first, CREATE DATABASE
             # cannot run inside a DO block / transaction)
@@ -222,6 +259,8 @@ class PolarisDeployer:
             )
             logger.info(f"Grant polaris schema access: {resp}")
 
+        except DeploymentSecretError:
+            raise
         except Exception as e:
             logger.warning(f"Could not create polaris database: {e}")
             raise
@@ -256,7 +295,7 @@ class PolarisDeployer:
         except Exception as e:
             logger.warning(f"Could not delete old bootstrap job: {e}")
 
-    def _wait_for_bootstrap_job(self, namespace: str, timeout_seconds: int = 180) -> bool:
+    def _wait_for_bootstrap_job(self, namespace: str, timeout_seconds: float = 180) -> bool:
         """Wait for the Polaris bootstrap Job to complete.
 
         Args:
@@ -294,9 +333,12 @@ class PolarisDeployer:
 
                 time.sleep(5)
 
+            deploy_deadline.check("Polaris bootstrap job", "not complete")
             logger.error(f"Polaris bootstrap job timed out after {timeout_seconds}s")
             return False
 
+        except deploy_deadline.DeployTimeout:
+            raise
         except Exception as e:
             logger.error(f"Error waiting for bootstrap job: {e}")
             return False

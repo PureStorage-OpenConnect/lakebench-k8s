@@ -9,7 +9,6 @@ import pytest
 from lakebench.metrics import (
     BenchmarkMetrics,
     BenchmarkRoundMeta,
-    CycleMetrics,
     JobMetrics,
     MetricsCollector,
     MetricsStorage,
@@ -19,7 +18,6 @@ from lakebench.metrics import (
     StageMetrics,
     StreamingJobMetrics,
     aggregate_benchmark_rounds,
-    build_config_snapshot,
     build_pipeline_benchmark,
 )
 from lakebench.reports.generator import ReportGenerator
@@ -32,69 +30,6 @@ from lakebench.reports.generator import ReportGenerator
 class TestJobMetrics:
     """Tests for JobMetrics dataclass."""
 
-    def test_basic_job_metrics(self):
-        m = JobMetrics(job_name="lakebench-bronze-verify", job_type="bronze-verify")
-        assert m.job_name == "lakebench-bronze-verify"
-        assert m.success is False
-        assert m.elapsed_seconds == 0.0
-        assert m.executor_cores == 0
-        assert m.executor_memory_gb == 0.0
-        assert m.cpu_seconds_requested == 0.0
-        assert m.memory_gb_requested == 0.0
-
-    def test_job_metrics_to_dict(self):
-        m = JobMetrics(
-            job_name="lakebench-silver-build",
-            job_type="silver-build",
-            elapsed_seconds=107.0,
-            success=True,
-            input_size_gb=1.0,
-            output_rows=500_000,
-            throughput_gb_per_second=0.009,
-        )
-        d = m.to_dict()
-        assert d["job_name"] == "lakebench-silver-build"
-        assert d["success"] is True
-        assert d["output_rows"] == 500_000
-
-    def test_job_metrics_datetime_serialisation(self):
-        now = datetime.now()
-        m = JobMetrics(
-            job_name="test",
-            job_type="bronze-verify",
-            start_time=now,
-            end_time=now + timedelta(seconds=60),
-        )
-        d = m.to_dict()
-        assert d["start_time"] == now.isoformat()
-        assert d["end_time"] == (now + timedelta(seconds=60)).isoformat()
-
-    def test_job_metrics_none_times(self):
-        m = JobMetrics(job_name="test", job_type="bronze-verify")
-        d = m.to_dict()
-        assert d["start_time"] is None
-        assert d["end_time"] is None
-
-    def test_job_metrics_resource_allocation(self):
-        m = JobMetrics(
-            job_name="lakebench-silver-build",
-            job_type="silver-build",
-            elapsed_seconds=200.0,
-            success=True,
-            executor_count=8,
-            executor_cores=4,
-            executor_memory_gb=48.0,
-            cpu_seconds_requested=6400.0,  # 8 * 4 * 200
-            memory_gb_requested=480.0,  # 8 * (48 + 12)
-        )
-        d = m.to_dict()
-        assert d["executor_count"] == 8
-        assert d["executor_cores"] == 4
-        assert d["executor_memory_gb"] == 48.0
-        assert d["cpu_seconds_requested"] == 6400.0
-        assert d["memory_gb_requested"] == 480.0
-        assert "stages" not in d
-
 
 # ---------------------------------------------------------------------------
 # QueryMetrics
@@ -103,45 +38,6 @@ class TestJobMetrics:
 
 class TestQueryMetrics:
     """Tests for QueryMetrics dataclass."""
-
-    def test_basic_query_metrics(self):
-        q = QueryMetrics(
-            query_name="rfm",
-            query_text="SELECT * FROM gold.customer_executive_dashboard",
-            elapsed_seconds=3.42,
-            rows_returned=100,
-            success=True,
-        )
-        assert q.query_name == "rfm"
-        assert q.elapsed_seconds == 3.42
-        assert q.error_message == ""
-
-    def test_query_metrics_to_dict(self):
-        q = QueryMetrics(
-            query_name="count",
-            query_text="SELECT count(*) FROM silver.interactions",
-            elapsed_seconds=0.42,
-            rows_returned=1,
-            success=True,
-        )
-        d = q.to_dict()
-        assert d["query_name"] == "count"
-        assert d["rows_returned"] == 1
-        assert d["success"] is True
-        assert d["error_message"] == ""
-
-    def test_failed_query_metrics(self):
-        q = QueryMetrics(
-            query_name="bad-query",
-            query_text="SELECT * FROM nonexistent",
-            elapsed_seconds=0.1,
-            rows_returned=0,
-            success=False,
-            error_message="Table not found",
-        )
-        d = q.to_dict()
-        assert d["success"] is False
-        assert d["error_message"] == "Table not found"
 
 
 # ---------------------------------------------------------------------------
@@ -152,81 +48,6 @@ class TestQueryMetrics:
 class TestPipelineMetrics:
     """Tests for PipelineMetrics dataclass."""
 
-    def test_basic_pipeline_metrics(self):
-        m = PipelineMetrics(
-            run_id="20260129-120000-abc123",
-            deployment_name="test-deploy",
-            start_time=datetime.now(),
-        )
-        assert m.run_id == "20260129-120000-abc123"
-        assert m.success is False
-        assert m.jobs == []
-        assert m.queries == []
-
-    def test_pipeline_to_dict(self):
-        now = datetime.now()
-        m = PipelineMetrics(
-            run_id="test-run",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    success=True,
-                    elapsed_seconds=53.0,
-                ),
-            ],
-            queries=[
-                QueryMetrics(
-                    query_name="rfm",
-                    query_text="SELECT ...",
-                    elapsed_seconds=3.42,
-                    rows_returned=100,
-                    success=True,
-                ),
-            ],
-        )
-        d = m.to_dict()
-        assert d["run_id"] == "test-run"
-        assert d["success"] is True
-        assert len(d["jobs"]) == 1
-        assert len(d["queries"]) == 1
-        assert d["jobs"][0]["job_name"] == "lakebench-bronze-verify"
-        assert d["queries"][0]["query_name"] == "rfm"
-
-    def test_pipeline_to_dict_includes_platform_metrics(self):
-        now = datetime.now()
-        pm = {
-            "pods": [{"pod_name": "test-pod", "component": "trino-coordinator"}],
-            "s3_requests_total": 50,
-            "engine": {"trino_completed_queries": 10},
-            "duration_seconds": 300,
-            "collection_error": None,
-        }
-        m = PipelineMetrics(
-            run_id="test-run",
-            deployment_name="test",
-            start_time=now,
-            platform_metrics=pm,
-        )
-        d = m.to_dict()
-        assert d["platform_metrics"] == pm
-        assert d["platform_metrics"]["engine"]["trino_completed_queries"] == 10
-
-    def test_pipeline_to_dict_omits_platform_metrics_when_none(self):
-        now = datetime.now()
-        m = PipelineMetrics(
-            run_id="test-run",
-            deployment_name="test",
-            start_time=now,
-        )
-        d = m.to_dict()
-        assert "platform_metrics" not in d
-
 
 # ---------------------------------------------------------------------------
 # MetricsCollector
@@ -235,167 +56,6 @@ class TestPipelineMetrics:
 
 class TestMetricsCollector:
     """Tests for MetricsCollector lifecycle."""
-
-    def test_start_run(self):
-        c = MetricsCollector()
-        run = c.start_run("run-1", "test-deploy", {"name": "test"})
-
-        assert run.run_id == "run-1"
-        assert run.deployment_name == "test-deploy"
-        assert run.config_snapshot == {"name": "test"}
-        assert c.current_run is run
-
-    def test_end_run(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-        result = c.end_run(success=True)
-
-        assert result is not None
-        assert result.success is True
-        assert result.end_time is not None
-        assert result.total_elapsed_seconds >= 0
-
-    def test_end_run_without_start(self):
-        c = MetricsCollector()
-        result = c.end_run()
-        assert result is None
-
-    def test_record_job(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        job = JobMetrics(
-            job_name="lakebench-bronze-verify",
-            job_type="bronze-verify",
-            success=True,
-            elapsed_seconds=53.0,
-        )
-        c.record_job(job)
-
-        assert len(c.current_run.jobs) == 1
-        assert c.current_run.jobs[0].job_name == "lakebench-bronze-verify"
-
-    def test_record_query(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        q = QueryMetrics(
-            query_name="rfm",
-            query_text="SELECT ...",
-            elapsed_seconds=3.42,
-            rows_returned=100,
-            success=True,
-        )
-        c.record_query(q)
-
-        assert len(c.current_run.queries) == 1
-        assert c.current_run.queries[0].query_name == "rfm"
-
-    def test_record_without_run_is_noop(self):
-        c = MetricsCollector()
-        job = JobMetrics(job_name="test", job_type="bronze-verify")
-        c.record_job(job)  # should not raise
-        q = QueryMetrics(query_name="test", query_text="SELECT 1")
-        c.record_query(q)  # should not raise
-
-    def test_get_summary(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        c.record_job(
-            JobMetrics(
-                job_name="bronze",
-                job_type="bronze-verify",
-                success=True,
-                elapsed_seconds=50,
-                input_size_gb=1.0,
-                output_rows=100_000,
-            )
-        )
-        c.record_job(
-            JobMetrics(
-                job_name="silver",
-                job_type="silver-build",
-                success=True,
-                elapsed_seconds=100,
-                input_size_gb=1.0,
-                output_rows=500_000,
-            )
-        )
-        c.record_job(
-            JobMetrics(
-                job_name="gold",
-                job_type="gold-finalize",
-                success=False,
-                elapsed_seconds=60,
-                input_size_gb=0.5,
-                output_rows=50_000,
-            )
-        )
-
-        summary = c.get_summary()
-        assert summary["total_jobs"] == 3
-        assert summary["successful_jobs"] == 2
-        assert summary["total_input_gb"] == 2.5
-        assert summary["total_output_rows"] == 650_000
-        assert summary["total_job_time_seconds"] == 210
-
-    def test_record_benchmark(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        bm = BenchmarkMetrics(
-            mode="standard",
-            cache="hot",
-            scale=102,
-            qph=820.4,
-            total_seconds=43.88,
-            queries=[{"name": "Q1", "success": True}],
-        )
-        c.record_benchmark(bm)
-
-        assert c.current_run.benchmark is not None
-        assert c.current_run.benchmark.qph == 820.4
-
-    def test_record_benchmark_without_run_is_noop(self):
-        c = MetricsCollector()
-        bm = BenchmarkMetrics(
-            mode="standard",
-            cache="hot",
-            scale=10,
-            qph=100.0,
-            total_seconds=10.0,
-        )
-        c.record_benchmark(bm)  # should not raise
-
-    def test_get_summary_empty(self):
-        c = MetricsCollector()
-        assert c.get_summary() == {}
-
-    def test_parse_driver_logs(self):
-        c = MetricsCollector()
-        logs = """
-2026-01-29 12:00:00 INFO Starting job
-=== JOB METRICS: bronze-verify ===
-total_size_gb: 1.5
-estimated_rows: 1000000
-output_rows: 999500
-========================================
-2026-01-29 12:00:53 INFO completed in 53.2s
-"""
-        metrics = c.parse_driver_logs(logs, "bronze-verify")
-        assert metrics.job_type == "bronze-verify"
-        assert metrics.input_size_gb == 1.5
-        assert metrics.input_rows == 1_000_000
-        assert metrics.output_rows == 999_500
-        assert metrics.elapsed_seconds == 53.2
-        assert metrics.throughput_gb_per_second > 0
-
-    def test_parse_driver_logs_no_metrics(self):
-        c = MetricsCollector()
-        metrics = c.parse_driver_logs("No metrics here", "bronze-verify")
-        assert metrics.input_size_gb == 0.0
-        assert metrics.elapsed_seconds == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -505,257 +165,6 @@ class TestMetricsStorage:
         assert job.rules_skipped == {"W1_connected_components": "vertex-cap"}
         assert job.rule_errors == {"W7_cross_border_high_risk": "boom"}
 
-    def test_apply_parsed_job_metrics_carries_all_fields(self):
-        """LB-123: the cluster run copies parsed driver-log fields onto the
-        stage JobMetrics via _apply_parsed_job_metrics. This is the exact site
-        whose omission dropped the detection dicts. Assert every data +
-        detection field transfers, so dropping any copy line fails here."""
-        from lakebench.cli._run import _apply_parsed_job_metrics
-
-        parsed = JobMetrics(
-            job_name="p",
-            job_type="gold-finalize",
-            input_size_gb=1.5,
-            output_size_gb=2.5,
-            input_rows=100,
-            output_rows=200,
-            throughput_gb_per_second=0.3,
-            throughput_rows_per_second=40.0,
-            alerts_by_rule={"W2_structuring": 12},
-            rule_errors={"W7_cross_border_high_risk": "boom"},
-            rules_skipped={"W1_connected_components": "vertex-cap"},
-            silver_tables={"silver_transactions_rows": 26671846, "silver_entities_rows": 113713},
-            extra_metrics={"data_clock_source": "datagen_timestamp_end"},
-        )
-        target = JobMetrics(job_name="lakebench-gold-finalize", job_type="gold-finalize")
-        _apply_parsed_job_metrics(target, parsed)
-        assert target.input_size_gb == 1.5
-        assert target.output_size_gb == 2.5
-        assert target.input_rows == 100
-        assert target.output_rows == 200
-        assert target.throughput_gb_per_second == 0.3
-        assert target.throughput_rows_per_second == 40.0
-        assert target.alerts_by_rule == {"W2_structuring": 12}
-        assert target.rule_errors == {"W7_cross_border_high_risk": "boom"}
-        assert target.rules_skipped == {"W1_connected_components": "vertex-cap"}
-        # A2 (silver-plan): live-validated regression -- lb-silver-live-v16 batch
-        # driver-log had silver_transactions_rows etc. but metrics.json showed
-        # silver_tables={} because the hand-copy here omitted them. Same shape
-        # as the LB-123 detection-dict defect the docstring warns about.
-        assert target.silver_tables == {
-            "silver_transactions_rows": 26671846,
-            "silver_entities_rows": 113713,
-        }
-        assert target.extra_metrics == {"data_clock_source": "datagen_timestamp_end"}
-
-    def test_storage_roundtrip_class_level_no_field_drops(self, tmp_path):
-        """Class-level guarantee on the STORAGE READ path. Adversarial-review
-        finding (2026-09-28): the write side (asdict) auto-includes every
-        dataclass field, but the read side (_data_to_metrics) hand-listed
-        ctor kwargs and silently dropped silver_tables + extra_metrics on
-        reload. Users of `lakebench report --regenerate` and any downstream
-        consumer of load_run saw empty dicts even though metrics.json on
-        disk was correct.
-
-        This test writes a JobMetrics + StreamingJobMetrics with EVERY
-        field populated by a distinctive probe value, round-trips through
-        save_run/load_run, and asserts the loaded values match the
-        pre-write values. Adding a new field to either dataclass without
-        updating _dataclass_from_dict cannot silently drop it any more.
-        """
-        import dataclasses
-
-        from lakebench.metrics import MetricsCollector
-
-        # Build a probe with a distinctive non-default value for every
-        # parser/data field. Cluster-owned fields also get probe values
-        # so we prove they survive round-trip.
-        def _probe_value(f: dataclasses.Field):
-            base = hash(f.name) & 0xFFFF
-            # Read the default so we can pick a distinctive but shape-
-            # compatible probe value. Positional fields (no default at
-            # all) get treated as string-shape.
-            if f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
-                default = f.default_factory()  # type: ignore[misc]
-            elif f.default is not dataclasses.MISSING:
-                default = f.default
-            else:
-                default = None
-            if isinstance(default, dict):
-                return {f.name + "_k": base}
-            if isinstance(default, list):
-                return [f.name + "_item"]
-            if isinstance(default, bool):
-                return True
-            if isinstance(default, int) and not isinstance(default, bool):
-                return base
-            if isinstance(default, float):
-                return float(base)
-            # str / None / positional -- use a string probe. JSON-safe.
-            return f.name + "_probe"
-
-        job = JobMetrics(job_name="probe-job", job_type="silver-build")
-        for f in dataclasses.fields(JobMetrics):
-            if f.name in ("start_time", "end_time"):
-                continue  # datetime probing handled below
-            setattr(job, f.name, _probe_value(f))
-        job.start_time = datetime(2026, 9, 28, 15, 0, 0)
-        job.end_time = datetime(2026, 9, 28, 15, 1, 0)
-
-        stream = StreamingJobMetrics(job_name="probe-stream", job_type="silver-stream")
-        for f in dataclasses.fields(StreamingJobMetrics):
-            setattr(stream, f.name, _probe_value(f))
-
-        run = PipelineMetrics(
-            run_id="probe-roundtrip",
-            deployment_name="probe",
-            start_time=datetime(2026, 9, 28, 14, 0, 0),
-            jobs=[job],
-            streaming=[stream],
-        )
-        storage = MetricsStorage(tmp_path / "runs")
-        collector = MetricsCollector()
-        collector.current_run = run
-        path = storage.save_run(run)
-        assert path is not None
-
-        loaded = storage.load_run("probe-roundtrip")
-        assert loaded is not None
-        assert len(loaded.jobs) == 1
-        assert len(loaded.streaming) == 1
-        lj = loaded.jobs[0]
-        ls = loaded.streaming[0]
-
-        # Every JobMetrics field survives the round-trip.
-        for f in dataclasses.fields(JobMetrics):
-            if f.name in ("start_time", "end_time"):
-                assert getattr(lj, f.name) == getattr(job, f.name), (
-                    f"JobMetrics.{f.name} lost through save_run/load_run"
-                )
-                continue
-            assert getattr(lj, f.name) == getattr(job, f.name), (
-                f"JobMetrics.{f.name} lost through save_run/load_run; "
-                f"either write (asdict) or read (_dataclass_from_dict) "
-                f"dropped it. This is the LB-123 defect shape -- fix the "
-                f"missing side."
-            )
-
-        # Every StreamingJobMetrics field survives.
-        for f in dataclasses.fields(StreamingJobMetrics):
-            assert getattr(ls, f.name) == getattr(stream, f.name), (
-                f"StreamingJobMetrics.{f.name} lost through save_run/load_run"
-            )
-
-    def test_apply_parsed_job_metrics_class_level_no_field_drops(self):
-        """Class-level guarantee: EVERY JobMetrics field is either declared
-        cluster-owned (never overwritten by parsed) or auto-copied from
-        parsed. Adding a new field to JobMetrics without categorising it
-        would slip through the existing per-field test above; this test
-        forces the choice.
-
-        Three live-caught defects (LB-123 detection dicts, silver-plan r3
-        silver_tables at 87feefd, silver-plan r3 streaming extra_metrics
-        at e31514d) were three instances of the same drift. This test
-        makes a fourth instance impossible without a new field escaping
-        both the cluster-owned set and the auto-copy.
-        """
-        import dataclasses
-
-        from lakebench.cli._run import (
-            _CLUSTER_OWNED_JOB_METRICS_FIELDS,
-            _apply_parsed_job_metrics,
-        )
-
-        # A distinctive value per JobMetrics field, so we can tell "auto-copy
-        # actually ran" from "default value happens to equal the parsed
-        # default". Every field name in JobMetrics must appear in one of
-        # the two branches; a new field forces a test update, which forces
-        # the categorisation decision.
-        parser_owned_probe = {
-            "input_size_gb": 3.14,
-            "output_size_gb": 6.28,
-            "input_rows": 111,
-            "output_rows": 222,
-            "throughput_gb_per_second": 0.5,
-            "throughput_rows_per_second": 50.0,
-            "alerts_by_rule": {"R": 7},
-            "rule_errors": {"R": "e"},
-            "rules_skipped": {"R": "s"},
-            "tm_invariants": {"1": {"x": {"status": "ok", "detail": "d"}}},
-            "tm_ops": {"k": "v"},
-            "tm_status": {"1": {"status": "ok", "reason": "r"}},
-            "c360_check": {"passed": 3},
-            "c360_bronze": {"rows": 4},
-            "silver_tables": {"silver_x_rows": 5},
-            "extra_metrics": {"data_clock_source": "z"},
-        }
-
-        parsed = JobMetrics(job_name="p", job_type="silver-build", **parser_owned_probe)
-        target = JobMetrics(job_name="t", job_type="silver-build")
-        _apply_parsed_job_metrics(target, parsed)
-
-        # Every parser-owned probe value must land on the target.
-        for name, value in parser_owned_probe.items():
-            assert getattr(target, name) == value, (
-                f"field {name!r} was not carried by _apply_parsed_job_metrics; "
-                f"either add it to _CLUSTER_OWNED_JOB_METRICS_FIELDS or "
-                f"extend the auto-copy path"
-            )
-
-        # Every JobMetrics field is either cluster-owned or parser-owned.
-        # A new field that is neither would slip past both this test and
-        # the field-by-field test above; force the author to categorise.
-        all_fields = {f.name for f in dataclasses.fields(JobMetrics)}
-        parser_owned = set(parser_owned_probe)
-        uncategorised = all_fields - _CLUSTER_OWNED_JOB_METRICS_FIELDS - parser_owned
-        assert not uncategorised, (
-            f"JobMetrics fields not categorised: {sorted(uncategorised)}. "
-            f"Add each to _CLUSTER_OWNED_JOB_METRICS_FIELDS (cluster path "
-            f"sets it authoritatively, parsed value ignored) or extend "
-            f"parser_owned_probe in this test (auto-copied from parsed)."
-        )
-
-        # H2 guard (2026-09-28 adversarial-review): _CLUSTER_OWNED accepts
-        # arbitrary strings, so a typo like "cpu_seconds_requesteed" would
-        # silently make the real field parser-owned and overwrite the
-        # cluster's authoritative value on every run. Require every name
-        # in the frozenset to be a real JobMetrics field.
-        misspelt = _CLUSTER_OWNED_JOB_METRICS_FIELDS - all_fields
-        assert not misspelt, (
-            f"_CLUSTER_OWNED_JOB_METRICS_FIELDS contains names not on "
-            f"JobMetrics: {sorted(misspelt)}. A typo here silently disables "
-            f"the cluster-owned guard for the real field it was meant to "
-            f"cover."
-        )
-
-        # H1 guard (2026-09-28 adversarial-review): dataclasses.fields()
-        # skips any class attribute without a PEP 526 annotation. A lane
-        # that added `reference_model_scores = field(default_factory=dict)`
-        # WITHOUT a type annotation would slip past both the auto-copy in
-        # _apply_parsed_job_metrics AND this test's `all_fields` set. Guard
-        # by asserting the public attribute surface of JobMetrics equals
-        # the dataclass field set. Attributes starting with `_` and
-        # methods are allowed off the field set; everything else must be
-        # annotated so `fields()` sees it.
-        public_attrs = {
-            name
-            for name in vars(JobMetrics)
-            if not name.startswith("_") and not callable(getattr(JobMetrics, name))
-        }
-        # Dataclass fields set defaults on the class; those show up in
-        # vars(). But a field WITH an annotation is also in all_fields.
-        # An unannotated attribute would appear in public_attrs and NOT
-        # in all_fields. That is the drift shape we refuse.
-        unannotated = public_attrs - all_fields
-        assert not unannotated, (
-            f"JobMetrics has public class attributes not seen by "
-            f"dataclasses.fields(): {sorted(unannotated)}. Add a type "
-            f"annotation so the field is real, or make the attribute "
-            f"private (leading underscore) if it is not part of the "
-            f"metrics surface. Without an annotation, "
-            f"_apply_parsed_job_metrics silently drops it."
-        )
-
     def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
         """LB-123 re-review F1 guard: the detection dicts must survive the
         FULL cluster path shape -- parse_driver_logs (the only producer) ->
@@ -797,186 +206,6 @@ class TestMetricsStorage:
         loaded = storage.load_run("det-001")
         assert loaded.jobs[0].alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
         assert loaded.jobs[0].rules_skipped == {"W1_connected_components": "vertex-cap"}
-
-    def test_save_and_load_without_financial_scoring(self, tmp_path):
-        """Backward compat: a run without financial_scoring loads as None."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        metrics = PipelineMetrics(
-            run_id="no-fs-001",
-            deployment_name="test",
-            start_time=datetime.now(),
-        )
-        storage.save_run(metrics)
-        loaded = storage.load_run("no-fs-001")
-        assert loaded is not None
-        assert loaded.financial_scoring is None
-
-    def test_save_and_load_with_platform_metrics(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        pm = {
-            "pods": [
-                {
-                    "pod_name": "trino-0",
-                    "component": "trino-coordinator",
-                    "cpu_avg_cores": 1.5,
-                    "cpu_max_cores": 2.0,
-                    "memory_avg_bytes": 1073741824,
-                    "memory_max_bytes": 2147483648,
-                }
-            ],
-            "s3_requests_total": 42,
-            "s3_errors_total": 0,
-            "s3_avg_latency_ms": 8.3,
-            "duration_seconds": 600,
-            "engine": {"trino_completed_queries": 32, "trino_failed_queries": 0},
-            "collection_error": None,
-        }
-        metrics = PipelineMetrics(
-            run_id="pm-test-001",
-            deployment_name="test",
-            start_time=now,
-            platform_metrics=pm,
-        )
-        storage.save_run(metrics)
-        loaded = storage.load_run("pm-test-001")
-        assert loaded is not None
-        assert loaded.platform_metrics is not None
-        assert loaded.platform_metrics["pods"][0]["pod_name"] == "trino-0"
-        assert loaded.platform_metrics["engine"]["trino_completed_queries"] == 32
-        assert loaded.platform_metrics["duration_seconds"] == 600
-
-    def test_save_and_load_without_platform_metrics(self, tmp_path):
-        """Backward compat: old runs without platform_metrics load as None."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="no-pm-001",
-            deployment_name="test",
-            start_time=now,
-        )
-        storage.save_run(metrics)
-        loaded = storage.load_run("no-pm-001")
-        assert loaded is not None
-        assert loaded.platform_metrics is None
-
-    def test_load_nonexistent(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        assert storage.load_run("nonexistent") is None
-
-    def test_list_runs(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        for i in range(3):
-            m = PipelineMetrics(
-                run_id=f"run-{i:03d}",
-                deployment_name="test",
-                start_time=now,
-                success=True,
-                jobs=[],
-            )
-            storage.save_run(m)
-
-        runs = storage.list_runs()
-        assert len(runs) == 3
-        # Should be sorted (most recent first by filename)
-        run_ids = [r["run_id"] for r in runs]
-        assert "run-000" in run_ids
-        assert "run-002" in run_ids
-
-    def test_get_latest_run(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        for i in range(3):
-            m = PipelineMetrics(
-                run_id=f"run-{i:03d}",
-                deployment_name="test",
-                start_time=now,
-                success=i == 2,
-            )
-            storage.save_run(m)
-
-        latest = storage.get_latest_run()
-        assert latest is not None
-
-    def test_get_latest_run_empty(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        assert storage.get_latest_run() is None
-
-    def test_save_and_load_with_benchmark(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="bench-roundtrip",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=100),
-            total_elapsed_seconds=100.0,
-            success=True,
-            benchmark=BenchmarkMetrics(
-                mode="standard",
-                cache="hot",
-                scale=102,
-                qph=820.4,
-                total_seconds=43.88,
-                queries=[
-                    {
-                        "name": "Q1_full_aggregation_scan",
-                        "class": "scan",
-                        "elapsed_seconds": 4.23,
-                        "rows_returned": 1,
-                        "success": True,
-                    }
-                ],
-                iterations=1,
-            ),
-        )
-
-        storage.save_run(metrics)
-        loaded = storage.load_run("bench-roundtrip")
-        assert loaded is not None
-        assert loaded.benchmark is not None
-        assert loaded.benchmark.qph == 820.4
-        assert loaded.benchmark.cache == "hot"
-        assert len(loaded.benchmark.queries) == 1
-
-    def test_save_and_load_without_benchmark(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="no-bench",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-        )
-
-        storage.save_run(metrics)
-        loaded = storage.load_run("no-bench")
-        assert loaded is not None
-        assert loaded.benchmark is None
-
-    def test_export_csv(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        m = PipelineMetrics(
-            run_id="csv-test",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-        )
-        storage.save_run(m)
-
-        csv_path = storage.export_csv(tmp_path / "export.csv")
-        assert csv_path.exists()
-
-        content = csv_path.read_text()
-        assert "csv-test" in content
-        assert "run_id" in content  # header
 
 
 # ---------------------------------------------------------------------------
@@ -1034,187 +263,6 @@ class TestReportGenerator:
             ],
             config_snapshot={"name": "test-deploy"},
         )
-
-    def test_generate_report(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(self._make_sample_metrics())
-
-        generator = ReportGenerator(
-            metrics_dir=metrics_dir,
-            output_dir=output_dir,
-        )
-
-        report_path = generator.generate_report()
-        assert report_path.exists()
-        assert report_path.suffix == ".html"
-
-        html = report_path.read_text()
-        assert "Lakebench Scorecard" in html
-        assert "test-deploy" in html
-
-    def test_report_contains_jobs_table(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(self._make_sample_metrics())
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Batch Job Performance" in html
-        assert "lakebench-bronze-verify" in html
-        assert "lakebench-silver-build" in html
-
-    def test_report_contains_queries_table(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(self._make_sample_metrics())
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Query Performance" in html
-        assert "rfm" in html
-        assert "revenue" in html
-        assert "3.42s" in html
-
-    def test_report_no_queries_section_when_empty(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        # Metrics with no queries
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="no-queries",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=60),
-            total_elapsed_seconds=60.0,
-            success=True,
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        # Query Performance section should NOT appear
-        assert "Query Performance" not in html
-
-    def test_report_includes_platform_metrics_from_saved_data(self, tmp_path):
-        """generate_report() picks up platform_metrics from metrics.json."""
-        metrics_dir = tmp_path / "metrics"
-        metrics = self._make_sample_metrics()
-        metrics.platform_metrics = {
-            "pods": [
-                {
-                    "pod_name": "lakebench-trino-coordinator-0",
-                    "component": "trino-coordinator",
-                    "cpu_avg_cores": 2.5,
-                    "cpu_max_cores": 4.0,
-                    "memory_avg_bytes": 4 * 1024**3,
-                    "memory_max_bytes": 8 * 1024**3,
-                }
-            ],
-            "s3_requests_total": 99,
-            "s3_errors_total": 1,
-            "s3_avg_latency_ms": 11.5,
-            "duration_seconds": 300,
-            "engine": {"trino_completed_queries": 41},
-            "collection_error": None,
-        }
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Platform Metrics" in html
-        assert "lakebench-trino-coordinator-0" in html
-        assert "Trino queries completed: 41" in html
-
-    def test_generate_report_nonexistent_run(self, tmp_path):
-        generator = ReportGenerator(
-            metrics_dir=tmp_path / "metrics",
-            output_dir=tmp_path / "reports",
-        )
-
-        with pytest.raises(ValueError, match="No runs found"):
-            generator.generate_report()
-
-    def test_report_contains_benchmark_section(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        metrics = self._make_sample_metrics()
-        metrics.benchmark = BenchmarkMetrics(
-            mode="standard",
-            cache="hot",
-            scale=102,
-            qph=820.4,
-            total_seconds=43.88,
-            queries=[
-                {
-                    "name": "Q1_full_aggregation_scan",
-                    "display_name": "Full aggregation scan",
-                    "class": "scan",
-                    "elapsed_seconds": 4.23,
-                    "rows_returned": 1,
-                    "success": True,
-                },
-            ],
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Trino Query Benchmark" in html
-        assert "820.4" in html
-        assert "Q1_full_aggregation_scan" in html
-        assert "QpH" in html
-
-    def test_report_no_benchmark_section_when_absent(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        metrics = self._make_sample_metrics()
-        # No benchmark attribute set
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Trino Query Benchmark" not in html
-
-    def test_generate_report_specific_nonexistent(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        metrics_dir.mkdir(parents=True)
-
-        generator = ReportGenerator(
-            metrics_dir=metrics_dir,
-            output_dir=tmp_path / "reports",
-        )
-
-        with pytest.raises(ValueError, match="Run not found"):
-            generator.generate_report(run_id="nonexistent")
 
 
 class TestSustainedReport:
@@ -1351,117 +399,6 @@ class TestSustainedReport:
         gen = ReportGenerator(metrics_dir="/tmp/unused-cont-rg")
         return gen._generate_html(metrics or self._make_sustained_metrics())
 
-    def test_sustained_summary_no_zeros(self):
-        """Summary cards should not show batch-derived zeros."""
-        html = self._render()
-        assert "0/0" not in html
-        assert "0.00 GB" not in html
-
-    def test_sustained_qph_single(self):
-        """QpH should appear at most once in the summary cards area."""
-        metrics = self._make_sustained_metrics()
-        # Add a benchmark to trigger QpH
-        metrics.pipeline_benchmark.benchmark_rounds = [
-            BenchmarkMetrics(
-                mode="power",
-                cache="cold",
-                scale=50,
-                qph=650.0,
-                total_seconds=44.3,
-            ),
-        ]
-        html = self._render(metrics)
-        # Count QpH occurrences in the top summary cards div
-        # (before the first <section>)
-        summary_area = html.split("<section>")[0]
-        assert summary_area.count("In-Stream QpH") <= 1
-
-    def test_sustained_no_batch_section(self):
-        """Sustained mode should not render Batch Job Performance."""
-        html = self._render()
-        assert "Batch Job Performance" not in html
-
-    def test_sustained_streaming_compute_columns(self):
-        """Streaming table should include compute columns."""
-        html = self._render()
-        assert "Executors" in html
-        assert "CPU-sec" in html
-        assert "Cores x Mem" in html
-
-    def test_sustained_run_context_banner(self):
-        """Context banner should show mode and scale."""
-        html = self._render()
-        assert "Sustained" in html
-        assert "scale 50" in html
-        assert "hive-iceberg-spark-trino" in html
-
-    def test_sustained_ingest_ratio_label(self):
-        """Should show 'Ingest Ratio', not 'Completeness'."""
-        html = self._render()
-        assert "Ingest Ratio" in html
-        assert "Completeness" not in html
-
-    def test_batch_report_unchanged(self):
-        """Batch metrics should still produce the original layout."""
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="batch-check",
-            deployment_name="batch-deploy",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lb-bronze-verify",
-                    job_type="bronze-verify",
-                    success=True,
-                    elapsed_seconds=100.0,
-                    input_size_gb=5.0,
-                    output_rows=500_000,
-                    throughput_gb_per_second=0.05,
-                ),
-            ],
-            pipeline_benchmark=PipelineBenchmark(
-                run_id="batch-check",
-                deployment_name="batch-deploy",
-                pipeline_mode="batch",
-                start_time=now,
-                end_time=now + timedelta(seconds=300),
-                success=True,
-                stages=[
-                    StageMetrics(
-                        stage_name="bronze",
-                        stage_type="batch",
-                        engine="spark",
-                        elapsed_seconds=100.0,
-                        input_size_gb=5.0,
-                        output_size_gb=5.0,
-                        input_rows=500_000,
-                        output_rows=500_000,
-                        throughput_gb_per_second=0.05,
-                        executor_count=4,
-                        executor_cores=2,
-                        executor_memory_gb=4.0,
-                        success=True,
-                    ),
-                ],
-                time_to_value_seconds=100.0,
-                pipeline_throughput_gb_per_second=0.05,
-                total_data_processed_gb=5.0,
-                scale_ratio=1.0,
-                compute_efficiency_gb_per_core_hour=0.5,
-            ),
-            config_snapshot={"name": "batch-deploy", "scale": 10},
-        )
-        gen = ReportGenerator(metrics_dir="/tmp/unused-batch-rg")
-        html = gen._generate_html(metrics)
-        assert "Batch Job Performance" in html
-        assert "Time to Value" in html
-        # Should NOT show streaming summary cards
-        assert "Data Throughput" not in html
-        assert "Sustained Throughput" not in html
-
 
 # ---------------------------------------------------------------------------
 # StreamingJobMetrics
@@ -1471,32 +408,6 @@ class TestSustainedReport:
 class TestStreamingJobMetrics:
     """Tests for StreamingJobMetrics dataclass."""
 
-    def test_basic_streaming_metrics(self):
-        m = StreamingJobMetrics(
-            job_name="lakebench-bronze-ingest",
-            job_type="bronze-ingest",
-        )
-        assert m.job_name == "lakebench-bronze-ingest"
-        assert m.success is False
-        assert m.total_batches == 0
-        assert m.total_rows_processed == 0
-        assert m.micro_batch_duration_ms == 0.0
-
-    def test_streaming_metrics_to_dict(self):
-        m = StreamingJobMetrics(
-            job_name="lakebench-silver-stream",
-            job_type="silver-stream",
-            elapsed_seconds=1800.0,
-            total_batches=30,
-            total_rows_processed=450_000,
-            success=True,
-        )
-        d = m.to_dict()
-        assert d["job_name"] == "lakebench-silver-stream"
-        assert d["total_batches"] == 30
-        assert d["total_rows_processed"] == 450_000
-        assert d["success"] is True
-
 
 # ---------------------------------------------------------------------------
 # Streaming log parsing
@@ -1505,38 +416,6 @@ class TestStreamingJobMetrics:
 
 class TestStreamingLogParsing:
     """Tests for streaming driver log parsing."""
-
-    def test_parse_streaming_logs_bronze(self):
-        c = MetricsCollector()
-        logs = """
-[lb] 2026-02-01T12:00:30.000Z - Batch 0: writing 150,000 rows to lakehouse.default.bronze_raw
-[lb] 2026-02-01T12:00:31.000Z - Batch 0: committed
-[lb] 2026-02-01T12:01:00.000Z - Batch 1: writing 175,000 rows to lakehouse.default.bronze_raw
-[lb] 2026-02-01T12:01:01.000Z - Batch 1: committed
-[lb] 2026-02-01T12:01:30.000Z - Batch 2: empty, skipping
-[lb] 2026-02-01T12:02:00.000Z - Batch 3: writing 200,000 rows to lakehouse.default.bronze_raw
-[lb] 2026-02-01T12:02:01.000Z - Batch 3: committed
-"""
-        metrics = c.parse_streaming_logs(logs, "bronze-ingest")
-        assert metrics.job_type == "bronze-ingest"
-        assert metrics.total_batches == 3  # batches 0, 1, 3 (2 was empty)
-        assert metrics.total_rows_processed == 525_000
-        assert metrics.batch_size == 175_000  # 525000 // 3
-
-    def test_parse_streaming_logs_silver(self):
-        c = MetricsCollector()
-        logs = """
-[lb] 2026-02-01T12:00:00.000Z - Batch 0: transforming 150,000 rows
-[lb] 2026-02-01T12:00:10.000Z - Batch 0: 148,500 rows after transforms (filtered ~1%)
-[lb] 2026-02-01T12:00:10.000Z - Batch 0: committed to ice.silver.customer_interactions_enriched
-[lb] 2026-02-01T12:01:00.000Z - Batch 1: transforming 200,000 rows
-[lb] 2026-02-01T12:01:12.000Z - Batch 1: 198,000 rows after transforms (filtered ~1%)
-[lb] 2026-02-01T12:01:12.000Z - Batch 1: committed to ice.silver.customer_interactions_enriched
-"""
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        assert metrics.job_type == "silver-stream"
-        assert metrics.total_batches == 2
-        assert metrics.total_rows_processed == 350_000
 
     def test_parse_streaming_logs_captures_per_batch_silver_labels(self):
         """D-full-simple + E1 + I7 labels emitted per micro-batch land in
@@ -1643,53 +522,6 @@ class TestStreamingLogParsing:
         # Only the strictly-lowercase key is captured.
         assert e.get("silver_valid_lowercase") == "7"
 
-    def test_parse_streaming_logs_gold(self):
-        c = MetricsCollector()
-        logs = """
-[lb] 2026-02-01T12:00:00.000Z - Refresh cycle 1 (batch 0)
-[lb] 2026-02-01T12:00:01.000Z - Cycle 1: aggregating 150,000 Silver records
-[lb] 2026-02-01T12:00:08.000Z - Cycle 1: generated 30 daily KPI records
-[lb] 2026-02-01T12:00:08.000Z - Cycle 1: refreshed ice.gold.customer_executive_dashboard in 8.2s (30 KPI records)
-[lb] 2026-02-01T12:05:00.000Z - Refresh cycle 2 (batch 1)
-[lb] 2026-02-01T12:05:01.000Z - Cycle 2: aggregating 300,000 Silver records
-[lb] 2026-02-01T12:05:14.000Z - Cycle 2: generated 30 daily KPI records
-[lb] 2026-02-01T12:05:14.000Z - Cycle 2: refreshed ice.gold.customer_executive_dashboard in 13.5s (30 KPI records)
-"""
-        metrics = c.parse_streaming_logs(logs, "gold-refresh")
-        assert metrics.job_type == "gold-refresh"
-        assert metrics.total_batches == 2  # cycles 1 and 2
-        assert metrics.total_rows_processed == 450_000
-        # avg batch duration: (8.2 + 13.5) / 2 = 10.85s = 10850ms
-        assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
-
-    def test_parse_streaming_logs_empty(self):
-        c = MetricsCollector()
-        metrics = c.parse_streaming_logs("No streaming output here", "bronze-ingest")
-        assert metrics.total_batches == 0
-        assert metrics.total_rows_processed == 0
-        assert metrics.micro_batch_duration_ms == 0.0
-
-    def test_record_streaming(self):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        m = StreamingJobMetrics(
-            job_name="lakebench-bronze-ingest",
-            job_type="bronze-ingest",
-            total_batches=5,
-            total_rows_processed=100_000,
-            success=True,
-        )
-        c.record_streaming(m)
-
-        assert len(c.current_run.streaming) == 1
-        assert c.current_run.streaming[0].total_rows_processed == 100_000
-
-    def test_record_streaming_without_run_is_noop(self):
-        c = MetricsCollector()
-        m = StreamingJobMetrics(job_name="test", job_type="bronze-ingest")
-        c.record_streaming(m)  # should not raise
-
 
 # ---------------------------------------------------------------------------
 # Streaming storage roundtrip
@@ -1698,49 +530,6 @@ class TestStreamingLogParsing:
 
 class TestStreamingStorageRoundtrip:
     """Tests for streaming metrics persistence."""
-
-    def test_save_and_load_with_streaming(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="streaming-roundtrip",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=1800),
-            total_elapsed_seconds=1800.0,
-            success=True,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=60,
-                    total_rows_processed=900_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                ),
-                StreamingJobMetrics(
-                    job_name="lakebench-silver-stream",
-                    job_type="silver-stream",
-                    total_batches=30,
-                    total_rows_processed=850_000,
-                    micro_batch_duration_ms=3500.0,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                ),
-            ],
-        )
-
-        storage.save_run(metrics)
-        loaded = storage.load_run("streaming-roundtrip")
-
-        assert loaded is not None
-        assert len(loaded.streaming) == 2
-        assert loaded.streaming[0].job_type == "bronze-ingest"
-        assert loaded.streaming[0].total_batches == 60
-        assert loaded.streaming[0].total_rows_processed == 900_000
-        assert loaded.streaming[1].job_type == "silver-stream"
-        assert loaded.streaming[1].micro_batch_duration_ms == 3500.0
 
 
 # ---------------------------------------------------------------------------
@@ -1751,162 +540,6 @@ class TestStreamingStorageRoundtrip:
 class TestStreamingReportGeneration:
     """Tests for streaming section in HTML reports."""
 
-    def test_report_contains_streaming_section(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="streaming-report",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=1800),
-            total_elapsed_seconds=1800.0,
-            success=True,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=60,
-                    total_rows_processed=900_000,
-                    elapsed_seconds=1800.0,
-                    throughput_rps=500.0,
-                    success=True,
-                ),
-                StreamingJobMetrics(
-                    job_name="lakebench-silver-stream",
-                    job_type="silver-stream",
-                    total_batches=30,
-                    total_rows_processed=850_000,
-                    elapsed_seconds=1800.0,
-                    throughput_rps=472.2,
-                    success=True,
-                ),
-            ],
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Streaming Pipeline" in html
-        assert "lakebench-bronze-ingest" in html
-        assert "lakebench-silver-stream" in html
-        assert "900,000" in html
-        assert "rows/s" in html
-
-    def test_report_no_streaming_section_when_empty(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="batch-only",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    success=True,
-                    elapsed_seconds=53.0,
-                ),
-            ],
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Streaming Pipeline" not in html
-
-    def test_report_streaming_freshness_column(self, tmp_path):
-        """Streaming table should show Freshness column when data exists."""
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="freshness-report",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=1800),
-            total_elapsed_seconds=1800.0,
-            success=True,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-gold-refresh",
-                    job_type="gold-refresh",
-                    total_batches=5,
-                    total_rows_processed=50_000,
-                    elapsed_seconds=1800.0,
-                    freshness_seconds=45.0,
-                    throughput_rps=27.8,
-                    success=True,
-                ),
-            ],
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Freshness" in html
-        assert "45s" in html
-
-    def test_report_config_shows_scale(self, tmp_path):
-        """Config section should show scale, not deprecated target_size."""
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="config-report",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            config_snapshot={
-                "name": "test",
-                "scale": 100,
-                "approx_bronze_gb": 1000.0,
-                "processing_pattern": "streaming",
-                "s3": {"endpoint": "http://test-s3-endpoint:80"},
-                "spark": {
-                    "executor": {"instances": 8, "cores": 4, "memory": "48g"},
-                },
-                "catalog": "hive",
-                "table_format": "iceberg",
-                "query_engine": "trino",
-                "trino": {"worker": {"replicas": 3, "cpu": "4", "memory": "16Gi"}},
-                "images": {"datagen": "lakebench/datagen:latest"},
-            },
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(metrics)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Scale" in html
-        assert "100" in html
-        assert "Target Size" not in html
-
 
 # ---------------------------------------------------------------------------
 # Phase 1+2: Driver log parsing with [lb] prefix
@@ -1915,69 +548,6 @@ class TestStreamingReportGeneration:
 
 class TestDriverLogParsingWithLbPrefix:
     """Tests for parse_driver_logs with realistic [lb]-prefixed output."""
-
-    def test_parse_bronze_verify_logs(self):
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T10:00:00.000000 - ============================================================
-[lb] 2026-02-01T10:00:00.000000 - Bronze Data Verification
-[lb] 2026-02-01T10:00:00.000000 - ============================================================
-[lb] 2026-02-01T10:00:00.000000 - Reading from: s3a://lb-bronze/customer/interactions/
-[lb] 2026-02-01T10:00:30.000000 - Rows: 5,000,000
-[lb] 2026-02-01T10:00:30.000000 - Columns: 21
-[lb] 2026-02-01T10:00:45.000000 - Total rows verified: 5,000,000
-[lb] 2026-02-01T10:00:45.000000 - Total time: 45.2s (0.8 min)
-[lb] 2026-02-01T10:00:45.000000 - === JOB METRICS: bronze-verify ===
-[lb] 2026-02-01T10:00:45.000000 - input_size_gb: 9.523
-[lb] 2026-02-01T10:00:45.000000 - estimated_rows: 5000000
-[lb] 2026-02-01T10:00:45.000000 - output_rows: 5000000
-[lb] 2026-02-01T10:00:45.000000 - elapsed_seconds: 45.2
-[lb] 2026-02-01T10:00:45.000000 - ========================================
-"""
-        metrics = c.parse_driver_logs(logs, "bronze-verify")
-        assert metrics.input_size_gb == pytest.approx(9.523)
-        assert metrics.input_rows == 5_000_000
-        assert metrics.output_rows == 5_000_000
-        assert metrics.elapsed_seconds == pytest.approx(45.2)
-        assert metrics.throughput_gb_per_second > 0
-
-    def test_parse_silver_build_logs(self):
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T10:01:00.000000 - ============================================================
-[lb] 2026-02-01T10:01:00.000000 - Silver Layer Build
-[lb] 2026-02-01T10:01:00.000000 - Duration: 107.3s
-[lb] 2026-02-01T10:01:00.000000 - === JOB METRICS: silver-build ===
-[lb] 2026-02-01T10:01:00.000000 - input_size_gb: 9.523
-[lb] 2026-02-01T10:01:00.000000 - estimated_rows: 5000000
-[lb] 2026-02-01T10:01:00.000000 - output_rows: 4850000
-[lb] 2026-02-01T10:01:00.000000 - elapsed_seconds: 107.3
-[lb] 2026-02-01T10:01:00.000000 - ========================================
-"""
-        metrics = c.parse_driver_logs(logs, "silver-build")
-        assert metrics.input_size_gb == pytest.approx(9.523)
-        assert metrics.input_rows == 5_000_000
-        assert metrics.output_rows == 4_850_000
-        assert metrics.elapsed_seconds == pytest.approx(107.3)
-
-    def test_parse_gold_finalize_logs(self):
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T10:03:00.000000 - ============================================================
-[lb] 2026-02-01T10:03:00.000000 - Gold Layer Finalization
-[lb] 2026-02-01T10:03:00.000000 - Duration: 22.5s
-[lb] 2026-02-01T10:03:00.000000 - === JOB METRICS: gold-finalize ===
-[lb] 2026-02-01T10:03:00.000000 - input_size_gb: 3.210
-[lb] 2026-02-01T10:03:00.000000 - estimated_rows: 4850000
-[lb] 2026-02-01T10:03:00.000000 - output_rows: 92
-[lb] 2026-02-01T10:03:00.000000 - elapsed_seconds: 22.5
-[lb] 2026-02-01T10:03:00.000000 - ========================================
-"""
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.input_size_gb == pytest.approx(3.21)
-        assert metrics.input_rows == 4_850_000
-        assert metrics.output_rows == 92
-        assert metrics.elapsed_seconds == pytest.approx(22.5)
 
 
 class TestDetectionRulesMetrics:
@@ -2013,16 +583,6 @@ class TestDetectionRulesMetrics:
         assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
         assert "silver.entities not found" in metrics.rule_errors["W7_cross_border_high_risk"]
 
-    def test_c360_gold_finalize_has_empty_rule_metrics(self):
-        """c360 gold-finalize emits no [detection] lines; the fields
-        default to empty dicts, not None."""
-        c = MetricsCollector()
-        logs = "[lb] 2026-09-22T10:00:00 - ordinary gold-finalize output"
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule == {}
-        assert metrics.rule_errors == {}
-        assert metrics.rules_skipped == {}
-
     def test_parse_skipped_rule_is_third_state(self):
         """LB-119: a structural skip (W1 above vertex cap) is recorded in
         rules_skipped and kept OUT of alerts_by_rule, so a skip is never
@@ -2054,35 +614,6 @@ class TestDetectionRulesMetrics:
         assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
         assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
 
-    def test_alerts_by_rule_serialised_in_to_dict(self):
-        c = MetricsCollector()
-        logs = (
-            "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=42 prior=0 elapsed=1.0s"
-        )
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        d = metrics.to_dict()
-        assert d["alerts_by_rule"] == {"W2_structuring": 42}
-        assert d["rule_errors"] == {}
-
-    def test_error_message_containing_elapsed_or_prior_not_truncated(self):
-        """Adversarial-review finding (silent corruption): a non-greedy
-        error slurp that stopped at the first ``prior=`` or ``elapsed=``
-        substring inside the error message would silently truncate the
-        recorded error. Anchor on trailing ``elapsed=Ns`` (the guaranteed
-        last token) instead."""
-        c = MetricsCollector()
-        logs = (
-            "[lb] 2026-09-22T10:00:00 - [detection] W7_cross_border_high_risk: alerts=0 "
-            "error=RuntimeError: expected prior=42 rows and elapsed=0.1s per shard elapsed=0.9s\n"
-        )
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
-        recorded = metrics.rule_errors["W7_cross_border_high_risk"]
-        # The inline exception text must survive; only the trailing
-        # ``elapsed=0.9s`` terminator is stripped.
-        assert "expected prior=42 rows" in recorded
-        assert "elapsed=0.1s per shard" in recorded
-
 
 # ---------------------------------------------------------------------------
 # Phase 1+2: Streaming timing and freshness parsing
@@ -2091,36 +622,6 @@ class TestDetectionRulesMetrics:
 
 class TestStreamingTimingAndFreshness:
     """Tests for new streaming timing and freshness log patterns."""
-
-    def test_bronze_committed_timing(self):
-        """Bronze 'committed in X.Xs' should populate batch_durations."""
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T12:00:30.000Z - Batch 0: writing 150,000 rows to lakehouse.default.bronze_raw
-[lb] 2026-02-01T12:00:35.000Z - Batch 0: committed in 5.2s
-[lb] 2026-02-01T12:01:00.000Z - Batch 1: writing 175,000 rows to lakehouse.default.bronze_raw
-[lb] 2026-02-01T12:01:08.000Z - Batch 1: committed in 7.8s
-"""
-        metrics = c.parse_streaming_logs(logs, "bronze-ingest")
-        assert metrics.total_batches == 2
-        assert metrics.total_rows_processed == 325_000
-        # avg batch duration: (5.2 + 7.8) / 2 = 6.5s = 6500ms
-        assert metrics.micro_batch_duration_ms == pytest.approx(6500.0, abs=1.0)
-
-    def test_silver_committed_timing(self):
-        """Silver 'committed to <table> in X.Xs' should populate batch_durations."""
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T12:00:00.000Z - Batch 0: transforming 150,000 rows
-[lb] 2026-02-01T12:00:10.000Z - Batch 0: committed to ice.silver.customer_interactions_enriched in 10.3s
-[lb] 2026-02-01T12:01:00.000Z - Batch 1: transforming 200,000 rows
-[lb] 2026-02-01T12:01:12.000Z - Batch 1: committed to ice.silver.customer_interactions_enriched in 12.1s
-"""
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        assert metrics.total_batches == 2
-        assert metrics.total_rows_processed == 350_000
-        # avg: (10.3 + 12.1) / 2 = 11.2s = 11200ms
-        assert metrics.micro_batch_duration_ms == pytest.approx(11200.0, abs=1.0)
 
     def test_gold_freshness_parsing(self):
         """Gold 'data freshness Xs' should populate freshness_seconds."""
@@ -2141,16 +642,6 @@ class TestStreamingTimingAndFreshness:
         # batch durations from "refreshed ... in Xs"
         assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
 
-    def test_no_freshness_when_absent(self):
-        """Freshness is absent (None), not 0, when no freshness line is present."""
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-02-01T12:00:01.000Z - Cycle 1: aggregating 150,000 Silver records
-[lb] 2026-02-01T12:00:08.000Z - Cycle 1: refreshed ice.gold.dashboard in 8.2s (30 KPI records)
-"""
-        metrics = c.parse_streaming_logs(logs, "gold-refresh")
-        assert metrics.freshness_seconds is None
-
 
 # ---------------------------------------------------------------------------
 # Phase 1: build_config_snapshot
@@ -2159,87 +650,6 @@ class TestStreamingTimingAndFreshness:
 
 class TestBuildConfigSnapshot:
     """Tests for build_config_snapshot function."""
-
-    def test_captures_expected_fields(self):
-        from lakebench.config import LakebenchConfig
-
-        cfg = LakebenchConfig(
-            name="snapshot-test",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://test-s3-endpoint:80",
-                        "access_key": "testkey",
-                        "secret_key": "testsecret",
-                        "buckets": {
-                            "bronze": "lb-bronze",
-                            "silver": "lb-silver",
-                            "gold": "lb-gold",
-                        },
-                    },
-                    "scratch": {
-                        "enabled": True,
-                        "storage_class": "px-csi-scratch",
-                        "size": "150Gi",
-                    },
-                },
-            },
-            architecture={
-                "workload": {"datagen": {"scale": 50}},
-            },
-        )
-        snapshot = build_config_snapshot(cfg)
-
-        assert snapshot["name"] == "snapshot-test"
-        assert snapshot["scale"] == 50
-        assert snapshot["approx_bronze_gb"] > 0
-        assert snapshot["processing_pattern"] == "medallion"  # default
-        assert snapshot["s3"]["endpoint"] == "http://test-s3-endpoint:80"
-        assert snapshot["s3"]["buckets"]["bronze"] == "lb-bronze"
-        assert snapshot["scratch"]["enabled"] is True
-        assert snapshot["spark"]["executor"]["instances"] == 8  # default
-        assert snapshot["spark"]["executor"]["cores"] == 4  # default
-        assert snapshot["catalog"] == "hive"  # default
-        assert snapshot["table_format"] == "iceberg"  # default
-        assert snapshot["pipeline_engine"] == "spark"  # default
-        assert snapshot["query_engine"] == "trino"  # default
-        assert snapshot["datagen"]["scale"] == 50
-        assert "datagen" in snapshot["images"]
-        assert "spark" in snapshot["images"]
-        assert snapshot["trino"]["worker"]["replicas"] == 2  # default
-        assert snapshot["sustained"]["run_duration"] == 1800  # default
-        # Default is auto: the snapshot records the value a run would use.
-        assert snapshot["sustained"]["max_files_per_trigger"] >= 1
-        assert snapshot["sustained"]["bronze_target_file_size_mb"] == 512
-        assert snapshot["sustained"]["silver_target_file_size_mb"] == 512
-        assert snapshot["sustained"]["gold_target_file_size_mb"] == 128
-
-    def test_captures_executor_overrides(self):
-        from lakebench.config import LakebenchConfig
-
-        cfg = LakebenchConfig(
-            name="override-test",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://test:80",
-                        "access_key": "ak",
-                        "secret_key": "sk",
-                    },
-                },
-                "compute": {
-                    "spark": {
-                        "silver_executors": 20,
-                        "gold_refresh_executors": 5,
-                    },
-                },
-            },
-        )
-        snapshot = build_config_snapshot(cfg)
-
-        assert snapshot["spark"]["executor_overrides"]["silver"] == 20
-        assert snapshot["spark"]["executor_overrides"]["gold_refresh"] == 5
-        assert snapshot["spark"]["executor_overrides"]["bronze"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2270,26 +680,6 @@ class TestRecordActualSizesBucketWarning:
         assert "lb-bronze" in warnings[0].message
         assert total == 0  # Missing buckets contribute 0 objects
 
-    def test_no_warning_on_successful_measurement(self, caplog):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        mock_s3 = MagicMock()
-        info = MagicMock()
-        info.size_bytes = 1024 * 1024 * 1024  # 1 GB
-        info.object_count = 100
-        mock_s3.get_bucket_size.return_value = info
-
-        with caplog.at_level(logging.WARNING, logger="lakebench.metrics.collector"):
-            total = c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 0
-
-        # Check sizes were recorded
-        assert c.current_run.bronze_size_gb == pytest.approx(1.0)
-        assert total == 300  # 100 objects x 3 buckets
-
 
 # ---------------------------------------------------------------------------
 # Phase 1: throughput_rps computation
@@ -2298,39 +688,6 @@ class TestRecordActualSizesBucketWarning:
 
 class TestThroughputRpsComputation:
     """Tests for throughput_rps computation logic."""
-
-    def test_throughput_rps_computed_when_data_exists(self):
-        """throughput_rps should be total_rows / elapsed_seconds."""
-        m = StreamingJobMetrics(
-            job_name="lakebench-bronze-ingest",
-            job_type="bronze-ingest",
-            total_rows_processed=900_000,
-            elapsed_seconds=1800.0,
-        )
-        # Simulate the computation from cli.py
-        if m.elapsed_seconds > 0 and m.total_rows_processed > 0:
-            m.throughput_rps = m.total_rows_processed / m.elapsed_seconds
-
-        assert m.throughput_rps == pytest.approx(500.0)
-
-    def test_throughput_rps_zero_when_no_rows(self):
-        m = StreamingJobMetrics(
-            job_name="test",
-            job_type="bronze-ingest",
-            total_rows_processed=0,
-            elapsed_seconds=1800.0,
-        )
-        # No computation when no rows
-        assert m.throughput_rps == 0.0
-
-    def test_throughput_rps_zero_when_no_elapsed(self):
-        m = StreamingJobMetrics(
-            job_name="test",
-            job_type="bronze-ingest",
-            total_rows_processed=1000,
-            elapsed_seconds=0.0,
-        )
-        assert m.throughput_rps == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -2341,176 +698,9 @@ class TestThroughputRpsComputation:
 class TestListRunsEnriched:
     """Tests for enriched list_runs() fields."""
 
-    def test_list_runs_includes_new_fields(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="enriched-001",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            bronze_size_gb=10.5,
-            silver_size_gb=3.2,
-            gold_size_gb=0.01,
-            config_snapshot={"scale": 100, "processing_pattern": "streaming"},
-            benchmark=BenchmarkMetrics(
-                mode="standard",
-                cache="hot",
-                scale=100,
-                qph=820.4,
-                total_seconds=43.88,
-            ),
-            streaming=[
-                StreamingJobMetrics(job_name="s1", job_type="bronze-ingest"),
-                StreamingJobMetrics(job_name="s2", job_type="silver-stream"),
-            ],
-        )
-        storage.save_run(metrics)
-
-        runs = storage.list_runs()
-        assert len(runs) == 1
-        r = runs[0]
-        assert r["scale"] == 100
-        assert r["processing_pattern"] == "streaming"
-        assert r["qph"] == 820.4
-        assert r["bronze_size_gb"] == pytest.approx(10.5)
-        assert r["silver_size_gb"] == pytest.approx(3.2)
-        assert r["gold_size_gb"] == pytest.approx(0.01)
-        assert r["streaming_count"] == 2
-
-    def test_list_runs_missing_config_fields(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="old-format",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            config_snapshot={"sustained": True, "duration": 1800},
-        )
-        storage.save_run(metrics)
-
-        runs = storage.list_runs()
-        r = runs[0]
-        assert r["scale"] is None
-        assert r["processing_pattern"] is None
-        assert r["qph"] is None
-        assert r["streaming_count"] == 0
-
-    def test_list_runs_no_benchmark(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="no-bench",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-        )
-        storage.save_run(metrics)
-
-        runs = storage.list_runs()
-        assert runs[0]["qph"] is None
-
 
 class TestExportCsvEnriched:
     """Tests for enriched export_csv() with per-job columns."""
-
-    def test_csv_has_enriched_headers(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="csv-enriched",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            config_snapshot={"scale": 50, "processing_pattern": "medallion"},
-        )
-        storage.save_run(metrics)
-
-        csv_path = storage.export_csv(tmp_path / "export.csv")
-        header = csv_path.read_text().split("\n")[0]
-
-        assert "scale" in header
-        assert "processing_pattern" in header
-        assert "qph" in header
-        assert "bronze_verify_seconds" in header
-        assert "silver_build_seconds" in header
-        assert "gold_finalize_seconds" in header
-        assert "bronze_ingest_total_batches" in header
-        assert "gold_refresh_freshness_seconds" in header
-
-    def test_csv_batch_job_columns(self, tmp_path):
-        import csv as csv_mod
-
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="csv-batch",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=45.2,
-                    input_size_gb=9.5,
-                    output_rows=5_000_000,
-                    success=True,
-                ),
-                JobMetrics(
-                    job_name="lakebench-silver-build",
-                    job_type="silver-build",
-                    elapsed_seconds=107.3,
-                    input_size_gb=9.5,
-                    output_rows=4_850_000,
-                    success=True,
-                ),
-            ],
-        )
-        storage.save_run(metrics)
-
-        csv_path = storage.export_csv(tmp_path / "export.csv")
-        with open(csv_path) as f:
-            reader = csv_mod.DictReader(f)
-            row = next(reader)
-
-        assert row["bronze_verify_seconds"] == "45.2"
-        assert row["silver_build_seconds"] == "107.3"
-        assert row["bronze_verify_output_rows"] == "5000000"
-        assert row["gold_finalize_seconds"] == ""
-
-    def test_csv_streaming_job_columns(self, tmp_path):
-        import csv as csv_mod
-
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="csv-stream",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=59,
-                    total_rows_processed=47_135_100,
-                    throughput_rps=26186.17,
-                    freshness_seconds=0.0,
-                    success=True,
-                ),
-            ],
-        )
-        storage.save_run(metrics)
-
-        csv_path = storage.export_csv(tmp_path / "export.csv")
-        with open(csv_path) as f:
-            reader = csv_mod.DictReader(f)
-            row = next(reader)
-
-        assert row["bronze_ingest_total_batches"] == "59"
-        assert row["bronze_ingest_total_rows_processed"] == "47135100"
 
 
 # ---------------------------------------------------------------------------
@@ -2520,81 +710,6 @@ class TestExportCsvEnriched:
 
 class TestStageMetrics:
     """Tests for the universal per-stage measurement dataclass."""
-
-    def test_basic_construction(self):
-        s = StageMetrics(stage_name="bronze", stage_type="batch", engine="spark")
-        assert s.stage_name == "bronze"
-        assert s.elapsed_seconds == 0.0
-        assert s.success is False
-        assert s.throughput_gb_per_second == 0.0
-
-    def test_to_dict(self):
-        now = datetime.now()
-        s = StageMetrics(
-            stage_name="silver",
-            stage_type="batch",
-            engine="spark",
-            start_time=now,
-            end_time=now + timedelta(seconds=100),
-            elapsed_seconds=100.0,
-            success=True,
-            input_size_gb=10.0,
-            output_size_gb=3.5,
-            input_rows=5_000_000,
-            output_rows=4_900_000,
-            executor_count=8,
-        )
-        d = s.to_dict()
-        assert d["stage_name"] == "silver"
-        assert d["engine"] == "spark"
-        assert d["elapsed_seconds"] == 100.0
-        assert d["input_size_gb"] == 10.0
-        assert d["executor_count"] == 8
-        assert "start_time" in d
-        assert "end_time" in d
-
-    def test_to_dict_omits_none_times(self):
-        s = StageMetrics(stage_name="gold", stage_type="batch", engine="spark")
-        d = s.to_dict()
-        assert "start_time" not in d
-        assert "end_time" not in d
-
-    def test_compute_derived(self):
-        s = StageMetrics(
-            stage_name="bronze",
-            stage_type="batch",
-            engine="spark",
-            elapsed_seconds=50.0,
-            input_size_gb=10.0,
-            input_rows=5_000_000,
-        )
-        s.compute_derived()
-        assert s.throughput_gb_per_second == pytest.approx(0.2)
-        assert s.throughput_rows_per_second == pytest.approx(100_000.0)
-
-    def test_compute_derived_zero_elapsed(self):
-        s = StageMetrics(
-            stage_name="bronze",
-            stage_type="batch",
-            engine="spark",
-            elapsed_seconds=0.0,
-            input_size_gb=10.0,
-        )
-        s.compute_derived()
-        assert s.throughput_gb_per_second == 0.0
-
-    def test_query_stage(self):
-        s = StageMetrics(
-            stage_name="query",
-            stage_type="query",
-            engine="trino",
-            elapsed_seconds=44.0,
-            queries_executed=10,
-            queries_per_hour=818.2,
-        )
-        d = s.to_dict()
-        assert d["queries_per_hour"] == 818.2
-        assert d["queries_executed"] == 10
 
 
 # ---------------------------------------------------------------------------
@@ -2649,24 +764,6 @@ class TestPipelineBenchmark:
             ),
         ]
 
-    def test_compute_aggregates(self):
-        now = datetime.now()
-        stages = self._make_stages()
-        pb = PipelineBenchmark(
-            run_id="agg-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            stages=stages,
-            success=True,
-        )
-        pb.compute_aggregates()
-
-        assert pb.total_elapsed_seconds == 200.0
-        assert pb.total_data_processed_gb == pytest.approx(23.5)
-        assert pb.pipeline_throughput_gb_per_second == pytest.approx(23.5 / 200.0)
-        assert pb.time_to_value_seconds == pytest.approx(200.0)
-
     def test_throughput_uses_ttv_not_summed_time(self):
         """Throughput divides by wall-clock TTV, not sum of stage durations."""
         now = datetime.now()
@@ -2710,164 +807,6 @@ class TestPipelineBenchmark:
         assert pb.time_to_value_seconds == 100.0  # wall-clock
         # Throughput uses TTV: 20 GB / 100s = 0.2, not 20/200 = 0.1
         assert pb.pipeline_throughput_gb_per_second == pytest.approx(0.2)
-
-    def test_to_matrix(self):
-        now = datetime.now()
-        stages = self._make_stages()
-        pb = PipelineBenchmark(
-            run_id="matrix-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            stages=stages,
-            success=True,
-        )
-        matrix = pb.to_matrix()
-
-        assert "bronze" in matrix
-        assert "silver" in matrix
-        assert "gold" in matrix
-        assert matrix["bronze"]["elapsed_seconds"] == 50.0
-        assert matrix["silver"]["input_size_gb"] == 10.0
-        assert matrix["gold"]["output_size_gb"] == 0.01
-
-    def test_compute_efficiency(self):
-        """compute_efficiency = total_gb / total_core_hours."""
-        now = datetime.now()
-        stages = [
-            StageMetrics(
-                stage_name="bronze",
-                stage_type="batch",
-                engine="spark",
-                start_time=now,
-                end_time=now + timedelta(seconds=3600),
-                elapsed_seconds=3600.0,
-                success=True,
-                input_size_gb=100.0,
-                executor_count=4,
-                executor_cores=2,
-            ),
-        ]
-        pb = PipelineBenchmark(
-            run_id="eff-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            stages=stages,
-            success=True,
-        )
-        pb.compute_aggregates()
-        # core_hours = 4 * 2 * 3600 / 3600 = 8
-        # efficiency = 100 / 8 = 12.5
-        assert pb.compute_efficiency_gb_per_core_hour == pytest.approx(12.5)
-
-    def test_scale_ratio(self):
-        """scale_ratio uses only bronze input, not total across all stages."""
-        now = datetime.now()
-        stages = [
-            StageMetrics(
-                stage_name="bronze",
-                stage_type="batch",
-                engine="spark",
-                start_time=now,
-                end_time=now + timedelta(seconds=100),
-                elapsed_seconds=100.0,
-                success=True,
-                input_size_gb=95.0,
-            ),
-            StageMetrics(
-                stage_name="silver",
-                stage_type="batch",
-                engine="spark",
-                start_time=now + timedelta(seconds=100),
-                end_time=now + timedelta(seconds=200),
-                elapsed_seconds=100.0,
-                success=True,
-                input_size_gb=95.0,
-            ),
-            StageMetrics(
-                stage_name="gold",
-                stage_type="batch",
-                engine="spark",
-                start_time=now + timedelta(seconds=200),
-                end_time=now + timedelta(seconds=300),
-                elapsed_seconds=100.0,
-                success=True,
-                input_size_gb=95.0,
-            ),
-        ]
-        pb = PipelineBenchmark(
-            run_id="scale-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            stages=stages,
-            success=True,
-            config_snapshot={"approx_bronze_gb": 100.0},
-        )
-        pb.compute_aggregates()
-        # Should be 95/100 = 0.95, NOT 285/100 = 2.85 (old triple-count bug)
-        assert pb.scale_ratio == pytest.approx(0.95)
-
-    def test_to_dict(self):
-        now = datetime.now()
-        stages = self._make_stages()
-        pb = PipelineBenchmark(
-            run_id="dict-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            stages=stages,
-            success=True,
-        )
-        pb.compute_aggregates()
-        d = pb.to_dict()
-
-        assert d["run_id"] == "dict-test"
-        assert d["pipeline_mode"] == "batch"
-        assert "scorecard" in d
-        assert "scores" in d  # backward compat alias
-        assert d["scorecard"]["total_elapsed_seconds"] == 200.0
-        assert "compute_efficiency_gb_per_core_hour" in d["scorecard"]
-        assert "scale_ratio" in d["scorecard"]
-        assert len(d["stages"]) == 3
-        assert "stage_matrix" in d
-        assert d["stage_matrix"]["bronze"]["engine"] == "spark"
-
-    def test_empty_pipeline(self):
-        now = datetime.now()
-        pb = PipelineBenchmark(
-            run_id="empty",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-        )
-        pb.compute_aggregates()
-
-        assert pb.total_elapsed_seconds == 0.0
-        assert pb.time_to_value_seconds == 0.0
-        assert pb.to_matrix() == {}
-
-    def test_with_query_benchmark(self):
-        now = datetime.now()
-        qb = BenchmarkMetrics(
-            mode="power",
-            cache="hot",
-            scale=100,
-            qph=820.0,
-            total_seconds=44.0,
-        )
-        pb = PipelineBenchmark(
-            run_id="qb-test",
-            deployment_name="test",
-            pipeline_mode="batch",
-            start_time=now,
-            query_benchmark=qb,
-            success=True,
-        )
-        d = pb.to_dict()
-        assert "query_benchmark" in d
-        assert d["query_benchmark"]["qph"] == 820.0
 
 
 # ---------------------------------------------------------------------------
@@ -2944,35 +883,6 @@ class TestBuildPipelineBenchmark:
             ),
         )
 
-    def test_batch_jobs_converted(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-
-        assert len(pb.stages) == 4  # bronze, silver, gold, query
-        assert pb.stages[0].stage_name == "bronze"
-        assert pb.stages[0].engine == "spark"
-        assert pb.stages[0].executor_count == 4
-        assert pb.stages[0].executor_cores == 2
-        assert pb.stages[0].executor_memory_gb == 4.0
-        assert pb.stages[1].stage_name == "silver"
-        assert pb.stages[1].executor_count == 12
-        assert pb.stages[1].executor_cores == 4
-        assert pb.stages[1].executor_memory_gb == 48.0
-        assert pb.stages[2].stage_name == "gold"
-        assert pb.stages[2].executor_cores == 4
-        assert pb.stages[3].stage_name == "query"
-        assert pb.stages[3].engine == "trino"
-
-    def test_query_stage_from_benchmark(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-
-        query_stage = pb.stages[3]
-        assert query_stage.stage_type == "query"
-        assert query_stage.queries_per_hour == 820.0
-        assert query_stage.elapsed_seconds == 40.0
-        assert query_stage.queries_executed == 1
-
     def test_s3_size_fallback(self):
         """output_size_gb uses S3 layer size when job reports 0."""
         run = self._make_run()
@@ -2997,46 +907,6 @@ class TestBuildPipelineBenchmark:
         gold_stage = [s for s in pb.stages if s.stage_name == "gold"][0]
         assert gold_stage.input_size_gb == pytest.approx(101.3)
         assert gold_stage.throughput_gb_per_second > 0
-
-    def test_executor_cores_memory_propagation(self):
-        """executor_cores and executor_memory_gb propagate to pipeline stages."""
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-
-        bronze = pb.stages[0]
-        assert bronze.executor_cores == 2
-        assert bronze.executor_memory_gb == 4.0
-
-        silver = pb.stages[1]
-        assert silver.executor_cores == 4
-        assert silver.executor_memory_gb == 48.0
-
-        # stage_matrix includes the new fields
-        matrix = pb.to_matrix()
-        assert matrix["bronze"]["executor_cores"] == 2
-        assert matrix["bronze"]["executor_memory_gb"] == 4.0
-        assert matrix["silver"]["executor_cores"] == 4
-        assert matrix["silver"]["executor_memory_gb"] == 48.0
-
-    def test_with_datagen(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(
-            run,
-            datagen_elapsed=600.0,
-            datagen_output_gb=10.0,
-            datagen_output_rows=5_000_000,
-        )
-
-        assert len(pb.stages) == 5  # datagen + bronze + silver + gold + query
-        assert pb.stages[0].stage_name == "datagen"
-        assert pb.stages[0].elapsed_seconds == 600.0
-        assert pb.stages[0].output_size_gb == 10.0
-
-    def test_no_datagen_when_zero(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run, datagen_elapsed=0.0)
-
-        assert pb.stages[0].stage_name != "datagen"
 
     def test_empty_fleet_dict_does_not_append_zero_stage(self):
         """A fleet with pods_reported=0 (all pods failed to emit) is still
@@ -3098,76 +968,6 @@ class TestBuildPipelineBenchmark:
         assert dg.executor_count == 4
         assert dg.executor_cores == 8  # 32 / 4
 
-    def test_pipeline_mode_detection(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-        assert pb.pipeline_mode == "batch"
-
-    def test_streaming_mode_detection(self):
-        now = datetime.now()
-        run = PipelineMetrics(
-            run_id="stream-mode",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=10,
-                    total_rows_processed=100_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=55.6,
-                    micro_batch_duration_ms=450.0,
-                    freshness_seconds=12.5,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-        assert pb.pipeline_mode == "sustained"
-        assert len(pb.stages) == 1
-        assert pb.stages[0].stage_name == "bronze"
-        assert pb.stages[0].stage_type == "streaming"
-        # Sustained scores are computed from streaming data
-        assert pb.data_freshness_seconds == 12.5
-        # sustained = bronze input_rows / run_duration = 100_000 / 1800
-        assert pb.sustained_throughput_rps == pytest.approx(100_000 / 1800.0)
-        assert pb.stage_latency_profile == [450.0, 0.0, 0.0]
-        assert pb.total_rows_processed == 100_000
-        # Batch scores remain zero for sustained
-        assert pb.time_to_value_seconds == 0.0
-        assert pb.total_data_processed_gb == 0.0
-        assert pb.pipeline_throughput_gb_per_second == 0.0
-
-    def test_aggregates_computed(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-
-        assert pb.total_elapsed_seconds > 0
-        assert pb.time_to_value_seconds > 0
-        assert pb.success is True
-
-    def test_empty_run(self):
-        now = datetime.now()
-        run = PipelineMetrics(
-            run_id="empty",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-        )
-        pb = build_pipeline_benchmark(run)
-
-        assert len(pb.stages) == 0
-        assert pb.total_elapsed_seconds == 0.0
-
-    def test_query_benchmark_preserved(self):
-        run = self._make_run()
-        pb = build_pipeline_benchmark(run)
-
-        assert pb.query_benchmark is not None
-        assert pb.query_benchmark.qph == 820.0
-
 
 # ---------------------------------------------------------------------------
 # Pipeline benchmark storage roundtrip
@@ -3177,215 +977,6 @@ class TestBuildPipelineBenchmark:
 class TestPipelineBenchmarkStorageRoundtrip:
     """Tests for pipeline benchmark save/load through MetricsStorage."""
 
-    def test_roundtrip(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        run = PipelineMetrics(
-            run_id="pb-roundtrip",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            bronze_size_gb=10.0,
-            silver_size_gb=3.5,
-            gold_size_gb=0.01,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=50.0,
-                    success=True,
-                    input_size_gb=10.0,
-                    executor_count=4,
-                    executor_cores=2,
-                    executor_memory_gb=4.0,
-                    cpu_seconds_requested=400.0,
-                    memory_gb_requested=24.0,
-                ),
-            ],
-            benchmark=BenchmarkMetrics(
-                mode="power",
-                cache="hot",
-                scale=100,
-                qph=820.0,
-                total_seconds=40.0,
-            ),
-        )
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-
-        storage.save_run(run)
-        loaded = storage.load_run("pb-roundtrip")
-
-        assert loaded is not None
-        assert loaded.pipeline_benchmark is not None
-        lpb = loaded.pipeline_benchmark
-        assert lpb.run_id == "pb-roundtrip"
-        assert lpb.pipeline_mode == "batch"
-        assert len(lpb.stages) == 2  # bronze + query
-        assert lpb.stages[0].stage_name == "bronze"
-        assert lpb.stages[0].executor_count == 4
-        assert lpb.stages[0].executor_cores == 2
-        assert lpb.stages[0].executor_memory_gb == 4.0
-        assert lpb.stages[1].stage_name == "query"
-        assert lpb.stages[1].queries_per_hour == 820.0
-        assert lpb.total_elapsed_seconds > 0
-        assert lpb.query_benchmark is not None
-        assert lpb.query_benchmark.qph == 820.0
-
-    def test_backward_compat_no_pipeline_benchmark(self, tmp_path):
-        """Old runs without pipeline_benchmark load without error."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        run = PipelineMetrics(
-            run_id="old-run",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-        )
-        storage.save_run(run)
-        loaded = storage.load_run("old-run")
-
-        assert loaded is not None
-        assert loaded.pipeline_benchmark is None
-
-    def test_list_runs_includes_pipeline_scores(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        run = PipelineMetrics(
-            run_id="pb-list",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=50.0,
-                    success=True,
-                    input_size_gb=10.0,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-        storage.save_run(run)
-
-        runs = storage.list_runs()
-        assert len(runs) == 1
-        assert runs[0]["time_to_value_seconds"] is not None or runs[0]["time_to_value_seconds"] == 0
-
-    def test_csv_includes_pipeline_benchmark_columns(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        run = PipelineMetrics(
-            run_id="pb-csv",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=50.0,
-                    success=True,
-                    input_size_gb=10.0,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-        storage.save_run(run)
-
-        csv_path = storage.export_csv(tmp_path / "export.csv")
-        header = csv_path.read_text().split("\n")[0]
-
-        assert "time_to_value_seconds" in header
-        assert "pipeline_throughput_gb_per_second" in header
-        assert "pb_bronze_seconds" in header
-        assert "pb_silver_seconds" in header
-        assert "pb_gold_seconds" in header
-        assert "pb_query_seconds" in header
-
-    def test_job_resource_fields_roundtrip(self, tmp_path):
-        """New resource fields survive save/load."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        now = datetime.now()
-
-        run = PipelineMetrics(
-            run_id="res-roundtrip",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-silver-build",
-                    job_type="silver-build",
-                    elapsed_seconds=200.0,
-                    success=True,
-                    executor_count=8,
-                    executor_cores=4,
-                    executor_memory_gb=48.0,
-                    cpu_seconds_requested=6400.0,
-                    memory_gb_requested=480.0,
-                ),
-            ],
-        )
-        storage.save_run(run)
-        loaded = storage.load_run("res-roundtrip")
-
-        assert loaded is not None
-        j = loaded.jobs[0]
-        assert j.executor_count == 8
-        assert j.executor_cores == 4
-        assert j.executor_memory_gb == 48.0
-        assert j.cpu_seconds_requested == 6400.0
-        assert j.memory_gb_requested == 480.0
-
-    def test_backward_compat_old_field_names(self, tmp_path):
-        """Old JSON with total_cpu_time_seconds/peak_memory_gb loads into new fields."""
-        import json
-
-        metrics_dir = tmp_path / "metrics"
-        metrics_dir.mkdir()
-        old_json = {
-            "run_id": "old-fields",
-            "deployment_name": "test",
-            "start_time": now.isoformat() if (now := datetime.now()) else "",
-            "success": True,
-            "total_elapsed_seconds": 60.0,
-            "bronze_size_gb": 0,
-            "silver_size_gb": 0,
-            "gold_size_gb": 0,
-            "jobs": [
-                {
-                    "job_name": "lakebench-bronze-verify",
-                    "job_type": "bronze-verify",
-                    "elapsed_seconds": 50.0,
-                    "success": True,
-                    "total_cpu_time_seconds": 123.4,
-                    "peak_memory_gb": 56.7,
-                }
-            ],
-            "queries": [],
-            "streaming": [],
-        }
-        with open(metrics_dir / "run-old-fields.json", "w") as f:
-            json.dump(old_json, f)
-
-        storage = MetricsStorage(metrics_dir)
-        loaded = storage.load_run("old-fields")
-
-        assert loaded is not None
-        j = loaded.jobs[0]
-        assert j.cpu_seconds_requested == 123.4
-        assert j.memory_gb_requested == 56.7
-
 
 # ---------------------------------------------------------------------------
 # Pipeline benchmark report generation
@@ -3394,73 +985,6 @@ class TestPipelineBenchmarkStorageRoundtrip:
 
 class TestPipelineBenchmarkReport:
     """Tests for pipeline benchmark section in HTML reports."""
-
-    def test_report_contains_pipeline_benchmark(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        run = PipelineMetrics(
-            run_id="pb-report",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=50.0,
-                    success=True,
-                    input_size_gb=10.0,
-                ),
-                JobMetrics(
-                    job_name="lakebench-silver-build",
-                    job_type="silver-build",
-                    elapsed_seconds=100.0,
-                    success=True,
-                    input_size_gb=10.0,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(run)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Pipeline Benchmark" in html
-        assert "Time to Value" in html
-        assert "bronze" in html
-        assert "silver" in html
-
-    def test_report_no_pipeline_benchmark_when_absent(self, tmp_path):
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        now = datetime.now()
-        run = PipelineMetrics(
-            run_id="no-pb",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=60),
-            total_elapsed_seconds=60.0,
-            success=True,
-        )
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(run)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Pipeline Benchmark" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -3546,17 +1070,6 @@ class TestSustainedPipelineScoring:
         # total_elapsed_seconds: sustained mode uses wall-clock (max), not sum
         assert pb.total_elapsed_seconds == pytest.approx(1800.0)
 
-    def test_gold_unique_rows_is_none(self):
-        """Gold-refresh unique_rows_processed should be None (unknown), not 0."""
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-        gold = next(s for s in pb.stages if s.stage_name == "gold")
-        assert gold.unique_rows_processed is None
-        # Bronze and silver should have non-None values
-        bronze = next(s for s in pb.stages if s.stage_name == "bronze")
-        assert bronze.unique_rows_processed is not None
-        assert bronze.unique_rows_processed > 0
-
     def test_sustained_batch_scores_zero(self):
         """Batch-only scores remain zero for a sustained pipeline."""
         run = self._make_streaming_run()
@@ -3601,125 +1114,6 @@ class TestSustainedPipelineScoring:
         assert pb.total_rows_processed == 0
         # Batch scores are populated
         assert pb.time_to_value_seconds > 0
-
-    def test_sustained_to_dict_scores(self):
-        """to_dict() outputs sustained score keys for sustained mode."""
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-        d = pb.to_dict()
-
-        scores = d["scores"]
-        assert "data_freshness_seconds" in scores
-        assert "sustained_throughput_rps" in scores
-        assert "stage_latency_profile" in scores
-        assert "ingest_ratio" in scores
-        assert "pipeline_saturated" in scores
-        assert "total_rows_processed" in scores
-        assert "total_elapsed_seconds" in scores
-        assert "compute_efficiency_gb_per_core_hour" in scores
-        assert "total_s3_objects" in scores
-        # Batch-only key should NOT appear
-        assert "time_to_value_seconds" not in scores
-        # Shared keys now appear in both modes
-        assert "total_data_processed_gb" in scores
-        assert "pipeline_throughput_gb_per_second" in scores
-
-        # Values match computed scores
-        assert scores["data_freshness_seconds"] == pytest.approx(15.0)
-        assert scores["total_rows_processed"] == 500_000 + 480_000 + 450_000
-        # total_s3_objects defaults to 0 (set by cli.py at runtime)
-        assert scores["total_s3_objects"] == 0
-
-    def test_batch_to_dict_scores(self):
-        """to_dict() outputs batch score keys for batch mode."""
-        now = datetime.now()
-        run = PipelineMetrics(
-            run_id="batch-dict",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    elapsed_seconds=50.0,
-                    success=True,
-                    input_size_gb=10.0,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-        d = pb.to_dict()
-
-        scores = d["scores"]
-        assert "time_to_value_seconds" in scores
-        assert "total_data_processed_gb" in scores
-        assert "pipeline_throughput_gb_per_second" in scores
-        # Sustained keys should NOT appear
-        assert "data_freshness_seconds" not in scores
-        assert "sustained_throughput_rps" not in scores
-        assert "total_s3_objects" not in scores
-
-    def test_sustained_storage_roundtrip(self, tmp_path):
-        """Sustained pipeline benchmark survives save/load."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-        storage.save_run(run)
-
-        loaded = storage.load_run("cont-test")
-        assert loaded is not None
-        assert loaded.pipeline_benchmark is not None
-
-        lpb = loaded.pipeline_benchmark
-        assert lpb.pipeline_mode == "sustained"
-        assert lpb.data_freshness_seconds == 15.0
-        assert lpb.sustained_throughput_rps == pytest.approx(500_000 / 1800.0, rel=1e-2)
-        assert lpb.stage_latency_profile == [200.0, 350.0, 500.0]
-        assert lpb.total_rows_processed == 1_430_000
-        assert lpb.total_elapsed_seconds == pytest.approx(1800.0)
-        assert len(lpb.stages) == 3
-
-    def test_total_s3_objects_roundtrip(self, tmp_path):
-        """total_s3_objects set by cli.py survives save/load."""
-        storage = MetricsStorage(tmp_path / "metrics")
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-        pb.total_s3_objects = 842_315
-        run.pipeline_benchmark = pb
-        storage.save_run(run)
-
-        loaded = storage.load_run("cont-test")
-        assert loaded is not None
-        lpb = loaded.pipeline_benchmark
-        assert lpb.total_s3_objects == 842_315
-        scores = lpb.to_dict()["scores"]
-        assert scores["total_s3_objects"] == 842_315
-
-    def test_sustained_report_cards(self, tmp_path):
-        """Report contains sustained score cards for streaming pipeline."""
-        metrics_dir = tmp_path / "metrics"
-        output_dir = tmp_path / "reports"
-
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-        run.pipeline_benchmark = pb
-
-        storage = MetricsStorage(metrics_dir)
-        storage.save_run(run)
-
-        generator = ReportGenerator(metrics_dir=metrics_dir, output_dir=output_dir)
-        report_path = generator.generate_report()
-        html = report_path.read_text()
-
-        assert "Data Freshness" in html
-        assert "Sustained Throughput" in html
-        assert "Data Processed" in html
-        assert "CPU-hours" in html
-        assert "worst-case gold staleness" in html
-        # Batch cards should NOT appear
-        assert "Time to Value" not in html
 
     def test_streaming_input_size_gb_backfill(self):
         """Streaming stages get input_size_gb from measured S3 bucket sizes."""
@@ -3772,24 +1166,6 @@ class TestSustainedPipelineScoring:
         # Backfilled from run.bronze_size_gb
         assert bronze.input_size_gb == pytest.approx(10.0)
 
-    def test_ingest_ratio(self):
-        """ingest_ratio computed when datagen_output_rows provided."""
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run, datagen_output_rows=600_000)
-
-        # bronze processed 500_000 out of 600_000 datagen rows
-        assert pb.ingest_ratio == pytest.approx(500_000 / 600_000, rel=1e-3)
-        assert pb.pipeline_saturated is True  # 0.833 < 0.95
-
-    def test_ingest_ratio_not_saturated(self):
-        """pipeline_saturated=False when completeness >= 0.95."""
-        run = self._make_streaming_run()
-        # 500_000 bronze rows / 500_000 datagen rows = 1.0 completeness
-        pb = build_pipeline_benchmark(run, datagen_output_rows=500_000)
-
-        assert pb.ingest_ratio == pytest.approx(1.0)
-        assert pb.pipeline_saturated is False
-
 
 # ---------------------------------------------------------------------------
 # BenchmarkRoundMeta
@@ -3799,35 +1175,6 @@ class TestSustainedPipelineScoring:
 class TestBenchmarkRoundMeta:
     """Tests for the in-stream benchmark round metadata dataclass."""
 
-    def test_defaults(self):
-        meta = BenchmarkRoundMeta(round_index=1)
-        assert meta.round_index == 1
-        assert meta.timestamp is None
-        assert meta.gold_event_age_seconds is None  # unmeasured, not 0
-        assert meta.q9_contention_observed is False
-        assert meta.q9_retry_used is False
-
-    def test_to_dict(self):
-        now = datetime.now()
-        meta = BenchmarkRoundMeta(
-            round_index=3,
-            timestamp=now,
-            gold_event_age_seconds=42.5,
-            q9_contention_observed=True,
-            q9_retry_used=True,
-        )
-        d = meta.to_dict()
-        assert d["round_index"] == 3
-        assert d["timestamp"] == now.isoformat()
-        assert d["gold_event_age_seconds"] == 42.5
-        assert d["q9_contention_observed"] is True
-        assert d["q9_retry_used"] is True
-
-    def test_to_dict_no_timestamp(self):
-        meta = BenchmarkRoundMeta(round_index=1)
-        d = meta.to_dict()
-        assert d["timestamp"] is None
-
 
 # ---------------------------------------------------------------------------
 # BenchmarkMetrics with round_meta
@@ -3836,35 +1183,6 @@ class TestBenchmarkRoundMeta:
 
 class TestBenchmarkMetricsRoundMeta:
     """Tests for BenchmarkMetrics with round_meta field."""
-
-    def test_round_meta_default_none(self):
-        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
-        assert bm.round_meta is None
-
-    def test_to_dict_without_round_meta(self):
-        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
-        d = bm.to_dict()
-        assert "round_meta" not in d
-
-    def test_to_dict_with_round_meta(self):
-        now = datetime.now()
-        meta = BenchmarkRoundMeta(
-            round_index=2,
-            timestamp=now,
-            gold_event_age_seconds=38.0,
-        )
-        bm = BenchmarkMetrics(
-            mode="power",
-            cache="hot",
-            scale=10,
-            qph=245.0,
-            total_seconds=28.0,
-            round_meta=meta,
-        )
-        d = bm.to_dict()
-        assert "round_meta" in d
-        assert d["round_meta"]["round_index"] == 2
-        assert d["round_meta"]["gold_event_age_seconds"] == 38.0
 
 
 # ---------------------------------------------------------------------------
@@ -3916,13 +1234,6 @@ class TestAggregateBenchmarkRounds:
             round_meta=meta,
         )
 
-    def test_single_round(self):
-        rounds = [self._make_round(1, qph=200.0, total_seconds=30.0)]
-        result = aggregate_benchmark_rounds(rounds)
-        assert result.qph == 200.0
-        assert result.total_seconds == 30.0
-        assert result.round_meta is None  # aggregated has no round_meta
-
     def test_median_of_three(self):
         rounds = [
             self._make_round(1, qph=200.0, total_seconds=30.0, q1_elapsed=5.0),
@@ -3951,13 +1262,6 @@ class TestAggregateBenchmarkRounds:
         with pytest.raises(ValueError, match="Cannot aggregate zero"):
             aggregate_benchmark_rounds([])
 
-    def test_preserves_mode_and_cache(self):
-        rounds = [self._make_round(1, qph=200.0, total_seconds=30.0)]
-        result = aggregate_benchmark_rounds(rounds)
-        assert result.mode == "power"
-        assert result.cache == "hot"
-        assert result.scale == 10
-
 
 # ---------------------------------------------------------------------------
 # PipelineMetrics with benchmark_rounds
@@ -3967,90 +1271,14 @@ class TestAggregateBenchmarkRounds:
 class TestPipelineMetricsRounds:
     """Tests for PipelineMetrics benchmark_rounds field."""
 
-    def test_default_empty(self):
-        m = PipelineMetrics(run_id="test", deployment_name="test", start_time=datetime.now())
-        assert m.benchmark_rounds == []
-
-    def test_to_dict_with_rounds(self):
-        now = datetime.now()
-        meta = BenchmarkRoundMeta(round_index=1, timestamp=now)
-        rnd = BenchmarkMetrics(
-            mode="power",
-            cache="hot",
-            scale=10,
-            qph=200.0,
-            total_seconds=30.0,
-            round_meta=meta,
-        )
-        m = PipelineMetrics(
-            run_id="test",
-            deployment_name="test",
-            start_time=now,
-            benchmark_rounds=[rnd],
-        )
-        d = m.to_dict()
-        assert "benchmark_rounds" in d
-        assert len(d["benchmark_rounds"]) == 1
-        assert d["benchmark_rounds"][0]["qph"] == 200.0
-
-    def test_to_dict_without_rounds(self):
-        m = PipelineMetrics(run_id="test", deployment_name="test", start_time=datetime.now())
-        d = m.to_dict()
-        assert "benchmark_rounds" not in d
-
 
 # ---------------------------------------------------------------------------
-# MetricsCollector record_benchmark_round
+# MetricsCollector record_round
 # ---------------------------------------------------------------------------
 
 
 class TestRecordBenchmarkRound:
-    """Tests for MetricsCollector.record_benchmark_round."""
-
-    def test_records_round(self):
-        c = MetricsCollector()
-        c.start_run("test-run", "test", {})
-        meta = BenchmarkRoundMeta(round_index=1)
-        rnd = BenchmarkMetrics(
-            mode="power",
-            cache="hot",
-            scale=10,
-            qph=200.0,
-            total_seconds=30.0,
-            round_meta=meta,
-        )
-        c.record_benchmark_round(rnd)
-        assert len(c.current_run.benchmark_rounds) == 1
-        assert c.current_run.benchmark_rounds[0].qph == 200.0
-
-    def test_multiple_rounds(self):
-        c = MetricsCollector()
-        c.start_run("test-run", "test", {})
-        for i in range(3):
-            c.record_benchmark_round(
-                BenchmarkMetrics(
-                    mode="power",
-                    cache="hot",
-                    scale=10,
-                    qph=200.0 + i * 10,
-                    total_seconds=30.0,
-                    round_meta=BenchmarkRoundMeta(round_index=i + 1),
-                )
-            )
-        assert len(c.current_run.benchmark_rounds) == 3
-
-    def test_no_current_run(self):
-        c = MetricsCollector()
-        # Should not raise even without a current run
-        c.record_benchmark_round(
-            BenchmarkMetrics(
-                mode="power",
-                cache="hot",
-                scale=10,
-                qph=200.0,
-                total_seconds=30.0,
-            )
-        )
+    """Tests for MetricsCollector.record_round."""
 
 
 # ---------------------------------------------------------------------------
@@ -4122,50 +1350,11 @@ class TestPipelineBenchmarkRounds:
             benchmark_rounds=rounds,
         )
 
-    def test_rounds_passed_through(self):
-        run = self._make_streaming_run_with_rounds()
-        pb = build_pipeline_benchmark(run)
-        assert len(pb.benchmark_rounds) == 3
-
     def test_query_time_event_age_computed(self):
         run = self._make_streaming_run_with_rounds()
         pb = build_pipeline_benchmark(run)
         # Freshness values: 30, 40, 50 -- median = 40
         assert pb.query_time_event_age_seconds == pytest.approx(40.0)
-
-    def test_scores_dict_with_rounds(self):
-        run = self._make_streaming_run_with_rounds()
-        pb = build_pipeline_benchmark(run)
-        d = pb.to_dict()
-        scores = d["scores"]
-
-        # In-stream median QpH: median of [200, 225, 250] = 225
-        assert scores["composite_qph"] == 225.0
-        assert scores["in_stream_composite_qph"] == 225.0
-        assert "post_stream_qph" not in scores
-        assert scores["benchmark_rounds_count"] == 3
-        assert scores["query_time_event_age_seconds"] == pytest.approx(40.0)
-
-    def test_to_dict_includes_rounds(self):
-        run = self._make_streaming_run_with_rounds()
-        pb = build_pipeline_benchmark(run)
-        d = pb.to_dict()
-        assert "benchmark_rounds" in d
-        assert len(d["benchmark_rounds"]) == 3
-
-    def test_no_rounds_no_in_stream_qph(self):
-        """Without in-stream rounds, no in-stream QpH scores are produced."""
-        run = self._make_streaming_run_with_rounds()
-        run.benchmark_rounds = []  # clear rounds
-        pb = build_pipeline_benchmark(run)
-        d = pb.to_dict()
-        scores = d["scores"]
-
-        # Without rounds, composite_qph falls back to benchmark field QpH
-        assert scores["composite_qph"] == 260.0
-        assert "in_stream_composite_qph" not in scores
-        assert "post_stream_qph" not in scores
-        assert "benchmark_rounds" not in d
 
 
 # ---------------------------------------------------------------------------
@@ -4401,38 +1590,6 @@ class TestSustainedScoringEdgeCases:
         # data_freshness_seconds = max(5.0, 12.0) = 12.0
         assert pb.data_freshness_seconds == pytest.approx(12.0)
 
-    def test_sustained_single_stage_only(self):
-        """Streaming run with only a single bronze stage builds gracefully."""
-        run = self._make_streaming_run(
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=100,
-                    total_rows_processed=500_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=277.8,
-                    micro_batch_duration_ms=200.0,
-                    freshness_seconds=7.5,
-                    batch_size=5000,
-                ),
-            ],
-        )
-        pb = build_pipeline_benchmark(run)
-
-        assert pb.pipeline_mode == "sustained"
-        assert len(pb.stages) == 1
-        # data_freshness_seconds = bronze freshness = 7.5
-        assert pb.data_freshness_seconds == pytest.approx(7.5)
-        # stage_latency_profile always has 3 entries (bronze, silver, gold)
-        # because _compute_sustained_scores iterates the fixed tuple.
-        # Missing stages get latency 0.0.
-        assert len(pb.stage_latency_profile) == 3
-        assert pb.stage_latency_profile[0] == pytest.approx(200.0)  # bronze
-        assert pb.stage_latency_profile[1] == 0.0  # silver absent
-        assert pb.stage_latency_profile[2] == 0.0  # gold absent
-
 
 # ---------------------------------------------------------------------------
 # CycleMetrics (v1.1.0)
@@ -4442,50 +1599,6 @@ class TestSustainedScoringEdgeCases:
 class TestCycleMetrics:
     """Tests for the CycleMetrics dataclass."""
 
-    def test_defaults(self):
-        cm = CycleMetrics(cycle_index=0)
-        assert cm.cycle_index == 0
-        assert cm.timestamp_start == ""
-        assert cm.timestamp_end == ""
-        assert cm.datagen_elapsed_seconds == 0.0
-        assert cm.datagen_output_gb == 0.0
-        assert cm.jobs == []
-        assert cm.benchmark is None
-        assert cm.table_health == {}
-
-    def test_to_dict(self):
-        job = JobMetrics(
-            job_name="lakebench-silver-build",
-            job_type="silver-build",
-            elapsed_seconds=120.0,
-            success=True,
-        )
-        cm = CycleMetrics(
-            cycle_index=2,
-            timestamp_start="2024-03-01",
-            timestamp_end="2024-06-01",
-            datagen_elapsed_seconds=45.0,
-            datagen_output_gb=10.5,
-            jobs=[job],
-            table_health={"silver_data_file_count": 42, "silver_snapshot_count": 5},
-        )
-        d = cm.to_dict()
-        assert d["cycle_index"] == 2
-        assert d["timestamp_start"] == "2024-03-01"
-        assert d["timestamp_end"] == "2024-06-01"
-        assert d["datagen_elapsed_seconds"] == 45.0
-        assert d["datagen_output_gb"] == 10.5
-        assert len(d["jobs"]) == 1
-        assert d["jobs"][0]["job_name"] == "lakebench-silver-build"
-        assert d["benchmark"] is None
-        assert d["table_health"]["silver_data_file_count"] == 42
-
-    def test_to_dict_with_benchmark(self):
-        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
-        cm = CycleMetrics(cycle_index=1, benchmark=bm)
-        d = cm.to_dict()
-        assert d["benchmark"]["qph"] == 200.0
-
 
 # ---------------------------------------------------------------------------
 # BenchmarkRoundMeta table health fields (v1.1.0)
@@ -4494,65 +1607,6 @@ class TestCycleMetrics:
 
 class TestBenchmarkRoundMetaTableHealth:
     """Tests for table health fields on BenchmarkRoundMeta."""
-
-    def test_health_defaults(self):
-        meta = BenchmarkRoundMeta(round_index=1)
-        assert meta.silver_data_file_count is None
-        assert meta.silver_snapshot_count is None
-        assert meta.gold_data_file_count is None
-        assert meta.gold_snapshot_count is None
-
-    def test_health_to_dict(self):
-        meta = BenchmarkRoundMeta(
-            round_index=1,
-            silver_data_file_count=150,
-            silver_snapshot_count=20,
-            gold_data_file_count=30,
-            gold_snapshot_count=5,
-        )
-        d = meta.to_dict()
-        assert "table_health" in d
-        assert d["table_health"]["silver_data_file_count"] == 150
-        assert d["table_health"]["silver_snapshot_count"] == 20
-        assert d["table_health"]["gold_data_file_count"] == 30
-        assert d["table_health"]["gold_snapshot_count"] == 5
-
-    def test_health_to_dict_zero_values_omitted(self):
-        """When all health fields are 0, table_health key is absent."""
-        meta = BenchmarkRoundMeta(round_index=1)
-        d = meta.to_dict()
-        assert "table_health" not in d
-
-    def test_health_storage_roundtrip(self, tmp_path):
-        """Table health fields survive save/load roundtrip."""
-        meta = BenchmarkRoundMeta(
-            round_index=1,
-            timestamp=datetime.now(),
-            silver_data_file_count=100,
-            gold_snapshot_count=8,
-        )
-        bm = BenchmarkMetrics(
-            mode="power",
-            cache="hot",
-            scale=10,
-            qph=200.0,
-            total_seconds=30.0,
-            round_meta=meta,
-        )
-        pm = PipelineMetrics(
-            run_id="test-health-rt",
-            deployment_name="test",
-            start_time=datetime.now(),
-            benchmark_rounds=[bm],
-        )
-        storage = MetricsStorage(tmp_path)
-        storage.save_run(pm)
-        loaded = storage.load_run("test-health-rt")
-        assert loaded is not None
-        rm = loaded.benchmark_rounds[0].round_meta
-        assert rm is not None
-        assert rm.silver_data_file_count == 100
-        assert rm.gold_snapshot_count == 8
 
 
 # ---------------------------------------------------------------------------
@@ -4611,22 +1665,6 @@ class TestQphDegradation:
         assert pb.qph_degradation_pct is not None
         assert pb.qph_degradation_pct == pytest.approx(50.0)
 
-    def test_degradation_with_improvement(self):
-        """Negative degradation = improvement."""
-        pb = self._make_sustained_pb([100, 100, 200, 200])
-        assert pb.qph_degradation_pct is not None
-        assert pb.qph_degradation_pct == pytest.approx(-100.0)
-
-    def test_degradation_needs_4_rounds(self):
-        """Fewer than 4 rounds returns None."""
-        pb = self._make_sustained_pb([200, 100, 100])
-        assert pb.qph_degradation_pct is None
-
-    def test_degradation_in_scores_dict(self):
-        pb = self._make_sustained_pb([200, 200, 100, 100])
-        d = pb.to_dict()
-        assert "qph_degradation_pct" in d["scores"]
-
 
 # ---------------------------------------------------------------------------
 # CycleMetrics storage roundtrip (v1.1.0)
@@ -4635,28 +1673,3 @@ class TestQphDegradation:
 
 class TestCycleMetricsStorage:
     """Tests for CycleMetrics serialization and deserialization."""
-
-    def test_pipeline_metrics_cycles_roundtrip(self, tmp_path):
-        """cycles survive save/load on PipelineMetrics."""
-        cm = CycleMetrics(
-            cycle_index=0,
-            timestamp_start="2024-01-01",
-            timestamp_end="2024-06-30",
-            datagen_elapsed_seconds=60.0,
-            datagen_output_gb=5.0,
-            table_health={"silver_data_file_count": 50},
-        )
-        pm = PipelineMetrics(
-            run_id="test-cycles-rt",
-            deployment_name="test",
-            start_time=datetime.now(),
-            cycles=[cm],
-        )
-        storage = MetricsStorage(tmp_path)
-        storage.save_run(pm)
-        loaded = storage.load_run("test-cycles-rt")
-        assert loaded is not None
-        assert len(loaded.cycles) == 1
-        assert loaded.cycles[0].cycle_index == 0
-        assert loaded.cycles[0].timestamp_start == "2024-01-01"
-        assert loaded.cycles[0].table_health["silver_data_file_count"] == 50

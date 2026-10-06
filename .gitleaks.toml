@@ -49,3 +49,7 @@ regexes = ['''^(0123456789abcdef){1,4}$''']
 [[allowlists]]
 description = "Environment variable name, not a value: the pinned perf configs list the credential variables they read (benchmarks/perf/*.yaml comments)"
 regexes = ['''^LAKEBENCH_S3_(ACCESS|SECRET)_KEY$''']
+
+[[allowlists]]
+description = "The fixed v1.6 metastore DB passwords, public in every release since 1.0; kept only so a deployment 1.6 created keeps its metastore (src/lakebench/deploy/deployment_secrets.py, SAF-8). New deployments generate their own."
+regexes = ['''^lakebench-(hive|polaris)-2024$''']

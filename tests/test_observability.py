@@ -3,7 +3,8 @@
 Covers:
 - PlatformCollector: collect(), _query_range(), _query_instant(), _infer_component()
 - S3MetricsWrapper: enabled/disabled paths, error recording, proxy behavior
-- ObservabilityDeployer: _build_helm_values(), _add_helm_repo(), deploy/destroy paths
+- ObservabilityDeployer deploy/destroy paths; build_helm_values() and the admin
+  install component's prepare() and install()
 """
 
 from __future__ import annotations
@@ -523,8 +524,30 @@ class TestS3MetricsWrapperDisabled:
             wrapper.get_object(Bucket="b", Key="missing")
 
 
+def _unregister_lakebench_s3_metrics() -> None:
+    try:
+        from prometheus_client import REGISTRY
+    except ImportError:
+        return
+    collectors = {
+        c
+        for name, c in list(REGISTRY._names_to_collectors.items())
+        if name.startswith("lakebench_s3_")
+    }
+    for collector in collectors:
+        REGISTRY.unregister(collector)
+
+
 class TestS3MetricsWrapperEnabled:
     """Tests for S3MetricsWrapper when enabled (mocked prometheus_client)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_registry(self):
+        # S3MetricsWrapper registers its metrics in the global registry, so
+        # each test starts and ends without them, in any order.
+        _unregister_lakebench_s3_metrics()
+        yield
+        _unregister_lakebench_s3_metrics()
 
     def test_enabled_records_metrics(self):
         """When enabled and prometheus_client available, metrics are recorded."""
@@ -538,29 +561,18 @@ class TestS3MetricsWrapperEnabled:
         mock_client = MagicMock()
         mock_client.list_buckets.return_value = ["b1"]
 
-        # Use unique metric names to avoid duplicate registration
         wrapper = S3MetricsWrapper(mock_client, enabled=True)
         result = wrapper.list_buckets()
         assert result == ["b1"]
 
     def test_enabled_records_errors(self):
         """When enabled, errors increment the error counter."""
-        from prometheus_client import REGISTRY
-
         from lakebench.observability.s3_metrics import _prom_available
 
         if not _prom_available:
             pytest.skip("prometheus_client not installed")
 
         from lakebench.observability.s3_metrics import S3MetricsWrapper
-
-        # Unregister metrics from the previous test to avoid duplicate errors
-        collectors_to_unregister = set()
-        for name, collector in list(REGISTRY._names_to_collectors.items()):
-            if name.startswith("lakebench_s3_"):
-                collectors_to_unregister.add(collector)
-        for collector in collectors_to_unregister:
-            REGISTRY.unregister(collector)
 
         mock_client = MagicMock()
         mock_client.get_object.side_effect = Exception("Boom")
@@ -575,18 +587,14 @@ class TestS3MetricsWrapperEnabled:
 # ===========================================================================
 
 
-class TestObservabilityDeployerBuildHelmValues:
-    """Tests for ObservabilityDeployer._build_helm_values()."""
+class TestObservabilityBuildHelmValues:
+    """Tests for observability.build_helm_values() (the admin install's values)."""
 
     def test_build_helm_values_structure(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+        from lakebench.deploy.observability import build_helm_values
 
         cfg = make_config(observability={"enabled": True, "retention": "14d", "storage": "20Gi"})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-
-        values = deployer._build_helm_values("test-ns")
+        values = build_helm_values(cfg.observability)
         assert values["prometheus.prometheusSpec.retention"] == "14d"
         assert (
             "20Gi"
@@ -594,69 +602,99 @@ class TestObservabilityDeployerBuildHelmValues:
                 "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage"
             ]
         )
-        assert values["grafana.adminPassword"] == "lakebench"
+        # SAF-8: no fixed Grafana password; the chart generates one per install.
+        assert "grafana.adminPassword" not in values
 
     def test_build_helm_values_grafana_disabled(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+        from lakebench.deploy.observability import build_helm_values
 
         cfg = make_config(observability={"enabled": True, "dashboards_enabled": False})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-
-        values = deployer._build_helm_values("test-ns")
-        assert values["grafana.enabled"] == "false"
+        assert build_helm_values(cfg.observability)["grafana.enabled"] == "false"
 
 
-class TestObservabilityDeployerAddHelmRepo:
-    """Tests for ObservabilityDeployer._add_helm_repo()."""
+class TestObservabilityPrepare:
+    """The chart repo is refreshed before the lease, and a failure is seen."""
 
-    def test_add_helm_repo_calls_subprocess(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
+    def _prepare(self, results):
+        from lakebench.deploy.shared_components import Observability, Settings
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            deployer._add_helm_repo()
-            # Should call helm repo add + helm repo update
-            assert mock_run.call_count == 2
-            first_call_args = mock_run.call_args_list[0][0][0]
-            assert "helm" in first_call_args
-            assert "repo" in first_call_args
-            assert "add" in first_call_args
+            mock_run.side_effect = results
+            problem = Observability().prepare(Settings.from_config(None))
+        return mock_run, problem
 
-    def test_add_helm_repo_failure_silent(self):
-        """_add_helm_repo doesn't raise even if subprocess fails."""
-        from lakebench.deploy.observability import ObservabilityDeployer
+    def test_prepare_adds_and_updates_the_repo(self):
+        mock_run, problem = self._prepare([MagicMock(returncode=0), MagicMock(returncode=0)])
+        assert problem is None
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert [c[:3] for c in cmds] == [["helm", "repo", "add"], ["helm", "repo", "update"]]
+
+    def test_prepare_reports_a_failed_update(self):
+        _run, problem = self._prepare(
+            [MagicMock(returncode=0), MagicMock(returncode=1, stderr="no network")]
+        )
+        assert problem and "no network" in problem
+
+
+class TestObservabilityComponentInstall:
+    """The shared install, now run by admin install (shared_components)."""
+
+    def _install(self, side_effect):
+        from lakebench.deploy.shared_components import Observability, Settings
 
         cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("lakebench.deploy.observability.is_openshift", return_value=False),
+            patch.object(Observability, "apply_dashboard") as dash,
+        ):
+            dash.return_value = MagicMock(ok=True, message="")
+            mock_run.side_effect = side_effect
+            result = Observability().install(
+                Settings.from_config(cfg), cfg.observability.chart_version
+            )
+        return cfg, mock_run, result
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stderr="error")
-            # Should not raise
-            deployer._add_helm_repo()
+    def test_install_pins_chart_version(self):
+        """The install command must pin --version -- previously it
+        carried no version flag at all and silently tracked whatever the
+        Helm repo served at install time (unpinned equivalent of LB-070's
+        --reuse-values gap, just with no pin to even reuse)."""
+        from lakebench.deploy.observability import HELM_CHART, OBSERVABILITY_NAMESPACE
+
+        # The chart repo is refreshed by prepare(), before the lease.
+        cfg, mock_run, result = self._install([MagicMock(returncode=0, stdout="", stderr="")])
+        assert result.ok, result.message
+        assert mock_run.call_count == 1
+        install_call = mock_run.call_args_list[0][0][0]
+        assert install_call[:2] == ["helm", "install"]
+        assert HELM_CHART in install_call
+        idx = install_call.index("--version")
+        assert install_call[idx + 1] == cfg.observability.chart_version
+        assert install_call[install_call.index("--namespace") + 1] == OBSERVABILITY_NAMESPACE
+        assert "--wait" not in install_call
+
+    def test_install_helm_failure(self):
+        _cfg, _run, result = self._install(
+            [MagicMock(returncode=1, stderr="chart not found", stdout="")]
+        )
+        assert not result.ok
+        assert "chart not found" in result.message
+
+    def test_install_helm_timeout(self):
+        import subprocess as sp
+
+        _cfg, _run, result = self._install([sp.TimeoutExpired(cmd="helm", timeout=360)])
+        assert not result.ok
+        assert "timed out" in result.message
 
 
 class TestObservabilityDeployerDeployDestroy:
     """Tests for ObservabilityDeployer deploy/destroy lifecycle."""
 
     @pytest.fixture(autouse=True)
-    def _lease(self):
-        # deploy takes the cluster lease and waits for Prometheus; neither
-        # has a cluster here.
-        with (
-            patch("kubernetes.client.CoreV1Api"),
-            patch("lakebench.deploy.cluster_lock.cluster_lock") as lock,
-            patch("lakebench.deploy.observability._wait_for_prometheus", return_value=""),
-        ):
-            lock.return_value.__exit__.return_value = False
+    def _ready(self):
+        with patch("lakebench.deploy.observability._wait_for_prometheus", return_value=""):
             yield
 
     def test_deploy_skip_when_disabled(self):
@@ -681,39 +719,11 @@ class TestObservabilityDeployerDeployDestroy:
         deployer = ObservabilityDeployer(engine)
         result = deployer.deploy()
         assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
+        assert "Would check the shared observability stack" in result.message
 
-    def test_deploy_pins_chart_version(self):
-        """The install/upgrade command must pin --version -- previously it
-        carried no version flag at all and silently tracked whatever the
-        Helm repo served at install time (unpinned equivalent of LB-070's
-        --reuse-values gap, just with no pin to even reuse)."""
-        from lakebench.deploy.observability import HELM_CHART, ObservabilityDeployer
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
-        deployer = ObservabilityDeployer(engine)
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
-                MagicMock(returncode=0),  # helm repo add
-                MagicMock(returncode=0),  # helm repo update
-                MagicMock(returncode=1, stderr="stop after capturing the install call"),
-            ]
-            deployer.deploy()
-
-            install_call = mock_run.call_args_list[3][0][0]
-            assert HELM_CHART in install_call
-            assert "--version" in install_call, (
-                f"install command must pin a chart version, got {install_call}"
-            )
-            idx = install_call.index("--version")
-            assert install_call[idx + 1] == cfg.observability.chart_version
-
-    def test_deploy_helm_failure(self):
+    def test_deploy_without_the_stack_fails_and_installs_nothing(self):
+        """DEP-3: deploy only verifies. Reverted (v1.6), a missing stack was
+        helm-installed from deploy."""
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer
 
@@ -724,38 +734,12 @@ class TestObservabilityDeployerDeployDestroy:
         deployer = ObservabilityDeployer(engine)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
-                MagicMock(returncode=0),  # helm repo add
-                MagicMock(returncode=0),  # helm repo update
-                MagicMock(returncode=1, stderr="chart not found", stdout=""),  # install fails
-            ]
+            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
             result = deployer.deploy()
-            assert result.status == DeploymentStatus.FAILED
-            assert "chart not found" in result.message
-
-    def test_deploy_helm_timeout(self):
-        import subprocess as sp
-
-        from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.observability import ObservabilityDeployer
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
-        deployer = ObservabilityDeployer(engine)
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
-                MagicMock(returncode=0),  # helm repo add
-                MagicMock(returncode=0),  # helm repo update
-                sp.TimeoutExpired(cmd="helm", timeout=360),  # helm install timeout
-            ]
-            result = deployer.deploy()
-            assert result.status == DeploymentStatus.FAILED
-            assert "timed out" in result.message
+        assert result.status == DeploymentStatus.FAILED
+        assert "lakebench admin install --component observability" in result.message
+        helm = [c.args[0][:2] for c in mock_run.call_args_list if c.args[0][0] == "helm"]
+        assert helm == [["helm", "list"]]
 
     def test_destroy_dry_run(self):
         from lakebench.deploy.engine import DeploymentStatus

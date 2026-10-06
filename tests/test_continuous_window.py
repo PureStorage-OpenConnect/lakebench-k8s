@@ -320,7 +320,7 @@ def test_submission_failures_are_reported_while_the_operator_retries(capsys):
     watch(JobStatus(name="s", state=JobState.RUNNING, message=""), 600.0)
     assert [f["attempt"] for f in watch.failures] == [1, 2]  # repeats are not re-reported
     assert watch.running_at is not None
-    out = capsys.readouterr().out
+    out = "".join(capsys.readouterr())
     assert "submission attempt 1 failed" in out and "iceberg-aws-bundle" in out
     assert journal.record.call_count == 2
 
@@ -382,7 +382,7 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     monkeypatch.setattr("lakebench.metrics.MetricsStorage", lambda *a, **kw: MagicMock())
     monkeypatch.setattr(_sustained, "write_run_report", lambda *a, **kw: None)
 
-    def broken(cfg):
+    def broken(cfg, **kw):
         raise RuntimeError("no query engine executor")
 
     monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", broken)
@@ -397,7 +397,7 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     with pytest.raises(typer.Exit) as exc:
         _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, False, 120)
     assert exc.value.exit_code == 1
-    assert "Could not create the benchmark runner" in capsys.readouterr().out
+    assert "Could not create the benchmark runner" in "".join(capsys.readouterr())
     jm.submit_job.assert_not_called()
     jm.deploy_scripts_configmap.assert_not_called()
 
@@ -524,7 +524,8 @@ def _drive(
     from lakebench.deploy import DeploymentStatus
 
     dg.deploy.return_value = MagicMock(status=DeploymentStatus.SUCCESS)
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e: dg)
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
+    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
     monkeypatch.setattr(_sustained, "_stop_leftover_streams", lambda *a: None)
     monkeypatch.setattr(_sustained, "_reset_continuous_state", lambda c, clear_raw: None)
@@ -537,7 +538,7 @@ def _drive(
     monkeypatch.setattr(_sustained, "write_run_report", lambda *a, **kw: None)
     monkeypatch.setattr(_sustained, "cluster_clock_offset_seconds", lambda: clock_offset)
     if runner is not None:
-        monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", lambda c: runner)
+        monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", lambda c, **kw: runner)
     monkeypatch.setattr(
         "lakebench.metrics.datagen_aggregator.collect_from_k8s",
         lambda **kw: MagicMock(data_quality="complete", total_rows_written=dg_rows),
@@ -762,10 +763,13 @@ def test_an_error_after_the_window_fails_the_run_and_stops_streams(monkeypatch, 
     monkeypatch.setattr(_sustained, "_stop_streams", lambda k, ns, sub: stopped.append(len(sub)))
 
     def boom(*a, **kw):
-        raise KeyboardInterrupt
+        raise RuntimeError("boom")
 
     monkeypatch.setattr("lakebench.metrics.continuous_window.window_gate_problems", boom)
-    with pytest.raises(KeyboardInterrupt):
+    # An error that is not an interrupt still propagates and still stops
+    # the streams (by name, in the finally). An interrupt is sealed and its
+    # streams stopped by uid instead: tests/test_run_interrupt.py.
+    with pytest.raises(RuntimeError, match="boom"):
         _drive(monkeypatch, tmp_path, logs)
     assert stopped == [3]
 
@@ -914,9 +918,9 @@ def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
         _sustained._run_sustained(
             _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
         )
-    assert exc.value.exit_code == 1
+    assert exc.value.exit_code == 2  # usage: the window and trickle do not fit
     op.check_status.assert_not_called()
-    assert "max_files_per_trigger" in capsys.readouterr().out
+    assert "max_files_per_trigger" in "".join(capsys.readouterr())
 
 
 def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):

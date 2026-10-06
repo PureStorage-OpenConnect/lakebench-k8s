@@ -1,0 +1,339 @@
+"""Tick records of the continuous AML gold-refresh driver.
+
+``gold_refresh_financial.run_tick`` logs these lines per tick, each carrying
+the run id::
+
+    Cycle N: pinned txns=<id> entities=<id> accounts=<id> versions=<id> at=<epoch_s> run=<run>
+    Cycle N: tt-record table=<t> snapshot=<id> committed_at=<iso> total_records=<n>
+        pos_deletes=<n> eq_deletes=<n> count_source=<summary|unavailable> run=<run>
+    Cycle N: committed alerts=<id> status=<id> run=<run>
+    Cycle N: completed run=<run>
+
+(the tt-record line is one line, logged only when the transactions snapshot
+is an id; an unknown value reads ``null``)
+
+and ``main`` logs ``Drain complete: ... last completed cycle N run=<run>``
+once the drain marker stopped the loop. An id is an Iceberg snapshot id, or
+``none`` (the table had no snapshot) or ``unknown`` (the lookup failed, or
+for ``versions`` the pinned read was not used). Cycle numbers restart with
+each driver start, so records are kept per driver start (the banner line
+opens a new one) and only the drain's own driver start is scored.
+
+Pure parsing: no cluster or Spark access.
+"""
+
+from __future__ import annotations
+
+import re
+import statistics
+from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta
+from typing import Any
+
+_LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
+#: The first line ``main`` logs after its separator: a driver start.
+_BANNER = "Gold Refresh (Financial) -- baseline + periodic detection"
+_PINNED = re.compile(
+    r"Cycle (\d+): pinned txns=(\S+) entities=(\S+) accounts=(\S+) versions=(\S+) "
+    r"at=([\d.]+) run=(\S+)\s*$"
+)
+_TT_RECORD = re.compile(
+    r"Cycle (\d+): tt-record table=(\S+) snapshot=(\S+) committed_at=(\S+) "
+    r"total_records=(\S+) pos_deletes=(\S+) eq_deletes=(\S+) count_source=(\S+) "
+    r"run=(\S+)\s*$"
+)
+_COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
+_COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
+_DRAIN = re.compile(
+    r"Drain complete: (?:stop marker present at start; )?last completed cycle (\d+) run=(\S+)\s*$"
+)
+
+#: The pins a covered score needs, as (tick key, table named in a reason).
+SCORED_PINS = (
+    ("pinned_txns", "silver.transactions"),
+    ("pinned_entities", "silver.entities"),
+    ("pinned_accounts", "silver.accounts"),
+    ("pinned_versions", "silver.silver_batch_versions"),
+    ("committed_alerts", "gold.alerts"),
+    ("committed_status", "gold.detection_status"),
+)
+
+
+def _token(raw: str) -> int | str:
+    """A logged snapshot token: the int id, or the string as logged."""
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def _count(raw: str) -> int | None:
+    """A logged count: the int, or None for ``null`` or anything else."""
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def is_pin(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def drain_cycle(logs: str | None, run_id: str) -> int | None:
+    """The cycle number of this run's ``Drain complete`` line, the last one in
+    the log; None when the log has none for *run_id*."""
+    found = None
+    for line in (logs or "").splitlines():
+        m = _DRAIN.search(line)
+        if m and m.group(2) == run_id:
+            found = int(m.group(1))
+    return found
+
+
+def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
+    """Every tick of *run_id* in the log, and the drain.
+
+    Returns ``{"ticks": [...], "drain_cycle": int | None, "drain_start":
+    int | None}``. Each tick is ``{start, cycle, pinned_txns,
+    pinned_entities, pinned_accounts, pinned_versions, pinned_at,
+    committed_alerts, committed_status, completed, completed_at, tt}``: ``start`` numbers
+    the driver start (0 for the first in the log), a field never logged is
+    None. ``tt`` is the tick's time-travel record (``{table, snapshot,
+    committed_at, total_records, pos_deletes, eq_deletes, count_source}``)
+    or None. ``drain_start`` is the driver start the drain line belongs to.
+    Lines of another run id are ignored.
+    """
+    start = -1
+    ticks: dict[tuple[int, int], dict[str, Any]] = {}
+    order: list[tuple[int, int]] = []
+    drain_cycle_n = None
+    drain_start = None
+
+    def tick(cycle: int) -> dict[str, Any]:
+        key = (max(start, 0), cycle)
+        if key not in ticks:
+            ticks[key] = {
+                "start": key[0],
+                "cycle": cycle,
+                "pinned_txns": None,
+                "pinned_entities": None,
+                "pinned_accounts": None,
+                "pinned_versions": None,
+                "pinned_at": None,
+                "committed_alerts": None,
+                "committed_status": None,
+                "completed": False,
+                "completed_at": None,
+                "tt": None,
+            }
+            order.append(key)
+        return ticks[key]
+
+    for line in (logs or "").splitlines():
+        if _BANNER in line:
+            start += 1
+            continue
+        m = _PINNED.search(line)
+        if m and m.group(7) == run_id:
+            t = tick(int(m.group(1)))
+            t["pinned_txns"] = _token(m.group(2))
+            t["pinned_entities"] = _token(m.group(3))
+            t["pinned_accounts"] = _token(m.group(4))
+            t["pinned_versions"] = _token(m.group(5))
+            t["pinned_at"] = float(m.group(6))
+            continue
+        m = _TT_RECORD.search(line)
+        if m and m.group(9) == run_id:
+            committed_at = m.group(4)
+            tick(int(m.group(1)))["tt"] = {
+                "table": m.group(2),
+                "snapshot": _token(m.group(3)),
+                "committed_at": None if committed_at == "null" else committed_at,
+                "total_records": _count(m.group(5)),
+                "pos_deletes": _count(m.group(6)),
+                "eq_deletes": _count(m.group(7)),
+                "count_source": m.group(8),
+            }
+            continue
+        m = _COMMITTED.search(line)
+        if m and m.group(4) == run_id:
+            t = tick(int(m.group(1)))
+            t["committed_alerts"] = _token(m.group(2))
+            t["committed_status"] = _token(m.group(3))
+            continue
+        m = _COMPLETED.search(line)
+        if m and m.group(2) == run_id:
+            ts = _LOG_TS.search(line)
+            t = tick(int(m.group(1)))
+            t["completed"] = True
+            t["completed_at"] = ts.group(1) + "Z" if ts else None
+            continue
+        m = _DRAIN.search(line)
+        if m and m.group(2) == run_id:
+            drain_cycle_n = int(m.group(1))
+            drain_start = max(start, 0)
+    return {
+        "ticks": [ticks[k] for k in order],
+        "drain_cycle": drain_cycle_n,
+        "drain_start": drain_start,
+    }
+
+
+def ticks_unpinned(ticks: list[dict[str, Any]]) -> int:
+    """Ticks whose logged ``txns`` or ``versions`` token is not an int (d3):
+    detection ran on them without the pinned sealed read."""
+    return sum(
+        1 for t in ticks if not (is_pin(t.get("pinned_txns")) and is_pin(t.get("pinned_versions")))
+    )
+
+
+def scored_tick(parsed: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """The tick a covered score reads, or ``(None, reason)``.
+
+    Only the drain's last completed cycle, in the drain's driver start, is
+    scored, and only when that same cycle is the last one there to have
+    committed and completed, and every pin it logged is an int. An earlier
+    tick is never scored instead: gold.alerts holds the last tick's rewrite.
+    """
+    n = parsed.get("drain_cycle")
+    if n is None:
+        return None, "no drain line in the gold-refresh log"
+    if n == 0:
+        return None, "the drain stopped the driver before its first tick completed"
+    start = parsed.get("drain_start")
+    mine = [t for t in parsed.get("ticks") or [] if t["start"] == start]
+    done = [t["cycle"] for t in mine if t.get("completed")]
+    committed = [t["cycle"] for t in mine if t.get("committed_alerts") is not None]
+    if not done or max(done) != n:
+        return None, f"no completed tick record for the drain's last cycle {n}"
+    if not committed or max(committed) != n:
+        return None, f"no committed tick record for the drain's last cycle {n}"
+    t = next(t for t in mine if t["cycle"] == n)
+    for key, table in SCORED_PINS:
+        if not is_pin(t.get(key)):
+            return None, f"{table} snapshot unknown at the last completed tick"
+    return t, ""
+
+
+def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``continuous.ticks[]`` as recorded (DESIGN interfaces): the pins and
+    times of each tick, with the commit snapshots and the driver start."""
+    keys = (
+        "cycle",
+        "pinned_txns",
+        "pinned_entities",
+        "pinned_accounts",
+        "pinned_versions",
+        "pinned_at",
+        "completed_at",
+        "committed_alerts",
+        "committed_status",
+        "start",
+    )
+    return [{k: t.get(k) for k in keys} for t in ticks]
+
+
+def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``continuous.time_travel.ticks[]`` (DESIGN interfaces): one entry per
+    tick that logged a time-travel record, with its driver start, cycle and
+    whether it completed (``(start, cycle)`` is the key into
+    ``continuous.ticks``).
+    A tick without one (no transactions snapshot, or a driver that predates
+    the record) is not listed."""
+    out = []
+    for t in ticks:
+        tt = t.get("tt")
+        if tt is None:
+            continue
+        # completed: the tick also logged its completed line (one that failed
+        # after pinning, or was still running when the log was read, still
+        # recorded the snapshot it read).
+        out.append(
+            {"start": t["start"], "cycle": t["cycle"], **tt, "completed": bool(t.get("completed"))}
+        )
+    return out
+
+
+_FRACTION = re.compile(r"^(?P<head>[^.]+)(?:\.(?P<frac>\d+))?$")
+
+
+def _parse_utc(text: Any) -> datetime | None:
+    """A recorded UTC time (``...Z`` or naive ISO) as a naive datetime. A
+    fraction of any length is read (Python 3.10's ``fromisoformat`` takes
+    only 3 or 6 digits)."""
+    if not text:
+        return None
+    m = _FRACTION.match(str(text).rstrip("Z"))
+    if not m:
+        return None
+    frac = m["frac"]
+    value = m["head"] + ("." + (frac + "000000")[:6] if frac else "")
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def investigator_tick_overlap(
+    sessions: Mapping[str, Any],
+    ticks: Iterable[Mapping[str, Any]],
+    clock_offset_s: float | None,
+    window: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """How the detection ticks met the investigator sessions' window
+    (``continuous.investigators.window``, on this host's clock):
+    ``{tick_delta, load_label}``, or None when the sessions did not run or no
+    tick carries a time. A tick timing entry (``ended_at`` on the cluster
+    clock, minus its ``total`` phase) is shifted to this host's clock by
+    *clock_offset_s* (cluster minus host). Only ticks that ended inside the
+    continuous *window* (``continuous.window``, cluster clock) count, so
+    warm-up ticks before it are not the clean baseline. A tick overlaps when
+    at least half of it lies inside the sessions' window, and is clean when
+    none of it does; one partly inside but under half is neither, and is
+    counted only in m of "k of m"."""
+    w = sessions.get("window") or {}
+    w0, w1 = _parse_utc(w.get("start")), _parse_utc(w.get("end"))
+    if w0 is None or w1 is None:
+        return None
+    c0 = _parse_utc((window or {}).get("start"))
+    c1 = _parse_utc((window or {}).get("end"))
+    shift = timedelta(seconds=clock_offset_s or 0.0)
+    over: list[float] = []
+    clean: list[float] = []
+    timed = 0
+    for t in ticks:
+        end = _parse_utc(t.get("ended_at"))
+        total = (t.get("phases") or {}).get("total")
+        if end is None or total is None:
+            continue
+        if (c0 is not None and end < c0) or (c1 is not None and end > c1):
+            continue
+        timed += 1
+        end = end - shift
+        begin = end - timedelta(seconds=float(total))
+        span = (end - begin).total_seconds()
+        inside = max(0.0, (min(end, w1) - max(begin, w0)).total_seconds())
+        if span <= 0:
+            share = 1.0 if w0 <= end <= w1 else 0.0
+        else:
+            share = inside / span
+        if share >= 0.5:
+            over.append(float(total))
+        elif inside == 0:
+            clean.append(float(total))
+    if timed == 0:
+        return None
+    return {
+        "tick_delta": {
+            "overlapping": {"n": len(over), "median_total_s": _median(over)},
+            "clean": {"n": len(clean), "median_total_s": _median(clean)},
+        },
+        "load_label": (
+            f"investigator load {w.get('start')}-{w.get('end')}: "
+            f"{len(over)} of {timed} ticks overlap"
+        ),
+    }
+
+
+def _median(xs: list[float]) -> float | None:
+    return round(statistics.median(xs), 3) if xs else None

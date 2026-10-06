@@ -3,28 +3,31 @@
 from __future__ import annotations
 
 import logging
-import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
+from kubernetes.config import ConfigException
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
 from lakebench import __version__
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._exit import LakebenchGroup
 from lakebench.cli._helpers import (
     DEFAULT_CONFIG as DEFAULT_CONFIG,
 )
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
-    EXIT_DECLINED,
     _journal_safe,
     _strip_ansi,
     console,
+    emit_data,
+    esc,
     journal_open,
+    markup,
     print_error,
     print_info,
     print_success,
@@ -35,15 +38,17 @@ from lakebench.cli._helpers import (
 from lakebench.cli._helpers import (
     get_journal as get_journal,
 )
+from lakebench.cli._json import json_option
+from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
     ConfigValidationError,
-    generate_example_config_yaml,
+    LoadPurpose,
     load_config,
-    parse_spark_memory,
 )
 from lakebench.config.schema import is_continuous_mode
+from lakebench.exit_codes import ExitCode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import (
@@ -51,20 +56,19 @@ from lakebench.k8s import (
     PlatformType,
     SecurityVerifier,
     get_k8s_client,
-    pinned_kubectl,
-    pinned_kubectl_popen,
 )
 from lakebench.s3 import test_s3_connectivity
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
-    from lakebench.modules.pipeline_engines.spark.job import PeakRequirement
 
 logger = logging.getLogger(__name__)
 
 
 app = typer.Typer(
     name="lakebench",
+    cls=LakebenchGroup,
+    pretty_exceptions_enable=False,
     help="Deploy and benchmark lakehouse architectures on Kubernetes",
     add_completion=False,
     no_args_is_help=True,
@@ -79,7 +83,7 @@ def _version_callback(value: bool) -> None:
     circuits subcommand dispatch (and works before any subcommand-
     validation errors would fire)."""
     if value:
-        console.print(f"Lakebench version {__version__}")
+        console.print(f"Lakebench version {esc(__version__)}")
         raise typer.Exit()
 
 
@@ -113,16 +117,12 @@ app.add_typer(config_app)
 app.add_typer(financial_app)
 app.add_typer(admin_app)
 
-# Compare command (registered from separate module)
-from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
-
-app.command(name="compare")(_compare_fn)
-
 # Extracted commands (registered from separate modules)
 from lakebench.cli._clean import clean as _clean_fn  # noqa: E402
 from lakebench.cli._deploy import deploy as _deploy_fn  # noqa: E402
 from lakebench.cli._destroy import destroy as _destroy_fn  # noqa: E402
 from lakebench.cli._generate import generate as _generate_fn  # noqa: E402
+from lakebench.cli._plan import plan as _plan_fn  # noqa: E402
 from lakebench.cli._query import benchmark as _benchmark_fn  # noqa: E402
 from lakebench.cli._query import query as _query_fn  # noqa: E402
 from lakebench.cli._reproduce import reproduce as _reproduce_fn  # noqa: E402
@@ -136,6 +136,11 @@ app.command(name="run")(_run_fn)
 app.command(name="query")(_query_fn)
 app.command(name="benchmark")(_benchmark_fn)
 app.command(name="reproduce")(_reproduce_fn)
+app.command(name="plan")(_plan_fn)
+
+from lakebench.cli import _aliases  # noqa: E402
+
+_aliases.register(app)
 
 
 # Re-exports for backward compatibility (tests import these from lakebench.cli)
@@ -157,19 +162,60 @@ from lakebench.cli._sustained import (  # noqa: E402
 )
 
 
+def _print_front_matter(metrics) -> None:
+    """The report's front matter (reports/front_matter.py), before any metric."""
+    from lakebench.reports.front_matter import print_front_matter
+
+    print_front_matter(metrics, console)
+
+
 # Re-export for backward compatibility (report command references this)
-def _print_report_summary(metrics) -> None:
-    """Print key scores from saved metrics to the terminal."""
+def _note_benchmark_record(metrics) -> None:
+    """One stderr line when *metrics* is a ``lakebench benchmark`` record: its
+    pipeline numbers are its parent run's, its benchmark is its own."""
+    if getattr(metrics, "record_kind", "run") == "benchmark":
+        print_info(
+            f"Run {metrics.run_id} is a benchmark record of run "
+            f"{metrics.parent_run_id or 'unknown'}: the benchmark is its own, the "
+            "pipeline numbers are that run's"
+        )
+
+
+_STATUS_WORDS = {
+    "PASSED": "[green]Passed[/green]",
+    "INTERRUPTED": "[yellow]Interrupted[/yellow]",
+    "REFUSED": "[red]Refused[/red]",
+}
+
+
+def _print_report_summary(metrics, judged: dict | None = None) -> None:
+    """Print key scores from saved metrics to the terminal. *judged* is
+    ``verdict.verdict_of`` of the stored record: the status line is its
+    headline (the strictest of the stored and the recomputed verdict, as
+    every reader takes it), naming both when they differ."""
+    _note_benchmark_record(metrics)
+    _print_front_matter(metrics)
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("No pipeline benchmark data in this run.")
         return
 
     # Header
-    status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
+    if judged is not None and judged.get("status"):
+        status = _STATUS_WORDS.get(str(judged["status"]), "[red]Failed[/red]")
+        if (
+            judged.get("stored")
+            and judged.get("recomputed")
+            and (judged["stored"] != judged["recomputed"])
+        ):
+            status += f" (stored {judged['stored']}; recomputed {judged['recomputed']})"
+    else:
+        status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
+    from lakebench.reports import copy as _words
+
     header = (
         f"[bold]{pb.deployment_name}[/bold]  run {pb.run_id}\n"
-        f"Mode: {pb.pipeline_mode} | Status: {status}"
+        f"Mode: {_words.mode_label(pb.pipeline_mode)} | Status: {status}"
     )
 
     # Stage table
@@ -197,7 +243,12 @@ def _print_report_summary(metrics) -> None:
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
-            scores.append(f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s")
+            from lakebench.metrics.bounds import trickle_note
+
+            scores.append(
+                f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s"
+                f"{trickle_note(metrics)}"
+            )
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"Latency (b/s/g): {lat}ms")
@@ -234,7 +285,13 @@ def _print_report_summary(metrics) -> None:
             )
         if pb.scale_ratio > 0:
             pct = pb.scale_ratio * 100
-            label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
+            label = (
+                "[yellow]incomplete[/yellow]"
+                if pct < 95
+                else "[yellow]above the scale[/yellow]"
+                if pb.scale_ratio > 1.05
+                else "[green]verified[/green]"
+            )
             scores.append(f"Scale:           {pct:>7.1f}% {label}")
 
     if pb.query_benchmark:
@@ -246,7 +303,7 @@ def _print_report_summary(metrics) -> None:
     if scores:
         console.print()
         for s in scores:
-            console.print(f"  {s}")
+            console.print(f"  {markup(s)}")
     console.print()
 
 
@@ -258,300 +315,13 @@ def _print_report_summary(metrics) -> None:
 @app.command()
 def version() -> None:
     """Show version information."""
-    console.print(f"Lakebench version {__version__}")
+    console.print(f"Lakebench version {esc(__version__)}")
 
 
-@app.command()
-def init(
-    output: Annotated[
-        Path,
-        typer.Option(
-            "--output",
-            "-o",
-            help="Output file path for configuration",
-        ),
-    ] = Path("lakebench.yaml"),
-    name: Annotated[
-        str,
-        typer.Option(
-            "--name",
-            "-n",
-            help="Deployment name",
-        ),
-    ] = "my-lakehouse",
-    scale: Annotated[
-        float,
-        typer.Option(
-            "--scale",
-            "-s",
-            help="Scale factor (0.1 = ~1 GB, 1 = ~10 GB, 100 = ~1 TB)",
-        ),
-    ] = 10,
-    endpoint: Annotated[
-        str,
-        typer.Option(
-            "--endpoint",
-            help="S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443)",
-        ),
-    ] = "",
-    access_key: Annotated[
-        str,
-        typer.Option(
-            "--access-key",
-            help="S3 access key",
-        ),
-    ] = "",
-    secret_key: Annotated[
-        str,
-        typer.Option(
-            "--secret-key",
-            help="S3 secret key",
-        ),
-    ] = "",
-    namespace: Annotated[
-        str,
-        typer.Option(
-            "--namespace",
-            help="Kubernetes namespace (default: same as deployment name)",
-        ),
-    ] = "",
-    recipe: Annotated[
-        str,
-        typer.Option(
-            "--recipe",
-            "-r",
-            help="Architecture recipe (e.g. hive-iceberg-spark-trino, default)",
-        ),
-    ] = "",
-    workload: Annotated[
-        str,
-        typer.Option(
-            "--workload",
-            "-w",
-            help="Workload schema (customer360 | financial). Default is customer360.",
-        ),
-    ] = "",
-    interactive: Annotated[
-        bool,
-        typer.Option(
-            "--interactive/--no-interactive",
-            "-i",
-            help="Guided wizard setup (default when no flags given)",
-        ),
-    ] = True,
-    force: Annotated[
-        bool,
-        typer.Option(
-            "--force",
-            help="Overwrite existing file",
-        ),
-    ] = False,
-    force_short_f: Annotated[
-        bool,
-        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
-    ] = False,
-    advanced: Annotated[
-        bool,
-        typer.Option(
-            "--advanced",
-            help="Full 5-step wizard (recipe, scale, mode). Default is quick mode (4 fields).",
-        ),
-    ] = False,
-    local: Annotated[
-        bool,
-        typer.Option(
-            "--local",
-            help="Generate a config for local mode (podman/docker, no Kubernetes)",
-        ),
-    ] = False,
-) -> None:
-    """Generate a starter configuration file.
+# init lives in cli/_init.py; registered here to keep its place in --help.
+from lakebench.cli._init import init as _init_fn  # noqa: E402
 
-    Quick mode (default): asks 4 questions -- endpoint, access key, secret
-    key, scale. Produces a minimal flat config. Name is auto-generated.
-
-    Advanced mode (--advanced): full 5-step wizard with recipe selection,
-    mode, and detailed review.
-
-    Non-interactive mode (--no-interactive): flags-based config generation
-    for scripted/CI usage.
-
-    Use 'lakebench config recommend' for cluster sizing guidance.
-    """
-    if force_short_f:
-        warn_deprecated_short_f("--force")
-        force = True
-    if output.exists() and not force:
-        print_error(f"File already exists: {output}")
-        print_info("Use --force to overwrite")
-        raise typer.Exit(1)
-
-    # Local mode short-circuits the wizard: there are no S3 credentials to
-    # collect (Garage mints its own), no namespace, and only one supported
-    # recipe. Asking those questions would be asking about a cluster that is
-    # not there.
-    if local:
-        # 10 is the cluster default and would ask a laptop for ~100 GB. Only
-        # override it when the user did not pick a scale themselves.
-        _write_local_config(output, name, 0.1 if scale == 10 else scale, workload_schema=workload)
-        return
-
-    # Detect whether user passed substantive flags -- if so, skip wizard
-    # even if --interactive wasn't explicitly set to false.
-    # Also skip wizard when stdin is not a TTY (CI, test runners, pipes).
-    import sys
-
-    has_flags = endpoint or access_key or secret_key
-    is_tty = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-
-    if interactive and not has_flags and is_tty:
-        # Wizard mode
-        from lakebench.init_wizard import _build_config_yaml, run_wizard
-
-        result = run_wizard(console, advanced=advanced)
-        if result is None:
-            raise typer.Exit(0)
-
-        # Apply any CLI flag overrides onto wizard state. Rebuild the YAML
-        # after applying overrides so flags actually reach the written file
-        # (the wizard's step_review built config_yaml from pre-override state).
-        if name != "my-lakehouse":
-            result.name = name
-        if namespace:
-            result.namespace = namespace
-        if recipe:
-            result.recipe = recipe
-        if scale != 10:
-            result.scale = scale
-        if workload:
-            result.workload_schema = workload
-        result.config_yaml = _build_config_yaml(result)
-
-        # Confirm write
-        import typer as _typer
-
-        console.print()
-        if not _typer.confirm(f"  Write configuration to {output}?", default=True):
-            console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(EXIT_DECLINED)
-
-        output.write_text(result.config_yaml)
-        console.print()
-        print_success(f"Created configuration file: {output}")
-        print_info("Next steps:")
-        print_info("  1. lakebench config validate -- check config for errors")
-        print_info("  2. lakebench deploy          -- deploy infrastructure")
-        print_info("  3. lakebench generate --wait -- generate test data")
-        print_info("  4. lakebench run             -- run pipeline + benchmark")
-        return
-
-    # Non-interactive / flag mode (backward compatible)
-    config_content = generate_example_config_yaml()
-    config_content = config_content.replace("name: my-lakehouse", f"name: {name}")
-    config_content = re.sub(r"scale:\s*\d+", f"scale: {scale}", config_content)
-
-    if recipe:
-        config_content = config_content.replace(
-            f"name: {name}",
-            f"name: {name}\nrecipe: {recipe}",
-        )
-
-    if endpoint:
-        config_content = config_content.replace('endpoint: ""', f'endpoint: "{endpoint}"', 1)
-    if access_key:
-        config_content = config_content.replace('access_key: ""', f'access_key: "{access_key}"')
-    if secret_key:
-        config_content = config_content.replace('secret_key: ""', f'secret_key: "{secret_key}"')
-    if namespace:
-        config_content = config_content.replace('namespace: ""', f'namespace: "{namespace}"', 1)
-    if workload:
-        config_content = re.sub(
-            r"# schema: customer360\s*# customer360 \| financial",
-            f"schema: {workload}    # customer360 | financial",
-            config_content,
-        )
-
-    output.write_text(config_content)
-    print_success(f"Created configuration file: {output}")
-    print_info(f"Scale: {scale}")
-    if not endpoint:
-        print_info("Edit the file to configure your S3 endpoint and credentials")
-    print_info("Then run: lakebench config validate")
-    print_info("Run 'lakebench config recommend' to find the optimal scale for your cluster")
-
-
-_LOCAL_CONFIG_TEMPLATE = """\
-# Lakebench local mode -- runs on one host with podman or docker.
-#
-# No Kubernetes, no object store to provision, no credentials to fill in:
-# `deploy --local` starts a Garage container and mints its own keys.
-#
-#   lakebench deploy {output} --local
-#   lakebench run {output} --local --generate --yes
-#
-# The first `run --local` needs `--generate` to write bronze into the
-# local Garage bucket; without it the pipeline runs against an empty
-# bronze. On a later run against the same workdir the bronze corpus is
-# reused, so `--generate` is only needed again when the workdir was
-# cleared or the scale changed.
-#
-# Local mode is Iceberg-only. DuckDB cannot read Delta on a non-AWS S3
-# endpoint, so a Delta config here would fail at query time.
-# See: lakebench config recipes --local
-
-name: {name}
-recipe: hive-iceberg-spark-duckdb
-
-# Workload lives at the top level (D12 workload move). The deprecated
-# architecture.workload block still loads but emits a warning.
-workload:{schema_line}
-  datagen:
-    # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
-    # Local mode is sized for 1 and below; larger scales still run but a
-    # single JVM shuffling that much on one host takes a long time.
-    scale: {scale}
-
-platform:
-  storage:
-    s3:
-      # Filled in by `deploy --local`. Garage runs on localhost:3900 and
-      # generates its own access key on first deploy.
-      endpoint: "http://localhost:3900"
-      region: us-east-1
-      path_style: true
-      buckets:
-        bronze: {prefix}-bronze
-        silver: {prefix}-silver
-        gold: {prefix}-gold
-"""
-
-
-def _write_local_config(output: Path, name: str, scale: float, workload_schema: str = "") -> None:
-    """Write a ready-to-run local mode config."""
-    if name == "my-lakehouse":
-        name = "local-lakehouse"
-
-    prefix = "".join(c if c.isalnum() or c == "-" else "-" for c in name).strip("-").lower()
-    # When the user picked a workload, emit `schema:` under `workload:`; the
-    # bare `workload:` block otherwise falls back to the customer360 default.
-    schema_line = f"\n  schema: {workload_schema}" if workload_schema else ""
-    content = _LOCAL_CONFIG_TEMPLATE.format(
-        output=output,
-        name=name,
-        scale=scale,
-        approx_gb=scale * 10.0,
-        prefix=prefix or "lakebench",
-        schema_line=schema_line,
-    )
-    output.write_text(content)
-
-    print_success(f"Created local configuration: {output}")
-    print_info(f"Scale: {scale} (~{scale * 10.0:.1f} GB bronze)")
-    console.print()
-    console.print("  Next:")
-    console.print(f"    [bold]lakebench deploy {output} --local[/bold]")
-    console.print(f"    [bold]lakebench run {output} --local --generate --yes[/bold]")
-    console.print("  (--generate populates bronze on the first local run.)")
+app.command(name="init")(_init_fn)
 
 
 def can_edit_operator_release(operator_namespace: str) -> bool | None:
@@ -596,8 +366,7 @@ def operator_watch_verdict(
     """Validate's verdict for a namespace missing from ``spark.jobNamespaces``.
 
     Returns ``(level, message, hint)``. ``deploy`` adds the namespace under
-    the ``lakebench-cluster-lock`` lease whatever ``operator.install`` says,
-    and ``run`` re-adds it before submitting jobs, so a missing entry is not
+    the ``lakebench-cluster-lock`` lease, and ``run`` re-adds it before submitting jobs, so a missing entry is not
     itself a blocker: before a deploy (namespace absent) it is expected, on
     an existing deployment it is drift worth a warning. It fails only when
     these credentials cannot make that add (``can_edit_release`` False), in
@@ -673,11 +442,9 @@ def validate(
     - Kubernetes namespace is accessible or can be created
     """
     config_file = resolve_config_path(config_file, file_option)
-    console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
+    console.print(Panel(f"Validating: [bold]{esc(config_file)}[/bold]", expand=False))
 
-    # Journal (opened early so we can record config_loaded)
-    j = journal_open(config_file, config_name="")
-    j.begin_command(CommandName.VALIDATE, {"verbose": verbose})
+    # validate is read-only: it opens no journal and writes no file.
 
     # Track validation results
     checks_passed = 0
@@ -689,7 +456,7 @@ def validate(
 
     def _section_start(title: str) -> None:
         _section_items.clear()
-        console.print(f"\n [bold]{title}[/bold]")
+        console.print(f"\n [bold]{esc(title)}[/bold]")
 
     def _check_ok(msg: str, *, hint: str | None = None) -> None:
         _section_items.append(("ok", msg, hint))
@@ -705,39 +472,42 @@ def validate(
         ok = fail = warn = 0
         for status, msg, hint in _section_items:
             if status == "ok":
-                console.print(f"   [green]+[/green] {msg}")
+                console.print(f"   [green]+[/green] {esc(msg)}")
                 ok += 1
             elif status == "fail":
-                console.print(f"   [red]x[/red] {msg}")
+                console.print(f"   [red]x[/red] {esc(msg)}")
                 fail += 1
             else:
-                console.print(f"   [yellow]![/yellow] {msg}")
+                console.print(f"   [yellow]![/yellow] {esc(msg)}")
                 warn += 1
             if hint:
                 for line in hint.split("\n"):
-                    console.print(f"     [dim]{line}[/dim]")
+                    console.print(f"     [dim]{esc(line)}[/dim]")
         _section_items.clear()
         return ok, fail, warn
 
     # 1. Load and validate config
     _section_start("Configuration")
     try:
-        cfg = load_config(config_file)
+        # validate answers "will deploy and run accept this config", so it
+        # loads as they do (MUTATE): a nameless config or a removed key fails
+        # here, not at deploy. Loading writes nothing either way.
+        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
         _check_ok("Config syntax valid")
         if verbose:
             _check_ok(f"Name: {cfg.name}, Namespace: {cfg.get_namespace()}")
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigValidationError as e:
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]x[/red] {loc}: {err['msg']}")
-        raise typer.Exit(1)  # noqa: B904
+            console.print(f"  [red]x[/red] {esc(loc)}: {esc(err['msg'])}")
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
     p, f, w = _section_end()
     checks_passed += p
     checks_failed += f
@@ -764,8 +534,8 @@ def validate(
     else:
         _check_ok(f"Endpoint: {s3.endpoint}")
 
-    if not cfg.has_inline_s3_credentials() and not cfg.has_s3_secret_ref():
-        _check_fail("Credentials not configured (neither inline nor secret_ref)")
+    if not cfg.has_inline_s3_credentials():
+        _check_fail("Credentials not configured (set access_key and secret_key)")
     else:
         _check_ok("Credentials configured")
 
@@ -792,25 +562,6 @@ def validate(
                 _check_ok(f"Buckets: {', '.join(results['buckets'])}")
         elif results["endpoint_reachable"]:
             _check_fail(results["credentials_message"])
-
-    # Secret ref validation
-    if cfg.has_s3_secret_ref():
-        secret_name = cfg.platform.storage.s3.secret_ref
-        try:
-            k8s = get_k8s_client(
-                context=cfg.platform.kubernetes.context,
-                namespace=cfg.get_namespace(),
-            )
-            if k8s.secret_exists(secret_name, cfg.get_namespace()):
-                _check_ok(f"Secret '{secret_name}' exists")
-            else:
-                _check_fail(
-                    f"Secret '{secret_name}' not found in namespace '{cfg.get_namespace()}'"
-                )
-        except K8sConnectionError:
-            _check_warn("Cannot verify S3 secret (K8s not connected yet)")
-        except Exception as e:
-            _check_warn(f"Cannot verify S3 secret: {e}")
 
     # Bucket name overlap
     bucket_names = [s3.buckets.bronze, s3.buckets.silver, s3.buckets.gold]
@@ -907,8 +658,10 @@ def validate(
         storage_v1 = k8s_client.StorageV1Api()
 
         storage_classes = []
+        from lakebench.config.autosizer import scratch_will_be_enabled
+
         scratch_cfg = cfg.platform.storage.scratch
-        if scratch_cfg.enabled and scratch_cfg.storage_class:
+        if scratch_will_be_enabled(cfg) and scratch_cfg.storage_class:
             # StorageClass is Category 2 shared infrastructure: preflight
             # requires it to exist before deploy runs.
             storage_classes.append((scratch_cfg.storage_class, "scratch", True))
@@ -956,32 +709,11 @@ def validate(
             }
             missing = [op for crd, op in required_crds.items() if crd not in crd_names]
             if missing:
-                hive_op_cfg = cfg.architecture.catalog.hive.operator
-                if hive_op_cfg.install:
-                    _check_warn(
-                        f"Missing Stackable operators: {', '.join(missing)}",
-                        hint="Will be auto-installed during deploy (install: true)",
-                    )
-                else:
-                    install_hint = (
-                        "Option 1: Set architecture.catalog.hive.operator.install: true\n"
-                        "Option 2: Install manually:\n"
-                        + "\n".join(
-                            f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
-                            f"--version {hive_op_cfg.version} --namespace {hive_op_cfg.namespace}"
-                            " --create-namespace"
-                            for op in [
-                                "commons-operator",
-                                "listener-operator",
-                                "secret-operator",
-                                "hive-operator",
-                            ]
-                        )
-                    )
-                    _check_fail(
-                        f"Missing Stackable operators: {', '.join(missing)}",
-                        hint=install_hint,
-                    )
+                _check_fail(
+                    f"Missing Stackable operators: {', '.join(missing)}",
+                    hint="A cluster admin installs them once:\n"
+                    "  lakebench admin install --component stackable <config>",
+                )
             else:
                 _check_ok("Stackable operators installed (Hive)")
         except Exception:
@@ -1003,7 +735,6 @@ def validate(
         spark_op_cfg = cfg.platform.compute.spark.operator
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
-            version=spark_op_cfg.version,
             job_namespace=cfg.get_namespace(),
             kube_context=cfg.platform.kubernetes.context,
         )
@@ -1040,30 +771,21 @@ def validate(
                 else:
                     _check_warn(msg, hint=hint)
             elif status.watching_namespace is None:
-                _check_ok(
-                    "Namespace watching unverified (helm values unavailable)",
+                # deploy and run stop on an unreadable watch list
+                _check_warn(
+                    "Namespace watching unverified (watch list unreadable)",
+                    hint="deploy and run refuse until the operator's watch list can be read",
                 )
+        elif status.installed is None:
+            _check_warn(f"Could not check the Spark Operator: {status.message}")
         elif status.installed:
-            if spark_op_cfg.install:
-                _check_warn(
-                    f"Installed but not ready: {status.message}",
-                    hint="Operator will be repaired during deploy",
-                )
-            else:
-                _check_warn(f"Installed but not ready: {status.message}")
+            _check_warn(f"Installed but not ready: {status.message}")
         else:
-            if spark_op_cfg.install:
-                _check_warn(
-                    "Not installed",
-                    hint="Will be auto-installed during deploy (install: true)",
-                )
-            else:
-                _check_fail(
-                    "Not installed",
-                    hint="Install it once per cluster (takes the cluster lock):\n"
-                    "  lakebench admin install-spark-operator\n"
-                    "or set platform.compute.spark.operator.install: true",
-                )
+            _check_fail(
+                "Not installed",
+                hint="A cluster admin installs it once (takes the cluster lock):\n"
+                "  lakebench admin install --component spark-operator <config>",
+            )
     except Exception as e:
         _check_warn(f"Could not check status: {e}")
     p, f, w = _section_end()
@@ -1071,8 +793,10 @@ def validate(
     checks_failed += f
     checks_warned += w
 
-    # 8. Compute adequacy
-    _section_start("Compute")
+    # 8. Scale. Executor counts and per-executor sizing come from the job
+    # profiles at manifest build, so there is no executor setting to grade;
+    # the tier's executor advice is not repeated (it named removed settings).
+    _section_start("Scale")
     try:
         from lakebench.config.scale import compute_guidance as _cg
 
@@ -1080,53 +804,12 @@ def validate(
         dims = cfg.get_scale_dimensions()
         guidance = _cg(scale)
 
-        actual_executors = cfg.platform.compute.spark.executor.instances
-        actual_memory = cfg.platform.compute.spark.executor.memory
-        actual_mem_bytes = parse_spark_memory(actual_memory)
-        rec_mem_bytes = parse_spark_memory(guidance.recommended_memory)
-        min_mem_bytes = parse_spark_memory(guidance.min_memory)
-
-        # Executors
-        if actual_executors >= guidance.recommended_executors:
-            _check_ok(
-                f"Executors: {actual_executors} "
-                f"(rec {guidance.recommended_executors} for scale {scale})"
-            )
-        elif actual_executors >= guidance.min_executors:
-            _check_warn(
-                f"Executors: {actual_executors} "
-                f"(min {guidance.min_executors}, rec {guidance.recommended_executors} "
-                f"for scale {scale})"
-            )
-        else:
-            _check_fail(
-                f"Executors: {actual_executors} below minimum "
-                f"{guidance.min_executors} for scale {scale}"
-            )
-
-        # Memory
-        if actual_mem_bytes >= rec_mem_bytes:
-            _check_ok(
-                f"Memory: {actual_memory} (rec {guidance.recommended_memory} for scale {scale})"
-            )
-        elif actual_mem_bytes >= min_mem_bytes:
-            _check_warn(
-                f"Memory: {actual_memory} "
-                f"(min {guidance.min_memory}, rec {guidance.recommended_memory} "
-                f"for scale {scale})"
-            )
-        else:
-            _check_fail(
-                f"Memory: {actual_memory} below minimum {guidance.min_memory} for scale {scale}"
-            )
-
         _check_ok(f"Scale {scale}: {dims.customers:,} customers, {dims.approx_rows:,} rows")
-
-        if guidance.warning:
-            _check_warn(guidance.warning)
+        if guidance.tier_name == "extreme":
+            _check_warn(f"Scale {scale} is the extreme tier: it needs a large cluster")
 
     except Exception as e:
-        _check_warn(f"Could not validate compute adequacy: {e}")
+        _check_warn(f"Could not read the scale: {e}")
     p, f, w = _section_end()
     checks_passed += p
     checks_failed += f
@@ -1137,43 +820,34 @@ def validate(
     if checks_failed == 0:
         if checks_warned > 0:
             warn_s = "s" if checks_warned > 1 else ""
-            _journal_safe(
-                j.end_command,
-                success=True,
-                message=f"{checks_passed} passed, {checks_warned} warning{warn_s}",
-            )
             console.print(
                 Panel(
-                    f"[green]{checks_passed} passed[/green], "
-                    f"[yellow]{checks_warned} warning{warn_s}[/yellow]\n"
+                    f"[green]{esc(checks_passed)} passed[/green], "
+                    f"[yellow]{esc(checks_warned)} warning{esc(warn_s)}[/yellow]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Passed",
                     expand=False,
                 )
             )
         else:
-            _journal_safe(j.end_command, success=True, message=f"All {checks_passed} checks passed")
             console.print(
                 Panel(
-                    f"[green]All {checks_passed} checks passed[/green]\n"
+                    f"[green]All {esc(checks_passed)} checks passed[/green]\n"
                     f"Run [bold]lakebench deploy[/bold] to deploy",
                     title="Validation Successful",
                     expand=False,
                 )
             )
     else:
-        _journal_safe(
-            j.end_command, success=False, message=f"{checks_passed} passed, {checks_failed} failed"
-        )
         console.print(
             Panel(
-                f"[green]{checks_passed} passed[/green], [red]{checks_failed} failed[/red]\n"
+                f"[green]{esc(checks_passed)} passed[/green], [red]{esc(checks_failed)} failed[/red]\n"
                 f"Fix the issues above before deploying",
                 title="Validation Failed",
                 expand=False,
             )
         )
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.FAILED)
 
 
 @app.command()
@@ -1214,6 +888,11 @@ def status(
             help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
         ),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Show deployment status.
 
@@ -1226,123 +905,182 @@ def status(
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
-            cfg = load_config(config_file, allow_long_names=True)  # LB-153
+            cfg = load_config(config_file, purpose=LoadPurpose.READ, name_override=name)
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    if cfg is not None and config_file and not local:
+        # A nameless config reads only a deployment it can prove is its own.
+        guard_nameless(cfg, config_file, allow_absent=True)
 
     if local:
         from lakebench.cli._local import print_local_status, status_local
 
+        if as_json:
+            print_error("--json covers cluster status; it does not combine with --local")
+            raise typer.Exit(ExitCode.USAGE)
         if cfg is None:
             print_error("Local status needs a config file")
-            raise typer.Exit(1)
+            raise typer.Exit(ExitCode.USAGE)
         print_local_status(status_local(cfg, workdir=workdir))
         return
 
     if not ns:
         print_error("Specify --namespace or provide a config file")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
 
-    console.print(Panel(f"Status for namespace: [bold]{ns}[/bold]", expand=False))
+    console.print(Panel(f"Status for namespace: [bold]{esc(ns)}[/bold]", expand=False))
+
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
+    from lakebench.exit_codes import LakebenchError
+
+    def _unreachable(detail: object) -> typer.Exit:
+        print_error(f"Kubernetes connection failed: {detail}")
+        return typer.Exit(ExitCode.PREREQUISITE)
+
+    def _unreadable(detail: object) -> typer.Exit:
+        print_error(f"Kubernetes API error: {detail}")
+        return typer.Exit(ExitCode.PREREQUISITE)
 
     try:
-        k8s = get_k8s_client(namespace=ns)
-
-        # Check if namespace exists
-        if not k8s.namespace_exists(ns):
-            print_warning(f"Namespace '{ns}' does not exist")
-            print_info("Run 'lakebench deploy' to create the deployment")
-            return
-
-        # Check components
-        from kubernetes import client as k8s_client
-
-        apps_v1 = k8s_client.AppsV1Api()
-
-        table = Table(title="Components")
-        table.add_column("Component", style="cyan")
-        table.add_column("Type", style="dim")
-        table.add_column("Status", style="bold")
-        table.add_column("Ready", justify="center")
-
-        # Build component list -- config-aware when a config file was loaded
+        # The config's context, or (status --namespace with no config) the
+        # kubeconfig's current context resolved by name and printed.
+        # get_k8s_client pins the process; the API objects below follow it.
         if cfg is not None:
-            components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
-            cat = cfg.architecture.catalog.type.value
-            if cat == "hive":
-                components.append(("lakebench-hive-metastore-default", "StatefulSet"))
-            elif cat == "polaris":
-                components.append(("lakebench-polaris", "Deployment"))
-            engine = cfg.architecture.query_engine.type.value
-            if engine == "trino":
-                components.append(("lakebench-trino-coordinator", "Deployment"))
-                components.append(("lakebench-trino-worker", "StatefulSet"))
-            elif engine == "spark-thrift":
-                components.append(("lakebench-spark-thrift", "Deployment"))
-            elif engine == "duckdb":
-                components.append(("lakebench-duckdb", "Deployment"))
-            # Observability is a shared stack in its own namespace
-            # (deploy/observability.py), not a component of this deployment.
+            get_k8s_client(context=cfg.platform.kubernetes.context, namespace=ns)
         else:
-            # Namespace-only mode (no config loaded) -- show all possible components
-            components = [
-                ("lakebench-postgres", "StatefulSet"),
-                ("lakebench-hive-metastore-default", "StatefulSet"),
-                ("lakebench-polaris", "Deployment"),
-                ("lakebench-trino-coordinator", "Deployment"),
-                ("lakebench-trino-worker", "StatefulSet"),
-                ("lakebench-spark-thrift", "Deployment"),
-                ("lakebench-duckdb", "Deployment"),
-                ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
-                ("lakebench-observability-grafana", "Deployment"),
-            ]
+            from lakebench.k8s.target import ClusterTarget
 
-        for name, kind in components:
-            try:
-                if kind == "StatefulSet":
-                    sts = apps_v1.read_namespaced_stateful_set(name, ns)
-                    ready = sts.status.ready_replicas or 0
-                    desired = sts.spec.replicas or 1
-                    status_str = f"{ready}/{desired} replicas"
-                    ready_str = "[green]OK[/green]" if ready >= desired else "[yellow]--[/yellow]"
-                else:
-                    dep = apps_v1.read_namespaced_deployment(name, ns)
-                    ready = dep.status.ready_replicas or 0
-                    desired = dep.spec.replicas or 1
-                    status_str = f"{ready}/{desired} replicas"
-                    ready_str = "[green]OK[/green]" if ready >= desired else "[yellow]--[/yellow]"
+            target = ClusterTarget.current()
+            print_info(f"Cluster context: {escape(target.label)}")
+            get_k8s_client(target=target, namespace=ns)
+    except (K8sConnectionError, ConfigException) as e:
+        raise _unreachable(e)  # noqa: B904
 
-                table.add_row(name, kind, status_str, ready_str)
-            except k8s_client.rest.ApiException as e:
-                if e.status == 404:
-                    table.add_row(name, kind, "Not found", "[dim]-[/dim]")
-                else:
-                    table.add_row(name, kind, f"Error: {e.reason}", "[red]ERROR[/red]")
+    deploy_hint = f"lakebench deploy {config_file}" if config_file else "lakebench deploy CONFIG"
+    try:
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), ns)
+    except ops.ClusterReadError as e:
+        raise _unreadable(e)  # noqa: B904
+    if not exists:
+        raise LakebenchError(
+            f"namespace {ns} does not exist",
+            next=deploy_hint,
+            path="status.namespace_missing",
+            code=ExitCode.FAILED,
+        )
 
-        console.print(table)
+    apps_v1 = k8s_client.AppsV1Api()
 
-        # Check for datagen job status
-        try:
-            batch_v1 = k8s_client.BatchV1Api()
-            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
-            active = job.status.active or 0
-            succeeded = job.status.succeeded or 0
-            completions = job.spec.completions or 1
-            if active > 0 or succeeded < completions:
-                console.print()
-                console.print(
-                    f"[bold]Datagen:[/bold] {succeeded}/{completions} pods completed, "
-                    f"{active} active"
-                )
-        except k8s_client.rest.ApiException as e:
-            if e.status != 404:
-                logger.debug("Could not check datagen job: %s", e)
+    table = Table(title="Components")
+    table.add_column("Component", style="cyan")
+    table.add_column("Type", style="dim")
+    table.add_column("Status", style="bold")
+    table.add_column("Ready", justify="center")
 
-    except K8sConnectionError as e:
-        print_error(f"Kubernetes connection failed: {e}")
-        raise typer.Exit(1)  # noqa: B904
+    # Build component list -- config-aware when a config file was loaded
+    if cfg is not None:
+        components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
+        cat = cfg.architecture.catalog.type.value
+        if cat == "hive":
+            components.append(("lakebench-hive-metastore-default", "StatefulSet"))
+        elif cat == "polaris":
+            components.append(("lakebench-polaris", "Deployment"))
+        engine = cfg.architecture.query_engine.type.value
+        if engine == "trino":
+            components.append(("lakebench-trino-coordinator", "Deployment"))
+            components.append(("lakebench-trino-worker", "StatefulSet"))
+        elif engine == "spark-thrift":
+            components.append(("lakebench-spark-thrift", "Deployment"))
+        elif engine == "duckdb":
+            components.append(("lakebench-duckdb", "Deployment"))
+        # Observability is a shared stack in its own namespace
+        # (deploy/observability.py), not a component of this deployment.
+    else:
+        # Namespace-only mode (no config loaded) -- show all possible components
+        components = [
+            ("lakebench-postgres", "StatefulSet"),
+            ("lakebench-hive-metastore-default", "StatefulSet"),
+            ("lakebench-polaris", "Deployment"),
+            ("lakebench-trino-coordinator", "Deployment"),
+            ("lakebench-trino-worker", "StatefulSet"),
+            ("lakebench-spark-thrift", "Deployment"),
+            ("lakebench-duckdb", "Deployment"),
+            ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
+            ("lakebench-observability-grafana", "Deployment"),
+        ]
+
+    marks = {
+        "ok": "[green]OK[/green]",
+        "unready": "[yellow]--[/yellow]",
+        "missing": "[dim]-[/dim]",
+        "error": "[red]ERROR[/red]",
+    }
+    rows = []
+    try:
+        for obj_name, kind in components:
+            row = ops.read_component(apps_v1, ns, obj_name, kind)
+            rows.append(row)
+            table.add_row(obj_name, kind, esc(row.detail), marks[row.state])
+    except ops.ClusterReadError as e:
+        raise _unreachable(e)  # noqa: B904
+
+    console.print(table)
+
+    # Datagen job progress, while it runs (informational, never drift)
+    datagen: dict[str, int] | None = None
+    try:
+        batch_v1 = k8s_client.BatchV1Api()
+        job = batch_v1.read_namespaced_job(
+            "lakebench-datagen", ns, _request_timeout=ops.API_TIMEOUT
+        )
+        active = job.status.active or 0
+        succeeded = job.status.succeeded or 0
+        completions = job.spec.completions or 1
+        if active > 0 or succeeded < completions:
+            datagen = {"succeeded": succeeded, "completions": completions, "active": active}
+            console.print()
+            console.print(
+                f"[bold]Datagen:[/bold] {esc(succeeded)}/{esc(completions)} pods completed, "
+                f"{esc(active)} active"
+            )
+    except k8s_client.rest.ApiException as e:
+        if e.status != 404:
+            logger.debug("Could not check datagen job: %s", e)
+    except Exception as e:  # noqa: BLE001 -- informational line only
+        logger.debug("Could not check datagen job: %s", e)
+
+    verdict, names = ops.status_exit(rows, config_known=cfg is not None)
+    from lakebench.cli import _json
+
+    _json.set_data(
+        {
+            "namespace": ns,
+            "verdict": verdict,
+            "components": [
+                {"name": r.name, "kind": r.kind, "state": r.state, "detail": r.detail} for r in rows
+            ],
+            "datagen": datagen,
+        }
+    )
+    if verdict == "drift":
+        print_error(f"Drift: {', '.join(names)} not ready or not found")
+        log_names = [ops.STATUS_LOG_COMPONENT[n] for n in names if n in ops.STATUS_LOG_COMPONENT]
+        cfg_arg = str(config_file) if config_file else "CONFIG"
+        name_arg = f" --name {name}" if name else ""
+        if log_names:
+            print_info(f"Next: lakebench logs {cfg_arg} {log_names[0]}{name_arg}, or {deploy_hint}")
+        else:
+            print_info(f"Next: {deploy_hint}")
+        raise typer.Exit(ExitCode.FAILED)
+    if verdict == "unverified":
+        raise _unreadable(f"could not read {', '.join(names)}")
+    print_success(
+        "Every listed component is ready" if cfg is not None else "Every component found is ready"
+    )
 
 
 @app.command()
@@ -1361,65 +1099,117 @@ def stop(
             help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="List what would be stopped without deleting anything",
+        ),
+    ] = False,
 ) -> None:
-    """Stop running continuous-mode jobs.
+    """Stop every job Lakebench started in the deployment.
 
-    Deletes the continuous-mode SparkApplications (bronze-ingest,
-    silver-stream, gold-refresh) from the cluster.
+    Deletes every SparkApplication named lakebench-* in the namespace that
+    has not finished (the continuous streams and any batch stage left
+    running) and the datagen Job while it runs. Finished ones stay, with
+    their logs. Exits 1 when anything could not be deleted.
     """
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file, allow_long_names=True)  # LB-153
+        cfg = load_config(
+            config_file, purpose=LoadPurpose.TEARDOWN, name_override=name
+        )  # no name-length check; stops only
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
+    # A nameless config stops only a deployment it can prove is its own.
+    guard_nameless(cfg, config_file, allow_absent=False)
     namespace = cfg.get_namespace()
-    k8s = get_k8s_client(
-        context=cfg.platform.kubernetes.context,
-        namespace=namespace,
-    )
+    try:
+        k8s = get_k8s_client(
+            context=cfg.platform.kubernetes.context,
+            namespace=namespace,
+        )
+    except (K8sConnectionError, ConfigException) as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+
+    verb = "Would stop" if dry_run else "Stopping"
+    console.print(Panel(f"{esc(verb)} jobs for: [bold]{esc(cfg.name)}[/bold]", expand=False))
+
+    try:
+        exists = ops.namespace_exists(k8s_client.CoreV1Api(), namespace)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    if not exists:
+        print_info(f"Namespace {namespace} does not exist; nothing to stop")
+        return
+
+    custom = k8s_client.CustomObjectsApi()
+    batch = k8s_client.BatchV1Api()
+    out = ops.StopOutcome()
+    try:
+        ops.stop_targets(custom, batch, namespace, out)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+
+    for ref in out.finished:
+        print_info(f"Already finished, left in place: {ref}")
+    if dry_run:
+        for ref in out.found:
+            print_info(f"Would delete {ref}")
+        if not out.found:
+            print_info("Nothing is running")
+        for failure in out.failures:
+            print_error(failure)
+        raise typer.Exit(ExitCode.FAILED if out.failures else ExitCode.OK)
 
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.STOP, {})
 
-    streaming_names = ["bronze-ingest", "silver-stream", "gold-refresh"]
-    stopped = 0
-
-    console.print(
-        Panel(
-            f"Stopping streaming jobs for: [bold]{cfg.name}[/bold]",
-            expand=False,
-        )
-    )
-
-    for name in streaming_names:
+    if out.found:
         try:
-            k8s.delete_custom_resource(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                plural="sparkapplications",
-                name=f"lakebench-{name}",
-                namespace=namespace,
-            )
-            print_success(f"Stopped: lakebench-{name}")
-            stopped += 1
-        except Exception as e:
-            print_info(f"lakebench-{name}: not running ({e})")
+            ops.pre_stop(cfg, k8s)
+        except Exception as e:  # noqa: BLE001 -- a failed drain must not block the stop
+            print_warning(f"Pre-stop step failed, stopping anyway: {e}")
+        ops.stop_delete(custom, batch, namespace, out)
 
-    if stopped > 0:
-        print_success(f"Stopped {stopped} continuous job(s)")
-    else:
-        print_info("No continuous jobs were running")
+    for ref in out.deleted:
+        print_success(f"Stopped: {ref}")
+    for ref in out.not_running:
+        print_info(f"{ref}: not running")
+    for failure in out.failures:
+        print_error(failure)
+    if out.deleted:
+        print_success(f"Stopped {len(out.deleted)} job(s)")
+    elif not out.failures:
+        print_info("Nothing was running")
 
     _journal_safe(
         j.record,
         EventType.STREAMING_STOP,
-        message=f"Stopped {stopped} streaming jobs",
-        details={"stopped": stopped},
+        message=f"Stopped {len(out.deleted)} jobs",
+        details={
+            "stopped": len(out.deleted),
+            "deleted": out.deleted,
+            "finished": out.finished,
+            "failures": out.failures,
+        },
     )
-    _journal_safe(j.end_command, success=True)
+    _journal_safe(j.end_command, success=not out.failures)
+    if out.failures:
+        raise typer.Exit(ExitCode.FAILED)
 
 
 # The customer360 generator's own timestamp defaults (datagen_rs generate.rs).
@@ -1473,30 +1263,6 @@ def info_date_range(cfg: LakebenchConfig, scale_days: int) -> str:
     return f"{days} days ({start} to {end})"
 
 
-def info_peak_request(
-    cfg: LakebenchConfig, scale: float, sustained: bool
-) -> tuple[PeakRequirement, int, int, str]:
-    """Peak requested resources for ``info``: ``(peak, co_cores, co_gb, label)``.
-
-    ``peak`` comes from ``compute_peak_requirements()``, the single source
-    of truth ``run``'s capacity preflight also uses; the co-resident
-    request (query engine, catalog, Postgres, continuous datagen) comes
-    from the same preflight helper, so ``info`` and ``run`` cannot
-    disagree about how big a cluster the config needs. The caller applies
-    ``resolve_auto_sizing`` first, as ``run`` does. These are requested
-    resources, not measured utilisation.
-    """
-    from lakebench.cli._prerequisites import _co_resident_request
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    mode = "sustained" if sustained else "batch"
-    raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
-    schema = getattr(raw_schema, "value", raw_schema)
-    peak = compute_peak_requirements(scale, mode, schema)
-    co_cores, co_gb, co_label = _co_resident_request(cfg, sustained)
-    return peak, co_cores, co_gb, co_label
-
-
 @app.command(hidden=True, deprecated=True)
 def info(
     config_file: Annotated[
@@ -1522,10 +1288,10 @@ def info(
     """
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, purpose=LoadPurpose.INSPECT)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
     # Auto-size resources based on scale (tier guidance only)
     from lakebench.config.autosizer import resolve_auto_sizing
@@ -1539,7 +1305,6 @@ def info(
         _scale_executor_count,
     )
 
-    spark = cfg.platform.compute.spark
     s3 = cfg.platform.storage.s3
     arch = cfg.architecture
     workload = arch.workload
@@ -1562,10 +1327,10 @@ def info(
         for j in _JOB_PROFILES
     }
     # Per-job executor counts with auto/override labels
+    from lakebench.modules.pipeline_engines.spark.job import executor_override
+
     override_map = {
-        "bronze-verify": spark.bronze_executors,
-        "silver-build": spark.silver_executors,
-        "gold-finalize": spark.gold_executors,
+        j: executor_override(j, cfg) for j in ("bronze-verify", "silver-build", "gold-finalize")
     }
     executor_parts = []
     for job_name, override_val in override_map.items():
@@ -1577,9 +1342,7 @@ def info(
 
     # Streaming executor counts
     streaming_override_map = {
-        "bronze-ingest": spark.bronze_ingest_executors,
-        "silver-stream": spark.silver_stream_executors,
-        "gold-refresh": spark.gold_refresh_executors,
+        j: executor_override(j, cfg) for j in ("bronze-ingest", "silver-stream", "gold-refresh")
     }
     streaming_executor_parts = []
     for job_name, override_val in streaming_override_map.items():
@@ -1634,25 +1397,16 @@ def info(
             ("Executors", ", ".join(executor_parts)),
         ]
 
-    # Peak requested resources: the single source of truth is
-    # compute_peak_requirements() (the same figure run's capacity
-    # preflight uses), plus the co-resident query engine / catalog pods.
-    peak, co_cores, co_gb, co_label = info_peak_request(cfg, scale, is_sustained)
+    # Peak requested resources from the one sizing source: the same
+    # plan_requirements() that config show, recommend and run's capacity
+    # preflight use. Offline, so batch datagen is before cluster scaling.
+    from lakebench.config.sizing import breakdown_text, floor_text, plan_requirements
+
+    plan = plan_requirements(cfg)
     lines += [
-        (
-            "Peak requested",
-            f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
-            f"{peak.scratch_gb} GB scratch",
-        ),
-        (
-            "  of which",
-            f"{peak.cpu_cores} cores / {peak.memory_gb} GB pipeline ({peak.driving_job}), "
-            f"{co_cores} cores / {co_gb} GB {co_label}",
-        ),
+        ("Peak requested", floor_text(plan)),
+        ("  of which", breakdown_text(plan)),
     ]
-    _overrides = (streaming_override_map if is_sustained else override_map).values()
-    if any(v is not None for v in _overrides):
-        lines.append(("", "peak uses profile executor counts; per-job overrides are not included"))
 
     lines += [
         ("S3 endpoint", s3.endpoint or "(not set)"),
@@ -1662,7 +1416,7 @@ def info(
     # Add monitoring info if enabled
     obs = cfg.observability
     if obs.enabled:
-        prom_status = "enabled" if obs.prometheus_stack_enabled else "disabled"
+        prom_status = "enabled"
         graf_status = "enabled" if obs.dashboards_enabled else "disabled"
         lines.append(
             (
@@ -1678,49 +1432,282 @@ def info(
         f"[dim]{label + ':':<{max_label + 1}}[/dim] [bold]{value}[/bold]" for label, value in lines
     )
 
-    console.print(Panel(formatted, title=f"Lakebench: {cfg.name}", expand=False))
+    console.print(Panel(formatted, title=f"Lakebench: {esc(cfg.name)}", expand=False))
 
     if guidance.warning:
-        console.print(f"  [yellow]Warning: {guidance.warning}[/yellow]")
+        console.print(f"  [yellow]Warning: {esc(guidance.warning)}[/yellow]")
 
-    # Check cluster feasibility
+    # Check cluster feasibility, on the cluster the config names, as run does
     try:
-        k8s = get_k8s_client()
+        k8s = get_k8s_client(context=cfg.platform.kubernetes.context)
         cap = k8s.get_cluster_capacity()
         if cap is None:
             raise ValueError("Could not detect cluster capacity")
         cluster_cores = cap.total_cpu_millicores // 1000
         cluster_gb = cap.total_memory_bytes // (1024**3)
-        needed_cores = peak.cpu_cores + co_cores
-        needed_gb = peak.memory_gb + co_gb
+        # The run preflight's decision for run --generate: datagen and
+        # Trino sized against this cluster, as run sizes them. A plain batch
+        # run creates no datagen pod and is checked without one.
+        from lakebench.config.sizing import check_capacity
 
-        if cluster_cores >= needed_cores and cluster_gb >= needed_gb:
+        verdict = check_capacity(cfg, cap)
+        fitted = verdict.plan.floor
+        request = (
+            f"{cluster_cores} cores / {cluster_gb} GB allocatable; "
+            f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB on this cluster "
+            "(with datagen)"
+        )
+        if verdict.status == "fits":
+            console.print(f"  [green]Cluster OK:[/green] {esc(request)}")
+        elif verdict.status == "degraded":
+            capped = verdict.capped_request or fitted
             console.print(
-                f"  [green]Cluster OK:[/green] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
+                f"  [yellow]Cluster below the full request:[/yellow] {esc(request)}; runs degraded "
+                f"at ~{esc(capped.cpu_cores)} cores / {esc(capped.memory_gb)} GB with capped streams"
             )
         else:
-            console.print(
-                f"  [red]Cluster undersized:[/red] {cluster_cores} cores / {cluster_gb} GB "
-                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
-            )
+            console.print(f"  [red]Cluster undersized:[/red] {esc(request)}")
             console.print(
                 "  [dim]Run 'lakebench config recommend' to find max feasible scale[/dim]"
             )
+        for note in (*verdict.plan.cuts, *verdict.warnings):
+            console.print(f"  [yellow]{esc(note)}[/yellow]")
     except Exception as e:
         logger.debug("Could not check cluster feasibility: %s", e)
 
 
+_REPORT_FORMATS = ("table", "json", "csv")
+
+
+def _report_target(
+    target: str | None, run_option: str | None, *, use_default: bool
+) -> tuple[Path | None, str | None]:
+    """``report``'s positional as ``(config, run id)``.
+
+    An existing file, or a name ending in .yaml or .yml, is a config; any
+    other value is a run id (a leading ``run-`` is dropped); a run directory
+    stands for its run id. With no
+    positional and no ``--run``, ``./lakebench.yaml`` is the config when it
+    exists and *use_default* is set (not for ``--list``, which lists every
+    deployment)."""
+    if target is None:
+        default = Path(DEFAULT_CONFIG)
+        if run_option is None and use_default and default.is_file():
+            return default, None
+        return None, None
+    path = Path(target)
+    if path.is_dir() and (path / "metrics.json").is_file():
+        target = path.resolve().name  # a run directory: its id
+    elif path.is_file() or path.suffix in (".yaml", ".yml"):
+        if not path.is_file():
+            print_error(f"Config file not found: {target}")
+            raise typer.Exit(ExitCode.USAGE)
+        return path, None
+    run = target.removeprefix("run-")
+    if run_option is not None and run_option != run:
+        print_error(f"Two runs given: {run} and --run {run_option}; pass one")
+        raise typer.Exit(ExitCode.USAGE)
+    return None, run
+
+
+def _print_stage_matrix(metrics, output_format: str) -> None:
+    """The stage matrix of *metrics*: a table, the pipeline benchmark block
+    as JSON, or the matrix as CSV. Exits 1 when the run has no pipeline
+    benchmark."""
+    import json as _json
+
+    _note_benchmark_record(metrics)
+    pb = metrics.pipeline_benchmark
+    if pb is None:
+        print_warning("This run does not have pipeline benchmark data.")
+        print_info("Pipeline benchmark is generated for runs after this feature was added.")
+        raise typer.Exit(ExitCode.FAILED)
+
+    # Machine-readable formats go to plain stdout (emit_data): Rich wraps
+    # long lines at the terminal width and parses markup, which breaks parsers.
+    if output_format == "json":
+        emit_data(_json.dumps(pb.to_dict(), indent=2))
+        return
+
+    if output_format == "csv":
+        import csv
+        import io
+
+        matrix = pb.to_matrix()
+        if not matrix:
+            print_warning("No stages in pipeline benchmark.")
+            return
+        # Build CSV: rows are metrics, columns are stages
+        metric_keys = list(next(iter(matrix.values())).keys())
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["metric"] + list(matrix.keys()))
+        for key in metric_keys:
+            row = [key] + [matrix[stage].get(key, "") for stage in matrix]
+            writer.writerow(row)
+        emit_data(buf.getvalue())
+        return
+
+    # Table format (default)
+    console.print()
+    console.print(
+        Panel(
+            f"[bold]Pipeline Benchmark:[/bold] {esc(pb.deployment_name)} (run {esc(pb.run_id)})\n"
+            f"Mode: {esc(pb.pipeline_mode)} | "
+            f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
+            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            expand=False,
+        )
+    )
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Stage", style="cyan")
+    table.add_column("Engine")
+    table.add_column("Time(s)", justify="right")
+    table.add_column("In(GB)", justify="right")
+    table.add_column("Out(GB)", justify="right")
+    table.add_column("In Rows", justify="right")
+    table.add_column("Out Rows", justify="right")
+    table.add_column("GB/s", justify="right")
+    table.add_column("Rows/s", justify="right")
+    table.add_column("Execs", justify="right")
+    table.add_column("Status")
+
+    for stage in pb.stages:
+        status = "[green]OK[/green]" if stage.success else "[red]FAIL[/red]"
+        table.add_row(
+            stage.stage_name,
+            stage.engine,
+            f"{stage.elapsed_seconds:.1f}",
+            f"{stage.input_size_gb:.3f}" if stage.input_size_gb > 0 else "-",
+            f"{stage.output_size_gb:.3f}" if stage.output_size_gb > 0 else "-",
+            f"{stage.input_rows:,}" if stage.input_rows > 0 else "-",
+            f"{stage.output_rows:,}" if stage.output_rows else "-",
+            f"{stage.throughput_gb_per_second:.4f}" if stage.throughput_gb_per_second > 0 else "-",
+            f"{stage.throughput_rows_per_second:.0f}"
+            if stage.throughput_rows_per_second > 0
+            else "-",
+            str(stage.executor_count) if stage.executor_count > 0 else "-",
+            status,
+        )
+
+    console.print(table)
+
+    # Query stage detail
+    if pb.query_benchmark:
+        qb = pb.query_benchmark
+        console.print(
+            f"\n  Query Benchmark: {esc(qb.mode)} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
+        )
+
+    console.print(
+        f"\n  Pipeline: {pb.total_elapsed_seconds:.1f}s total"
+        f" | {pb.time_to_value_seconds:.1f}s time-to-value"
+        f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s"
+    )
+    console.print()
+
+
+def _report_list_row(r: dict) -> dict:
+    """A ``report --list`` row for ``--json`` (cli/_json.ReportListRow):
+    the headline verdict (the strictest of the stored and the recomputed
+    one, as every reader takes it) and both halves."""
+    from lakebench.metrics.verdict import verdict_of, verdict_status
+
+    stored = verdict_status(r) or r.get("verdict_status")
+    return {
+        "run_id": r.get("run_id"),
+        "record_kind": r.get("record_kind") or "run",
+        "parent_run_id": r.get("parent_run_id"),
+        "deployment_name": r.get("deployment_name"),
+        "start_time": r.get("start_time"),
+        "verdict": r.get("verdict_headline") or verdict_of(r)["status"],
+        "verdict_stored": stored,
+        "verdict_recomputed": r.get("verdict_recomputed"),
+        "total_elapsed_seconds": r.get("total_elapsed_seconds"),
+    }
+
+
+def _stored_record(runs_dir: Path, rid: str) -> dict:
+    """The record *rid* as stored (the per-run file, else the legacy flat
+    one, as ``load_run`` reads them), or {} when neither is readable."""
+    import json as _json_mod
+
+    for path in (runs_dir / f"run-{rid}" / "metrics.json", runs_dir / f"run-{rid}.json"):
+        try:
+            data = _json_mod.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def _stored_verdict(runs_dir: Path, rid: str) -> dict | None:
+    """``verdict.verdict_of`` of the stored record *rid*, or None."""
+    from lakebench.metrics.verdict import verdict_of
+
+    record = _stored_record(runs_dir, rid)
+    return verdict_of(record) if record else None
+
+
+def _report_run_data(
+    metrics, runs_dir: Path, delivered: Path | None, requested: str | None = None
+) -> dict:
+    """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
+    the record as stored (the per-run file, else the legacy flat one, as
+    ``load_run`` reads them). Scores are as stored. The verdict carries both
+    halves: ``verdict_stored`` as the record holds it, ``verdict_recomputed``
+    from the record (``verdict.verdict_from_record``), and ``verdict``, the
+    strictest of them, as the perf gate and the release gate read
+    it. A record that cannot be read as stored gives null for all three and
+    for the scores."""
+    from lakebench.metrics.verdict import verdict_of
+
+    # The id load_run was given, when one was.
+    record = _stored_record(runs_dir, requested or metrics.run_id)
+    pbd = record.get("pipeline_benchmark") or {}
+    judged = verdict_of(record) if record else {"stored": None, "recomputed": None, "status": None}
+    return {
+        "run_id": metrics.run_id,
+        "record_kind": record.get("record_kind") or metrics.record_kind,
+        "parent_run_id": record.get("parent_run_id", metrics.parent_run_id),
+        "deployment_name": record.get("deployment_name", metrics.deployment_name),
+        "start_time": record.get("start_time"),
+        "verdict": judged["status"],
+        "verdict_stored": judged["stored"],
+        "verdict_recomputed": judged["recomputed"],
+        "pipeline_mode": pbd.get("pipeline_mode"),
+        "scores": pbd.get("scores") if record else None,
+        "stages": [
+            {
+                "stage_name": st.get("stage_name"),
+                "stage_type": st.get("stage_type"),
+                "elapsed_seconds": st.get("elapsed_seconds"),
+                "input_size_gb": st.get("input_size_gb"),
+                "output_size_gb": st.get("output_size_gb"),
+                "throughput_gb_per_second": st.get("throughput_gb_per_second"),
+                "executor_count": st.get("executor_count"),
+            }
+            for st in pbd.get("stages") or []
+        ],
+        "delivered_report": str(delivered) if delivered is not None else None,
+    }
+
+
 @app.command()
 def report(
-    config_file: Annotated[
-        Path | None,
+    target: Annotated[
+        str | None,
         typer.Argument(
+            metavar="[RUN|CONFIG]",
             help=(
-                "Path to configuration YAML file. When given, the "
-                "'latest run' lookup is scoped to this deployment so a "
-                "parallel deployment's newer run is not reported by mistake."
+                "A run id, or a configuration YAML file: its deployment's latest "
+                "run record, so a parallel deployment's newer run is not reported "
+                "by mistake. Default: ./lakebench.yaml when it exists, otherwise "
+                "the latest run of any deployment."
             ),
+            show_default=False,
         ),
     ] = None,
     metrics_dir: Annotated[
@@ -1786,6 +1773,18 @@ def report(
             help="Also print the key scores when rendering (default action already prints them).",
         ),
     ] = False,
+    output_format: Annotated[
+        str | None,
+        typer.Option(
+            "--format",
+            "-o",
+            help=(
+                "Print the run's stage matrix instead of the summary: table, json "
+                "or csv (json is the pipeline benchmark block)"
+            ),
+        ),
+    ] = None,
+    as_json: Annotated[bool, json_option()] = False,
 ) -> None:
     """Report on a saved benchmark run.
 
@@ -1794,8 +1793,10 @@ def report(
     modifying it. Pass ``--render`` to regenerate a fresh HTML file; the
     output goes to ``lakebench-output/reports/report-<run_id>-<ts>.html`` so
     the delivered artifact is never rewritten silently. Pass ``--list`` to
-    show all saved runs.
+    show all saved runs, and ``--format`` for the stage matrix (what
+    ``results`` printed).
     """
+    from lakebench.cli import _json
     from lakebench.metrics import MetricsStorage
     from lakebench.reports import ReportGenerator
 
@@ -1805,40 +1806,69 @@ def report(
     # file is given. Under parallel deployments the shared runs/ tree can
     # have another deployment's newer record on top; without scoping,
     # `report` would display it (SP-2 owns the durable deployment_id fix).
+    if output_format is not None and output_format not in _REPORT_FORMATS:
+        print_error(f"--format must be one of {', '.join(_REPORT_FORMATS)}, not {output_format}")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_format is not None and as_json:
+        print_error("--json and --format are two outputs; pass one")
+        raise typer.Exit(ExitCode.USAGE)
+    if output_format is not None and (render or list_runs):
+        print_error("--format prints a stage matrix; it does not combine with --render or --list")
+        raise typer.Exit(ExitCode.USAGE)
+    config_file, target_run = _report_target(target, run_id, use_default=not list_runs)
+    run_id = target_run or run_id
     deployment_name: str | None = None
     if config_file is not None:
         try:
-            deployment_name = load_config(config_file).name
+            deployment_name = load_config(config_file, purpose=LoadPurpose.READ).name
         except ConfigError as e:
             print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
+            raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+        if target is None and run_id is None:
+            print_info(
+                f"Showing the latest record of deployment {deployment_name} "
+                f"(./{DEFAULT_CONFIG}); pass a run id or another config to choose"
+            )
 
     # List runs mode
     if list_runs:
         runs = storage.list_runs()
+        _json.set_data({"runs": [_report_list_row(r) for r in runs]})
         if not runs:
             print_warning(f"No runs found in {metrics_dir}")
             return
 
-        console.print(Panel(f"Available runs in [bold]{metrics_dir}[/bold]", expand=False))
+        console.print(Panel(f"Available runs in [bold]{esc(metrics_dir)}[/bold]", expand=False))
 
         table = Table()
         table.add_column("Run ID", style="cyan")
+        table.add_column("Kind")
         table.add_column("Deployment")
         table.add_column("Date")
         table.add_column("Status")
         table.add_column("Duration")
 
         from lakebench.metrics.verdict import passed as _record_passed
+        from lakebench.metrics.verdict import verdict_status as _verdict_status
 
         for r in runs:
             # Prefer the persisted verdict (OD-6: v1.6 records) and fall
             # back to raw ``success`` for legacy v1.5 records.
-            status = "[green]Passed[/green]" if _record_passed(r) else "[red]Failed[/red]"
+            headline = r.get("verdict_headline")
+            if r.get("passed", _record_passed(r)):
+                status = "[green]Passed[/green]"
+            elif (headline or _verdict_status(r) or r.get("verdict_status")) == "INTERRUPTED":
+                status = "[yellow]Interrupted[/yellow]"
+            else:
+                status = "[red]Failed[/red]"
             elapsed = f"{r.get('total_elapsed_seconds', 0):.1f}s"
             date = r.get("start_time", "")[:10] if r.get("start_time") else ""
+            kind = r.get("record_kind") or "run"
+            if kind == "benchmark" and r.get("parent_run_id"):
+                kind = f"benchmark of {r['parent_run_id']}"
             table.add_row(
                 r.get("run_id", ""),
+                kind,
                 r.get("deployment_name", ""),
                 date,
                 status,
@@ -1852,16 +1882,16 @@ def report(
     # make sense with --render: they are opt-ins to a regenerate action.
     if force and not render:
         print_error("--force requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     if output_path is not None and not render:
         print_error("--output requires --render")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
     # --force only makes sense with --output: the default timestamped path
     # is collision-free in practice, so --force there is a no-op that only
     # confuses the caller. Matches the help text.
     if force and output_path is None:
         print_error("--force requires --output (the default timestamped path is collision-free)")
-        raise typer.Exit(2)
+        raise typer.Exit(ExitCode.USAGE)
 
     if render:
         try:
@@ -1880,12 +1910,17 @@ def report(
                 print_info("Pass --force to overwrite the file at --output.")
             else:
                 print_info("Retry in a moment; the timestamp will differ.")
-            raise typer.Exit(1)  # noqa: B904
+            # An existing --output file is a usage error; a default-path
+            # collision is a transient failure.
+            code = ExitCode.USAGE if output_path is not None else ExitCode.FAILED
+            raise typer.Exit(code)  # noqa: B904
         except ValueError as e:
             print_error(str(e))
             print_info("Use 'lakebench report --list' to see available runs")
-            raise typer.Exit(1)  # noqa: B904
+            # An unknown run id is a bad argument; no runs at all is a failed lookup.
+            raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)  # noqa: B904
 
+        _json.set_data({"run_id": run_id, "report": str(report_path)})
         # Also print the summary when asked; keep the default quiet so
         # scripts that watch stdout for the path have a clean output.
         if summary:
@@ -1895,12 +1930,14 @@ def report(
                 else storage.get_latest_run_for_deployment(deployment_name)
             )
             if resolved:
-                _print_report_summary(resolved)
+                _print_report_summary(
+                    resolved, _stored_verdict(storage.metrics_dir, run_id or resolved.run_id)
+                )
 
         console.print(
             Panel(
                 f"[green]Report rendered[/green]\n\n"
-                f"Output: {report_path}\n\n"
+                f"Output: {esc(report_path)}\n\n"
                 f"The delivered run directory report.html is unchanged.",
                 title="Report Rendered",
                 expand=False,
@@ -1915,211 +1952,63 @@ def report(
         else storage.get_latest_run_for_deployment(deployment_name)
     )
     if metrics is None:
-        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
+        if target_run is not None:
+            print_error(f"No run {run_id} in {metrics_dir}, and no file {target}")
+        else:
+            print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
         print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
+        # An unknown run id is a bad argument; no runs at all is a failed lookup.
+        raise typer.Exit(ExitCode.USAGE if run_id else ExitCode.FAILED)
 
-    _print_report_summary(metrics)
+    if output_format is not None:
+        _print_stage_matrix(metrics, output_format)
+        return
 
-    delivered = storage.run_dir(metrics.run_id) / "report.html"
+    _print_report_summary(metrics, _stored_verdict(storage.metrics_dir, run_id or metrics.run_id))
+
+    # Not run_dir(): that creates the directory, and report only reads here.
+    delivered = storage.metrics_dir / f"run-{run_id or metrics.run_id}" / "report.html"
+    _json.set_data(
+        _report_run_data(
+            metrics, storage.metrics_dir, delivered if delivered.exists() else None, run_id
+        )
+    )
     if delivered.exists():
-        console.print(f"[dim]Delivered report: {delivered}[/dim]")
+        console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
         console.print(
             "[dim]Run 'lakebench report --render' to write a fresh HTML "
             "at lakebench-output/reports/.[/dim]"
         )
     else:
         console.print(
-            f"[dim]No delivered report at {delivered}. "
+            f"[dim]No delivered report at {esc(delivered)}. "
             "Run 'lakebench report --render' to generate one.[/dim]"
         )
 
 
-@app.command()
-def results(
-    config_file: Annotated[
-        Path | None,
-        typer.Argument(
-            help="Path to configuration YAML file (used for deployment name; optional)",
-        ),
-    ] = None,
-    metrics_dir: Annotated[
-        Path,
-        typer.Option(
-            "--metrics",
-            "-m",
-            help="Directory containing run subdirectories",
-        ),
-    ] = Path(DEFAULT_OUTPUT_DIR) / "runs",
-    run_id: Annotated[
-        str | None,
-        typer.Option(
-            "--run",
-            "-r",
-            help="Specific run ID (default: latest)",
-        ),
-    ] = None,
-    output_format: Annotated[
-        str | None,
-        typer.Option(
-            "--format",
-            "-o",
-            help="Output format: table, json, csv (default: table)",
-        ),
-    ] = None,
-    format_short_f: Annotated[
-        str | None,
-        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
-    ] = None,
-) -> None:
-    """Display pipeline benchmark results.
-
-    Shows the stage-matrix view of pipeline performance -- each stage
-    as a column with consistent metrics as rows. Use --format json or
-    --format csv for machine-readable output.
-
-    Accepts an optional config file argument. When provided, scopes the
-    default-summary lookup to that deployment (so ``results other.yaml``
-    on a shared lakebench-output tree does not read another deployment's
-    latest run).
-    """
-    if format_short_f is not None:
-        warn_deprecated_short_f("--format / -o")
-        if output_format is not None and output_format != format_short_f:
-            print_error(f"both --format {output_format} and -f {format_short_f} given")
-            raise typer.Exit(2)
-        output_format = format_short_f
-    if output_format is None:
-        output_format = "table"
-    import json as _json
-
-    from lakebench.metrics import MetricsStorage
-
-    storage = MetricsStorage(metrics_dir)
-
-    # Scope the "latest run" lookup to a specific deployment when the
-    # optional config file was given (see ``report`` for the same pattern).
-    deployment_name: str | None = None
-    if config_file is not None:
-        try:
-            deployment_name = load_config(config_file).name
-        except ConfigError as e:
-            print_error(f"Config error: {e}")
-            raise typer.Exit(1)  # noqa: B904
-
-    if run_id:
-        metrics = storage.load_run(run_id)
-    else:
-        metrics = storage.get_latest_run_for_deployment(deployment_name)
-
-    if metrics is None:
-        print_error("No run found" + (f" with ID {run_id}" if run_id else ""))
-        print_info("Use 'lakebench report --list' to see available runs")
-        raise typer.Exit(1)
-
-    pb = metrics.pipeline_benchmark
-    if pb is None:
-        print_warning("This run does not have pipeline benchmark data.")
-        print_info("Pipeline benchmark is generated for runs after this feature was added.")
-        raise typer.Exit(1)
-
-    # Machine-readable formats go to stdout with plain print: Rich wraps long
-    # lines at the terminal width and inserts markup, which breaks parsers.
-    if output_format == "json":
-        print(_json.dumps(pb.to_dict(), indent=2))
-        return
-
-    if output_format == "csv":
-        import csv
-        import io
-
-        matrix = pb.to_matrix()
-        if not matrix:
-            print_warning("No stages in pipeline benchmark.")
-            return
-        # Build CSV: rows are metrics, columns are stages
-        metric_keys = list(next(iter(matrix.values())).keys())
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(["metric"] + list(matrix.keys()))
-        for key in metric_keys:
-            row = [key] + [matrix[stage].get(key, "") for stage in matrix]
-            writer.writerow(row)
-        print(buf.getvalue(), end="")
-        return
-
-    # Table format (default)
-    console.print()
-    console.print(
-        Panel(
-            f"[bold]Pipeline Benchmark:[/bold] {pb.deployment_name} (run {pb.run_id})\n"
-            f"Mode: {pb.pipeline_mode} | "
-            f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
-            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
-            expand=False,
-        )
-    )
-
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Stage", style="cyan")
-    table.add_column("Engine")
-    table.add_column("Time(s)", justify="right")
-    table.add_column("In(GB)", justify="right")
-    table.add_column("Out(GB)", justify="right")
-    table.add_column("In Rows", justify="right")
-    table.add_column("Out Rows", justify="right")
-    table.add_column("GB/s", justify="right")
-    table.add_column("Rows/s", justify="right")
-    table.add_column("Execs", justify="right")
-    table.add_column("Status")
-
-    for stage in pb.stages:
-        status = "[green]OK[/green]" if stage.success else "[red]FAIL[/red]"
-        table.add_row(
-            stage.stage_name,
-            stage.engine,
-            f"{stage.elapsed_seconds:.1f}",
-            f"{stage.input_size_gb:.3f}" if stage.input_size_gb > 0 else "-",
-            f"{stage.output_size_gb:.3f}" if stage.output_size_gb > 0 else "-",
-            f"{stage.input_rows:,}" if stage.input_rows > 0 else "-",
-            f"{stage.output_rows:,}" if stage.output_rows else "-",
-            f"{stage.throughput_gb_per_second:.4f}" if stage.throughput_gb_per_second > 0 else "-",
-            f"{stage.throughput_rows_per_second:.0f}"
-            if stage.throughput_rows_per_second > 0
-            else "-",
-            str(stage.executor_count) if stage.executor_count > 0 else "-",
-            status,
-        )
-
-    console.print(table)
-
-    # Query stage detail
-    if pb.query_benchmark:
-        qb = pb.query_benchmark
-        console.print(
-            f"\n  Query Benchmark: {qb.mode} mode | QpH: {qb.qph:.1f} | {qb.total_seconds:.1f}s"
-        )
-
-    console.print(
-        f"\n  Pipeline: {pb.total_elapsed_seconds:.1f}s total"
-        f" | {pb.time_to_value_seconds:.1f}s time-to-value"
-        f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s"
-    )
-    console.print()
+_LOGS_HELP_COMPONENTS = (
+    "datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, "
+    "silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, "
+    "trino-worker, thrift, duckdb, hive, polaris, postgres"
+)
 
 
 @app.command()
 def logs(
-    component: Annotated[
-        str,
+    first: Annotated[
+        str | None,
         typer.Argument(
-            help="Component to show logs for (postgres, hive, polaris, trino, spark-driver)",
-        ),
-    ],
-    config_file: Annotated[
-        Path | None,
-        typer.Argument(
+            metavar="CONFIG",
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
+            show_default=False,
+        ),
+    ] = None,
+    second: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="COMPONENT",
+            help=f"Component to read: {_LOGS_HELP_COMPONENTS}",
+            show_default=False,
         ),
     ] = None,
     file_option: Annotated[
@@ -2134,7 +2023,7 @@ def logs(
         typer.Option(
             "--follow",
             "-F",
-            help="Follow log output",
+            help="Follow log output (the newest matching pod)",
         ),
     ] = False,
     follow_short_f: Annotated[
@@ -2146,106 +2035,130 @@ def logs(
         typer.Option(
             "--lines",
             "-n",
-            help="Number of lines to show",
+            min=1,
+            help="Number of lines to show per pod",
         ),
     ] = 100,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help=NAME_OPTION_HELP),
+    ] = None,
+    previous: Annotated[
+        bool,
+        typer.Option(
+            "--previous",
+            help="Read the previous (crashed or restarted) container instead",
+        ),
+    ] = False,
 ) -> None:
-    """Stream logs from a component.
+    """Show logs from a component of the deployment.
 
-    Shows logs from the specified Lakebench component.
-
-    Valid components: postgres, hive, polaris, trino, spark-driver
+    `lakebench logs CONFIG COMPONENT`. The 1.6 order, COMPONENT first, still
+    works. Log text goes to stdout, unformatted; pod headers and notices go
+    to stderr.
     """
+    from kubernetes import client as k8s_client
+
+    from lakebench.cli import _cluster_ops as ops
+    from lakebench.exit_codes import LakebenchError
+
     if follow_short_f:
         warn_deprecated_short_f("--follow / -F")
         follow = True
-    # Map component names to pod selectors
-    COMPONENT_SELECTORS = {
-        "postgres": ("app.kubernetes.io/component=postgres", None),
-        "hive": ("app.kubernetes.io/component=metastore", None),
-        "polaris": ("app.kubernetes.io/component=polaris", None),
-        "trino": ("app.kubernetes.io/component=trino-coordinator", None),
-        "spark-driver": ("spark-role=driver", None),
-    }
-
-    if component not in COMPONENT_SELECTORS:
-        print_error(f"Unknown component: {component}")
-        print_info(f"Valid components: {', '.join(COMPONENT_SELECTORS.keys())}")
-        raise typer.Exit(1)
-
-    config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file, allow_long_names=True)  # LB-153
+        component, config_arg, legacy = ops.resolve_logs_args(
+            first, second, file_option is not None
+        )
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    valid = ", ".join(ops.LOG_COMPONENTS)
+    if component is None:
+        print_error("Name a component: lakebench logs CONFIG COMPONENT")
+        print_info(f"Valid components: {valid}")
+        raise typer.Exit(ExitCode.USAGE)
+    if component not in ops.LOG_COMPONENTS:
+        print_error(f"Unknown component: {component}")
+        print_info(f"Valid components: {valid}")
+        raise typer.Exit(ExitCode.USAGE)
+    if legacy:
+        print_warning(
+            f"`logs {component} {config_arg}` is the 1.6 argument order; "
+            f"use `lakebench logs {config_arg} {component}`"
+        )
+
+    config_file = resolve_config_path(Path(config_arg) if config_arg else None, file_option)
+    try:
+        cfg = load_config(config_file, purpose=LoadPurpose.READ, name_override=name)
     except ConfigError as e:
         print_error(f"Config error: {e}")
-        raise typer.Exit(1)  # noqa: B904
+        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
+    # A nameless config reads only a deployment it can prove is its own.
+    guard_nameless(cfg, config_file, allow_absent=True)
     namespace = cfg.get_namespace()
-    label_selector, container = COMPONENT_SELECTORS[component]
-
-    console.print(
-        f"Fetching logs for [bold]{component}[/bold] in namespace [bold]{namespace}[/bold]"
-    )
-
-    # Build kubectl logs args (the "kubectl" itself is added by the pinned
-    # helper along with --context=<configured>).
-    cmd = [
-        "logs",
-        "-l",
-        label_selector,
-        "-n",
-        namespace,
-        f"--tail={lines}",
-    ]
-    if container:
-        cmd.extend(["-c", container])
-    if follow:
-        cmd.append("-f")
+    source = ops.LOG_COMPONENTS[component]
+    try:
+        get_k8s_client(context=cfg.platform.kubernetes.context, namespace=namespace)
+    except (K8sConnectionError, ConfigException) as e:
+        print_error(f"Kubernetes connection failed: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    core = k8s_client.CoreV1Api()
 
     try:
-        if follow:
-            # Stream logs
-            process = pinned_kubectl_popen(
-                cfg,
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            try:
-                if process.stdout:
-                    for line in iter(process.stdout.readline, ""):
-                        console.print(_strip_ansi(line), end="")
-            except KeyboardInterrupt:
-                process.terminate()
-                print_info("\nLog streaming stopped")
-        else:
-            # One-shot log fetch
-            result = pinned_kubectl(
-                cfg,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                if "not found" in result.stderr.lower() or not result.stderr.strip():
-                    print_warning(f"No pods found for {component}")
-                    print_info("Is the component deployed? Run: lakebench status")
-                else:
-                    print_error(result.stderr.strip())
-                return
+        pods = ops.list_pods(core, namespace, source.selector)
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    if not pods:
+        raise LakebenchError(
+            f"no pod for {component} ({source.what}) in namespace {namespace}",
+            next=f"lakebench status {config_file}" + (f" --name {name}" if name else ""),
+            path="logs.no_pod",
+            code=ExitCode.FAILED,
+        )
+    if follow and len(pods) > 1:
+        print_info(
+            f"Following {pods[-1].metadata.name}, the newest of {len(pods)} pods; "
+            "leave out --follow to read them all"
+        )
 
-            if result.stdout:
-                console.print(_strip_ansi(result.stdout))
-            else:
-                print_warning(f"No logs available for {component}")
+    try:
+        outcome = ops.read_logs(
+            core,
+            namespace,
+            pods,
+            source,
+            lines=lines,
+            previous=previous,
+            follow=follow,
+            write=lambda text: emit_data(_strip_ansi(text)),
+            header=print_info,
+        )
+    except ops.ClusterReadError as e:
+        print_error(f"Kubernetes API error: {e}")
+        raise typer.Exit(ExitCode.PREREQUISITE)  # noqa: B904
+    except KeyboardInterrupt:
+        print_info("Log streaming stopped")
+        raise typer.Exit(ExitCode.INTERRUPTED)  # noqa: B904
 
-    except subprocess.TimeoutExpired:
-        print_error("Timed out fetching logs")
-    except FileNotFoundError:
-        print_error("kubectl not found on PATH")
+    for pod_name in outcome.empty:
+        print_warning(f"No log output from pod {pod_name}")
+    for line in outcome.unavailable:
+        print_warning(f"No log: {line}")
+    for error in outcome.errors:
+        print_error(f"Kubernetes API error: {error}")
+    if outcome.errors:
+        raise typer.Exit(ExitCode.PREREQUISITE)
+    if not outcome.pods:
+        raise LakebenchError(
+            f"no pod of {component} has a log to read"
+            + (" from a previous container" if previous else ""),
+            next=f"lakebench status {config_file}" + (f" --name {name}" if name else ""),
+            path="logs.no_pod",
+            code=ExitCode.FAILED,
+        )
 
 
 @app.command()
@@ -2293,7 +2206,7 @@ def journal(
             print_warning(f"No events found for session {session_id}")
             return
 
-        console.print(Panel(f"Session: [bold]{session_id}[/bold]", expand=False))
+        console.print(Panel(f"Session: [bold]{esc(session_id)}[/bold]", expand=False))
         table = Table()
         table.add_column("Time", style="dim", width=19)
         table.add_column("Event", style="cyan")
@@ -2373,6 +2286,7 @@ def recommend(
         typer.Option(
             "--scale",
             "-s",
+            min=1,
             help="Target scale factor to check requirements for",
         ),
     ] = None,
@@ -2389,7 +2303,7 @@ def recommend(
         bool,
         typer.Option(
             "--slow-datagen",
-            help="Reduce datagen parallelism to fit smaller clusters (slower generation, same Spark resources).",
+            help="Ignored: datagen pods that do not fit queue, so datagen never limits the scale.",
         ),
     ] = False,
     mode: Annotated[
@@ -2413,412 +2327,42 @@ def recommend(
     - "I have cluster X -- what scale can I run?"
     - "I want to run scale X -- what cluster do I need?"
 
-    Without arguments, auto-detects connected cluster capacity and shows
-    the maximum feasible scale. Use --scale to check requirements for
-    a specific target (any scale from 1 to 100,000,000+ is supported).
-
-    Scale maps linearly to data volume: scale 1 = ~10 GB, scale 100 = ~1 TB,
-    scale 100,000 = ~1 PB.
+    Every figure comes from the one sizing source that ``run``'s capacity
+    preflight and ``config show`` use, for the default recipe
+    (hive-iceberg-spark-trino) of the workload and mode. Without
+    arguments it auto-detects the connected cluster and shows the largest
+    scale that fits, up to the workload's datagen ceiling. Use --scale to
+    see what one scale requests.
 
     Examples:
 
         lakebench recommend                     # auto-detect cluster, find max scale
         lakebench recommend --cores 64 --memory 256
         lakebench recommend --scale 100         # what do I need for scale 100?
-        lakebench recommend --scale 100000      # what do I need for 1 PB?
     """
-    from lakebench.config.scale import customer360_dimensions, full_compute_guidance
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-    from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+    from lakebench.cli._recommend import recommend_impl
 
-    # Resolve --extended -> --slow-datagen
-    use_slow_datagen = slow_datagen or extended
     if extended:
         console.print("[yellow]--extended is deprecated, use --slow-datagen instead[/yellow]\n")
 
-    # Resolve pipeline mode
-    pipeline_mode = mode or "batch"
-    is_sustained = is_continuous_mode(pipeline_mode)
+    def _detect():
+        from lakebench.k8s.target import ClusterTarget
 
-    def format_data_size(gb: float) -> str:
-        """Format data size in human-readable units."""
-        if gb >= 1_000_000_000:  # 1 EB = 10^9 GB
-            return f"{gb / 1_000_000_000:.1f} EB"
-        if gb >= 1_000_000:  # 1 PB = 10^6 GB
-            return f"{gb / 1_000_000:.1f} PB"
-        if gb >= 1_000:
-            return f"{gb / 1_000:.1f} TB"
-        return f"{gb:.0f} GB"
+        target = ClusterTarget.current()
+        console.print(f"[dim]Cluster context: {esc(target.label)}[/dim]")
+        return get_k8s_client(target=target).get_cluster_capacity()
 
-    def _streaming_resources(scale: int) -> tuple[int, int]:
-        """Streaming cores and memory requested in sustained mode.
-
-        From compute_peak_requirements(), the single source of truth, so
-        executor memory overhead and drivers are counted (heap alone
-        under-reported the request).
-        """
-        peak = compute_peak_requirements(scale, "sustained", schema_type)
-        return peak.cpu_cores, peak.memory_gb
-
-    def _batch_spark_resources(scale: int, guidance) -> tuple[int, int]:
-        """Batch Spark cores and memory used for sizing: never below the peak request.
-
-        compute_guidance() is advisory and under-reported the request (8
-        cores at scale 1 against 36 requested by silver-build). The floor is
-        compute_peak_requirements(); above the executor cap the jobs request
-        no more, but guidance keeps growing, and it is kept as sizing
-        headroom so the max-scale search stays bounded. The output labels
-        the two figures separately.
-        """
-        peak = compute_peak_requirements(scale, "batch", schema_type)
-        g_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-        g_mem = guidance.spark.recommended_executors * int(
-            guidance.spark.recommended_memory.rstrip("g")
-        )
-        return max(peak.cpu_cores, g_cores), max(peak.memory_gb, g_mem)
-
-    def _batch_spark_request(scale: int) -> tuple[int, int]:
-        peak = compute_peak_requirements(scale, "batch", schema_type)
-        return peak.cpu_cores, peak.memory_gb
-
-    def compute_cluster_requirements(scale: int) -> dict:
-        """Compute minimum cluster requirements for a given scale."""
-        from lakebench.config.autosizer import _parse_cpu_millicores
-
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        # Datagen
-        datagen_cores = (
-            guidance.datagen.parallelism * _parse_cpu_millicores(guidance.datagen.cpu) // 1000
-        )
-        datagen_mem_gi = guidance.datagen.parallelism * int(
-            guidance.datagen.memory.rstrip("Gi").rstrip("gi")
-        )
-
-        # Trino (always running)
-        trino_cores = (
-            _parse_cpu_millicores(guidance.trino.coordinator_cpu) // 1000
-            + guidance.trino.worker_replicas
-            * _parse_cpu_millicores(guidance.trino.worker_cpu)
-            // 1000
-        )
-        trino_mem_gi = int(
-            guidance.trino.coordinator_memory.rstrip("Gi")
-        ) + guidance.trino.worker_replicas * int(guidance.trino.worker_memory.rstrip("Gi"))
-
-        # Infra overhead (Hive/Polaris, Postgres) ~4 cores, 8 Gi
-        infra_cores = 4
-        infra_mem_gi = 8
-
-        if is_sustained:
-            streaming_cores, streaming_mem = _streaming_resources(scale)
-            peak_cores = datagen_cores + streaming_cores + trino_cores + infra_cores
-            peak_mem = datagen_mem_gi + streaming_mem + trino_mem_gi + infra_mem_gi
-        else:
-            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
-            peak_cores = max(spark_cores, datagen_cores) + trino_cores + infra_cores
-            peak_mem = max(spark_mem_gi, datagen_mem_gi) + trino_mem_gi + infra_mem_gi
-
-        # Add 15% headroom for system pods
-        total_cores = int(peak_cores * 1.15)
-        total_mem_gi = int(peak_mem * 1.15)
-
-        result = {
-            "scale": scale,
-            "data_gb": dims.approx_bronze_gb,
-            "tier": guidance.spark.tier_name,
-            "datagen_pods": guidance.datagen.parallelism,
-            "trino_workers": guidance.trino.worker_replicas,
-            "total_cores": total_cores,
-            "total_mem_gi": total_mem_gi,
-        }
-
-        if is_sustained:
-            streaming_cores, _ = _streaming_resources(scale)
-            result["streaming_executors"] = sum(
-                _scale_executor_count(_JOB_PROFILES[j], scale)
-                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-            )
-            result["streaming_cores"] = streaming_cores
-        else:
-            result["spark_cores"] = spark_cores
-            result["spark_mem_gi"] = spark_mem_gi
-            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
-
-        return result
-
-    def is_feasible(scale: int, cores: int, mem_gb: int) -> bool:
-        reqs = compute_cluster_requirements(scale)
-        return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
-
-    def compute_slow_datagen_requirements(scale: int) -> dict:
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        trino_cores = int(guidance.trino.coordinator_cpu) + guidance.trino.worker_replicas * int(
-            guidance.trino.worker_cpu
-        )
-        trino_mem_gi = int(
-            guidance.trino.coordinator_memory.rstrip("Gi")
-        ) + guidance.trino.worker_replicas * int(guidance.trino.worker_memory.rstrip("Gi"))
-
-        infra_cores = 4
-        infra_mem_gi = 8
-
-        if is_sustained:
-            streaming_cores, streaming_mem = _streaming_resources(scale)
-            total_cores = streaming_cores + trino_cores + infra_cores
-            total_mem_gi = streaming_mem + trino_mem_gi + infra_mem_gi
-        else:
-            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
-            total_cores = spark_cores + trino_cores + infra_cores
-            total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
-
-        total_cores = int(total_cores * 1.15)
-        total_mem_gi = int(total_mem_gi * 1.15)
-
-        result = {
-            "scale": scale,
-            "data_gb": dims.approx_bronze_gb,
-            "tier": guidance.spark.tier_name,
-            "datagen_pods": guidance.datagen.parallelism,
-            "trino_workers": guidance.trino.worker_replicas,
-            "total_cores": total_cores,
-            "total_mem_gi": total_mem_gi,
-        }
-
-        if is_sustained:
-            streaming_cores, _ = _streaming_resources(scale)
-            result["streaming_executors"] = sum(
-                _scale_executor_count(_JOB_PROFILES[j], scale)
-                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-            )
-            result["streaming_cores"] = streaming_cores
-        else:
-            result["spark_cores"] = spark_cores
-            result["spark_mem_gi"] = spark_mem_gi
-            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
-
-        return result
-
-    def is_feasible_slow_datagen(scale: int, cores: int, mem_gb: int) -> bool:
-        reqs = compute_slow_datagen_requirements(scale)
-        return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
-
-    def find_max_scale(cores: int, mem_gb: int, use_slow_datagen: bool = False) -> int:
-        check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
-        if not check_fn(1, cores, mem_gb):
-            return 0
-
-        lo, hi = 1, 100_000_000
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if check_fn(mid, cores, mem_gb):
-                lo = mid
-            else:
-                hi = mid - 1
-        return lo
-
-    # Case 1: User wants to know requirements for a specific scale
-    if target_scale is not None:
-        reqs = compute_cluster_requirements(target_scale)
-        dims = customer360_dimensions(target_scale)
-
-        mode_label = "continuous" if is_sustained else "batch"
-        if is_sustained:
-            workload_line = (
-                f"  Streaming:       {reqs['streaming_executors']} executors "
-                f"({reqs['streaming_cores']} cores)"
-            )
-        else:
-            workload_line = (
-                f"  Spark:           {reqs['spark_req_cores']} cores, "
-                f"{reqs['spark_req_mem_gi']} GB requested at peak"
-            )
-            if (reqs["spark_cores"], reqs["spark_mem_gi"]) != (
-                reqs["spark_req_cores"],
-                reqs["spark_req_mem_gi"],
-            ):
-                workload_line += (
-                    f"\n                   sized for {reqs['spark_cores']} cores, "
-                    f"{reqs['spark_mem_gi']} GB (headroom above the executor cap)"
-                )
-
-        console.print(
-            Panel(
-                f"[bold]Scale {target_scale:,}[/bold] ({format_data_size(reqs['data_gb'])})\n\n"
-                f"[dim]Tier:[/dim]             {reqs['tier']}\n"
-                f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n"
-                f"[dim]Mode:[/dim]             {mode_label}\n\n"
-                f"[yellow]Minimum Cluster Requirements:[/yellow]\n"
-                f"  CPU cores:       [bold]{reqs['total_cores']:,}[/bold]\n"
-                f"  Memory:          [bold]{reqs['total_mem_gi']:,} GB[/bold]\n\n"
-                f"[dim]Breakdown:[/dim]\n"
-                f"{workload_line}\n"
-                f"  Datagen:         {reqs['datagen_pods']} pods\n"
-                f"  Trino:           {reqs['trino_workers']} workers\n"
-                f"  + infra overhead",
-                title="Cluster Requirements",
-                expand=False,
-            )
-        )
-        return
-
-    # Case 2: Auto-detect cluster or use provided specs
-    detected_cores = cluster_cores
-    detected_mem = cluster_memory_gb
-    cluster_source = "user-provided"
-
-    if detected_cores is None or detected_mem is None:
-        try:
-            k8s = get_k8s_client()
-            cap = k8s.get_cluster_capacity()
-            if cap is not None:
-                if detected_cores is None:
-                    detected_cores = cap.total_cpu_millicores // 1000
-                if detected_mem is None:
-                    detected_mem = int(cap.total_memory_bytes / (1024**3))
-                cluster_source = f"detected ({cap.node_count} nodes)"
-        except Exception as e:
-            console.print(f"[yellow]Could not detect cluster capacity: {e}[/yellow]")
-            console.print("[dim]Use --cores and --memory to specify manually[/dim]\n")
-
-    if detected_cores is None or detected_mem is None:
-        mode_label = "continuous" if is_sustained else "batch"
-        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {mode_label})\n")
-        console.print(
-            "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
-        )
-        console.print("[dim]Use --scale N to see requirements for any specific scale[/dim]\n")
-
-        table = Table(title="Common Scale Points")
-        table.add_column("Scale", justify="right", style="cyan")
-        table.add_column("Data Size", justify="right")
-        table.add_column("Min Cores", justify="right")
-        table.add_column("Min Memory", justify="right")
-
-        for scale in [1, 10, 100, 500, 1000, 10000, 100000]:
-            reqs = compute_cluster_requirements(scale)
-            table.add_row(
-                f"{scale:,}",
-                format_data_size(reqs["data_gb"]),
-                f"{reqs['total_cores']:,}",
-                f"{reqs['total_mem_gi']:,} GB",
-            )
-
-        console.print(table)
-        return
-
-    # Case 3: Find max feasible scale for this cluster
-    max_scale = find_max_scale(detected_cores, detected_mem, use_slow_datagen=use_slow_datagen)
-    max_scale_standard = find_max_scale(detected_cores, detected_mem, use_slow_datagen=False)
-    max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
-
-    mode_label = "continuous" if is_sustained else "batch"
-    console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source}, mode: {mode_label})")
-    console.print(f"  CPU cores: [bold]{detected_cores}[/bold]")
-    console.print(f"  Memory:    [bold]{detected_mem} GB[/bold]\n")
-
-    if max_scale == 0:
-        console.print("[yellow]Cluster is below minimum requirements for scale 1.[/yellow]")
-        reqs = compute_cluster_requirements(1)
-        console.print(
-            f"[dim]Minimum for scale 1: {reqs['total_cores']} cores, {reqs['total_mem_gi']} GB RAM[/dim]"
-        )
-        return
-
-    # Show both datagen modes
-    std_reqs = compute_cluster_requirements(max_scale_standard)
-    slow_reqs = compute_slow_datagen_requirements(max_scale_slow)
-
-    if use_slow_datagen:
-        console.print(
-            "[bold yellow]Slow datagen:[/bold yellow] Datagen runs with reduced parallelism (slower generation, same compute resources)\n"
-        )
-        console.print(
-            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({format_data_size(slow_reqs['data_gb'])})"
-        )
-        console.print(
-            f"[dim]Standard max:              {max_scale_standard:,} ({format_data_size(std_reqs['data_gb'])})[/dim]\n"
-        )
-    else:
-        console.print(
-            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({format_data_size(std_reqs['data_gb'])})"
-        )
-        if max_scale_slow > max_scale_standard:
-            console.print(
-                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({format_data_size(slow_reqs['data_gb'])})[/dim]"
-            )
-        console.print()
-
-    # Use appropriate requirements function based on datagen mode
-    req_fn = compute_slow_datagen_requirements if use_slow_datagen else compute_cluster_requirements
-    check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
-
-    # Build a cleaner table: only show FEASIBLE milestones + max + next infeasible tier
-    scale_points = []
-    milestones = [1, 10, 50, 100, 500, 1000, 5000, 10000, 50000, 100000]
-
-    for s in milestones:
-        if s < max_scale and check_fn(s, detected_cores, detected_mem):
-            scale_points.append(s)
-
-    scale_points.append(max_scale)
-
-    for s in milestones:
-        if s > max_scale:
-            scale_points.append(s)
-            break
-    if (
-        len(scale_points)
-        == len(
-            [s for s in milestones if s < max_scale and check_fn(s, detected_cores, detected_mem)]
-        )
-        + 1
-    ):
-        scale_points.append(max_scale * 2)
-
-    table = Table(title="Scale Options")
-    table.add_column("Scale", justify="right", style="cyan")
-    table.add_column("Data", justify="right")
-    table.add_column("Cores", justify="right")
-    table.add_column("Memory", justify="right")
-    table.add_column("Status")
-
-    for scale in scale_points:
-        reqs = req_fn(scale)
-        feasible = check_fn(scale, detected_cores, detected_mem)
-
-        if scale == max_scale:
-            status = "[green bold]<- MAX[/green bold]"
-        elif feasible:
-            status = "[green]OK[/green]"
-        else:
-            cores_need = max(0, reqs["total_cores"] - detected_cores)
-            mem_need = max(0, reqs["total_mem_gi"] - detected_mem)
-            parts = []
-            if cores_need > 0:
-                parts.append(f"+{cores_need:,} cores")
-            if mem_need > 0:
-                parts.append(f"+{mem_need:,} GB")
-            status = f"[red]needs {', '.join(parts)}[/red]"
-
-        table.add_row(
-            f"{scale:,}",
-            format_data_size(reqs["data_gb"]),
-            f"{reqs['total_cores']:,}",
-            f"{reqs['total_mem_gi']:,} GB",
-            status,
-        )
-
-    console.print(table)
-
-    # Show next steps
-    console.print()
-    if use_slow_datagen:
-        console.print("[dim]Slow datagen: generation runs slower to fit cluster resources[/dim]")
-    console.print(f"[dim]Next: lakebench init --scale {max_scale}[/dim]")
+    code = recommend_impl(
+        cluster_cores=cluster_cores,
+        cluster_memory_gb=cluster_memory_gb,
+        target_scale=target_scale,
+        slow_datagen=slow_datagen or extended,
+        mode=mode,
+        schema_type=schema_type,
+        detect_capacity=_detect,
+    )
+    if code:
+        raise typer.Exit(code)
 
 
 # =============================================================================

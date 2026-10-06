@@ -3,8 +3,7 @@ work (lane compare-equiv). Each test fails with its fix reverted."""
 
 from __future__ import annotations
 
-import io
-import json
+import copy
 from types import SimpleNamespace
 from unittest import mock
 
@@ -56,8 +55,13 @@ def _run(cfg=None, fps=None, fleet=None):
     # A2b wiring: compare and perf_gate now refuse a run whose verdict is
     # FAILED. Mark the synthetic collector as successful so its computed
     # verdict is PASSED; these tests exercise the comparability ladder,
-    # not the failed-run refusal path.
+    # not the failed-run refusal path. Every layer has rows, so the
+    # verdict's layer_rows gate passes too.
     run.success = True
+    run.jobs = [
+        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
+        for s in ("bronze-verify", "silver-build", "gold-finalize")
+    ]
     return run
 
 
@@ -270,54 +274,6 @@ class TestFailedQueries:
 
 
 class TestNotEstablished:
-    def _comparison(self, a, b):
-        from lakebench.cli._compare import _build_comparison
-
-        for m in (a, b):
-            m.setdefault("pipeline_benchmark", {})["scores"] = {"time_to_value_seconds": 100.0}
-        b["pipeline_benchmark"]["scores"]["time_to_value_seconds"] = 50.0
-        return _build_comparison("A", a, "B", b)
-
-    def test_runs_without_results_are_not_established(self):
-        a = _run(fps={}).to_dict()
-        b = _run(fps={}).to_dict()
-        c = self._comparison(a, b)
-        assert c["verdict"] == "not_established"
-        assert c["comparable"] is False and c["like_for_like"] is False
-        assert all(r["not_comparable"] for r in c["metrics"])
-
-    def test_table_shows_no_winner(self):
-        from rich.console import Console
-
-        from lakebench.cli import _compare
-
-        c = self._comparison(_run(fps={}).to_dict(), _run(fps={}).to_dict())
-        buf = io.StringIO()
-        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
-            _compare._print_comparison_table(c)
-        text = buf.getvalue()
-        assert "NOT ESTABLISHED" in text and "-50.0%" not in text
-
-    def test_compare_exits_zero_when_not_established(self, tmp_path):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        for p in ("a.yaml", "b.yaml"):
-            (tmp_path / p).write_text("name: x\n")
-        a, b = _run(fps={}).to_dict(), _run(fps={}).to_dict()
-        with (
-            mock.patch("lakebench.cli._compare.load_config", side_effect=[_cfg(), _cfg()]),
-            mock.patch("lakebench.cli._compare._run_single", side_effect=[a, b]),
-            mock.patch("lakebench.cli._compare.DEFAULT_OUTPUT_DIR", str(tmp_path / "out")),
-        ):
-            result = CliRunner().invoke(
-                app, ["compare", str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml"), "--yes"]
-            )
-        assert result.exit_code == 0, result.output
-        saved = next((tmp_path / "out" / "comparisons").glob("*/comparison.json"))
-        assert json.loads(saved.read_text())["verdict"] == "not_established"
-
     def test_stored_references_refuse_a_batch_run_without_results(self):
         exp = stub_experiment(["Q1"])
         empty = stub_experiment([])
@@ -335,16 +291,6 @@ class TestNotEstablished:
 
 
 class TestObservedCorpus:
-    def test_fleet_values_are_stamped_and_disagreement_refuses(self):
-        cfg = _cfg()
-        fleet = {"seed": 999, "scale": 1.0, "image": cfg.images.datagen, "image_ids": []}
-        e = _run(cfg, fleet=fleet).to_dict()["experiment"]
-        assert e["corpus"]["seed"] == 999 and e["corpus"]["observed"] is True
-        assert any("seed" in p for p in e["corpus"]["problems"])
-        good = _run(cfg).to_dict()
-        prov, _, _ = ex.refusals(good, _run(cfg, fleet=fleet).to_dict())
-        assert any("datagen pods ran 999" in p for p in prov), prov
-
     def test_mixed_fleet_is_a_problem(self):
         e = _run(fleet={"data_quality": "mixed", "mixed_params": ["scale"]}).to_dict()["experiment"]
         assert any("mixed" in p for p in e["corpus"]["problems"])
@@ -372,17 +318,6 @@ class TestObservedCorpus:
 
 
 class TestStamps:
-    def test_local_run_stamps_what_ran(self):
-        run = _run(_cfg(query_engine={"type": "trino"}))
-        run.config_snapshot["local"] = True
-        e = run.to_dict()["experiment"]
-        assert e["system"] == "local"
-        assert e["architecture"]["query_engine"]["type"] == "duckdb"
-        assert e["architecture"]["query_access_path"] == "direct_storage"
-        assert "not_supported" in e["effective_maintenance"]["id"]
-        cluster = _run(_cfg(query_engine={"type": "duckdb"})).to_dict()
-        assert any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
-
     def test_streaming_budget_cap_and_tm_cap_are_bound(self):
         run = _run(
             _cfg(
@@ -411,8 +346,11 @@ class TestStamps:
         ra, rb = _run(_cfg(benchmark={"iterations": 1})), _run(_cfg(benchmark={"iterations": 3}))
         ra.benchmark.iterations, rb.benchmark.iterations = 1, 3
         a, b = ra.to_dict(), rb.to_dict()
-        assert ex.refusals(a, b)[0] == []
-        assert any(d.startswith("benchmark iterations") for d in ex.like_for_like(a, b))
+        assert ex.identity_differences(a["experiment"], b["experiment"]) == []
+        assert any(
+            d.startswith("benchmark iterations")
+            for d in ex.condition_differences(a["experiment"], b["experiment"])
+        )
 
     def test_hive_version_is_the_stackable_image(self):
         v = ex.experiment_inputs(_cfg())["architecture"]["catalog"]["version"]
@@ -435,9 +373,21 @@ class TestBlockFollowsTheRecord:
         loaded = storage.load_run(run.run_id)
         assert loaded.to_dict()["experiment"]["results"]["not_checked"]
         loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
+        stored = copy.deepcopy(loaded.to_dict()["experiment"])
+        assert stored["results"]["not_checked"], "a stored block is never rebuilt"
+        ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
+        # ... under its own run id: the run's record is written once.
+        loaded.run_id = "bench-1"
         storage.save_run(loaded)
-        e = storage.load_run(run.run_id).to_dict()["experiment"]
+        e = storage.load_run("bench-1").to_dict()["experiment"]
         assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+        assert e["benchmark_source"].startswith("lakebench benchmark")
+        moved = ("results", "limits", "repetitions", "stages", "benchmark_source")
+        assert {k: v for k, v in e.items() if k not in moved} == {
+            k: v for k, v in stored.items() if k not in moved
+        }
+        assert "benchmark (not run)" in stored["stages"]["skipped"]
+        assert not any(x.startswith("benchmark (") for x in e["stages"]["skipped"])
 
     def test_run_ending_before_maintenance_is_not_run(self):
         run = _run()
@@ -493,7 +443,12 @@ class TestFixPass:
         exp = stub_experiment(["Q1_full_aggregation_scan"], mode="sustained")
         exp["results"]["fingerprints"] = {"Q1_full_aggregation_scan": None}  # aggregated rounds
         exp["results"]["by_design"] = True  # the old deviation's marker no longer excuses it
-        run = SimpleNamespace(raw={"experiment": exp}, run_id="r", mode="sustained", scores={})
+        run = SimpleNamespace(
+            raw={"experiment": exp, "provenance": {"deps": {"pinset_sha256": "a" * 64}}},
+            run_id="r",
+            mode="sustained",
+            scores={},
+        )
         with (
             mock.patch.object(pg, "run_refusals", return_value=[]),
             mock.patch.object(pg.BaselineStore, "pinned", return_value=SimpleNamespace()),
@@ -531,7 +486,8 @@ class TestFixPass:
         a, b = run(1), run(2)
         ea, eb = ex.experiment_of(a), ex.experiment_of(b)
         assert ea["limits"]["bound"] != eb["limits"]["bound"]  # evidence keeps the counts
-        assert not [d for d in ex.like_for_like(a, b) if d.startswith("Lakebench limits")]
+        diffs = ex.condition_differences(ea, eb, a, b)
+        assert not [d for d in diffs if d.startswith("Lakebench limits")]
 
     def test_iterations_come_from_the_recorded_benchmark(self):
         r = _run(_cfg(benchmark={"iterations": 3}))

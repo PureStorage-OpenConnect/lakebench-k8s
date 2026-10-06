@@ -19,14 +19,11 @@ must eat the first raise and complete the second attempt cleanly.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 # The retry wrapper is a pure-Python control-flow helper; the tests mock out
 # Spark entirely with a fake session, so pyspark itself is not needed here.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+pytestmark = pytest.mark.usefixtures("load_script")
 
 
 class _FakeSpark:

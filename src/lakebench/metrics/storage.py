@@ -200,9 +200,57 @@ def _deserialize_benchmark_rounds(
                 streams=r.get("streams", 1),
                 stream_results=r.get("stream_results", []),
                 round_meta=round_meta,
+                round_record=(
+                    {k: r.get(k) for k in _ROUND_RECORD_KEYS}
+                    if "executed_query_set_id" in r
+                    else None
+                ),
             )
         )
     return rounds
+
+
+def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
+    """The ``composite_qph_basis`` of a stored metrics.json record, read from
+    its in-stream rounds (collector.composite_qph_basis) so a record written
+    before the basis was stored gets the same answer in the perf gate and
+    reproduce. A record that keeps no rounds gives its stored basis,
+    or None."""
+    from .collector import composite_qph_basis
+
+    rounds = _recorded_rounds(record)
+    if rounds:
+        return composite_qph_basis(rounds)[0]
+    if not isinstance(record, dict) or "error" in record:
+        return None
+    pb = record.get("pipeline_benchmark") or {}
+    stored = (pb.get("scores") or {}).get("composite_qph_basis") if isinstance(pb, dict) else None
+    return stored if isinstance(stored, dict) else None
+
+
+def _recorded_rounds(record: Any) -> list[BenchmarkMetrics]:
+    """A stored record's in-stream rounds, loaded as ``_dict_to_metrics``
+    loads them; rounds that are not objects are skipped."""
+    if not isinstance(record, dict) or "error" in record:
+        return []
+    pb = record.get("pipeline_benchmark") or {}
+    raw = pb.get("benchmark_rounds") if isinstance(pb, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return _deserialize_benchmark_rounds(
+        [r for r in raw if isinstance(r, dict)], record.get("start_time")
+    )
+
+
+#: The keys MetricsCollector.record_round writes beside a round's benchmark.
+_ROUND_RECORD_KEYS = (
+    "index",
+    "started_at",
+    "ended_at",
+    "executed_queries",
+    "executed_query_set_id",
+    "investigator_queries",
+)
 
 
 def recorded_engine(bench: dict[str, Any]) -> str | None:
@@ -262,12 +310,42 @@ def _deserialize_cycles(
                 timestamp_end=c.get("timestamp_end", ""),
                 datagen_elapsed_seconds=c.get("datagen_elapsed_seconds", 0.0),
                 datagen_output_gb=c.get("datagen_output_gb", 0.0),
+                datagen_skipped=bool(c.get("datagen_skipped", False)),
+                datagen_start=c.get("datagen_start", "") or "",
+                datagen_end=c.get("datagen_end", "") or "",
                 jobs=jobs,
                 benchmark=bench,
                 table_health=c.get("table_health", {}),
             )
         )
     return cycles
+
+
+class RecordExistsError(FileExistsError):
+    """``save_run`` found a record at the run's path and was not told to
+    replace it (``seal_update``)."""
+
+
+def _create_exclusive(tmp_path: str, filepath: Path) -> None:
+    """Move *tmp_path* to *filepath*, refusing when *filepath* exists.
+
+    ``os.link`` creates the name atomically and fails if it exists, so two
+    writers cannot both succeed. A filesystem without hard links falls back
+    to an exists check and a rename (not atomic against a racing writer)."""
+    try:
+        os.link(tmp_path, filepath)
+    except FileExistsError:
+        raise RecordExistsError(
+            f"{filepath} already exists; a record is written once, by the run that owns it"
+        ) from None
+    except OSError:
+        if filepath.exists():
+            raise RecordExistsError(
+                f"{filepath} already exists; a record is written once, by the run that owns it"
+            ) from None
+        os.rename(tmp_path, filepath)
+        return
+    os.unlink(tmp_path)
 
 
 class MetricsStorage:
@@ -284,7 +362,8 @@ class MetricsStorage:
             metrics_dir: Directory for storing metrics (parent of per-run dirs)
         """
         self.metrics_dir = Path(metrics_dir)
-        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        # Created on first write (run_dir), not here: report, results and
+        # compare only read, and a read-only command creates no files.
 
     # ------------------------------------------------------------------
     # Run directory helpers
@@ -300,11 +379,18 @@ class MetricsStorage:
     # Save / load
     # ------------------------------------------------------------------
 
-    def save_run(self, metrics: PipelineMetrics) -> Path:
-        """Save pipeline run metrics.
+    def save_run(self, metrics: PipelineMetrics, *, seal_update: bool = False) -> Path:
+        """Save pipeline run metrics to ``run-<id>/metrics.json``.
+
+        A record is written once. An existing ``metrics.json`` is replaced
+        only with ``seal_update=True``, which only the run that owns the
+        record passes; every other writer gets ``RecordExistsError`` and
+        the file is left as it was. The write goes to a temporary file in
+        the run directory first, so a reader never sees half a record.
 
         Args:
             metrics: PipelineMetrics to save
+            seal_update: replace an existing record (the owning run only)
 
         Returns:
             Path to saved file
@@ -318,9 +404,13 @@ class MetricsStorage:
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(metrics.to_dict(), f, indent=2)
-            os.rename(tmp_path, filepath)
+            if seal_update:
+                os.replace(tmp_path, filepath)
+            else:
+                _create_exclusive(tmp_path, filepath)
         except BaseException:
-            os.unlink(tmp_path)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
             raise
 
         logger.info(f"Saved metrics to {filepath}")
@@ -358,8 +448,11 @@ class MetricsStorage:
         Returns:
             List of run summaries (most recent first)
         """
-        runs = []
+        runs: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+
+        if not self.metrics_dir.is_dir():
+            return runs
 
         # New layout: per-run directories
         for run_dir in sorted(self.metrics_dir.iterdir(), reverse=True):
@@ -397,12 +490,23 @@ class MetricsStorage:
             # ``lakebench report --list`` (and any other summary consumer)
             # can prefer verdict.status over raw ``success`` (OD-6).
             verdict = data.get("verdict") if isinstance(data.get("verdict"), dict) else None
+            from lakebench.metrics.verdict import verdict_of
+
+            judged = verdict_of(data)
             return {
                 "run_id": data.get("run_id"),
                 "deployment_name": data.get("deployment_name"),
+                "record_kind": data.get("record_kind") or "run",
+                "parent_run_id": data.get("parent_run_id"),
                 "start_time": data.get("start_time"),
                 "success": data.get("success"),
                 "verdict": verdict,
+                # The strictest of the stored verdict and the one recomputed
+                # from the whole record (verdict.verdict_of): a reader of the
+                # row cannot recompute, so the row carries it.
+                "verdict_recomputed": judged["recomputed"],
+                "verdict_headline": judged["status"],
+                "passed": judged["status"] == "PASSED",
                 "total_elapsed_seconds": data.get("total_elapsed_seconds"),
                 "job_count": len(data.get("jobs", [])),
                 "scale": data.get("config_snapshot", {}).get("scale"),
@@ -421,12 +525,15 @@ class MetricsStorage:
             return None
 
     def get_latest_run(self) -> PipelineMetrics | None:
-        """Get the most recent run.
+        """Get the most recent run record.
+
+        A ``benchmark`` record (``record_kind``) is never the latest run:
+        it is a copy of the run it measured, read by its own run id.
 
         Returns:
             PipelineMetrics or None if no runs exist
         """
-        runs = self.list_runs()
+        runs = [r for r in self.list_runs() if r.get("record_kind", "run") == "run"]
         if not runs:
             return None
 
@@ -475,6 +582,10 @@ class MetricsStorage:
 
         legacy_fallback_id: str | None = None
         for info in self.list_runs():
+            if info.get("record_kind", "run") != "run":
+                # A benchmark record is a copy of a run, not a run (see
+                # get_latest_run); compare's config resolution skips it too.
+                continue
             recorded = info.get("deployment_name")
             if recorded == deployment_name:
                 return self.load_run(info["run_id"])
@@ -492,6 +603,8 @@ class MetricsStorage:
 
     def _iter_metrics_files(self):
         """Yield all metrics JSON file paths (new + legacy layouts)."""
+        if not self.metrics_dir.is_dir():
+            return
         # New layout: per-run directories
         for run_dir in sorted(self.metrics_dir.iterdir(), reverse=True):
             metrics_file = run_dir / "metrics.json"
@@ -568,18 +681,31 @@ class MetricsStorage:
             platform_metrics=data.get("platform_metrics"),
             cycles=_deserialize_cycles(data.get("cycles", []), recorded_at),
             datagen_fleet=data.get("datagen_fleet"),
+            datagen_stale_bronze=(data.get("datagen") or {}).get("stale_bronze"),
             financial_scoring=data.get("financial_scoring"),
             tm_operations=data.get("tm_operations"),
             c360_correctness=data.get("c360_correctness"),
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
             benchmark_error=data.get("benchmark_error"),
+            failure_reasons=[str(r) for r in data.get("failure_reasons") or []],
             autosize_cuts=data.get("autosize_cuts"),
+            job_timeout_seconds=data.get("job_timeout_seconds"),
+            benchmark_query_timeout_seconds=data.get("benchmark_query_timeout_seconds"),
             maintenance_outcomes=data.get("maintenance_outcomes"),
             continuous=data.get("continuous"),
+            interrupted=data.get("interrupted"),
+            abort_reason=data.get("abort_reason"),
+            series=data.get("series"),
+            record_kind=str(data.get("record_kind") or "run"),
+            parent_run_id=data.get("parent_run_id"),
+            stage_only=data.get("stage_only"),
+            cycle_series=data.get("cycle_series"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
+            stored_verdict=data.get("verdict") if isinstance(data.get("verdict"), dict) else None,
+            storage_multiple=data.get("storage_multiple"),
         )
 
         if data.get("end_time"):
@@ -694,6 +820,9 @@ class MetricsStorage:
                     "pipeline_throughput_gb_per_second", 0.0
                 ),
                 time_to_value_seconds=scores.get("time_to_value_seconds", 0.0),
+                time_to_value_datagen_excluded_seconds=scores.get(
+                    "time_to_value_datagen_excluded_seconds"
+                ),
                 # Both modes
                 total_core_hours=scores.get("total_core_hours", 0.0),
                 compute_efficiency_gb_per_core_hour=scores.get(
@@ -737,6 +866,7 @@ class MetricsStorage:
                 ),
                 cycles=_deserialize_cycles(pb_data.get("cycles", []), recorded_at),
                 qph_degradation_pct=scores.get("qph_degradation_pct"),
+                qph_degradation_withheld=scores.get("qph_degradation_withheld"),
                 # Maintenance metrics (v1.3)
                 maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),
                 maintenance_stopped=bool(scores.get("maintenance_stopped", False)),
@@ -836,6 +966,8 @@ class MetricsStorage:
                 if rid in seen_ids:
                     continue
                 seen_ids.add(rid)
+                if (data.get("record_kind") or "run") != "run":
+                    continue  # a benchmark record repeats its run's pipeline numbers
 
                 from lakebench.metrics.verdict import passed as _record_passed
                 from lakebench.metrics.verdict import verdict_status as _verdict_status

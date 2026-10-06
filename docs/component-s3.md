@@ -19,7 +19,6 @@ platform:
       path_style: true                   # Required for FlashBlade, MinIO
       access_key: ""                     # Inline S3 access key
       secret_key: ""                     # Inline S3 secret key
-      secret_ref: ""                     # OR: name of existing K8s Secret
       ca_cert: ""                        # PEM CA cert path (for HTTPS with self-signed CA)
       verify_ssl: true                   # Set false to skip SSL verification (dev only)
       buckets:
@@ -38,23 +37,20 @@ platform:
 | `path_style` | bool | `true` | Use path-style bucket addressing (`http://endpoint/bucket`) instead of virtual-hosted style (`http://bucket.endpoint`). Must be `true` for FlashBlade and MinIO. |
 | `access_key` | string | `""` | S3 access key provided inline. |
 | `secret_key` | string | `""` | S3 secret key provided inline. |
-| `secret_ref` | string | `""` | Name of an existing Kubernetes Secret containing `accessKey` and `secretKey` data fields. See [Credential Management](#credential-management): not yet consumed by deploy. |
 | `buckets.bronze` | string | `<name>-bronze` | Bucket name for the bronze (raw) data layer. When unset, derived from the deployment `name`. |
 | `buckets.silver` | string | `<name>-silver` | Bucket name for the silver (enriched) data layer. When unset, derived from the deployment `name`. |
 | `buckets.gold` | string | `<name>-gold` | Bucket name for the gold (aggregated) data layer. When unset, derived from the deployment `name`. |
-| `create_buckets` | bool | `true` | Automatically create buckets that do not exist. Set to `false` if buckets are pre-provisioned or if the credentials lack `CreateBucket` permission. |
+| `create_buckets` | bool | `true` | Automatically create buckets that do not exist. Set to `false` if buckets are pre-provisioned or if the credentials lack `CreateBucket` permission. `lakebench reproduce` refuses `false` (exit 2): it measures only against buckets it creates. |
 | `ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. At deploy time, the PEM content is read and embedded into a Kubernetes Secret for all components. Empty = system default CAs. |
 | `verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development when you don't have the CA certificate file. |
 
 ## Credential Management
 
-Lakebench supports two credential strategies:
+Lakebench reads S3 credentials only from `access_key` and `secret_key`. `deploy` renders the `lakebench-s3-credentials` Secret from them and the CLI's S3 client uses the same fields. To keep keys out of the file, use `${VAR}` environment substitution in the YAML (for example `access_key: "${S3_ACCESS_KEY}"`).
 
-1. **Inline credentials** -- Set `access_key` and `secret_key` directly in the YAML file. Convenient for development but exposes secrets in plaintext.
+`secret_ref` (the name of an existing Kubernetes Secret) was removed in v1.7: nothing ever read an existing Secret. The commands that change data refuse a config that sets it; `destroy`, `status` and the read-only commands load it and drop the key with a note.
 
-2. **Kubernetes Secret reference** -- `secret_ref` names a pre-existing Secret with `accessKey` and `secretKey` data fields. Today it only satisfies the credential-presence check: `deploy` renders the `lakebench-s3-credentials` Secret from `access_key`/`secret_key`, and the CLI's S3 client reads the same inline fields, so a config with only `secret_ref` deploys empty credentials. Use inline credentials, or `${VAR}` environment substitution in the YAML (for example `access_key: "${S3_ACCESS_KEY}"`) to keep keys out of the file.
-
-If neither inline credentials nor a `secret_ref` is provided, the config still loads, and `lakebench deploy` refuses to start.
+If no credentials are provided, the config still loads, and `lakebench deploy` refuses to start.
 
 ## Minimum S3 Permissions (IAM Policy)
 
@@ -181,14 +177,14 @@ When using Pure Storage FlashBlade as the S3 backend, keep the following in mind
         ca_cert: ./flashblade-ca.pem
   ```
 
-  Lakebench automatically distributes the certificate to all components (Spark, Trino, Polaris, Hive, datagen) via a Kubernetes Secret and JVM truststore injection.
+  Lakebench automatically distributes the certificate to all components (Spark, Trino, Polaris, Hive, datagen) via a Kubernetes Secret and JVM truststore injection. Datagen pods get it as `S3_CA_CERT` and as `SSL_CERT_FILE`; the second replaces the pod's system CA store, so datagen trusts only the CAs in that file while `ca_cert` is set.
 
 - **Path-style access is required.** FlashBlade does not support virtual-hosted bucket addressing. Always set `path_style: true`.
 - **Multipart upload ghost objects.** After failed or aborted uploads, FlashBlade may report non-zero object counts in its management UI even though `list_objects_v2` returns nothing. These are incomplete multipart upload artifacts that FlashBlade garbage-collects asynchronously. The `empty_bucket()` method in the S3 client handles this by aborting all incomplete multipart uploads and then entering a retry-verify loop: it re-checks both `list_objects_v2` and `list_multipart_uploads` until both return empty, waiting up to `max_wait` seconds (default 300) for FlashBlade's async GC to catch up.
 
 ## Spark S3A Integration
 
-Spark jobs access the S3 buckets through the Hadoop S3A connector. Lakebench injects proven S3A tuning parameters (connection pool size, multipart upload size, retry settings) into every Spark job automatically. These defaults are defined under `spark.conf` in the config schema and have been battle-tested at 1TB+ scale on FlashBlade. They can be overridden in the `spark.conf` section of the YAML file if needed.
+Spark jobs access the S3 buckets through the Hadoop S3A connector. Lakebench injects proven S3A tuning parameters into every Spark job, proven at 1TB+ scale on FlashBlade. The multipart part size, upload blocks and retry settings are job defaults that the `spark.conf` section of the YAML file can override; the connection pool, thread count and upload buffer are set by Lakebench for every job and are refused in `spark.conf` (see [Spark Reference](component-spark.md)).
 
 ## See Also
 

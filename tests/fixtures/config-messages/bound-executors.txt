@@ -1,0 +1,1 @@
+  - platform.compute.spark.silver_executors: Input should be greater than or equal to 1

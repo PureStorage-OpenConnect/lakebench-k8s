@@ -36,15 +36,11 @@ platform:
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+    # polaris.client_secret is optional: deploy generates one per deployment
+    # and stores it in the Secret lakebench-polaris-client.
 
   pipeline:
     mode: batch
-    medallion:
-      bronze:
-        format: parquet
-        path_template: pacs008     # <-- datagen + bronze_verify both read here
 
   tables:
     bronze: default.pacs008_raw

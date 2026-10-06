@@ -1,8 +1,8 @@
 # Recipe: hive-delta-spark-trino
 #
 # Hive Metastore + Delta Lake + Spark pipeline + Trino query engine.
-# Uses Delta Lake 4.0.0 as the table format instead of Iceberg.
-# Delta 4.0.0 requires Spark 4.0.x -- do not use with Spark 3.5.x.
+# Uses Delta Lake as the table format instead of Iceberg: 4.1.0 on Spark
+# 4.1 (this recipe's default), 4.0.0 on Spark 4.0. Not for Spark 3.5.x.
 #
 # Deploys: namespace, S3 secrets, PostgreSQL, Hive Metastore (Stackable),
 #          Spark RBAC, Trino (coordinator + workers).
@@ -11,7 +11,7 @@ name: hive-delta-trino
 recipe: hive-delta-spark-trino
 
 images:
-  spark: apache/spark:4.0.2-python3
+  spark: apache/spark:4.1.1-python3
   postgres: postgres:17
   trino: trinodb/trino:483
   pull_policy: Always
@@ -46,7 +46,7 @@ architecture:
   table_format:
     type: delta
     delta:
-      version: "4.0.0"          # requires Spark 4.0.x
+      version: "4.1.0"          # requires Spark 4.1.x
 
   pipeline:
     mode: batch

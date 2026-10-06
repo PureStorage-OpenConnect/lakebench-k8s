@@ -13,13 +13,14 @@
 #
 # Run it as-is. Identity and credentials come from the environment:
 #   LAKEBENCH_PERF_NAME, LAKEBENCH_S3_ENDPOINT, LAKEBENCH_S3_ACCESS_KEY,
-#   LAKEBENCH_S3_SECRET_KEY, LAKEBENCH_POLARIS_CLIENT_SECRET
+#   LAKEBENCH_S3_SECRET_KEY. The Polaris client secret is generated per
+#   deployment by deploy (SAF-8).
 
 name: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}
 recipe: polaris-iceberg-spark-thrift
 
 images:
-  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -46,21 +47,12 @@ platform:
     scratch:
       enabled: true
       storage_class: px-csi-scratch
-      size: 200Gi
 
   compute:
     postgres:
       storage: 10Gi
       storage_class: px-csi-db
     spark:
-      driver:
-        cores: 2
-        memory: 2g
-      executor:
-        instances: 2
-        cores: 2
-        memory: 4g
-        memory_overhead: 1g
       # Per-job executor counts, equal to the scale-1 auto values today
       # (get_executor_count with schema financial).
       bronze_executors: 4
@@ -70,17 +62,11 @@ platform:
 architecture:
   catalog:
     type: polaris
-    polaris:
-      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch
     # Maintenance settings are part of the gate fingerprint; pinned here.
     pre_benchmark_maintenance: true
-    medallion:
-      bronze:
-        format: parquet
-        path_template: pacs008
 
   workload:
     schema: financial
@@ -120,4 +106,3 @@ architecture:
     # Median of 3 timed runs per query (LB-150); a run with a different
     # sample count is refused by the gate.
     iterations: 3
-    streams: 4

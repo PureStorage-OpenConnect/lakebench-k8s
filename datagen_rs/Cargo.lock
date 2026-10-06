@@ -542,11 +542,14 @@ name = "datagen_rs"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "bytes",
  "mimalloc",
  "object_store",
  "parquet",
  "rayon",
+ "ring",
+ "serde_json",
  "tokio",
 ]
 

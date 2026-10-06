@@ -1,0 +1,1 @@
+  - architecture.query_engine.trino.worker.replicas: Input should be greater than or equal to 1

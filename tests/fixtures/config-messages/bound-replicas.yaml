@@ -1,0 +1,6 @@
+name: t
+architecture:
+  query_engine:
+    trino:
+      worker:
+        replicas: -2

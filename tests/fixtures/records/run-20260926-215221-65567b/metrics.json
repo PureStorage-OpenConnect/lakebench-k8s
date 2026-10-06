@@ -1,0 +1,1181 @@
+{
+  "run_id": "20260926-215221-65567b",
+  "deployment_name": "lb16-cont-c360",
+  "start_time": "2026-09-26T21:52:21.318548",
+  "end_time": "2026-09-26T22:14:31.991268",
+  "total_elapsed_seconds": 1330.67272,
+  "success": true,
+  "bronze_size_gb": 19.794568830169737,
+  "silver_size_gb": 9.746043489314616,
+  "gold_size_gb": 3.013666719198227e-05,
+  "jobs": [],
+  "queries": [],
+  "streaming": [
+    {
+      "job_name": "lakebench-bronze-ingest",
+      "job_type": "bronze-ingest",
+      "throughput_rps": 4130.933333333333,
+      "freshness_seconds": 0.0,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "batch_span_seconds": 75.581493,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 2,
+      "micro_batch_duration_ms": 21575.0,
+      "batch_size": 619640,
+      "total_batches": 4,
+      "total_rows_processed": 2478560,
+      "unique_rows_processed": 2478560,
+      "elapsed_seconds": 600,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "job_name": "lakebench-silver-stream",
+      "job_type": "silver-stream",
+      "throughput_rps": 4130.933333333333,
+      "freshness_seconds": 0.0,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": 2478560,
+      "batch_span_seconds": null,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 4,
+      "micro_batch_duration_ms": 62000.0,
+      "batch_size": 2478560,
+      "total_batches": 1,
+      "total_rows_processed": 2478560,
+      "unique_rows_processed": 2478560,
+      "elapsed_seconds": 600,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "job_name": "lakebench-gold-refresh",
+      "job_type": "gold-refresh",
+      "throughput_rps": 4047.6016666666665,
+      "freshness_seconds": 322.0,
+      "freshness_active_seconds": 322.0,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "batch_span_seconds": null,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 1,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "ttd_pass_end_p50_seconds": null,
+      "ttd_pass_end_p95_seconds": null,
+      "ttd_by_rule": {},
+      "tick_timings": [],
+      "requested_executors": 2,
+      "micro_batch_duration_ms": 19000.0,
+      "batch_size": 2428561,
+      "total_batches": 1,
+      "total_rows_processed": 2428561,
+      "unique_rows_processed": 0,
+      "elapsed_seconds": 600,
+      "success": true,
+      "error_message": null
+    }
+  ],
+  "config_snapshot": {
+    "name": "lb16-cont-c360",
+    "scale": 1.0,
+    "approx_bronze_gb": 10.0,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.0.1.50:80",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "100Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 2,
+        "memory": "2g"
+      },
+      "executor": {
+        "instances": 2,
+        "cores": 2,
+        "memory": "4g",
+        "memory_overhead": "1g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "customer360",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 600,
+      "max_files_per_trigger": 50,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 1.0,
+      "mode": "auto",
+      "parallelism": 2,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "worker": {
+        "replicas": 2,
+        "cpu": "4",
+        "memory": "16Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": 300,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": 600
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0.dev0",
+    "git_sha": "f8b29eb9bfb92181d345af7b0cf0f1d2661b592d",
+    "git_dirty": false
+  },
+  "benchmark": {
+    "benchmark_type": "trino_query",
+    "query_set_id": "qs8-fbcf945fe40f",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 1.0,
+    "qph": 780.8,
+    "total_seconds": 36.89,
+    "iterations": 1,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "Q1_full_aggregation_scan",
+        "display_name": "Full aggregation scan",
+        "class": "scan",
+        "elapsed_seconds": 8.766,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          8.766
+        ],
+        "min_seconds": 8.766,
+        "max_seconds": 8.766,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q2_filtered_aggregation",
+        "display_name": "Filtered aggregation",
+        "class": "filter_prune",
+        "elapsed_seconds": 7.612,
+        "rows_returned": 70,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          7.612
+        ],
+        "min_seconds": 7.612,
+        "max_seconds": 7.612,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q4_churn_risk_analysis",
+        "display_name": "Churn risk analysis",
+        "class": "filter_prune",
+        "elapsed_seconds": 3.3,
+        "rows_returned": 6,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          3.3
+        ],
+        "min_seconds": 3.3,
+        "max_seconds": 3.3,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q3_customer_segmentation",
+        "display_name": "Customer segmentation",
+        "class": "aggregation",
+        "elapsed_seconds": 4.091,
+        "rows_returned": 12,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          4.091
+        ],
+        "min_seconds": 4.091,
+        "max_seconds": 4.091,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q7_channel_conversion_funnel",
+        "display_name": "Channel conversion funnel",
+        "class": "aggregation",
+        "elapsed_seconds": 3.386,
+        "rows_returned": 5,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          3.386
+        ],
+        "min_seconds": 3.386,
+        "max_seconds": 3.386,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q5_revenue_trend_ma7",
+        "display_name": "Revenue trend MA7",
+        "class": "analytics",
+        "elapsed_seconds": 2.992,
+        "rows_returned": 14,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          2.992
+        ],
+        "min_seconds": 2.992,
+        "max_seconds": 2.992,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q6_customer_rfm",
+        "display_name": "Customer RFM scoring",
+        "class": "analytics",
+        "elapsed_seconds": 4.623,
+        "rows_returned": 4,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          4.623
+        ],
+        "min_seconds": 4.623,
+        "max_seconds": 4.623,
+        "relative_range": 0.0
+      },
+      {
+        "name": "Q9_executive_dashboard",
+        "display_name": "Executive dashboard",
+        "class": "operational",
+        "elapsed_seconds": 2.116,
+        "rows_returned": 14,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          2.116
+        ],
+        "min_seconds": 2.116,
+        "max_seconds": 2.116,
+        "relative_range": 0.0
+      }
+    ],
+    "spread": {
+      "samples_per_query": 1,
+      "qph_low": 780.8,
+      "qph_high": 780.8,
+      "relative_range": 0.0
+    }
+  },
+  "benchmark_rounds": [
+    {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-fbcf945fe40f",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 780.8,
+      "total_seconds": 36.89,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 8.766,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            8.766
+          ],
+          "min_seconds": 8.766,
+          "max_seconds": 8.766,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.612,
+          "rows_returned": 70,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            7.612
+          ],
+          "min_seconds": 7.612,
+          "max_seconds": 7.612,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 3.3,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            3.3
+          ],
+          "min_seconds": 3.3,
+          "max_seconds": 3.3,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 4.091,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.091
+          ],
+          "min_seconds": 4.091,
+          "max_seconds": 4.091,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 3.386,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            3.386
+          ],
+          "min_seconds": 3.386,
+          "max_seconds": 3.386,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 2.992,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.992
+          ],
+          "min_seconds": 2.992,
+          "max_seconds": 2.992,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 4.623,
+          "rows_returned": 4,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.623
+          ],
+          "min_seconds": 4.623,
+          "max_seconds": 4.623,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 2.116,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.116
+          ],
+          "min_seconds": 2.116,
+          "max_seconds": 2.116,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 780.8,
+        "qph_high": 780.8,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 1,
+        "timestamp": "2026-09-26T22:09:31.351424",
+        "gold_freshness_seconds": 0.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 28,
+          "silver_snapshot_count": 1,
+          "gold_data_file_count": -1,
+          "gold_snapshot_count": -1
+        }
+      }
+    }
+  ],
+  "pipeline_benchmark": {
+    "run_id": "20260926-215221-65567b",
+    "deployment_name": "lb16-cont-c360",
+    "pipeline_mode": "sustained",
+    "scale_factor": 1.0,
+    "start_time": "2026-09-26T21:52:21.318548",
+    "end_time": "2026-09-26T22:14:31.991268",
+    "success": true,
+    "scorecard": {
+      "data_freshness_seconds": 322.0,
+      "sustained_throughput_rps": 4130.9,
+      "total_data_processed_gb": 39.287,
+      "pipeline_throughput_gb_per_second": 0.0655,
+      "total_core_hours": 4.67,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 8.4186,
+      "stage_latency_profile": {
+        "bronze_ms": 21575.0,
+        "silver_ms": 62000.0,
+        "gold_ms": 19000.0
+      },
+      "composite_qph": 780.8,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "corpus_drain_seconds": null,
+      "bronze_busy_fraction": 0.144,
+      "total_rows_processed": 7385681,
+      "total_elapsed_seconds": 1330.67,
+      "total_s3_objects": 306,
+      "in_stream_composite_qph": 780.8,
+      "benchmark_rounds_count": 1
+    },
+    "scores": {
+      "data_freshness_seconds": 322.0,
+      "sustained_throughput_rps": 4130.9,
+      "total_data_processed_gb": 39.287,
+      "pipeline_throughput_gb_per_second": 0.0655,
+      "total_core_hours": 4.67,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 8.4186,
+      "stage_latency_profile": {
+        "bronze_ms": 21575.0,
+        "silver_ms": 62000.0,
+        "gold_ms": 19000.0
+      },
+      "composite_qph": 780.8,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "corpus_drain_seconds": null,
+      "bronze_busy_fraction": 0.144,
+      "total_rows_processed": 7385681,
+      "total_elapsed_seconds": 1330.67,
+      "total_s3_objects": 306,
+      "in_stream_composite_qph": 780.8,
+      "benchmark_rounds_count": 1
+    },
+    "stages": [
+      {
+        "stage_name": "bronze",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 19.794568830169737,
+        "output_size_gb": 0.0,
+        "input_rows": 2478560,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.032990948050282895,
+        "throughput_rows_per_second": 4130.933333333333,
+        "executor_count": 2,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": 21575.0,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": 75.581493,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 4,
+        "batch_size": 619640,
+        "unique_rows_processed": 2478560,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 9.746043489314616,
+        "output_size_gb": 0.0,
+        "input_rows": 2478560,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.01624340581552436,
+        "throughput_rows_per_second": 4130.933333333333,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 62000.0,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": 2478560,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 1,
+        "batch_size": 2478560,
+        "unique_rows_processed": 2478560,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 9.746043489314616,
+        "output_size_gb": 0.0,
+        "input_rows": 2428561,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.01624340581552436,
+        "throughput_rows_per_second": 4047.6016666666665,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 19000.0,
+        "freshness_seconds": 322.0,
+        "freshness_active_seconds": 322.0,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 1,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 1,
+        "batch_size": 2428561,
+        "unique_rows_processed": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 36.88696542297839,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 3.013666719198227e-05,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "queries_executed": 8,
+        "queries_per_hour": 780.7636022577045
+      }
+    ],
+    "stage_matrix": {
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "input_size_gb": 19.795,
+        "output_size_gb": 0.0,
+        "input_rows": 2478560,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.033,
+        "throughput_rows_per_second": 4130.9,
+        "executor_count": 2,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": 21575.0,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "input_size_gb": 9.746,
+        "output_size_gb": 0.0,
+        "input_rows": 2478560,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0162,
+        "throughput_rows_per_second": 4130.9,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 62000.0,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 600,
+        "input_size_gb": 9.746,
+        "output_size_gb": 0.0,
+        "input_rows": 2428561,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0162,
+        "throughput_rows_per_second": 4047.6,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 19000.0,
+        "freshness_seconds": 322.0,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 36.89,
+        "input_size_gb": 0.0,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 780.8,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 19.795,
+      "silver_gb": 0.0,
+      "gold_gb": 0.0
+    },
+    "config_snapshot": {
+      "name": "lb16-cont-c360",
+      "scale": 1.0,
+      "approx_bronze_gb": 10.0,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.0.1.50:80",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "100Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 2,
+          "memory": "2g"
+        },
+        "executor": {
+          "instances": 2,
+          "cores": 2,
+          "memory": "4g",
+          "memory_overhead": "1g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "hive",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "customer360",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 600,
+        "max_files_per_trigger": 50,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 1.0,
+        "mode": "auto",
+        "parallelism": 2,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "2",
+          "memory": "8Gi"
+        },
+        "worker": {
+          "replicas": 2,
+          "cpu": "4",
+          "memory": "16Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": 300,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": 600
+      },
+      "datagen_output_rows": 2478560
+    },
+    "ingest_ratio": 1.0,
+    "pipeline_saturated": false,
+    "corpus_drained": false,
+    "query_benchmark": {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-fbcf945fe40f",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 1.0,
+      "qph": 780.8,
+      "total_seconds": 36.89,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "Q1_full_aggregation_scan",
+          "display_name": "Full aggregation scan",
+          "class": "scan",
+          "elapsed_seconds": 8.766,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            8.766
+          ],
+          "min_seconds": 8.766,
+          "max_seconds": 8.766,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q2_filtered_aggregation",
+          "display_name": "Filtered aggregation",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.612,
+          "rows_returned": 70,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            7.612
+          ],
+          "min_seconds": 7.612,
+          "max_seconds": 7.612,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q4_churn_risk_analysis",
+          "display_name": "Churn risk analysis",
+          "class": "filter_prune",
+          "elapsed_seconds": 3.3,
+          "rows_returned": 6,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            3.3
+          ],
+          "min_seconds": 3.3,
+          "max_seconds": 3.3,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q3_customer_segmentation",
+          "display_name": "Customer segmentation",
+          "class": "aggregation",
+          "elapsed_seconds": 4.091,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.091
+          ],
+          "min_seconds": 4.091,
+          "max_seconds": 4.091,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q7_channel_conversion_funnel",
+          "display_name": "Channel conversion funnel",
+          "class": "aggregation",
+          "elapsed_seconds": 3.386,
+          "rows_returned": 5,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            3.386
+          ],
+          "min_seconds": 3.386,
+          "max_seconds": 3.386,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q5_revenue_trend_ma7",
+          "display_name": "Revenue trend MA7",
+          "class": "analytics",
+          "elapsed_seconds": 2.992,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.992
+          ],
+          "min_seconds": 2.992,
+          "max_seconds": 2.992,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q6_customer_rfm",
+          "display_name": "Customer RFM scoring",
+          "class": "analytics",
+          "elapsed_seconds": 4.623,
+          "rows_returned": 4,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.623
+          ],
+          "min_seconds": 4.623,
+          "max_seconds": 4.623,
+          "relative_range": 0.0
+        },
+        {
+          "name": "Q9_executive_dashboard",
+          "display_name": "Executive dashboard",
+          "class": "operational",
+          "elapsed_seconds": 2.116,
+          "rows_returned": 14,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.116
+          ],
+          "min_seconds": 2.116,
+          "max_seconds": 2.116,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 780.8,
+        "qph_high": 780.8,
+        "relative_range": 0.0
+      }
+    },
+    "benchmark_rounds": [
+      {
+        "benchmark_type": "trino_query",
+        "query_set_id": "qs8-fbcf945fe40f",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 1.0,
+        "qph": 780.8,
+        "total_seconds": 36.89,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "Q1_full_aggregation_scan",
+            "display_name": "Full aggregation scan",
+            "class": "scan",
+            "elapsed_seconds": 8.766,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              8.766
+            ],
+            "min_seconds": 8.766,
+            "max_seconds": 8.766,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q2_filtered_aggregation",
+            "display_name": "Filtered aggregation",
+            "class": "filter_prune",
+            "elapsed_seconds": 7.612,
+            "rows_returned": 70,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              7.612
+            ],
+            "min_seconds": 7.612,
+            "max_seconds": 7.612,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q4_churn_risk_analysis",
+            "display_name": "Churn risk analysis",
+            "class": "filter_prune",
+            "elapsed_seconds": 3.3,
+            "rows_returned": 6,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              3.3
+            ],
+            "min_seconds": 3.3,
+            "max_seconds": 3.3,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q3_customer_segmentation",
+            "display_name": "Customer segmentation",
+            "class": "aggregation",
+            "elapsed_seconds": 4.091,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              4.091
+            ],
+            "min_seconds": 4.091,
+            "max_seconds": 4.091,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q7_channel_conversion_funnel",
+            "display_name": "Channel conversion funnel",
+            "class": "aggregation",
+            "elapsed_seconds": 3.386,
+            "rows_returned": 5,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              3.386
+            ],
+            "min_seconds": 3.386,
+            "max_seconds": 3.386,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q5_revenue_trend_ma7",
+            "display_name": "Revenue trend MA7",
+            "class": "analytics",
+            "elapsed_seconds": 2.992,
+            "rows_returned": 14,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.992
+            ],
+            "min_seconds": 2.992,
+            "max_seconds": 2.992,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q6_customer_rfm",
+            "display_name": "Customer RFM scoring",
+            "class": "analytics",
+            "elapsed_seconds": 4.623,
+            "rows_returned": 4,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              4.623
+            ],
+            "min_seconds": 4.623,
+            "max_seconds": 4.623,
+            "relative_range": 0.0
+          },
+          {
+            "name": "Q9_executive_dashboard",
+            "display_name": "Executive dashboard",
+            "class": "operational",
+            "elapsed_seconds": 2.116,
+            "rows_returned": 14,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.116
+            ],
+            "min_seconds": 2.116,
+            "max_seconds": 2.116,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 780.8,
+          "qph_high": 780.8,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 1,
+          "timestamp": "2026-09-26T22:09:31.351424",
+          "gold_freshness_seconds": 0.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 28,
+            "silver_snapshot_count": 1,
+            "gold_data_file_count": -1,
+            "gold_snapshot_count": -1
+          }
+        }
+      }
+    ],
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
+      "sustained_throughput_rps": "Rows entering bronze per second (higher is better). When intake_limit is trickle_rate this is the configured offered load, not a capacity",
+      "ingest_ratio": "Bronze rows ingested / datagen rows produced: the share of the corpus the window consumed (1.0 = all data consumed). The offered load is the trickle (max_files_per_trigger per bronze trigger), so a corpus larger than trickle rate x window reads below 1 without saturation; intake_limit says which",
+      "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
+      "pipeline_saturated": "True when ingest_ratio < 0.95 and the pipeline did not keep pace with the offered load. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
+      "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
+      "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
+      "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+      "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
+      "total_rows_processed": "Cumulative rows processed across all streaming stages",
+      "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
+      "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
+      "benchmark_rounds_count": "Number of in-stream benchmark rounds executed"
+    },
+    "advanced_metrics": null
+  }
+}

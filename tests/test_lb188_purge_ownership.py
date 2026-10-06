@@ -12,8 +12,6 @@ not-owned tables, where PURGE never ran regardless.
 
 from __future__ import annotations
 
-import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -50,19 +48,12 @@ class _FakeSpark:
 
 
 @pytest.fixture
-def common(monkeypatch):
-    if _SCRIPTS not in sys.path:
-        sys.path.insert(0, _SCRIPTS)
-    sys.modules.pop("common", None)
-    mod = importlib.import_module("common")
-    yield mod
-    sys.modules.pop("common", None)
+def common(load_script):
+    return load_script("common")
 
 
 @pytest.fixture
-def financial(monkeypatch):
-    if _SCRIPTS not in sys.path:
-        sys.path.insert(0, _SCRIPTS)
+def financial(monkeypatch, load_script):
     # bronze_verify_financial reads these into module constants (CATALOG,
     # BRONZE_URI, PACS_PREFIX) at import time. Clear anything a prior test in
     # the full suite leaked so the re-import uses the declared defaults these
@@ -78,12 +69,7 @@ def financial(monkeypatch):
         "LB_FINANCIAL_BRONZE_TABLE",
     ):
         monkeypatch.delenv(var, raising=False)
-    sys.modules.pop("common", None)
-    sys.modules.pop("bronze_verify_financial", None)
-    mod = importlib.import_module("bronze_verify_financial")
-    yield mod
-    sys.modules.pop("bronze_verify_financial", None)
-    sys.modules.pop("common", None)
+    return load_script("bronze_verify_financial")
 
 
 # --- c360: common.reset_stream_tables ---------------------------------------

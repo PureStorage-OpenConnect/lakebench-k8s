@@ -1,0 +1,1 @@
+  - recipe: unknown recipe 'hive-iceberg-spark-trno'; did you mean 'hive-iceberg-spark-trino'?

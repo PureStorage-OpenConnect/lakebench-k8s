@@ -1,7 +1,7 @@
 """Shared CLI helpers for Lakebench.
 
 Extracted from cli/__init__.py so that submodules (_sustained.py,
-_compare.py, _config.py) can import these without circular dependencies.
+_config.py) can import these without circular dependencies.
 """
 
 from __future__ import annotations
@@ -12,26 +12,16 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
+from rich.text import Text
 
+from lakebench.exit_codes import ExitCode, LakebenchError
 from lakebench.journal import Journal
 
 logger = logging.getLogger(__name__)
 
 # Default config file name for auto-discovery
 DEFAULT_CONFIG = "lakebench.yaml"
-
-# Exit code for a declined interactive confirmation prompt (C3, v1.6).
-# Distinct from 0 (success) and 1 (failure) so wrapper scripts can tell a
-# "user said no" apart from either. Every CLI site that reaches a
-# ``typer.confirm`` and takes the "no" branch exits with this code.
-EXIT_DECLINED = 3
-
-# Exit code when datagen exceeds its wait budget (A4, v1.6). Distinct from
-# 1 (generic failure), 2 (usage/refusal), 3 (declined prompt) and 4
-# (EXIT_NAMESPACE_STILL_TERMINATING in cli/_destroy.py). A wrapper that
-# retries on 4 must not retry on this; a wrapper that watches for 5 must
-# not treat it as namespace-still-terminating.
-EXIT_DATAGEN_TIMEOUT = 5
 
 # ANSI escape code stripper for log output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -66,9 +56,9 @@ def resolve_config_path(
     if default.exists():
         return default
 
-    console.print(f"[red]ERROR[/red] No config file specified and ./{DEFAULT_CONFIG} not found")
-    console.print("[blue]INFO[/blue] Create one with: lakebench init")
-    raise typer.Exit(1)
+    print_error(f"No config file specified and ./{DEFAULT_CONFIG} not found")
+    print_info("Create one with: lakebench init")
+    raise typer.Exit(ExitCode.USAGE)
 
 
 def get_journal() -> Journal:
@@ -86,19 +76,83 @@ def journal_open(config_path: Path | None, config_name: str = "") -> Journal:
     return j
 
 
-def print_success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"[green]OK[/green] {message}")
+def esc(value: object) -> str:
+    """``str(value)`` with Rich markup escaped.
+
+    For values interpolated into an f-string that goes to ``console.print``:
+    without it ``[/tmp]`` raises ``MarkupError`` and ``[main]`` vanishes.
+    """
+    return escape(str(value))
 
 
-def print_error(message: str) -> None:
-    """Print an error message."""
-    console.print(f"[red]ERROR[/red] {message}")
+def markup(text: str) -> str:
+    """Mark *text* as Rich markup on purpose (identity).
+
+    The markup-safety lint accepts an f-string value wrapped in ``markup()``
+    (or in a function whose name ends in ``_markup``); use it only for text
+    built from literals, such as a coloured PASS/FAIL label.
+    """
+    return text
 
 
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    console.print(f"[yellow]WARN[/yellow] {message}")
+def _status_line(prefix: str, style: str, message: object) -> None:
+    """``prefix message`` on stderr; the message is never parsed as markup.
+
+    ``soft_wrap`` keeps a long message on one line, so a pipe or a log grep
+    sees it whole.
+    """
+    line = Text(prefix, style=style)
+    line.append(" ")
+    line.append(str(message))
+    err_console.print(line, soft_wrap=True)
+
+
+def print_success(message: object) -> None:
+    """Print a success message on stderr (text is printed verbatim)."""
+    _status_line("OK", "green", message)
+
+
+def print_error(message: object) -> None:
+    """Print an error message on stderr (text is printed verbatim). Under
+    ``--json`` it is also kept for the document's ``errors``."""
+    from lakebench.cli import _json
+
+    _json.note_printed_error(message)
+    _status_line("ERROR", "red", message)
+
+
+def print_warning(message: object) -> None:
+    """Print a warning message on stderr (text is printed verbatim)."""
+    _status_line("WARN", "yellow", message)
+
+
+def emit_error(err: LakebenchError) -> None:
+    """Print *err* on stderr in the TUD 11.1 shape, at most four lines.
+
+    ``ERROR what``, then ``Why``, ``Next`` and ``Where`` only when set. No
+    field is parsed as markup and none is wrapped.
+    """
+    for label, text in err.lines():
+        line = Text(label.ljust(6), style="red" if label == "ERROR" else "bold")
+        line.append(" ")
+        line.append(text)
+        err_console.print(line, soft_wrap=True)
+
+
+def emit_data(text: str) -> None:
+    """Write machine output (JSON, CSV) to plain stdout.
+
+    Not through Rich: Rich wraps at the terminal width and parses markup,
+    which breaks parsers on long values or brackets.
+    """
+    import sys
+
+    from lakebench.cli import _json
+
+    # Under --json, stdout carries only the document.
+    out = sys.stderr if _json.active() else sys.stdout
+    out.write(text if text.endswith("\n") else text + "\n")
+    out.flush()
 
 
 def check_datagen_scale(cfg: object) -> None:
@@ -115,7 +169,7 @@ def check_datagen_scale(cfg: object) -> None:
     state, basis = band
     if state == UNSUPPORTED:
         print_error(f"Unsupported scale, refused: {basis}")
-        raise typer.Exit(1)
+        raise typer.Exit(ExitCode.USAGE)
     print_warning(f"Unverified scale: {basis}")
 
 
@@ -131,7 +185,7 @@ def warn_deprecated_short_f(new_spelling: str) -> None:
     Goes to stderr so that, for example, ``results -f json | jq`` still parses.
     """
     err_console.print(
-        f"[yellow]WARN[/yellow] '-f' here is deprecated: use {new_spelling}. In a future "
+        f"[yellow]WARN[/yellow] '-f' here is deprecated: use {esc(new_spelling)}. In a future "
         "release '-f' will mean --file (the config path), as it does on every other command."
     )
 
@@ -170,16 +224,16 @@ def deprecated_short_f_force(new_spelling: str, force_given: bool) -> bool:
         warn_deprecated_short_f(new_spelling)
         return True
     err_console.print(
-        f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {new_spelling}. "
+        f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {esc(new_spelling)}. "
         "'-f' will mean --file (the config path), as it does on every other command. "
-        f"Set {LEGACY_SHORT_F_ENV}=1 to keep the old meaning for this release."
+        f"Set {esc(LEGACY_SHORT_F_ENV)}=1 to keep the old meaning for this release."
     )
-    raise typer.Exit(2)
+    raise typer.Exit(ExitCode.USAGE)
 
 
-def print_info(message: str) -> None:
-    """Print an info message."""
-    console.print(f"[blue]...[/blue] {message}")
+def print_info(message: object) -> None:
+    """Print an info message on stderr (text is printed verbatim)."""
+    _status_line("...", "blue", message)
 
 
 def _journal_safe(fn, *args, **kwargs) -> None:
@@ -193,81 +247,127 @@ def _journal_safe(fn, *args, **kwargs) -> None:
             _journal_warned = True
 
 
-def enforce_bronze_regenerate(cfg, regenerate: bool) -> None:
-    """Refuse to start datagen over a non-empty bronze prefix (A4, v1.6).
+def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> None:
+    """``stop_previous_datagen``; a refusal or an unknown pod state exits.
 
-    Before A4 both ``lakebench generate`` and ``run --generate`` deployed
-    datagen straight onto whatever was in bronze; the deployer's LB-185
-    clear ran only for buckets this deployment recorded creating, so any
-    other case silently over-wrote existing part-* files. This gate is the
-    CLI-level counterpart: without ``--regenerate`` the command exits 2 and
-    names the prefix, so the operator opts in explicitly instead of
-    discovering the wipe later. With ``--regenerate`` the whole bronze
-    bucket is emptied via ``S3Client.empty_bucket`` (which also aborts
-    dangling multipart uploads on FlashBlade) before datagen submits.
+    Called before the bronze gate (``generate``, ``run --generate``, the
+    multi-cycle loop) and before a continuous reset, so no pod of an
+    earlier datagen Job writes after the prefix is checked or cleared.
+    Live pods exit 3 (``datagen.pods_live``). Pods that cannot be listed,
+    or a Job that cannot be deleted, exit 4 as an unreachable cluster does
+    (``k8s.unreachable``): nothing has run yet.
     """
-    from lakebench.deploy.datagen import bronze_datagen_prefix
-    from lakebench.s3 import S3Client
+    from lakebench.deploy.datagen import (
+        DatagenPodsUnknown,
+        DatagenRefused,
+        stop_previous_datagen,
+    )
+    from lakebench.exit_codes import path_code
 
-    prefix = bronze_datagen_prefix(cfg)
-    prefix_norm = prefix.strip("/")
-    s3_cfg = cfg.platform.storage.s3
-    bucket = s3_cfg.buckets.bronze
-    s3 = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
-    if s3._init_error:
-        # No S3 available: cannot check safely, so refuse rather than proceed
-        # blind and wipe under --regenerate what we cannot even list.
-        print_error(
-            f"Cannot check bronze bucket {bucket} for existing data "
-            f"({s3._init_error}); refusing to generate."
-        )
-        raise typer.Exit(2)
     try:
-        list_prefix = prefix_norm + "/" if prefix_norm else ""
-        info = s3.get_bucket_size(bucket, prefix=list_prefix)
-    except Exception as e:  # noqa: BLE001
-        print_error(f"Could not list bronze prefix s3://{bucket}/{prefix}: {e}")
-        raise typer.Exit(2) from e
-    object_count = info.object_count or 0
-    if not info.exists or object_count == 0:
-        return
-    if not regenerate:
-        size_gb = (info.size_bytes or 0) / (1024**3)
-        print_error(
-            f"Bronze prefix s3://{bucket}/{prefix} is not empty "
-            f"({object_count} object(s), {size_gb:.2f} GB). "
-            "Refusing to generate over it: pass --regenerate to empty the "
-            "bronze bucket first, or --skip-generate to reuse the existing "
-            "data."
+        stop_previous_datagen(cfg)
+    except DatagenRefused as e:
+        print_error(f"{what}: {e}")
+        if e.exit_path:
+            code = path_code(e.exit_path)
+        elif isinstance(e, DatagenPodsUnknown):
+            code = path_code("k8s.unreachable")
+        else:
+            code = ExitCode.FAILED
+        from lakebench.cli._exit import note_exit_paths
+
+        note_exit_paths(
+            [e.exit_path or ("k8s.unreachable" if isinstance(e, DatagenPodsUnknown) else "")]
         )
-        raise typer.Exit(2)
-    # empty_bucket does NOT accept a Prefix filter today (LB-185's helper
-    # aborts multipart uploads across the bucket to catch FlashBlade
-    # ghosts, so the wipe is bucket-wide). Anything else the bronze bucket
-    # holds (streaming checkpoints, previous-run scratch, a co-tenant that
-    # shares this bucket via a distinct path_template) goes with it.
-    # Prefix-scoped regenerate is a follow-up.
-    print_info(
-        f"--regenerate: emptying the ENTIRE bucket s3://{bucket} before "
-        f"datagen. Datagen prefix {prefix!r} has {object_count} object(s); "
-        "any other prefixes in the same bucket (streaming checkpoints, "
-        "previous-run scratch, or a co-tenant sharing this bucket) will "
-        "also be removed."
+        raise typer.Exit(code) from None
+
+
+def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False):
+    """Run the bronze gate before datagen; a refusal exits with its code.
+
+    ``lakebench.deploy.datagen.bronze_prefix_gate`` decides (one table for
+    every caller: ``generate``, ``run --generate``, the multi-cycle loop
+    before cycle 0). A non-empty datagen prefix is refused unless
+    ``--regenerate`` (a bucket this deployment may empty: the datagen prefix
+    is cleared) or ``--allow-stale-bronze`` (any other bucket: datagen writes
+    over the objects and the run records it). ``--regenerate`` never clears a
+    bucket this deployment did not create. Returns the gate's result; a refusal exits with the gate's code
+    (refused, ``run.bronze_nonempty``; prerequisite when bronze cannot be read).
+    """
+    from lakebench.deploy.datagen import bronze_prefix_gate
+
+    result = bronze_prefix_gate(
+        cfg,
+        regenerate=regenerate,
+        allow_stale_bronze=allow_stale_bronze,
     )
+    if not result.proceed:
+        print_error(result.message)
+        if result.exit_code == ExitCode.REFUSED:
+            from lakebench.cli._exit import note_exit_paths
+
+            note_exit_paths(["run.bronze_nonempty"])
+        raise typer.Exit(result.exit_code)
+    record_stale_bronze(cfg, result.record())
+    shown = f"s3://{result.bucket}/{result.prefix}"
+    if result.cleared:
+        print_success(f"cleared {result.cleared} object(s) under {shown} before generating")
+    if result.stale_allowed:
+        print_warning(
+            f"{shown} held {result.objects_before} object(s) before generate and this "
+            "deployment did not create the bucket; generating over them "
+            "(--allow-stale-bronze). Rows may be over-counted; the scale-ratio check "
+            "flags it."
+        )
+    return result
+
+
+def _stale_bronze_path(cfg) -> Path:
+    from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+    return Path(DEFAULT_OUTPUT_DIR) / "datagen" / f"{cfg.get_namespace()}-stale-bronze.json"
+
+
+def record_stale_bronze(cfg, record: dict | None) -> None:
+    """Keep the gate's ``datagen.stale_bronze`` for a later ``run``.
+
+    ``generate`` writes no metrics, so a ``run`` after it reads the record
+    from here; a generate that wrote over nothing removes it.
+    """
+    import json
+
+    path = _stale_bronze_path(cfg)
     try:
-        deleted = s3.empty_bucket(bucket)
-    except Exception as e:
-        print_error(f"--regenerate: could not empty s3://{bucket}: {e}")
-        raise typer.Exit(1) from e
-    print_success(f"--regenerate: removed {deleted} object(s) from s3://{bucket}")
+        if record is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record, sort_keys=True))
+    except OSError as e:
+        print_warning(f"could not record the stale-bronze note at {path}: {e}")
+
+
+def load_stale_bronze(cfg) -> dict | None:
+    """The ``datagen.stale_bronze`` record the last generate left, if any.
+
+    Only a note for this config's bronze bucket and datagen prefix counts; a
+    note for another bucket (the config changed) is ignored.
+    """
+    import json
+
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    try:
+        data = json.loads(_stale_bronze_path(cfg).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("bucket") != cfg.platform.storage.s3.buckets.bronze or data.get(
+        "prefix"
+    ) != bronze_datagen_prefix(cfg).strip("/"):
+        return None
+    return data
 
 
 def write_run_report(metrics_storage, run_id: str) -> Path | None:
@@ -298,3 +398,49 @@ def write_run_report(metrics_storage, run_id: str) -> Path | None:
         return None
     print_info(f"Report written to {path}")
     return path
+
+
+def load_deps_handle(cfg, config_file=None):
+    """The deployment's verified dependency set for the Spark jobs:
+    called before anything is recorded or submitted. A typed refusal
+    (``run.deps_missing``, ``run.deps_stale``, ``run.deps_mismatch``)
+    propagates to the CLI's error handler."""
+    from lakebench.deps import runtime
+
+    handle = runtime.load_handle(cfg, None, config_path=config_file)
+    print_info(f"Dependency set {handle.pinset_sha256[:12]} verified")
+    return handle
+
+
+def record_deps_provenance(run, handle) -> None:
+    """``provenance.deps`` from the run-start handle."""
+    from lakebench.deps.manifest import provenance_block
+
+    if run is not None and handle is not None:
+        run.provenance = {**(run.provenance or {}), "deps": provenance_block(handle)}
+
+
+def record_deps_pods(run, cfg, handle, skipped: str | None = None) -> bool:
+    """The run-end check that the query engine pods ran the run's set
+    (``provenance.deps.pods_checked`` and ``pod_mismatches``). True when the
+    run must fail: a pod on another set, or pods that could not be read.
+    With ``skipped`` (why: the run was interrupted, the namespace went,
+    nothing reached the cluster) nothing is read, and the record says why
+    in ``pods_check_skipped``."""
+    from lakebench.deps import runtime
+
+    if run is None or handle is None or not isinstance((run.provenance or {}).get("deps"), dict):
+        return False
+    if skipped:
+        run.provenance["deps"]["pods_check_skipped"] = skipped
+        return False
+    result = runtime.check_pods(cfg, handle, run.start_time)
+    run.provenance["deps"].update(result)
+    if result.get("pods_checked") is None:
+        print_warning(f"Query engine dependency set not checked: {result.get('pods_check_error')}")
+    elif result.get("pod_mismatches"):
+        print_error(
+            "Pods ran different dependency sets: "
+            + ", ".join(f"{p['pod']} on {p['pinset'][:12]}" for p in result["pod_mismatches"])
+        )
+    return bool(result.get("pod_mismatches")) or result.get("pods_checked") is None

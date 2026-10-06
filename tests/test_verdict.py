@@ -166,13 +166,16 @@ def _make_metrics(
         benchmark_error=benchmark_error,
     )
     if with_jobs:
-        m.jobs.append(
-            JobMetrics(
-                job_name="lakebench-bronze-verify",
-                job_type="bronze-verify",
-                success=job_success,
+        # Every layer has rows, so the EVD-1 layer_rows gate passes.
+        for stage in ("bronze-verify", "silver-build", "gold-finalize"):
+            m.jobs.append(
+                JobMetrics(
+                    job_name=f"lakebench-{stage}",
+                    job_type=stage,
+                    success=job_success,
+                    output_rows=100,
+                )
             )
-        )
     if with_benchmark:
         m.benchmark = BenchmarkMetrics(
             mode="power",

@@ -120,14 +120,14 @@ gold tables (FQ1-FQ8) and four investigator queries over the transaction
 monitoring operations tables (IQ1-IQ4). The investigator queries read only
 the current run's rows, and the runner leaves them out unless the TM
 operations layer ran for this run. QpH is recorded with its query-set id, so
-`compare` and `reproduce` never set an 8-query run against a 12-query one.
+`reproduce` never sets an 8-query run against a 12-query one.
 
 | ID | Category | Purpose |
 |---|---|---|
 | `FQ1_txn_full_scan` | scan | Full aggregation of `silver.transactions`: counts, distinct originators and beneficiaries, total and average USD volume |
 | `FQ2_top_corridors_window` | filter_prune | Top bank-to-bank corridors by USD volume in the last 30 days of data |
 | `FQ3_entity_edge_risk` | aggregation | Per-entity out-degree and outbound volume from the counterparty edges, joined to entities |
-| `FQ4_running_balance_window` | analytics | Ordered statement entries (window function) for the 50 most active accounts |
+| `FQ4_running_balance_window` | analytics | Statement entries for the 50 most active accounts, with the running balance recomputed in ledger order (window function) |
 | `FQ5_alert_triage` | operational | `gold.alerts` counts, entities and average score by rule, priority and status |
 | `FQ6_structuring_scan` | filter_prune | Originators with 3 or more payments just under each currency's reporting threshold (the W2 shape) |
 | `FQ7_cross_border_concentration` | aggregation | Cross-border share of USD volume per bank-to-bank corridor |
