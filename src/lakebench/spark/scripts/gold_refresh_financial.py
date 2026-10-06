@@ -946,10 +946,13 @@ def stop_requested(spark) -> bool:
 
 def _idle_after_drain(spark, last_cycle, at_start=False) -> None:
     """Report the drain, free the executors, and keep the pod (and its log)
-    until the CLI deletes the application: a driver that exited would be
-    restarted by restartPolicy Always and the log the CLI reads lost. The
-    drain line is logged again every minute, so it stays at the tail of the
-    log the CLI polls whatever Spark logs while it stops."""
+    until the CLI deletes the application. If this script exited the operator
+    would move the SparkApplication to COMPLETED and delete the pod before
+    the CLI reads the drain line (and would NOT auto-rerun it either:
+    streaming jobs use ``restartPolicy OnFailure`` with
+    ``onFailureRetries=0``). The drain line is logged again every minute so
+    it stays at the tail of the log the CLI polls whatever Spark logs while
+    it stops."""
     where = "stop marker present at start; " if at_start else ""
     line = f"Drain complete: {where}last completed cycle {last_cycle} run={RUN_ID}"
     log(line)
@@ -978,8 +981,10 @@ def main() -> None:
     log(f"Max consecutive failures: {MAX_CONSECUTIVE_FAILURES}")
     log("=" * 60)
 
-    # A driver restarted after its run was drained (restartPolicy Always)
-    # does no work.
+    # If this process started on top of an already-drained run (stop marker
+    # present), do no further work. The streaming policy
+    # (OnFailure, onFailureRetries=0) will not restart this script after a
+    # drain; the check is kept for defence in depth.
     if stop_requested(spark):
         _idle_after_drain(spark, 0, at_start=True)
         return

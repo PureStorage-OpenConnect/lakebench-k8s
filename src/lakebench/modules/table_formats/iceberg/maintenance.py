@@ -118,8 +118,10 @@ def _parse_threshold_seconds(retention_threshold: str) -> int:
 
 # Orphan removal never runs below 24 h plus a 10 min margin, on any engine or
 # path: racing a writer it deletes files a commit is about to use (Iceberg's
-# Spark procedure refuses under 24 h for that reason), and stream apps with
-# restartPolicy Always can be writing even when a run believes none are.
+# Spark procedure refuses under 24 h for that reason), and an undeleted
+# stream SparkApplication can be writing even when a run believes none are
+# (the streaming restart policy, OnFailure with 0 retries, does not change
+# that).
 ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600 + 600
 # Floor for expire_snapshots while streams are live, so a stream's reader is
 # never left without the snapshot it is positioned on.

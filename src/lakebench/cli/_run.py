@@ -2601,9 +2601,11 @@ def _run_once(
         # Multi-cycle batch support (v1.1.0)
         total_cycles = cfg.architecture.pipeline.cycles
 
-        # A continuous gold-refresh left by an aborted run restarts forever
-        # (restartPolicy Always) with a fresh run id, and each restart deletes
-        # every other run's rows from gold.alerts, including this run's.
+        # A continuous gold-refresh left by an aborted run (operator still
+        # has the SparkApplication; a leftover app whose driver finished OK
+        # but was never cleaned up by the aborted CLI is still live) runs
+        # with a fresh run id, and each restart deletes every
+        # other run's rows from gold.alerts, including this run's.
         if cfg.architecture.workload.schema_type.value == "financial":
             from lakebench.cli._sustained import _stop_leftover_streams
 
@@ -3365,8 +3367,11 @@ def _run_once(
                 # orphan removal and compaction together, and the first
                 # timeout stops the rest.
                 maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
-                # Stream apps (restartPolicy Always) can still be writing: a
-                # c360 run never stops leftovers. Any present means live.
+                # Stream apps that still exist (as SparkApplication CRs) can
+                # still be writing: a c360 run never stops leftovers. Any
+                # present means live. The streaming restart policy
+                # (OnFailure, onFailureRetries=0) is immaterial here: an
+                # undeleted SparkApplication still has a RUNNING driver.
                 live_apps, live_errors = _live_stream_apps(cfg.get_namespace())
                 if live_apps:
                     maint_live_reason = (
