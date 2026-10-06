@@ -313,10 +313,16 @@ class StopOutcome:
 # Spark Operator (v2.5.1) applicationState values after which the operator
 # never submits the application again: its retry decision is taken in
 # FAILING and SUCCEEDING, before these. SUBMISSION_FAILED is not here:
-# lakebench submits streams with restartPolicy Always and batch stages with
-# OnFailure and onSubmissionFailureRetries 5 (spark/job.py), so the operator
-# resubmits from it. A stage in FAILING is deleted, and with it the driver's
-# logs, in the window before the operator moves it to FAILED or a retry.
+# lakebench submits streams with restartPolicy OnFailure and
+# onFailureRetries=0 (a stream driver that exits inside the window is a
+# definitive FAIL, not a resubmit; the gate at _sustained.py refuses a
+# resubmit anyway) and batch stages with OnFailure and onFailureRetries=2;
+# both get onSubmissionFailureRetries=5 (spark/job.py), so the operator
+# resubmits from SUBMISSION_FAILED. A stage in FAILING is deleted, and with
+# it the driver's logs, in the window before the operator moves it to
+# FAILED or (for batch) a retry; the DriverLogCapturer tails
+# ``kubectl logs -f`` into ``<run_dir>/drivers/`` so the first driver's
+# output survives that delete.
 FINISHED_APP_STATES = frozenset({"COMPLETED", "FAILED"})
 
 

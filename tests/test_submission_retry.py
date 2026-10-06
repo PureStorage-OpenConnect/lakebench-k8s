@@ -62,4 +62,12 @@ def test_operator_submission_retries_configured():
     assert batch["onSubmissionFailureRetries"] >= 5
     assert batch["onSubmissionFailureRetryInterval"] >= 60
     stream = mgr._build_manifest(JobType.BRONZE_INGEST)["spec"]["restartPolicy"]
-    assert stream["type"] == "Always" and stream["onSubmissionFailureRetryInterval"] >= 60
+    # Streaming jobs flipped to OnFailure with onFailureRetries=0 (LB-279 Part A):
+    # the continuous gate refuses a run whose driver was resubmitted inside the
+    # window, so "Always" was a loaded footgun that lost the diagnostic log on
+    # any transient event. Submission retries stay, which is what this test
+    # guards.
+    assert stream["type"] == "OnFailure"
+    assert stream["onFailureRetries"] == 0
+    assert stream["onSubmissionFailureRetries"] >= 5
+    assert stream["onSubmissionFailureRetryInterval"] >= 60

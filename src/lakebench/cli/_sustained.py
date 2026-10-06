@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 from lakebench._clock import utc_now
+from lakebench.cli._driver_log_capture import DriverLogCapturer
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -239,10 +240,14 @@ _TERMINAL_APP_STATES = frozenset({"COMPLETED", "FAILED"})
 def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
     """Stream SparkApplications present in *namespace* (any schema).
 
-    Returns ``(live, read_errors)``. Stream apps run with restartPolicy
-    Always, so one that exists is writing or about to. A read error other
-    than 404, including a timeout, counts the app as live (maintenance then
-    takes the safe, live-stream settings) and is listed in ``read_errors``.
+    Returns ``(live, read_errors)``. A SparkApplication that exists is
+    either RUNNING (writing) or FAILING/PENDING_RERUN (its SIGTERM'd driver
+    pod is being torn down, but outstanding writes may still land). A read
+    error other than 404, including a timeout, counts the app as live
+    (maintenance then takes the safe, live-stream settings) and is listed
+    in ``read_errors``. Stream restartPolicy is ``OnFailure`` with
+    ``onFailureRetries=0``: a driver that exits inside the window becomes a
+    definitive FAILED, not a silent resubmit.
     """
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
@@ -3329,6 +3334,10 @@ def _run_sustained(
     # Set when the namespace went away mid-window: {reason, at_elapsed}.
     _abort: dict | None = None
     _ns_watch = NamespaceWatch(cfg.get_namespace())
+    # Pre-declared so the finally-cleanup can check it even when an
+    # exception raised inside the try block before the capturer was init'd
+    # (e.g. the benchmark runner failing to construct).
+    _driver_log_capturer: DriverLogCapturer | None = None
 
     try:
         # Check Spark operator
@@ -3665,6 +3674,25 @@ def _run_sustained(
             if isinstance(job_status.executor_count, int) and job_status.executor_count > 0:
                 requested_executors[job_name] = job_status.executor_count
             submitted.append((job_type, job_name))
+
+        # Preserve each streaming driver's log across pod rotation.
+        # The Spark Operator deletes a failed driver pod as it moves
+        # the SparkApplication to PENDING_RERUN; ``kubectl logs`` after that
+        # returns "pod not found". Running ``kubectl logs -f`` from the
+        # moment each pod is Running captures the FIRST driver's output into
+        # ``<run_dir>/drivers/<app>.driver.log``, and on resubmit a second
+        # file ``.r1.log`` is opened for the new pod. Best-effort: a missing
+        # kubectl or an RBAC error does NOT fail the run.
+        try:
+            _driver_log_capturer = DriverLogCapturer(
+                namespace=cfg.get_namespace(),
+                run_dir=metrics_storage.run_dir(run_id),
+                context=cfg.platform.kubernetes.context or None,
+            )
+            _driver_log_capturer.watch([f"lakebench-{name}" for _, name in submitted])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("driver log capture: initial setup failed, continuing: %s", e)
+            _driver_log_capturer = None
 
         # A streaming submission that failed used to go unnoticed until the
         # end-of-run gates reported zero rows. Confirm each driver is running
@@ -4319,6 +4347,9 @@ def _run_sustained(
         )
         _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
+        if _driver_log_capturer is not None:
+            _driver_log_capturer.close()
+            _driver_log_capturer = None
         for _job_type, job_name in submitted:
             _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
         _stage = "result-check"
@@ -4701,6 +4732,9 @@ def _run_sustained(
         )
         if submitted and not streams_stopped and k8s is not None:
             _stop_streams(k8s, cfg.get_namespace(), submitted)
+        if _driver_log_capturer is not None:
+            _driver_log_capturer.close()
+            _driver_log_capturer = None
         _ns_watch.close()
         if _total_s3_objects is None and _interrupted is None and _abort is None:
             # Not after an interrupt: partial data, and a long listing would

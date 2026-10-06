@@ -1685,6 +1685,14 @@ class FakeSubprocess:
         argv = [str(a) for a in argv]
         if argv and Path(argv[0]).name == "git":
             return self._real_run(argv, *args, **kwargs)
+        if (
+            Path(argv[0]).name == "kubectl"
+            and "pods" in argv
+            and any(a.startswith("sparkoperator.k8s.io/app-name=") for a in argv)
+        ):
+            # The driver-log capturer polls on a 2 s timer, so its calls are
+            # answered (no pods) and not recorded: their count depends on timing.
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         self._rec.add("subprocess", *argv)
         if (
             Path(argv[0]).name == "kubectl"

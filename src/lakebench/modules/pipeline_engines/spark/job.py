@@ -2720,9 +2720,20 @@ class SparkJobManager:
             spark_conf["spark.local.dir"] = "/tmp/spark-local"
 
         _restart_policy: dict[str, Any] = (
+            # Streaming jobs: do NOT auto-rerun a failed driver (LB-279).
+            # The continuous gate at cli/_sustained.py refuses the window on
+            # "driver was resubmitted inside the window; earlier driver's
+            # work is not in the log", so an uncapped "Always" guarantees any
+            # transient event becomes a silent FAIL with the diagnostic log
+            # lost to the operator's pod delete. OnFailure with 0 driver
+            # retries converts the same event into a definitive FAILED
+            # verdict whose first driver's log is still inspectable.
+            # Submission retries stay (they run before the driver starts and
+            # the submitting operator can be transiently busy).
             {
-                "type": "Always",
-                "onFailureRetryInterval": 30,
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
                 "onSubmissionFailureRetryInterval": 60,
             }
             if job_type in _STREAMING_JOB_TYPES
