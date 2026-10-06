@@ -947,7 +947,7 @@ def _with_system_identity(rec: dict, endpoint: str) -> dict:
     sysid = {
         "type": "cluster",
         "version": 2,
-        "fingerprint": fingerprint_of(parts),
+        "fingerprint": fingerprint_of(parts, None, "cluster", 2),
         "partial": True,
         "parts": parts,
     }
@@ -967,7 +967,10 @@ def test_scrub_recomputes_the_system_fingerprint() -> None:
     for where in (out["experiment"], out["config_snapshot"]["experiment_inputs"]):
         sysid = where["system_identity"]
         assert sysid["parts"]["storage_endpoint"] == "10.0.1.50:80"
-        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"]) != source
+        # The identity was stored at v2 so the recomputed fingerprint is
+        # over v2 parts (raw host:port); _with_system_identity above pinned
+        # that version.
+        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"], None, "cluster", 2) != source
     assert ".experiment.system_identity.fingerprint" in changed
     assert scrub.check_clean(out) == []
 
@@ -1017,4 +1020,7 @@ def test_scrub_recomputes_every_system_identity_copy() -> None:
     assert len(copies) == 3
     for path in copies:
         sysid = scrub._at(out, path)
-        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"]), path
+        version = sysid.get("version") or 2
+        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"], None, "cluster", version), (
+            path
+        )

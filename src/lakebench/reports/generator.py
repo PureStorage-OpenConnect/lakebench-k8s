@@ -3346,11 +3346,9 @@ class ReportGenerator:
             ("Scale", config.get("scale")),
             ("Approx Bronze GB", config.get("approx_bronze_gb")),
             ("Processing Pattern", config.get("processing_pattern")),
-            (
-                "S3 Endpoint",
-                config.get("s3", {}).get("endpoint")
-                or config.get("platform", {}).get("storage", {}).get("s3", {}).get("endpoint"),
-            ),
+            # S3 Endpoint intentionally not rendered: a report.html shared off
+            # the operator's host would leak the endpoint value. The storage
+            # backend type is already in system_identity for comparability.
             # Executor sizing is in "Resources as run" (what each job ran
             # with), not here: spark.executor in the snapshot sized nothing.
             (

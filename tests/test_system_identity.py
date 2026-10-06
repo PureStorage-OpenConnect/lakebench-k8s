@@ -170,7 +170,11 @@ def test_full_observation(cluster, ca_file) -> None:
             "count": 3,
         },
     ]
-    assert parts["storage_endpoint"] == "10.0.1.50:80"
+    # LB-280: storage_endpoint is now a stable sha256-16 hash of the
+    # lowercased host:port, not the raw value. The sysid still distinguishes
+    # endpoints (next test), but the raw IP never leaves build time.
+    assert parts["storage_endpoint"].startswith("s3-endpoint-")
+    assert len(parts["storage_endpoint"]) == len("s3-endpoint-") + 16
     assert parts["storage_backend"] == "unknown"
     assert parts["storage_server"] == "PureStorageFlashBlade"
     assert parts["scratch"] == {"enabled": True, "storage_class": "px-csi-scratch"}
@@ -265,11 +269,22 @@ def test_type_enters_the_hash(cluster) -> None:
 
 
 def test_endpoint_spelling_normalised(cluster) -> None:
+    """Spelling-normalisation (lowercase host, default port by scheme) is
+    preserved under LB-280 redaction: two inputs that normalised to the same
+    host:port before now hash to the same value, and two different normalised
+    values still hash differently.
+    """
+
     def ep(endpoint: str) -> Any:
         return _observe(cluster(), cfg=_cfg(endpoint=endpoint))["parts"]["storage_endpoint"]
 
-    assert ep("http://FB.Example:80") == ep("fb.example") == "fb.example:80"
-    assert ep("https://fb.example") == "fb.example:443"
+    # Case and missing-port spellings must still collapse.
+    assert ep("http://FB.Example:80") == ep("fb.example")
+    # Different canonical host:port must still distinguish.
+    assert ep("http://FB.Example:80") != ep("https://fb.example")
+    # And both must be redacted (not the raw lowercase host:port).
+    assert ep("http://FB.Example:80").startswith("s3-endpoint-")
+    assert ep("https://fb.example").startswith("s3-endpoint-")
 
 
 def test_storage_backend_is_the_conformance_guess(cluster) -> None:
@@ -446,10 +461,11 @@ def test_node_without_capacity_is_a_gap(cluster) -> None:
 def test_detect_backend_answers_are_pinned() -> None:
     """storage_backend hashes detect_backend's answer. If this fails because
     detect_backend learned a new backend, bump SYSTEM_IDENTITY_VERSION with
-    it, or stored v2 observations of an unchanged system stop matching."""
+    it, or stored observations of an unchanged system stop matching."""
     from lakebench.s3.conformance import detect_backend
 
-    assert si.SYSTEM_IDENTITY_VERSION == 2
+    # v3: LB-280 redacted storage_endpoint from host:port to sha256-16.
+    assert si.SYSTEM_IDENTITY_VERSION == 3
     assert detect_backend("http://10.0.1.50:80") == "unknown"
     assert detect_backend("https://minio.example:9000") == "unknown"
     assert detect_backend("https://s3.us-east-1.amazonaws.com") == "aws"

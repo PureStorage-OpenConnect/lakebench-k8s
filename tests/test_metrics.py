@@ -2204,7 +2204,10 @@ class TestBuildConfigSnapshot:
         assert snapshot["scale"] == 50
         assert snapshot["approx_bronze_gb"] > 0
         assert snapshot["processing_pattern"] == "medallion"  # default
-        assert snapshot["s3"]["endpoint"] == "http://test-s3-endpoint:80"
+        # Endpoint value is redacted to a stable per-host hash so a shared
+        # metrics.json or report.html does not carry the raw endpoint.
+        assert snapshot["s3"]["endpoint"].startswith("s3-endpoint-")
+        assert "test-s3-endpoint" not in snapshot["s3"]["endpoint"]
         assert snapshot["s3"]["buckets"]["bronze"] == "lb-bronze"
         assert snapshot["scratch"]["enabled"] is True
         # Per-executor sizing is recorded per job, from the job profiles.

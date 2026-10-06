@@ -14,7 +14,9 @@ part is one flat entry, so a gap is always a whole part:
   NFD CPU-model label when present), with a count per class. Allocatable,
   conditions, cordons and node names never enter: they move with load and
   maintenance, not with the hardware;
-* ``storage_endpoint``: the S3 endpoint's lowercased ``host:port``;
+* ``storage_endpoint``: a stable per-endpoint sha256 (16 hex) of the
+  lowercased ``host:port``; two different endpoints read as different
+  fingerprints without the raw value leaking;
 * ``storage_backend``: ``s3/conformance.detect_backend`` of the endpoint
   (``aws`` or ``unknown``), the read-only half of the conformance summary;
 * ``storage_server``: the ``Server`` header the endpoint answers a HEAD on
@@ -96,7 +98,11 @@ logger = logging.getLogger(__name__)
 
 #: Bump when what a part holds changes; it enters the hash, so fingerprints
 #: of different versions never compare equal by accident.
-SYSTEM_IDENTITY_VERSION = 2
+#: v3: ``storage_endpoint`` holds a stable sha256-16 of the lowercased
+#: ``host:port`` instead of the raw value, so a pre-v3 run (whose part is
+#: literal ``host:port``) and a v3 run on the same endpoint are explicitly
+#: incomparable rather than silently different.
+SYSTEM_IDENTITY_VERSION = 3
 
 PARTS = (
     "api_server_ca",
@@ -321,6 +327,15 @@ def _nodes(k8s: Any) -> Any:
 
 
 def _storage_endpoint(cfg: Any) -> Any:
+    """Return a stable, redacted identifier for the S3 endpoint.
+
+    The raw host:port used to be returned so the fingerprint could tell two
+    endpoints apart. That raw value leaks the operator's lab IP when a
+    metrics.json or report.html is shared off the host. The sha256 hash of the
+    canonical host:port preserves per-endpoint distinguishability (two
+    different endpoints still produce different fingerprints) while hiding the
+    value.
+    """
     endpoint = str(cfg.platform.storage.s3.endpoint or "").strip()
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     host = (parsed.hostname or "").lower()
@@ -332,7 +347,9 @@ def _storage_endpoint(cfg: Any) -> Any:
         port = None
     if port is None:
         port = 443 if parsed.scheme == "https" else 80
-    return f"{host}:{port}"
+    hostport = f"{host}:{port}"
+    digest = hashlib.sha256(hostport.encode("utf-8")).hexdigest()[:16]
+    return f"s3-endpoint-{digest}"
 
 
 def _storage_backend(cfg: Any) -> Any:

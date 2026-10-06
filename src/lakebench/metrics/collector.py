@@ -670,6 +670,24 @@ class PipelineMetrics:
 RATIO_THRESHOLD = 0.95
 
 
+def _redact_endpoint(endpoint: str | None) -> str | None:
+    """Hash an S3 endpoint for the config snapshot.
+
+    The config snapshot is stored in metrics.json and rendered in report.html;
+    both can be shared off the operator's host, and the raw endpoint leaks the
+    deployer's lab IP in those cases. The raw value is never read back by
+    lakebench; the only use was display, so a stable per-host hash preserves
+    per-host distinguishability while hiding the value.
+
+    None or empty inputs pass through unchanged, so a run with no S3 configured
+    still records the fact.
+    """
+    if not endpoint:
+        return endpoint
+    digest = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:16]
+    return f"s3-endpoint-{digest}"
+
+
 def ratio_out(value: float, digits: int) -> float:
     """*value* rounded for metrics.json, never across ``RATIO_THRESHOLD``:
     a ratio just under it (0.9496 at 3 places) is rounded down, so the
@@ -2541,7 +2559,12 @@ def build_config_snapshot(
         "approx_bronze_gb": round(cfg.get_scale_dimensions().approx_bronze_gb, 2),
         "processing_pattern": pipeline.pattern.value,
         "s3": {
-            "endpoint": s3.endpoint,
+            # Endpoint value redacted to a stable per-host hash.
+            # The raw endpoint leaks the operator's lab IP when a metrics.json
+            # or report.html is shared off the host. The hash keeps per-host
+            # distinguishability for comparability, which is the only use the
+            # value had here (never read back by lakebench itself, only shown).
+            "endpoint": _redact_endpoint(s3.endpoint),
             "buckets": {
                 "bronze": s3.buckets.bronze,
                 "silver": s3.buckets.silver,
