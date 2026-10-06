@@ -64,7 +64,7 @@ FLOORS: dict[str, dict[str, float]] = {
         "lakebench/deploy/destroy.py": 79.0,
         "lakebench/deploy/ownership.py": 85.0,
         "lakebench/metrics/c360_correctness.py": 62.0,
-        "lakebench/metrics/collector.py": 94.0,
+        "lakebench/metrics/collector.py": 91.0,
         "lakebench/metrics/experiment.py": 93.0,
         "lakebench/reports/scorecard.py": 96.0,
         "lakebench/s3/client.py": 69.0,

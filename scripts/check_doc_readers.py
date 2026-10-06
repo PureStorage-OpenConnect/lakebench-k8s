@@ -95,7 +95,10 @@ STUB_MAX_LINES = 5
 
 #: (glob, reader file, literal): files read through a computed path. An entry
 #: counts only while the literal is still in the reader file.
-PATTERN_READERS = (("uat/results-*.md", "scripts/release_gate.py", "uat/results-"),)
+PATTERN_READERS = (
+    ("uat/results-*.md", "scripts/release_gate.py", "uat/results-"),
+    ("scripts/prose_guard.py", "scripts/release_gate.py", '"prose_guard"'),
+)
 
 #: Unread files on the day this check landed. The list may only shrink: the
 #: test fails when an entry gains a reader or disappears, so remove it then.
