@@ -1,10 +1,10 @@
-"""Capture streaming SparkApplication driver logs across pod rotation (LB-279 Part B).
+"""Capture streaming SparkApplication driver logs across pod rotation.
 
 When a streaming driver pod fails inside the window, the Spark Operator deletes
 the pod as it transitions the SparkApplication through FAILING->PENDING_RERUN.
 ``kubectl logs <pod>`` after that returns ``pod not found``, so the diagnostic
-log for the first (failing) driver is lost. LB-279 shipped unexplained because
-of this: the gate correctly refused the window, but no evidence of why survived.
+log for the first (failing) driver is lost: the gate refuses the window, but no
+evidence of why survives.
 
 This module runs ``kubectl logs -f --timestamps`` for each streaming driver
 pod as soon as the pod enters ``Running`` and writes to a file inside the run
@@ -12,7 +12,7 @@ directory. If the pod is replaced (resubmission after a crash), the capture
 loop detects the new pod and starts a second file with a rotation suffix.
 Everything is best-effort: a missing kubectl, an RBAC error or a pod that
 never reaches Running does NOT fail the pipeline; it only means less evidence
-if LB-279 fires.
+if a driver fails.
 
 Interface:
 

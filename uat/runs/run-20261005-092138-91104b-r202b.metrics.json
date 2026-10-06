@@ -1556,7 +1556,7 @@
     "install": "checkout",
     "tree_sha256": "cd46e0ef49521581b0b03a07ef2ab96a81ffa0c5737105c7e813e684f1682e86",
     "config_sha256": "e1e1d0478f6f9f34485b260180af4c89b4187dabdd457df2010dcbf23e2fc412",
-    "config_path": "/home/repos/lakebench-k8s/dev-artifacts/ledger-configs/lb17-r202b/lakebench.yaml",
+    "config_path": "lakebench.yaml",
     "deps": {
       "pinset_sha256": "67ccaee0bb076321546090f8f0c6cfb6a9553ef5ad3887c51de4b6cdcebe0ec8",
       "request_sha256": "4739b33b3ac0a59976a414e652d2b146f09348bb5085dcf1a463b0f1dba92460",
