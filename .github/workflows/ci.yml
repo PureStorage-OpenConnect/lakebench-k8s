@@ -441,7 +441,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [spark-tests]
-    if: ${{ !cancelled() }}
+    # Run when spark-tests did (always, even if it failed, so a coverage drop
+    # is still reported). If spark-tests was skipped by its own gate, so is
+    # this; it reads its artifacts.
+    if: ${{ !cancelled() && needs.spark-tests.result != 'skipped' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
