@@ -9,9 +9,9 @@ Audience: engineers who run, reproduce or compare this benchmark, and
 contributors who implement it on a new component. Every statement describes
 what the code of this release does, and names the module that does it.
 Python paths are relative to `src/lakebench/`; generator paths to
-`datagen_rs/`. Figures labelled "recorded" carry the run that recorded them;
-those runs' records are published under `uat/runs/`. The three published AML
-records (`run-20260929-205000-ebb26f`, `run-20260929-214442-825153`,
+`datagen_rs/`. Figures labelled "recorded" carry the id of the run that
+recorded them; the run records are not in the repository. The three AML
+runs cited (`run-20260929-205000-ebb26f`, `run-20260929-214442-825153`,
 `run-20260929-221146-9d5345`) were written by Lakebench 1.6: they carry
 workload version `aml-1` and experiment schema `exp1`, predate the continuous
 drain and covered scoring, the reason codes and the record gates, and are
@@ -323,11 +323,7 @@ a matching `generated` entry for the corpus it reads.
 `scripts/aml_heldout_audit.py` lists this host's run records, journals,
 ledgers and ledger buckets that touch a protected corpus; an AML record is
 known by its workload name too, so one missing its corpus block is listed
-as unidentified. The release gate's `records` and `support-record` checks
-refuse a held-out `corpus_role`, a recorded seed that hashes to a held-out
-seed or is withheld, and an AML record with no corpus seed or one it cannot
-read, with that reason alone, naming the run id and the role or what could
-not be read, never the seed. A run record, its datagen fleet record and its
+as unidentified. A run record, its datagen fleet record and its
 HTML report never show a protected seed (held out, spent or with a recorded
 look): it is recorded as its salted reference (`{"seed_ref": ..., "role":
 ...}`, the role set for a held-out seed), and as withheld (`{"seed_ref":
@@ -838,8 +834,8 @@ means depends on the setting (`metrics/comparability.py`):
   maintenance, the compaction operation that ran (Trino `optimize` or Spark
   `rewrite_data_files`), maintenance settings, benchmark iterations and
   mode, the Lakebench limits that bound, and (continuous) the in-stream
-  round count. A difference in round count is an outcome of the run, so the
-  perf gate and `reproduce` do not refuse on it.
+  round count. A difference in round count is an outcome of the run, so
+  `reproduce` does not refuse on it.
 
 Datagen parallelism is not permitted tuning: it is a corpus input (section
 3.2). `datagen.file_size` is fixed at `64mb`.
@@ -910,7 +906,7 @@ by the trickle, not infrastructure capacity (`metrics/bounds.py`).
 ## 8. Metrics
 
 Units, directions and bands are the metric registry's
-(`metrics/metric_registry.py`), which `reproduce`, the perf gate and the
+(`metrics/metric_registry.py`), which `reproduce` and the
 report read; `pipeline_benchmark.score_descriptions` gives a
 one-line description of each score a run recorded. A direction of `none`
 means a delta in the metric has no better side. Pipeline scores are in
@@ -983,8 +979,7 @@ snapshot summary's record and delete counts, from metadata only. After the
 window a Spark job fingerprints each recorded snapshot still in the table,
 newest first, over its business columns (`common.frame_fingerprint`; every
 column less the batch-version sentinels `_batch_id`, `_stream_id`,
-`ingest_ts` and `committed_at`, as `scripts/release/silver_parity.py`
-defines them, recorded in `hashed_columns`), writes the
+`ingest_ts` and `committed_at`, recorded in `hashed_columns`), writes the
 hashes to the gold `scoring/<run_id>/` prefix, reads them back, and then
 times a full scan `VERSION AS OF` each snapshot with the same fingerprint.
 Only ticks in the current gold-refresh driver pod's log are read (a driver
@@ -1030,7 +1025,7 @@ with another run's. A published continuous `composite_qph` must carry
 | `datagen_cpu_hr_per_tb` | cpu-h/TB | lower | datagen CPU-hours per TB written |
 | `storage_multiple_total` | ratio | lower, diagnostic (never a directional delta) | physical over logical table bytes at run end, measured once after maintenance and only when the run passed (`storage_multiple.total.multiple`); a condition of the maintenance policy, not a system score |
 
-The three datagen figures are derived by `reproduce` and the perf gate from
+The three datagen figures are derived by `reproduce` from
 the datagen record, and `storage_multiple_total` from the record's
 `storage_multiple` block; none is emitted under `scores`. Per-stage and
 per-query figures (`<stage>_seconds`, `query_qph_<query>`) are recorded
@@ -1187,9 +1182,9 @@ either.
 Batch and continuous AML runs are never comparable (mode is a Workload key).
 A batch run whose TM layer did not run (8 queries) is not comparable with
 one where it ran (12), because the query sets differ. A different
-maintenance policy id is refused by the perf gate and `reproduce`. Records
+maintenance policy id is refused by `reproduce`. Records
 written by Lakebench 1.6 (exp1, workload `aml-1`), including the three
-published AML records, are not comparable with this release's records: they
+cited AML runs, are not comparable with this release's records: they
 are reference figures, not baselines.
 
 ## 11. Supported compositions
@@ -1221,7 +1216,7 @@ recipes and `apache/spark:4.0.2-python3` on the Polaris recipes; a config
 that sets `images.spark` runs that image. The release matrix's AML rows are
 batch hive-iceberg-spark-trino at scale 1 and 10, batch
 polaris-iceberg-spark-trino, continuous hive-iceberg-spark-trino and
-continuous polaris-iceberg-spark-trino (`metrics/release_record.py`).
+continuous polaris-iceberg-spark-trino (`config/support.py`).
 Continuous mode runs the reduced rule set W2, W3, W4 and W17 on every
 recipe. `--local` is refused for AML: local mode runs Customer 360 batch
 only.

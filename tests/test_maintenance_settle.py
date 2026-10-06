@@ -397,15 +397,6 @@ def test_settle_is_recorded_and_ttv_is_unchanged(tmp_path):
     assert "maintenance_settle_seconds" not in raw_without
 
 
-def test_perf_gate_numbers_ignore_the_settle_wait():
-    from lakebench.cli._reproduce import _extract_expected_numbers
-
-    clock = _Clock()
-    pm_without, _ = _pb_with_settle(None)
-    pm, _ = _pb_with_settle(_wait(clock, [12.0, 12.0]))
-    assert _extract_expected_numbers(pm) == _extract_expected_numbers(pm_without)
-
-
 def test_report_shows_settle_rows():
     from lakebench.reports.generator import ReportGenerator
 

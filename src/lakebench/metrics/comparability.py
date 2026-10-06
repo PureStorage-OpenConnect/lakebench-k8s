@@ -80,7 +80,7 @@ CONDITION_KEYS = (
 )
 
 #: Conditions that are also outcomes of the run: a difference is not
-#: like-for-like, and the perf gate and reproduce do not refuse on it.
+#: like-for-like, and reproduce does not refuse on it.
 OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"})
 
 

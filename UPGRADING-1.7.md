@@ -216,15 +216,15 @@ A continuous record without a stored round count reads it from its rounds; the s
 
 **What to do:** Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
 
-### Perf-gate fingerprint version 2
+### Perf gate removed
 
-The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines are refused until re-recorded.
+`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.
 
-**What to do:** Re-record perf-gate baselines under 1.7; pin the profile's executor counts in a pinned config.
+**What to do:** Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
 
 ### Readers take the strictest verdict
 
-`report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+`report` reads the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 
 **What to do:** Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed` beside the `verdict` it heads with.
 

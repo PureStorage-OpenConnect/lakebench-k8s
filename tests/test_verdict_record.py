@@ -492,20 +492,6 @@ def test_every_cli_save_follows_the_save_gate(path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_release_record_reads_layer_rows_and_expected_skips() -> None:
-    from lakebench.metrics import release_record as rr
-
-    assert rr.LAYER_ROWS_UNMEASURED == V.LAYER_ROWS_UNMEASURED
-    assert rr._layer_rows_problem(sr.load_record(C360_BATCH)) is None
-    assert rr._rules_problems(sr.load_record(AML_BATCH)["experiment"]) == []
-    rec = sr.load_record(AML_CONT)
-    _stream(rec, "gold-refresh")["ttd_alerts"] = None
-    assert rr._layer_rows_problem(rec) == "rows not measured for gold"
-    bad = copy.deepcopy(sr.load_record(C360_BATCH))
-    _silver_zero(bad)
-    assert rr._layer_rows_problem(bad) == "rows per layer: layer_rows gate is FAIL"
-
-
 # ---------------------------------------------------------------------------
 # Through the real run(): the QA-9 harness, one layer emptied after parsing
 # ---------------------------------------------------------------------------
@@ -856,13 +842,6 @@ def _benchmark_record() -> dict:
     rec["record_kind"], rec["parent_run_id"] = "benchmark", rec["run_id"]
     rec["run_id"] = "20261003-000000-be0000"
     return rec
-
-
-def test_benchmark_record_is_refused_by_release_and_perf_readers() -> None:
-    from lakebench.metrics import release_record as rr
-
-    bench = _benchmark_record()
-    assert any("a benchmark record" in p for p in rr.record_problems(bench, "f" * 40, {}))
 
 
 def test_benchmark_record_is_never_the_latest_run(tmp_path: Path) -> None:

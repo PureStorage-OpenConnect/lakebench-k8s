@@ -376,33 +376,14 @@ def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
     assert scores["total_elapsed_seconds"] == round(sum(st["elapsed_seconds"] for st in stages), 2)
 
 
-def test_reproduce_and_release_evidence_refuse_a_benchmark_record(tmp_path, monkeypatch):
+def test_reproduce_refuses_a_benchmark_record(tmp_path, monkeypatch):
     from lakebench.cli._query import _save_benchmark_record
-    from lakebench.metrics.release_record import record_problems
 
     runs = _runs(tmp_path, PARENT)
     storage = MetricsStorage(runs)
     path = _save_benchmark_record(storage, storage.load_run(PARENT), _bench_result())
     bench_id = path.parent.name.removeprefix("run-")
-    problems = record_problems(json.loads(path.read_text()), "f" * 40, None)
-    assert any(f"a benchmark record (of run {PARENT}), not a run" in p for p in problems)
     res = _invoke(tmp_path, monkeypatch, "reproduce", "--record", bench_id, "--write", "pkg.yaml")
     assert res.exit_code == 2, res.output
     assert f"lakebench reproduce --record {PARENT} --write pkg.yaml" in _stderr(res)
     assert not (tmp_path / "pkg.yaml").exists()
-
-
-def test_perf_gate_and_export_skip_benchmark_records(tmp_path):
-    from lakebench.cli._query import _save_benchmark_record
-    from lakebench.metrics import perf_gate as pg
-
-    runs = _runs(tmp_path, PARENT)
-    storage = MetricsStorage(runs)
-    path = _save_benchmark_record(storage, storage.load_run(PARENT), _bench_result())
-    bench_id = path.parent.name.removeprefix("run-")
-    assert [r.run_id for r in pg.iter_runs(runs)] == [PARENT]
-    run = pg.load_run(path.parent)
-    reasons = pg.run_refusals(run, SimpleNamespace(mode=run.mode, fingerprint={}))
-    assert any(f"a benchmark record (of run {PARENT}), not a run" in r for r in reasons)
-    csv_text = storage.export_csv(tmp_path / "out.csv").read_text()
-    assert PARENT in csv_text and bench_id not in csv_text

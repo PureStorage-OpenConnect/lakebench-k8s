@@ -95,49 +95,6 @@ def _scores_dict_keys() -> dict[str, set[str]]:
     return out
 
 
-def test_every_emitted_key_registered():
-    """(a) every key _scores_dict can emit, in the mode it emits it; (b)
-    every score key in the pinned records and in their rebuilt
-    pipeline_benchmark; (c) every number reproduce and the perf gate take
-    from those records. Each resolves, in its mode."""
-    from lakebench.cli._reproduce import _extract_expected_numbers
-    from lakebench.metrics.collector import build_pipeline_benchmark
-    from lakebench.metrics.perf_gate import RunRecord, extract_metrics
-
-    missing: list[str] = []
-    for mode, keys in _scores_dict_keys().items():
-        for key in sorted(keys):
-            meta = reg.lookup(key, mode)
-            if meta is None or mode not in meta.modes:
-                missing.append(f"{key} ({mode}, _scores_dict)")
-    assert len(_scores_dict_keys()["sustained"]) > 20 and len(_scores_dict_keys()["batch"]) > 20
-
-    stored_keys: set[str] = set()
-    for run_id in sr.record_ids():
-        raw = sr.load_record(run_id)
-        mode = _mode(raw)
-        stored = ((raw.get("pipeline_benchmark") or {}).get("scores")) or {}
-        stored_keys |= set(stored)
-        for key in stored:
-            if reg.lookup(key, mode) is None:
-                missing.append(f"{key} ({run_id} stored)")
-        metrics = sr.load_metrics(run_id)
-        if metrics.pipeline_benchmark is not None:
-            rebuilt = build_pipeline_benchmark(metrics)._scores_dict()
-            for key in rebuilt:
-                if reg.lookup(key, mode) is None:
-                    missing.append(f"{key} ({run_id} rebuilt)")
-        record = RunRecord(run_id, sr.record_path(run_id), raw, metrics)
-        numbers = set(_extract_expected_numbers(metrics))
-        if raw.get("pipeline_benchmark"):
-            numbers |= set(extract_metrics(record)[0])
-        for key in numbers:
-            if reg.lookup(key, mode) is None:
-                missing.append(f"{key} ({run_id} reproduce/perf gate)")
-    assert len(stored_keys) == 55  # the pinned records' score keys (design 03 section 2)
-    assert missing == []
-
-
 def test_an_unregistered_score_fails_the_drift_check(monkeypatch):
     """A new key in a dict literal, through ``.update`` under a condition,
     or inside the continuous ``**{...}`` splat is seen by the scan."""
@@ -474,27 +431,6 @@ def test_reproduce_classification_unchanged():
     assert {k: _METRIC_TABLE[k] for k in _METRIC_TABLE} == {k: LEGACY[k] for k in _METRIC_TABLE}
 
 
-def test_moved_keys_never_reach_reproduce_or_the_perf_gate():
-    from lakebench.cli._reproduce import _classify_direction, _extract_expected_numbers
-    from lakebench.metrics.perf_gate import RunRecord, extract_metrics
-
-    reached: set[str] = set()
-    for run_id in sr.record_ids():
-        raw = sr.load_record(run_id)
-        metrics = sr.load_metrics(run_id)
-        reached |= set(_extract_expected_numbers(metrics))
-        if raw.get("pipeline_benchmark"):
-            rec = RunRecord(run_id, sr.record_path(run_id), raw, metrics)
-            reached |= set(extract_metrics(rec)[0])
-    assert reached and not reached & set(MOVED)
-    for key in reached:
-        legacy = LEGACY.get(key) or (
-            LEGACY["query_qph_Q1_full_aggregation_scan"] if key.startswith("query_qph_") else None
-        )
-        assert legacy is not None, key
-        assert _classify_direction(key) == legacy, key
-
-
 # --- descriptions and the report --------------------------------------------
 
 
@@ -544,3 +480,40 @@ def test_report_card_hints_match_the_registry():
 
 
 # --- compare: stored pair P2 -------------------------------------------------
+
+
+def test_every_emitted_key_registered():
+    """Every key _scores_dict can emit, every score key in the pinned records
+    and their rebuilt pipeline_benchmark, and every number reproduce takes
+    from those records resolves in the registry, in its mode."""
+    from lakebench.cli._reproduce import _extract_expected_numbers
+    from lakebench.metrics.collector import build_pipeline_benchmark
+
+    missing: list[str] = []
+    for mode, keys in _scores_dict_keys().items():
+        for key in sorted(keys):
+            meta = reg.lookup(key, mode)
+            if meta is None or mode not in meta.modes:
+                missing.append(f"{key} ({mode}, _scores_dict)")
+    assert len(_scores_dict_keys()["sustained"]) > 20 and len(_scores_dict_keys()["batch"]) > 20
+
+    stored_keys: set[str] = set()
+    for run_id in sr.record_ids():
+        raw = sr.load_record(run_id)
+        mode = _mode(raw)
+        stored = ((raw.get("pipeline_benchmark") or {}).get("scores")) or {}
+        stored_keys |= set(stored)
+        for key in stored:
+            if reg.lookup(key, mode) is None:
+                missing.append(f"{key} ({run_id} stored)")
+        metrics = sr.load_metrics(run_id)
+        if metrics.pipeline_benchmark is not None:
+            rebuilt = build_pipeline_benchmark(metrics)._scores_dict()
+            for key in rebuilt:
+                if reg.lookup(key, mode) is None:
+                    missing.append(f"{key} ({run_id} rebuilt)")
+        for key in set(_extract_expected_numbers(metrics)):
+            if reg.lookup(key, mode) is None:
+                missing.append(f"{key} ({run_id} reproduce)")
+    assert len(stored_keys) == 55
+    assert missing == []

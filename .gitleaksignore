@@ -2,9 +2,8 @@
 # credentials. Each entry is a fingerprint <commit>:<path>:<rule>:<line>;
 # none holds a secret value; a commit or tag message finding is
 # msgs/commits/<sha>.txt:<rule>:<line> or msgs/tags/<object id>.txt:<rule>:<line>.
-# scripts/gitleaks_history.py passes this file to gitleaks explicitly. CI's
-# history scan uses origin/main's copy (origin/integrate/v1.5.0's while main
-# has none) instead of a branch's; see RELEASING.md.
+# scripts/gitleaks_history.py passes this file to gitleaks explicitly; the
+# pre-push hook reads origin/main's copy instead of a branch's.
 # tests/test_gitleaks_baseline.py pins the list.
 
 # The old default Polaris client secret, public on PyPI in 1.0.0 to 1.4.0. It

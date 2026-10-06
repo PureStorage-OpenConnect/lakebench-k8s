@@ -51,9 +51,8 @@ Spark Thrift's tsv2 has one, and DuckDB returns up to 100 rows as Python
 reprs; `count` is the rows the engine returned. `report --json` gives the
 scores as stored and the verdict three ways: `verdict_stored` as the
 record holds it, `verdict_recomputed` from the record's own fields, and
-`verdict`, the stricter of the two, which is what the perf gate
-and the release gate read (`report --list --json` rows carry the same
-three). `--json` does not
+`verdict`, the stricter of the two (`report --list --json` rows carry
+the same three). `--json` does not
 combine with `--format` on `report` or `query`, nor with
 `status --local` or `query --interactive`. `plan --json` makes no cluster
 call, as before.
@@ -795,8 +794,7 @@ copy of that run's record with the new benchmark as its QpH, scores and
 query stage, and `provenance.benchmark` naming the code and time of the
 benchmark; a continuous run's in-stream rounds and the run's maintenance
 QpH pair are not copied). The run's
-own record is never rewritten, and the perf gate never takes a benchmark
-record as a run. Nothing is recorded when the deployment has no run record,
+own record is never rewritten. Nothing is recorded when the deployment has no run record,
 or when the query engine now runs another dependency set than that run
 recorded.
 

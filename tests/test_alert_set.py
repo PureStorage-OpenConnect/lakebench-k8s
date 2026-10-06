@@ -215,35 +215,6 @@ class TestCompare:
 # ---------------------------------------------------------------------------
 
 
-def test_release_record_names_the_rule():
-    from lakebench.metrics.release_record import _fingerprint_problems
-
-    other = _aset(W1_connected_components=(2, "-12"), W2_structuring=(5, "907"))
-    probs = _fingerprint_problems({"alert_set": other}, {"alert_set": ASET})
-    assert probs == [
-        "alert set differs: rule W1_connected_components raised 2 alert(s) in the run and 3 "
-        "in the expected set (against the expected alert set)"
-    ]
-    assert _fingerprint_problems({"alert_set": copy.deepcopy(ASET)}, {"alert_set": ASET}) == []
-    bad = _fingerprint_problems({"alert_set": "x"}, {"alert_set": ASET})
-    assert bad == ["alert set cannot be checked: run not an object, expected well formed"]
-
-
-def test_release_record_requires_the_alert_set():
-    """A 1.7 AML batch release row without its alert set is a problem even
-    when the expected entry carries none."""
-    from lakebench.metrics.release_record import _results_problems
-
-    exp = _fresh(aset=None, unavailable="boom").to_dict()["experiment"]
-    assert _results_problems({}, exp, {"entries": []}) == [
-        "the alert-set fingerprint was not recorded (boom)"
-    ]
-    ok = _fresh().to_dict()["experiment"]
-    assert _results_problems({}, ok, {"entries": []}) == [
-        "no expected results for this workload, corpus and scale"
-    ]
-
-
 def test_cli_takes_the_fingerprint_off_the_stage_time():
     from datetime import datetime, timezone
 

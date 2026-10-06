@@ -8,7 +8,7 @@ the stages and detection rules that ran or were skipped, the limits
 Lakebench imposed on the run, and a result fingerprint per benchmark query
 (benchmark.fingerprint).
 
-The perf gate and ``reproduce`` read it (``stored_identity_refusals``): two
+``reproduce`` reads it (``stored_identity_refusals``): two
 runs whose workload, corpus, seed, scale or mode differ, or whose benchmark
 queries returned different results, are not compared on performance
 (invariant 2). A record without the block (written before it existed) is
@@ -16,7 +16,7 @@ queries returned different results, are not compared on performance
 
 The block is assembled in two halves. ``experiment_inputs(cfg)`` runs when
 the run starts and is stored in ``config_snapshot["experiment_inputs"]``
-(outside the perf-gate fingerprint keys, so adding it moved no
+(outside the fingerprint keys, so adding it moved no
 fingerprint). ``build_experiment(metrics)`` runs when metrics.json is
 written and adds what only the run knows.
 
@@ -524,8 +524,7 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
             "scale_derived": uncapped,
             "cap": cap,
             "override": override,
-            # A count pinned at the cap is the cap binding too (a pinned
-            # perf-gate config must pin the profile's count, the cap there).
+            # A count pinned at the cap is the cap binding too.
             "cap_hit": uncapped > cap and (override is None or override == cap),
             "observed": observed,
         }
@@ -1308,7 +1307,7 @@ CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
 #: Conditions that are also outcomes of the run: the in-stream round count
 #: depends on how long each round took, so a slower build fits fewer rounds,
 #: and the investigator sessions that ran depend on the cases open.
-#: A difference is not like-for-like; the perf gate and reproduce do not
+#: A difference is not like-for-like; reproduce does not
 #: refuse on it, or a regression that costs a round would
 #: read as "not comparable" instead of a regression.
 OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
@@ -1454,8 +1453,8 @@ def stored_identity_refusals(
     failed: Any = (),
 ) -> list[str]:
     """Refusals for a run (*actual*: its experiment block) checked against a
-    stored reference: a perf-gate baseline or a reproduction package, which
-    keep only the identity and the result fingerprints. *what* names the
+    stored reference, a reproduction package, which
+    keeps only the identity and the result fingerprints. *what* names the
     reference in messages ("baseline", "package"). Every identity field
     counts here, execution conditions included: a reference is only matched
     like-for-like. The exception is OUTCOME_CONDITION_KEYS (the in-stream

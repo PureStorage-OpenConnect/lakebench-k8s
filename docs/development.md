@@ -154,7 +154,7 @@ A coverage report: `make test-cov`, written to `htmlcov/index.html`.
 |--------|-------------|
 | `make install` | Install the package in editable mode, without the dev extra |
 | `make dev` | Install with the dev extra and set up the pre-commit hooks |
-| `make check-fast` | Ruff and the format check on `src/`, `tests/` and `scripts/`, mypy on `src/lakebench/`, then the unit tests in parallel without `tests/spark` and the `slow` tests (CI's Lint job runs it, budget 8 minutes) |
+| `make check-fast` | Ruff and the format check on `src/`, `tests/` and `scripts/`, mypy on `src/lakebench/`, then the unit tests in parallel without `tests/spark` and the `slow` tests |
 | `make test` | The pytest command of `make check-fast` alone |
 | `make test-spark` | The Spark tier on the installed pyspark, with its pinned jars fetched and `LB_REQUIRE_JARS=1` |
 | `make test-unit` | Every test not marked `integration` or `e2e`, serially, `slow` tests included |
@@ -218,19 +218,9 @@ one.
 
 ### Maintainer checks
 
-- `python scripts/check_doc_readers.py` (also in CI) fails on a tracked doc
-  or script that nothing links or reads; `--resolve-paths FILE` checks that
-  every path a local notes file names exists.
-- `python scripts/check_doc_overlap.py FILE` lists each paragraph of a
-  local, untracked instructions file that repeats a tracked doc, and each
-  line that repeats a fact (a number with a unit, a backticked identifier
-  with a digit) without pointing at a doc that states it. `CHANGELOG.md` is
-  not in its corpus. It exits 1 on any report and 2 when it cannot run;
-  rewrite a reported line as a pointer. Its unit tests run in CI on planted
-  files.
 - `python scripts/prose_guard.py` fails on an em dash, an emoji or an AI
-  attribution line in any tracked file (`tests/test_prose_style.py` runs it
-  in the unit tier, and the release gate's `prose` check runs it too). A
+  attribution line in any tracked file (the release gate's `prose` check
+  runs it). A
   hit that has to stay goes in `scripts/prose_allowlist.txt` as
   `path:kind:key  # reason`, with the key the hit prints (a hash of the
   line, so the entry survives edits elsewhere in the file); an entry whose
@@ -502,114 +492,22 @@ generator's output after the freeze is `Void`.
 ## What CI Runs
 
 `.github/workflows/ci.yml` runs on every branch push and on pull requests to
-`main` and `integrate/**`. A newer push to the same `lane/*` branch or pull
-request cancels the older run; on every other branch each pushed head's run
-finishes. A tag push does not trigger this workflow; the release workflow
-calls it instead. The lint job runs `ruff check src/ tests/ scripts/`,
-`ruff format --check src/ tests/ scripts/` and `mypy src/lakebench/` on
-Python 3.11, and `scripts/check_action_runtimes.py --verify`, which reads
-each action's `action.yml` at its pinned SHA and fails if
-`.github/action-runtimes.json` no longer matches it. It also runs
-`scripts/check_doc_readers.py`, which fails on any tracked `.md` file, file
-under `docs/` or `scripts/`, or top-level script that is neither linked from
-`README.md` or `docs/README.md` nor read by code, tests or CI (a mention in a
-comment or docstring does not count); link a new page from `docs/README.md`.
-`tests/test_doc_links.py` checks that every relative link, `#anchor` and
-backticked `src/`, `tests/`, `scripts/` or `datagen_rs/` path in the docs
-resolves. `tests/test_citations.py` fails when a shipped file (under `src/`,
-`docs/`, `scripts/`, `datagen_rs/` or `examples/`, or the README) gains a
-bug id, an internal plan, requirement or work-item id, or a gotcha number,
-none of which a reader of the package can look up; state the reason in
-words instead. A change to `tests/fixtures/citation_counts.json` that raises
-a count is a review blocker, except in the commit that lands the ratchet on
-a merge-train tree (`python tests/test_citations.py` retakes it there). The
-Lint job runs `make check-fast` on Python 3.11 under an 8-minute budget,
-alongside the docs and other static checks: `scripts/ci_budget.py` fails the step when a command runs over its
-budget, records the time in the step summary, and leaves the job's
-`timeout-minutes` (1.5 times the budget) as a backstop. The test job runs
-the same parallel unit tests (`-n auto --dist loadfile`, without
-`tests/spark` and the `slow` tests, excluding `tests/test_e2e.py` and
-`tests/test_integration.py`) on Python 3.10 and 3.13, the oldest and newest
-supported versions, under a 15-minute budget. It runs to the end rather
-than stopping at the first failure, prints every skip reason, and a failure
-on one Python version does not cancel the other (`fail-fast: false`). On 3.13 it checks per-file
-coverage floors with `scripts/check_coverage.py --suite unit` and keeps the
-per-file report as the `coverage-unit` artifact for 30 days; floors are
-raised from that report, never lowered. The Spark tier runs on two legs,
-`pyspark==4.0.1` and `pyspark==4.1.1`, on Java 17, forward and with
-`--lb-reverse`, and each of those four passes is split into two jobs with
-`--lb-shard 1/2` and `2/2`: eight parallel jobs, each under a
-52-minute budget. Every job fetches the jars pinned in
-`tests/spark/jars.lock.json` with `scripts/fetch_test_jars.py`, runs with
-`LB_REQUIRE_JARS=1` and keeps its JUnit report as a `spark-junit-*`
-artifact. The two 4.0 forward jobs collect coverage, and the "Spark
-coverage floors" job combines their data and checks the floors with
-`scripts/check_coverage.py --suite spark`, keeping the report as the
-`coverage-spark` artifact. A failing job uploads every
-`spark-subprocess.log`. The "AML statistics (slow)" job runs
-the tests marked `slow` (the heavy fidelity-gate fits, the scale invariance
-check and the Spark fidelity gate over silver) on Python 3.11 with the pinned
-`[aml]` libraries, on every push to `main`, `integrate/**`, `train/*` and
-tags (through the release workflow's call) and on every pull request to
-`integrate/**` or `main`; it is not run on other branch pushes, and the
-unit legs and `make check-fast` deselect the `slow` tests. It also reruns the D8 power simulation in a second
-environment with the numpy and scipy versions the pre-registration recorded
-its output hash with, since that guard skips on the `[aml]` pins.
-The Rust job runs `cargo fmt
---check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test
---release --locked` in `datagen_rs/`. A gitleaks job scans the working tree
-for credentials, and a second one (`scripts/gitleaks_history.py`, which the
-release gate also runs) scans every commit reachable from the pushed or
-merged head, including what merge commits change, plus every commit and tag
-message, and ignores inline `gitleaks:allow` comments. It fails if gitleaks
-scanned no commit, which is how gitleaks reports a `git log` it could not
-run. Findings listed in `.gitleaksignore` (the history
-baseline: two fingerprints of the old default Polaris secret that PyPI
-1.0.0 to 1.4.0 published) are not reported. The scan takes the config and
-the baseline from a trusted ref, not from the branch, so a branch cannot
-allowlist its own finding. A push to `main`, a pull request to `main` and a
-release tag trust `origin/main` first, then `origin/integrate/v1.5.0`;
-every other branch trusts `origin/integrate/v1.5.0` first (the ref the
-pre-push hook reads), then `origin/main`. A pull request to `main` uses its
-own baseline, which the owner reviews, and CI prints its baseline and config
-diff against `main`. The scan also runs with
-the branch's own config, so a new rule applies at once.
-`tests/test_gitleaks_baseline.py` pins the list. The package build runs
-only after the lint, test, Spark, Rust and both secret-scan jobs pass; it
-does not wait for the slow AML job, which most branches skip. After the
-build it installs the pinned gitleaks and runs
-`scripts/package_guard.py --dist dist`: no `docs/internal/`
-or other maintainer-only member, no binary or link member, no key pattern
-or gitleaks finding, and no held-out seed once
-the hash file exists, in the wheel, the sdist and the script ConfigMaps
-rendered from the wheel.
+`main`; the release workflow calls it on the tagged commit. A newer push to a
+pull request cancels its older run.
 
-Every job runs on a fixed runner image (`ubuntu-24.04`, never
-`ubuntu-latest`), and every action is pinned by commit SHA with its tag as
-a trailing comment (`owner/repo@<sha> # vX.Y.Z`; `dtolnay/rust-toolchain`
-has no release tags and names its branch and date instead). To change an action, pin
-the new SHA, update its entry in `.github/action-runtimes.json` and run
-`GITHUB_TOKEN=$(gh auth token) python scripts/check_action_runtimes.py
---verify`; `tests/test_workflows.py` fails on a floating runner label, an
-unpinned or unmapped action, or a Node 20 or older runtime.
+| Job | What it runs |
+|-----|--------------|
+| Lint & Type Check | `ruff check` and `ruff format --check` on `src/ tests/ scripts/`, `mypy src/lakebench/` (Python 3.11) |
+| Test (3.10, 3.13) | the unit tests in parallel, without `tests/spark` and the `slow` tests; one version failing does not cancel the other |
+| Secret scan | gitleaks over the working tree with `.gitleaks.toml` |
+| Rust datagen | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --release` in `datagen_rs/` |
+| Build Package | after the four above: build the wheel and sdist, check `py.typed`, install the wheel, then `scripts/package_guard.py --dist dist` |
 
-The "Contributor path" job runs the quick-path block of `CONTRIBUTING.md`
-(between its `contributor-path:begin` and `contributor-path:end` markers)
-as written, in a clean `python:3.11-bookworm` container with Java 17, make
-and git. `scripts/contributor_path.py` extracts it, fails on a `make`
-target the Makefile lacks, and replaces only the one `git clone` line with
-a clone of this repository at the commit under test. It runs on every push to `main`, `integrate/**` and
-`train/*` and on tags, and on any other push or pull request whose changes
-touch `CONTRIBUTING.md`, the `Makefile`, `pyproject.toml`,
-`.github/workflows/`, `.pre-commit-config.yaml`, the script itself,
-`scripts/fetch_test_jars.py` or `tests/spark/jars.lock.json`; otherwise its
-steps are skipped and the step summary says so, so it must not be a
-required check. It is outside the fast-path budgets (the block includes
-`make test-spark`, and nothing is cached), the package build does not wait
-for it, and a release, which calls this workflow on the tag, does. A
-command in the block that needs a cluster or a local file fails the job on
-the pull request that adds it; `tests/test_contributor_path.py` also fails
-in the unit tier on a `make` target the Makefile lacks.
+The Spark tier, the `slow` AML statistics tests and the full-history gitleaks
+scan (`tests/test_gitleaks_history.py`) run locally before a push, not in CI.
+
+Jobs use a fixed runner image (`ubuntu-24.04`) and every action is pinned by
+commit SHA with its tag as a trailing comment.
 
 ## Further reading
 

@@ -184,36 +184,3 @@ class TestLoader:
         CliRunner().invoke(app, [*argv, str(self._write(tmp_path, "x"))])
         assert seen and not seen[0].get("allow_long_names")
         assert seen[0].get("purpose") in (LoadPurpose.MUTATE, LoadPurpose.RUN)
-
-
-_PINNED = sorted(
-    p
-    for p in (Path(__file__).parent.parent / "benchmarks" / "perf").glob("*.yaml")
-    if p.name != "baselines.yaml"
-)
-
-
-class TestPinnedPerfConfigs:
-    def test_pinned_configs_found(self):
-        assert len(_PINNED) >= 3
-
-    @pytest.mark.parametrize("path", _PINNED)
-    def test_gate_loads_with_a_long_perf_name_in_the_env(self, path, monkeypatch):
-        # The fingerprint does not depend on the name, so the gate must not
-        # refuse because a too-long LAKEBENCH_PERF_NAME is still exported.
-        from lakebench.metrics.perf_gate import load_pinned
-
-        monkeypatch.setenv("LAKEBENCH_PERF_NAME", "ov-perf-c360-continuous-s10")
-        load_pinned(path)
-
-    @pytest.mark.parametrize("path", _PINNED)
-    def test_default_names_fit(self, path, monkeypatch):
-        from lakebench.metrics.perf_gate import _PLACEHOLDER_ENV
-
-        monkeypatch.delenv("LAKEBENCH_PERF_NAME", raising=False)
-        for k, v in _PLACEHOLDER_ENV.items():
-            if k != "LAKEBENCH_PERF_NAME":
-                monkeypatch.setenv(k, v)
-        cfg = load_config(path)
-        assert derived_name_violations(cfg) == []
-        assert len(cfg.get_namespace()) <= max_namespace_length(cfg)

@@ -37,7 +37,7 @@ class LoadPurpose(str, Enum):
     """What the command that loads the config is going to do with it."""
 
     MUTATE = "mutate"  # deploy, generate, benchmark, query, clean, financial, reproduce
-    RUN = "run"  # run (and the perf gate's pinned configs): MUTATE plus run-only refusals
+    RUN = "run"  # run: MUTATE plus run-only refusals
     TEARDOWN = "teardown"  # destroy, stop, admin
     READ = "read"  # status, logs, report, results: read about a deployment
     INSPECT = "inspect"  # config show, info, config storage/recommend/upgrade: no deployment

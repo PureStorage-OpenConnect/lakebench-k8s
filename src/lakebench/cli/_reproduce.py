@@ -104,7 +104,7 @@ def _classify_direction(metric: str) -> tuple[str, str]:
     return reproduce_class(metric)
 
 
-#: The metrics reproduce and the perf gate enumerate, with their (band,
+#: The metrics reproduce enumerates, with their (band,
 #: direction). A view of the registry, kept for callers that read the table.
 _METRIC_TABLE: dict[str, tuple[str, str]] = {
     m: _classify_direction(m)
@@ -344,8 +344,8 @@ def _experiment_refusal(meta: dict[str, Any], metrics: Any) -> str | None:
         meta.get("result_fingerprints"),
         _run_experiment(metrics),
         "package",
-        # A failed query is reported once, as a failed number, like the
-        # perf gate does, not a second time as a result mismatch.
+        # A failed query is reported once, as a failed number, not a
+        # second time as a result mismatch.
         failed=_failed_queries(metrics),
     )
     if not reasons:

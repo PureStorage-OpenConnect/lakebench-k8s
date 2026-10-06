@@ -282,12 +282,6 @@ def test_snapshot_records_the_configured_gold_strategy(value, want) -> None:
     assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": want}
 
 
-def test_requested_gold_strategy_is_outside_the_perf_fingerprint() -> None:
-    from lakebench.metrics.perf_gate import _FINGERPRINT_KEYS
-
-    assert "requested" not in _FINGERPRINT_KEYS
-
-
 def test_explicit_request_with_an_unrecorded_effective_claims_nothing() -> None:
     """An older script logged no strategy: the request cannot be judged."""
     rec = sr.load_record(C360_BATCH)

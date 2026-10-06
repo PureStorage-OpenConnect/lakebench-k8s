@@ -1631,8 +1631,8 @@ class ProcessingConfig(ConfigModel):
             "maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below "
             "24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta "
             "`OPTIMIZE` is never run. All statements share one 30-minute budget; the first "
-            "statement timeout or the deadline stops the rest, and the perf gate then treats "
-            "post-maintenance QpH as not a measurement."
+            "statement timeout or the deadline stops the rest, and the post-maintenance QpH "
+            "is then not a measurement."
         ),
     )
     sustained: SustainedConfig = Field(default_factory=SustainedConfig)

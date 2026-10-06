@@ -488,8 +488,7 @@ def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
 
 #: Name prefix of the one benchmark query whose failure an in-stream round
 #: tolerates: Q9 reads the C360 gold table that gold refresh replaces while
-#: rounds run (``cli._sustained.tolerated_q9_results``). The release record
-#: (``release_record.round_query_set``) reads the same prefix.
+#: rounds run (``cli._sustained.tolerated_q9_results``).
 TOLERATED_ROUND_FAILURE_PREFIX = "Q9"
 
 
@@ -580,8 +579,8 @@ def _deps_pods_reason(metrics: PipelineMetrics) -> str | None:
 
 # ---------------------------------------------------------------------------
 # Record gates: decided from the record alone.
-# Each reads only fields a stored metrics.json carries, so a report,
-# the perf gate and the release gate recompute the outcome the run saved.
+# Each reads only fields a stored metrics.json carries, so a report
+# recomputes the outcome the run saved.
 # They apply to a run that was not interrupted: an interrupted run is never
 # PASSED, and its partial layers must not turn INTERRUPTED into FAILED.
 # ---------------------------------------------------------------------------
@@ -607,7 +606,7 @@ EXPECTED_SKIPS: dict[tuple[str, str], dict[str, frozenset[str]]] = {
 
 #: Verdict qualifier listing the layers whose rows were not measured, where
 #: the ``layer_rows`` gate passed on bytes alone. Always set (possibly
-#: empty) when the gate is computed; the release gate reads it.
+#: empty) when the gate is computed.
 LAYER_ROWS_UNMEASURED = "layer_rows_unmeasured"
 
 #: Verdict qualifier naming each AML rule a PASSED run skipped on a

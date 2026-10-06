@@ -75,6 +75,5 @@ a workload end to end, and records evidence of what produced each number.
 ## Development
 
 - [Development Guide](development.md) -- architecture map, test and CI wiring, adding a recipe or workload
-- [Performance Regression Gate](perf-regression-gate.md) -- pinned configs, baselines, gate behaviour
 - [Design Notes](design/README.md) -- long-form design records (namespace isolation, others)
 - [Contributing](../CONTRIBUTING.md) -- setup, test tiers, pull requests, review and style

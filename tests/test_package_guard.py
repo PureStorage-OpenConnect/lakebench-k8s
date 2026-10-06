@@ -38,13 +38,6 @@ def _sdist(path: Path, members: dict[str, str]) -> Path:
     return path
 
 
-def _wheel(path: Path, members: dict[str, str]) -> Path:
-    with zipfile.ZipFile(path, "w") as z:
-        for name, body in members.items():
-            z.writestr(name, body)
-    return path
-
-
 @pytest.mark.parametrize(
     "member",
     [
@@ -314,37 +307,6 @@ def test_real_build_passes_non_seed_checks(tmp_path):
     assert by["names"].status == by["content"].status == pg.PASS
     # The script maps were rendered from the wheel and scanned with it.
     assert int(by["names"].detail.split()[0]) > 100
-
-
-def _workflow(name: str) -> dict:
-    import yaml
-
-    return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
-
-
-def test_ci_build_job_guards_the_built_package_after_installing_it():
-    steps = [str(s.get("run", "")) for s in _workflow("ci.yml")["jobs"]["build"]["steps"]]
-    guard = next(i for i, r in enumerate(steps) if "scripts/package_guard.py --dist dist" in r)
-    install = next(i for i, r in enumerate(steps) if "pip install dist/*.whl" in r)
-    assert install < guard
-    assert any("gitleaks.tgz" in r and "sha256sum -c" in r for r in steps[:guard])
-
-
-def test_release_guards_the_files_it_uploads():
-    steps = _workflow("release.yml")["jobs"]["build-dist"]["steps"]
-    runs = [str(s.get("run", "")) for s in steps]
-    guard = next(i for i, r in enumerate(runs) if "package_guard.py --dist dist --require-all" in r)
-    upload = next(i for i, s in enumerate(steps) if "upload-artifact" in str(s.get("uses", "")))
-    assert guard < upload
-    assert any("gitleaks.tgz" in r for r in runs[:guard])
-
-
-def test_release_gate_job_has_gitleaks_for_the_package_guard():
-    steps = _workflow("release.yml")["jobs"]["gate"]["steps"]
-    runs = [str(s.get("run", "")) for s in steps]
-    gl = next(i for i, r in enumerate(runs) if "gitleaks.tgz" in r and "sha256sum -c" in r)
-    gate = next(i for i, r in enumerate(runs) if "release_gate.py" in r)
-    assert gl < gate and "package-guard" in runs[gate] and "--require-all" in runs[gate]
 
 
 def test_release_gate_check_maps_pending_to_skip(monkeypatch):

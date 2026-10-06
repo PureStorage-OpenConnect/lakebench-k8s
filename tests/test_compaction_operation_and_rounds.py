@@ -320,24 +320,6 @@ def test_blended_qph_is_not_gated_or_reproduced():
     assert "composite_qph" not in _extract_expected_numbers(m)
 
 
-def test_perf_gate_excludes_a_blended_composite(tmp_path):
-    """Read from the rounds as reproduce reads them, so a record stored
-    before the basis existed (this one stores none) gets the same answer."""
-    from lakebench.metrics.perf_gate import RunRecord, extract_metrics
-    from lakebench.metrics.storage import MetricsStorage
-
-    raw = sr.load_record("204941-1d17f4")
-    assert "composite_qph_basis" not in (raw["pipeline_benchmark"].get("scores") or {})
-    m = sr.load_metrics("204941-1d17f4")
-    run = RunRecord("x", sr.record_path("204941-1d17f4"), raw, m)
-    assert "composite_qph" not in extract_metrics(run)[1]
-    raw["pipeline_benchmark"]["benchmark_rounds"][1]["queries"][0]["success"] = False
-    m = MetricsStorage(str(tmp_path))._dict_to_metrics(raw)
-    numbers, excluded = extract_metrics(RunRecord("x", sr.record_path("204941-1d17f4"), raw, m))
-    assert excluded.get("composite_qph") == "in-stream rounds ran different query sets"
-    assert "composite_qph" not in numbers
-
-
 def test_odd_stored_rounds_do_not_crash_the_basis():
     from lakebench.metrics.storage import recorded_qph_basis
 

@@ -36,7 +36,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
 - Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
 - A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
-- The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines are refused until re-recorded.
+- The perf gate (`scripts/perf_gate.py`, `benchmarks/perf/`, the baseline store) is removed.
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
 - `stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
@@ -69,7 +69,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
 - The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 - A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
-- `report`, the perf gate and the release gate read the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+- `report` reads the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
@@ -87,14 +87,12 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   stays on 4.0.2). With the format version at `auto`, Delta follows to 4.1.0
   and Iceberg 1.11.0 uses its native Spark 4.1 runtime. A config that did
   not set `images.spark` therefore runs a different Spark, jar set and
-  perf-gate fingerprint than under v1.6: pin `images.spark:
+  fingerprint than under v1.6: pin `images.spark:
   apache/spark:4.0.2-python3` to keep the old one. A deployment made from
   such a config must be redeployed, since `run` refuses a dependency set
   that no longer matches the config. A config that writes a table format
   version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
-  so it still loads and tears down. The Hive examples now pin 4.1.1; of the
-  perf-gate pinned configs, `aml-batch-s10` runs 4.1.1 and the Customer 360
-  Hive/Polaris pair stays on 4.0.2 (Polaris is validated only there). `--local`
+  so it still loads and tears down. The Hive examples now pin 4.1.1. `--local`
   runs keep their own 4.0.2 image, and their record now names it.
 - **The verdict is decided from the record.** A PASSED verdict now also
   needs rows in every layer (`layer_rows`), the expected AML rules with no
@@ -109,7 +107,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   conditions that before only turned the report badge red: a continuous
   ingest ratio below 0.95 that the trickle does not explain, gold stale for
   more than half the run, and a batch scale ratio between 0 and 0.95.
-  The perf gate, the release gate and `report` take the
+  `report` takes the
   strictest of a record's stored verdict and the one recomputed from it
   (`report --json` and its `--list` rows show `verdict_stored`,
   `verdict_recomputed` and that strictest one as `verdict`), so stored
@@ -117,8 +115,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   corpus without a watchlist (W5 and W6 did not run) do, and the stored
   Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
   dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
-  records the stage (`stage_only`), is judged on that stage's layer, and is
-  refused as a perf baseline. A stored scale or ingest ratio just under
+  records the stage (`stage_only`) and is judged on that stage's layer. A stored scale or ingest ratio just under
   0.95 is rounded down, never up to 0.95. A `lakebench benchmark`
   record's `success` follows its verdict (the command's exit code does not change).
 - **Multi-cycle runs and reused corpora check a corpus series marker.**
@@ -164,8 +161,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   is recorded in `experiment.architecture` (`spark_executor_overrides`,
   `spark_driver_overrides`) as an architecture difference. A run whose
   overrides differ from the profile's counts, or that sets a driver
-  override, is not release evidence or a perf baseline, and a pinned
-  perf-gate config must pin the profile's counts. The financial operations
+  override, is recorded as such. The financial operations
   jobs (`replay-financial`, `reproduce-financial`,
   `score-financial-reference`) have their own sizing profiles, equal to
   silver-build's; a Spark job with no profile is now an error rather than a
@@ -210,8 +206,8 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   benchmark inside the run's own `metrics.json`. The copy's QpH, scores and
   query stage are the new benchmark's, `provenance.benchmark` names the code
   and time of the benchmark, and a continuous run's in-stream rounds and the
-  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`,
-  nor a perf-gate candidate or baseline: read it by its run id
+  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`:
+  read it by its run id
   (`benchmark` prints it). `lakebench query` prints and journals its result
   and no longer appends it to the latest record. `MetricsStorage.save_run`
   refuses to replace an existing `metrics.json` unless called with
@@ -460,20 +456,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `lakebench benchmark --mode`, `--cold` or `--streams`), and the run's
   `config_snapshot.benchmark` records the pass that ran instead of the
   config's values.
-- **Perf-gate fingerprint version 2 and baseline store schema 2.** The
-  fingerprint now also hashes each Spark job's profile and the Spark conf its
-  manifest writes (location and credential keys left out), the query
-  engine's sizing and the catalog's resources; a run stamps
-  `config_snapshot.fingerprint_version` and `fingerprint_inputs` when it
-  starts and the gate reads them. Baselines record `fingerprint_version` and
-  the run's dependency pinset. Runs and baselines from before version 2 are
-  refused by name until re-recorded, a run on another dependency set than
-  its baseline is refused, and `record` refuses a run without a pinset. A
-  run now records the sha256 of its config file (`config_sha256`) and the
-  gate refuses a run of any other file. A continuous pinned config must pin
-  its three streaming executor counts. The user's `spark.conf` entries
-  enter the fingerprint as a hash, never in plain text. The three pinned
-  configs drop the removed keys and `streams: 4`.
 - **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
   the other flat spellings still load, each with a note naming the nested
   key to write. Both spellings set: the flat value still wins, with a note.
@@ -488,47 +470,15 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   command (support states, configuration and CLI references, sizing tables,
   exit codes, prerequisites); `--check` exits 1 when any is stale. Every
   config schema field, section blocks included, now has a description.
-- **Release harness.** `scripts/release/harness.py` (not in the wheel) runs
-  the release matrix (`scripts/release/matrix-1.7.yaml`) from a worktree
-  detached at the freeze commit: it refuses a dirty tree, a foreign sha or a
-  lakebench imported from outside the tree, writes the deployments-ledger
-  row before each deploy, admits rows against the cluster's load, judges
-  each row by its record and destroys only the incarnation it deployed
-  (`destroy --expect-incarnation`), closing a ledger row only when the
-  namespace and its buckets are gone. The six parallel-safety scenarios
-  moved into `scripts/release/scenarios/`, updated to the current CLI
-  (refusals checked by exit code and exit path, a context-pinned `kubectl`,
-  owners read from the bucket tag or the owner marker), and run through
-  `harness.py scenario S-Pn`, which cleans up by incarnation afterwards.
-  `harness.py upgrade` deploys and runs one deployment with Lakebench 1.6,
-  then converts it with `init --from`, deploys, runs and destroys it with
-  the release, checking that the 1.6 bronze and tables survive. Matrix rows
-  may run extra steps before their destroy (M01: a continuous run after the
-  batch run on the same deployment). `harness.py expected` writes
-  `uat/expected-results-<version>.json` from reference run records, refusing
-  exp1 records, runs that did not pass, corpora not from the release datagen
-  image, query sets other than the registry's, missing or empty fingerprints
-  or AML alert sets, and runs of one entry that disagree; a rehearsal writes
-  a draft of it to its `--out`. See RELEASING.md.
 - **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
   to that file as it exits, so scripts can tell refusals that share exit 3
   apart without reading message text (docs/exit-codes.md).
-- **AML silver parity check.** `scripts/release/silver_parity.py` (not in the
-  wheel) compares row counts and order-insensitive checksums of the AML
-  silver tables between a batch and a drained continuous deployment of one
-  corpus, with the business columns read from the silver DDL. See
-  RELEASING.md.
-- **v1.7 performance re-baseline configs.** `benchmarks/perf/` pins
-  `aml-batch-s10` and `c360-batch-s10-polaris` (the Polaris twin of
-  `c360-batch-s10`); the release workflow now runs the `perf-baselines`
-  check, which fails a tag only for configs marked required (none until the
-  post-freeze data commit). See docs/perf-regression-gate.md.
 - **AML batch runs record their alert set.**
   After its last alert write, gold-finalize fingerprints the run's alerts
   over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
   generated ids and wall-clock times (`experiment.results.alert_set`, equal
   on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are not
-  comparable; the perf gate, `reproduce` and the release record refuse an
+  comparable; `reproduce` refuses an
   AML batch record written by 1.7 without one. The fingerprint runs last in
   the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
   off the stage's time, as the Customer 360 check's are (time to value of a
@@ -578,9 +528,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   {requested, run}`, and the identity key `investigator sessions` takes the
   sessions that ran, not the configured number, so a run whose round was
   lowered or skipped compares as not like-for-like with one that ran at N
-  (an outcome condition: the perf gate and `reproduce` do not refuse on the
-  number; the perf gate refuses sessions that ran against a baseline with
-  none configured or none run, and the other way round). A config without the key records and identifies exactly
+  (an outcome condition: `reproduce` does not refuse on the number). A config without the key records and identifies exactly
   as before. With the key, the run adds one round after its first
   in-stream round with a case: N concurrent sessions, one case each in
   IQ1's queue order, run IQ1 to IQ3 bound to their case and IQ4, once each,
@@ -838,20 +786,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   answer when read. The trickle is not a bound kind, so no experiment
   identity moves. The `intake_limit` description now says `none` means
   `ingest_ratio >= 0.95` and points at `trickle_bound`.
-- **The release gate reads the evidence.** `scripts/release_gate.py` gains
-  `records`, `support-record`, `freeze` and `expected-results`: every cited
-  run record must have passed, measured every layer, run the expected stages
-  and rules, matched the expected results, come from the declared freeze
-  commit on a clean tree from the release datagen image, and been bound by no
-  Lakebench limit; changes after the freeze are limited to evidence and
-  generated blocks. `records`, `freeze` and `expected-results` are skipped
-  until `uat/freeze-<version>` exists and `support-record` until `--tag`; the
-  release workflow runs all four with `--require-all` on the full history.
-  A continuous round whose only failed queries are Q9, which the verdict
-  tolerates, counts for the query set it listed, so a C360 continuous run
-  that passed with one is not refused for running a 7-query set.
-  The perf gate now refuses a run an evaluation profile or a Lakebench limit
-  bound. See `RELEASING.md`, "Release evidence".
 - **Compaction by engine, and blended in-stream QpH.** A run's effective
   maintenance records the compaction operation and its parameters (Trino
   `optimize` with its 128 MB threshold, Iceberg `rewrite_data_files`
@@ -970,25 +904,6 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `upgrading/`, moved `operators-and-catalogs.md` to component reference,
   and tightened the legacy-package section in `docs/reproductions/README.md`
   plus minor weasel-word nits.
-- **The release gate refuses a record from a held-out AML corpus by its
-  seed, not only by its declared role.** `records`,
-  `support-record` and the release harness refuse a record whose recorded
-  seed hashes to a held-out seed or is withheld, and an AML record with no
-  corpus seed, a seed in no form the guard can read, or a held-out check
-  that cannot run; before, only a declared `corpus_role: evaluation` or
-  `robustness` was refused. Such a record gets that one reason and no
-  other, so no field of it can carry a seed into the output; the reason
-  names the run id and the role or what could not be read, never a seed.
-  The held-out audit and the gate also count a record as AML by its
-  workload name, so an AML record missing its corpus block is
-  unidentified. A salted hash the hash file does not name is unidentified
-  too (it may be a held-out seed's hash under another salt). The perf gate
-  (`perf-baselines`, `scripts/perf_gate.py record`, `compare` and `gate`)
-  refuses such a run, and a baseline whose identity names a held-out seed
-  (or, for AML, no seed it can check), with that reason alone, and never
-  picks such a run as the newest candidate. A seed difference, in the perf
-  gate and in `reproduce`'s package check, reads `seed differs (values
-  withheld)`, never the values.
 - **FQ4 and IQ3 give one answer per corpus in batch and continuous.**
   Continuous AML stores edge rows per pair per micro-batch and statement
   running balances in arrival order, so FQ4 (which returned the stored
@@ -1066,21 +981,9 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   Spark minor is read only from an `apache/spark` image with a release tag,
   so a run on a custom or forked Spark image is never `supported`. An entry
   that is not a release-matrix row at the matrix's versions is refused at
-  load. The record is written by `PYTHONPATH=src python -m
-  lakebench.config.support . --from-records DIR... --tree SHA --expected
-  FILE --write` from records that are release evidence on a release-matrix
-  row at that row's versions, never by hand.
+  load.
   The support table in the README and docs names each supported cell's
-  version pairs and gives each unverified cell's reason as a note. The
-  release gate's `support-record` check requires every matrix row at its
-  versions and refuses entries outside the matrix.
-- **CI's Spark tier runs as eight jobs.** Each pyspark line's forward and
-  reverse passes are split in two by test file (`--lb-shard K/N` in
-  `tests/spark/conftest.py`, balanced on the recorded seconds per file in
-  `tests/spark/shard_weights.json`), each job under a 52-minute budget (one
-  unsharded pass had outgrown its 70 minutes). Every file is in exactly one
-  shard. The Spark coverage floors are checked on the two 4.0 forward
-  shards' coverage combined, in a "Spark coverage floors" job.
+  version pairs and gives each unverified cell's reason as a note.
 - **The release gate and CI check what the package ships.**
   `scripts/package_guard.py` reads the built wheel and sdist, and the
   script ConfigMaps rendered from the wheel, and fails on a

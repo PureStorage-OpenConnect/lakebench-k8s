@@ -20,7 +20,7 @@ result as a record of its own, `record_kind: "benchmark"` with
 `parent_run_id` naming the run it measured: a copy of that run's record with
 the new benchmark, under a new run id. The run's own record is never
 rewritten, and a benchmark record is never a deployment's "latest run" for
-`report`, nor a candidate or baseline for the perf gate. Its
+`report`. Its
 QpH, scores and query stage are the new benchmark's; its pipeline stages,
 sizes and timings are the run's, and `provenance.benchmark` names the code
 that ran the benchmark and when. A continuous run's in-stream rounds and the
@@ -52,7 +52,7 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 | `cycle_progression` | Per-cycle elapsed, QpH, table health | (Multi-cycle only, when `cycles > 1`) Shows pipeline time and Iceberg metadata growth per cycle. |
 
-Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; the perf gate refuses to compare the two (record a new baseline).
+Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; do not compare the two.
 
 ### Continuous Scores
 
@@ -77,7 +77,7 @@ included; `data_freshness_seconds` covered every gold cycle in the log;
 `corpus_drained` also needed two idle gold cycles; `total_rows_processed`
 counted whole logs. Continuous records made before this are not comparable
 with later ones on those scores (their experiment identity and results
-differ, so the perf gate and reproduce refuse them).
+differ, so reproduce refuses them).
 
 | Score | Formula | Meaning |
 |---|---|---|
@@ -297,7 +297,7 @@ than the others, so its QpH is over different queries.
 QpH (those with a QpH) executed more than one set (`blended`) and how many
 rounds each set has; `scores.composite_qph_by_set` is the median per set. A
 round recorded before 1.7 gets its set from its queries' success flags,
-and the perf gate and `reproduce` read the basis from the
+and `reproduce` reads the basis from the
 rounds, so an older run in which a query failed in some rounds and not
 others reads blended too. When the rounds are blended, the aggregate
 benchmark's `query_set_id` reads `blended` (otherwise it is, as before, the
@@ -305,8 +305,8 @@ set of every query name the rounds ran, even when one query failed in every
 round). Such a run's `composite_qph` and `in_stream_composite_qph` are
 medians over different query sets and are not comparable with another
 run's; it records no `qph_degradation_pct`
-(`scores.qph_degradation_withheld` says why). The perf gate and
-`reproduce` leave the in-stream QpH out. When every round missed the same
+(`scores.qph_degradation_withheld` says why). `reproduce` leaves the
+in-stream QpH out. When every round missed the same
 query, the medians are over a smaller set than the run declared, and
 `reproduce` reads the run's query set as the smaller set the rounds
 executed (for a record from before 1.7, its pinned legacy id or `unknown`).
@@ -616,9 +616,8 @@ with a warning and no QpH score is produced.
 ### What a PASSED verdict asserts
 
 The verdict in `metrics.json` (`verdict.status`, with each gate in
-`verdict.gates`) is decided from the record as it is saved, so `run`,
-`report`, the perf gate and the release gate read the same outcome from
-the same record. Besides the stages succeeding and no query failing, a
+`verdict.gates`) is decided from the record as it is saved, so `run`
+and `report` read the same outcome from the same record. Besides the stages succeeding and no query failing, a
 PASSED run shows:
 
 - **Rows in every layer** (`layer_rows`). Batch: the last bronze-verify,
@@ -656,7 +655,7 @@ it already did not pass. A `run --stage` run is judged on its stage's
 layer, on the rules when the stage is gold-finalize, and on the scale ratio
 only when the stage is bronze-verify. When the record does not read PASSED
 although every check the run printed passed, `run` prints `Verdict:
-<reason>` and exits 1. `report`, the perf gate and the release gate take
+<reason>` and exits 1. `report` takes
 the strictest of the stored verdict and the one recomputed from the
 record, so a record saved by an earlier Lakebench can read failed now.
 
@@ -893,7 +892,7 @@ whose early files are larger than the mean can read slightly above 1.0; that
 still means bronze kept up. A value well above 1.0 means bronze ingested more
 rows than the trickle had released (for example, data left in the bronze
 bucket from an earlier run). The HTML report shows a ratio above 1.05 as a
-warning, and the perf gate refuses a run whose `ingest_ratio` is above 1.05. The pipeline is saturated only when
+warning. The pipeline is saturated only when
 `ingest_ratio < 0.95` and `intake_limit` does not show the trickle bounding
 intake.
 
@@ -992,7 +991,7 @@ rounds for trend analysis.
 | `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
 | `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
 | `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
-| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun without `--skip-generate`: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts (a Customer 360 rerun over existing tables also needs `--force-reset`); the report warns above 1.05 and the perf gate refuses the run |
+| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun without `--skip-generate`: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts (a Customer 360 rerun over existing tables also needs `--force-reset`); the report warns above 1.05 |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
 | Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
@@ -1058,7 +1057,7 @@ The JSON structure includes:
 ```
 
 `maintenance_policy_id` names the table-maintenance policy the run was
-measured under (see `docs/perf-regression-gate.md`). `provenance` records
+measured under. `provenance` records
 what produced the run. The experiment block's `lakebench` copy carries the
 code fields, `deps` and `images_observed`: the dependency pinset
 (`deps.pinset_sha256`) is part of the experiment identity, and the
@@ -1078,8 +1077,7 @@ observed none, is not a difference). The rest is provenance only:
   commit, version or install did. An edit inside an installed wheel or an
   already-modified checkout counts. When the code changed, a support state
   of `supported` is withdrawn to `unverified`.
-- `config_sha256` (the same value the perf gate checks in
-  `config_snapshot`) and `config_path`, the config file as given, made
+- `config_sha256` (of `config_snapshot`) and `config_path`, the config file as given, made
   absolute.
 - `scripts_sha256`, `scripts_maps` and `scripts_files_sha256`: the Spark
   scripts ConfigMaps the run applied and read back.

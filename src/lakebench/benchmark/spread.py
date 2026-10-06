@@ -3,7 +3,7 @@
 A benchmark round times each query ``iterations`` times and scores it by the
 median (LB-150). The recorded query dict carries every sample. Records
 written before that carry only ``elapsed_seconds`` and read as one sample.
-These helpers work on the dicts, so the scorecard, the perf gate and
+These helpers work on the dicts, so the scorecard and
 reproduce read new and old metrics.json the same way.
 """
 

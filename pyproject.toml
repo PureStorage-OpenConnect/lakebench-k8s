@@ -74,9 +74,6 @@ aml = [
 dev = [
     "lakebench-k8s[aml]",
     "pytest>=8.0.0",
-    # Pinned: the coverage floors in scripts/check_coverage.py sit within a
-    # point of the measured values, and line counting can move between
-    # coverage releases.
     "pytest-cov==7.0.0",
     "coverage==7.13.2",
     "pytest-asyncio>=0.23.0",
@@ -207,7 +204,7 @@ testpaths = ["tests"]
 # `make check-fast` also sets PYTHONPATH=src for those.
 pythonpath = ["src"]
 python_files = ["test_*.py"]
-addopts = "-v --tb=short -m 'not e2e and not integration'"
+addopts = "--tb=short -m 'not e2e and not integration'"
 markers = [
     "unit: Unit tests (no external dependencies, fast)",
     "integration: Integration tests (require K8s/S3 connectivity)",
