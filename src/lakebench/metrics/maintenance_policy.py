@@ -5,8 +5,7 @@ freshness and throughput (maintenance statements compete with the streams),
 and total_s3_objects. Two runs under different policies are not comparable,
 in the same way two QpH numbers over different query sets are not
 (benchmark.queries.query_set_id). Every metrics.json records the policy id;
-the perf gate refuses to compare a run with a baseline recorded under
-another policy, and ``lakebench reproduce`` refuses a package recorded under
+``lakebench reproduce`` refuses a package recorded under
 another policy.
 
 A metrics.json or package without the field was recorded under the legacy
@@ -18,7 +17,7 @@ Policy history:
   two real policies: before f63cb38 Iceberg expire_snapshots and
   remove_orphan_files never succeeded on either engine (LB-172, LB-174), so
   only compaction ran; from f63cb38 they did. Because the two cannot be told
-  apart, the perf gate and reproduce accept only runs under the current id.
+  apart, reproduce accepts only runs under the current id.
 - ``m2-2026-09-26``: LB-174 fixed statement forms (Trino SET SESSION
   min-retention in the same submission, Spark TIMESTAMP literal); continuous
   expiry floored at 1 h and orphan removal at 24 h 10 min on every path;
@@ -37,8 +36,7 @@ failure stopped it. Compaction outcomes now count tables (a table succeeds
 when every chunk does) and name each failed table.
 
 A run with ``--skip-maintenance`` is stamped ``<id>+skipped``: it ran no
-table maintenance, so the perf gate matches it with nothing measured under
-the policy. The identity reads two runs that each skipped every operation
+table maintenance, so nothing it measured is under the policy. The identity reads two runs that each skipped every operation
 under one policy (``+skipped``, or ``pre_benchmark_maintenance`` off in
 batch) as the same maintenance (comparability.maintenance_equal).
 

@@ -6,8 +6,7 @@ plaintext unless the AML seed guard says it must not be shown
 a recorded look) or cannot tell. 42 (the Customer 360 default) and the AML
 calibration seed are public and always plaintext. A protected seed is
 written as the recorded form the readers already know
-(``look_guard.recorded_seed_role``, ``comparability.seeds_equal``,
-the perf gate)::
+(``look_guard.recorded_seed_role``, ``comparability.seeds_equal``)::
 
     {"seed_ref": <salted hash>, "role": <held-out role or None>}
 

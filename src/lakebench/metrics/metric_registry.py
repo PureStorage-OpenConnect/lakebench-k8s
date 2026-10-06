@@ -1,17 +1,15 @@
 """One source of metric metadata: unit, direction, band, modes, workloads
 and Lakebench caps a metric depends on.
 
-Readers: ``lakebench reproduce`` and the perf gate (``reproduce_class``), the HTML
+Readers: ``lakebench reproduce`` (``reproduce_class``), the HTML
 report's "higher is better" hints (``direction_hint``), and the collector's
 ``score_descriptions``. Still outside it: the QpH query-set check and
-its "capped" rendering, and the perf gate's own rule that continuous stage
-seconds are not measurements (later work moves them here). A score emitted
+its "capped" rendering. A score emitted
 with no entry fails ``tests/test_metric_registry.py``.
 
 ``band`` decides who uses a metric:
 
-- ``performance``: a rate or a time; feeds deltas, reproduce tolerance and
-  the perf gate.
+- ``performance``: a rate or a time; feeds deltas and reproduce tolerance.
 - ``correctness``: exact in reproduce (``scale_ratio``, best at 1.0).
 - ``guard``: a range the run must sit in (``ingest_ratio``).
 - ``diagnostic``, ``config_bound``, ``label`` and ``result``: shown, never
@@ -36,8 +34,8 @@ seconds are the window length; continuous core-hours scale with it): they
 have one entry per mode, and ``lookup`` takes the run's mode. ``lookup``
 refuses ``mode=None`` for a key whose unit, direction or band differs by
 mode (``ModeRequired``), and answers it with every mode's caps when only the
-caps differ; reproduce and the perf gate, which read numbers without a
-mode, use ``reproduce_class``.
+caps differ; reproduce, which reads numbers without a
+mode, uses ``reproduce_class``.
 
 History of band and direction changes to published metrics (to be named in
 UPGRADING-1.7.md):
@@ -55,8 +53,8 @@ UPGRADING-1.7.md):
   ``storage_reclaimed_mb``, and in a continuous run ``total_core_hours`` and
   ``total_elapsed_seconds``. ``compaction_ratio`` is higher (was lower) and
   diagnostic; ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was
-  higher). The reproduce and perf-gate classification of every metric they
-  extract is unchanged.
+  higher). The reproduce classification of every metric it
+  extracts is unchanged.
 """
 
 from __future__ import annotations
@@ -1161,8 +1159,8 @@ def descriptions() -> dict[str, str]:
 
 
 def _mode_free(key: str) -> MetricMeta | None:
-    """The batch entry with every mode's caps (``_merged``); reproduce and
-    the perf gate read stored numbers without a mode."""
+    """The batch entry with every mode's caps (``_merged``); reproduce
+    reads stored numbers without a mode."""
     key = ALIASES.get(key, key)
     if key in _BY_ID:
         return _merged(_BY_ID[key])
@@ -1173,8 +1171,8 @@ def _mode_free(key: str) -> MetricMeta | None:
 
 
 def reproduce_class(key: str) -> tuple[str, str]:
-    """``(band, direction)`` in the vocabulary reproduce and the perf gate
-    use: band ``correctness`` (the registry's correctness and guard bands)
+    """``(band, direction)`` in the vocabulary reproduce
+    uses: band ``correctness`` (the registry's correctness and guard bands)
     or ``performance`` (every other band); direction ``higher`` or
     ``lower`` for a directional metric, else ``exact`` (either way of
     drift counts). Mode-free, as those callers are. A key the registry does

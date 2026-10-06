@@ -395,7 +395,7 @@ def load_config(
         allow_long_names: Skip the derived-name length check (LB-153).
             TEARDOWN, READ and INSPECT always skip it. Given alone it means TEARDOWN,
             as in v1.6; with an explicit purpose it only skips the length
-            check, which ``clean`` and the perf gate use so a deployment
+            check, which ``clean`` uses so a deployment
             whose namespace is too long to finish deploying can still be
             cleaned while keeping the MUTATE refusals.
         print_notes: Print the notes block on stderr (the default). A caller
@@ -662,8 +662,7 @@ def retention_floor_advisory(cfg: LakebenchConfig) -> str | None:
         return None
     sustained = cfg.architecture.pipeline.sustained
     if "retention_threshold" not in sustained.model_fields_set:
-        # The 30m default stays (it is in every config's perf-gate
-        # fingerprint, so moving it would orphan every pinned baseline), and
+        # The 30m default stays (it is in every config's fingerprint), and
         # the floor raises live expiry to 1h on its own. The run records the
         # applied value (continuous.retention), so the default needs no
         # warning.

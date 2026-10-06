@@ -1,27 +1,14 @@
 name: Release
 
-# One workflow per v* tag, in this order:
+# One workflow per v* tag:
 #
 #   ci -> verify-tag + gate -> build-dist + build-binary-{linux,macos} -> github-release
 #      -> publish (PyPI)
 #
-# github-release and publish run only in the upstream repository. On a fork
-# they are skipped and release-dry-run downloads the same artifacts, lists
-# them, writes SHA256SUMS and runs install.sh against them, so a tag on a fork
-# exercises the build and the artifact round trip without writing a release
-# or uploading anywhere.
-# There is deliberately no workflow_dispatch trigger: a manual run in the
-# upstream repository would reach publish.
-#
-# The GitHub Release is created before the PyPI upload, so a version on PyPI
-# always has its binaries; if the upload fails the tag has binaries only and
-# the publish job can be re-run.
-#
-# These gates bind only a tag whose own commit carries this file. A tag
-# pushed on an older commit runs that commit's release workflow, which may
-# have no gates. Protection against that lives in repository settings (a
-# required reviewer on the pypi environment and a v* tag ruleset); see
-# RELEASING.md.
+# github-release and publish run only in the upstream repository. The GitHub
+# Release is created before the PyPI upload, so a version on PyPI always has
+# its binaries; if the upload fails, re-run the publish job.
+# No workflow_dispatch trigger: a manual run upstream would reach publish.
 
 on:
   push:
@@ -294,72 +281,3 @@ jobs:
           path: dist
 
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2 (the release/v1 branch on 2026-09-30)
-
-  # Forks only. Same downloads, rename and SHA256SUMS as github-release and
-  # publish, then a listing, and install.sh run against those files served
-  # the way the release serves them, so a fork tag exercises the download,
-  # checksum and install path end to end.
-  release-dry-run:
-    name: Release dry run (fork)
-    needs: [build-dist, build-binary-linux, build-binary-macos]
-    if: github.repository != 'PureStorage-OpenConnect/lakebench-k8s'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      # Only for install.sh; checked out to repo/ so the downloads below stay
-      # at the job root as in github-release.
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          path: repo
-
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: lakebench-*
-          path: artifacts
-
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: dist
-          path: dist
-
-      - name: List downloads
-        run: ls -R artifacts dist
-
-      - name: Rename binaries
-        run: |
-          for dir in artifacts/lakebench-*; do
-            os=$(basename "$dir" | sed 's/lakebench-//')
-            mv "$dir/lakebench" "lakebench-${os}"
-          done
-          ls -la lakebench-*
-
-      - name: Expected files and checksums
-        run: |
-          for f in lakebench-linux-amd64 lakebench-macos-amd64 lakebench-macos-arm64; do
-            test -s "$f" || { echo "::error::missing release binary $f"; exit 1; }
-          done
-          ls dist/*.whl dist/*.tar.gz
-          sha256sum lakebench-* > SHA256SUMS
-          cat SHA256SUMS
-          test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "::error::SHA256SUMS does not list 3 binaries"; exit 1; }
-          sha256sum dist/*
-
-      # The release layout is <base>/<tag>/<asset>; install.sh reads
-      # LB_INSTALL_BASE_URL in place of the GitHub download base.
-      - name: install.sh round trip
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          mkdir -p "srv/${TAG}" "${RUNNER_TEMP}/lb-bin"
-          cp lakebench-* SHA256SUMS "srv/${TAG}/"
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory srv &
-          for _ in $(seq 1 30); do
-            curl -fs -o /dev/null http://127.0.0.1:8765/ && break
-            sleep 1
-          done
-          curl -fs -o /dev/null http://127.0.0.1:8765/ \
-            || { echo "::error::the local http.server did not start"; exit 1; }
-          INSTALL_DIR="${RUNNER_TEMP}/lb-bin" VERSION="${TAG}" \
-            LB_INSTALL_BASE_URL=http://127.0.0.1:8765 bash repo/install.sh
-          cmp "${RUNNER_TEMP}/lb-bin/lakebench" lakebench-linux-amd64

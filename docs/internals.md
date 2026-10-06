@@ -319,9 +319,8 @@ it. Before a batch benchmark,
 `run` runs compaction and maintenance under one shared budget
 (`src/lakebench/cli/_run.py:PRE_BENCHMARK_MAINTENANCE_CAP`). A round that
 stops on that budget, or runs beside live streams, is recorded
-(`maintenance_stopped`, `maintenance_live_streams`), and the perf gate does
-not treat the post-maintenance QpH as a measurement
-(`src/lakebench/metrics/perf_gate.py:post_qph_unmeasured`). Destroy runs no
+(`maintenance_stopped`, `maintenance_live_streams`), and its
+post-maintenance QpH is not a measurement. Destroy runs no
 maintenance. Delta maintenance is covered in
 [Troubleshooting](troubleshooting.md#delta-no-compaction-and-vacuum-only-on-trino).
 

@@ -19,7 +19,49 @@ from lakebench.cli import _sustained as sus
 from lakebench.cli._sustained import resolve_maintenance_schedule
 from lakebench.config.schema import SustainedConfig
 from tests.conftest import make_config
-from tests.test_perf_gate import _simulate_continuous_loop
+
+
+def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=300):
+    """(maintenance rounds, compaction rounds) the _run_sustained loop fires.
+
+    Worst case: every maintenance and compaction round uses its whole budget
+    plus the statement grace,
+    every maintenance round ends on a timeout (so compaction is held one
+    statement timeout), and each in-stream benchmark round takes bench_s and
+    wins the loop pass (it `continue`s). Mirrors the order in _run_sustained.
+    """
+    from lakebench.cli._sustained import _BUDGET_GRACE_SECONDS, continuous_round_bounds
+
+    t, next_round, next_maint, next_comp = 0.0, float(warmup), float(ri), float(ci)
+    last_round = hold = 0.0
+    maint = comp = 0
+    while t < run:
+        elapsed = t
+        if bench_s and elapsed >= next_round and run - elapsed >= max(60, last_round * 1.2):
+            t += bench_s
+            last_round = bench_s
+            next_round = t + bench_interval
+            continue
+        if elapsed >= next_maint:
+            b = continuous_round_bounds(ri, run - t)
+            if b:
+                # The last statement may overrun the budget by the grace.
+                t += b[1] + _BUDGET_GRACE_SECONDS
+                maint += 1
+                hold = t + b[0]
+            next_maint = t + ri
+        if elapsed >= next_comp:
+            if t < hold:
+                next_comp = hold
+            else:
+                b = continuous_round_bounds(ci, run - t)
+                if b:
+                    t += b[1] + _BUDGET_GRACE_SECONDS
+                    comp += 1
+                next_comp = t + ci
+        wake = min(elapsed + 30, next_round if bench_s else run, next_maint, next_comp, run)
+        t = max(t + 1.0, wake)  # real time moves on even when nothing sleeps
+    return maint, comp
 
 
 def _schedule(run_duration=1800, skip=False, **kw):

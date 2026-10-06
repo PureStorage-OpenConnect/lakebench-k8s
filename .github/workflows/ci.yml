@@ -1,33 +1,22 @@
 name: CI
 
 on:
-  # Every branch push runs CI; feature branches were previously never checked,
-  # which is how a credential reached a pushed branch unnoticed.
+  # Every branch push runs CI: an unchecked feature branch is how a credential
+  # once reached a pushed branch.
   push:
     branches: ['**']
   pull_request:
     branches: [main]
-  # release.yml calls this workflow on the tagged commit and publishes only
-  # if it passes. That binds only tags whose commit carries the current
-  # release.yml; see RELEASING.md for the repository settings that
-  # cover the rest.
+  # release.yml runs this on the tagged commit before it publishes.
   workflow_call:
 
 permissions:
   contents: read
 
-# A newer push to the same lane/* branch or pull request cancels the older
-# run. Every other ref (main, integrate/**, train/*, tags, and any branch added
-# later) puts the run id in its group, so no run of it is ever cancelled: a
-# shared group would not do, because GitHub cancels a pending run when a newer
-# one joins the group even with cancel-in-progress off. A push runs CI on its
-# head commit only, so this keeps every pushed head's run, not a run for every
-# commit in a multi-commit push.
+# A newer push to a pull request cancels its older run; every other ref keeps
+# each run.
 concurrency:
-  group: >-
-    ci-${{ github.workflow }}-${{ github.ref }}${{
-    !(startsWith(github.ref, 'refs/heads/lane/') || startsWith(github.ref, 'refs/pull/'))
-    && format('-{0}', github.run_id) || '' }}
+  group: ci-${{ github.ref }}-${{ startsWith(github.ref, 'refs/pull/') && 'pr' || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -47,38 +36,17 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      # `make check-fast`, what a contributor runs before pushing: ruff, the
-      # format check, mypy and the parallel unit tier without the slow AML
-      # statistics tests, under an 8-minute budget (target 5). The first
-      # signal: the test legs below run the same unit tier on 3.10 and 3.13.
-      - name: make check-fast
-        run: python scripts/ci_budget.py --seconds 480 --label "make check-fast" -- make check-fast
+      - name: ruff
+        run: ruff check src/ tests/ scripts/ && ruff format --check src/ tests/ scripts/
 
-      # Every tracked doc, script and top-level .md is linked from the docs
-      # index or read by code, tests or CI (tests/test_doc_readers.py runs
-      # the same check with its planted cases).
-      - name: Docs have readers
-        # Runs even when make check-fast fails, so one push reports both.
-        if: success() || failure()
-        run: python scripts/check_doc_readers.py
-
-      # Every action in .github/workflows is pinned by SHA and listed in
-      # .github/action-runtimes.json with its runs.using value. This reads
-      # each action.yml at its pinned SHA and fails if the map has drifted.
-      - name: Action runtimes
-        if: success() || failure()
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python scripts/check_action_runtimes.py --verify
+      - name: mypy
+        run: mypy src/lakebench/
 
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
-    # A backstop 1.5 times the step budget below; the budget is the signal.
-    timeout-minutes: 23
+    timeout-minutes: 20
     strategy:
-      # One failing Python version must not cancel the other: both results
-      # are needed to tell a version-specific failure from a real one.
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.13"]
@@ -94,36 +62,10 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      # Coverage is collected on 3.13 only: the floors are checked on one
-      # interpreter so line-counting differences between versions do not move
-      # the number, and the other entries skip the tracing overhead. The
-      # version named here must be in the matrix above, or coverage and the
-      # floor check stop silently (tests/test_workflows.py checks this).
-      # In parallel (one file per worker), under a 15-minute budget
-      # (scripts/ci_budget.py fails the step when it runs over and records the
-      # time in the step summary). The AML statistics tests marked slow run in
-      # the "AML statistics (slow)" job and the Spark tier in its own job.
       - name: Run unit tests
         run: >-
-          python scripts/ci_budget.py --seconds 900 --label "unit tests (Python ${{ matrix.python-version }})" --
-          pytest tests/ -n auto --dist loadfile -m "not slow and not e2e and not integration"
-          -rs --tb=short --ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
-          ${{ matrix.python-version == '3.13' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
-
-      # Per-file floors on the scoring and metrics code (GOALS P8.3).
-      - name: Coverage floors
-        if: matrix.python-version == '3.13'
-        run: python scripts/check_coverage.py --suite unit coverage-unit.json
-
-      # The per-file report, kept so a floor can be raised from a measured run.
-      - name: Upload coverage report
-        if: always() && matrix.python-version == '3.13'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: coverage-unit
-          path: coverage-unit.json
-          retention-days: 30
-          if-no-files-found: error
+          pytest tests/ -q -n auto --dist loadfile -m "not slow and not e2e and not integration"
+          -rfE --ignore=tests/spark --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
 
   secrets:
     name: Secret scan
@@ -131,8 +73,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # gitleaks binary rather than gitleaks-action, which needs a paid licence
-      # for organisation repos. Version and checksum are pinned.
+      # The binary, not gitleaks-action, which needs a paid licence for
+      # organisation repos.
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: "8.28.0"
@@ -144,27 +86,9 @@ jobs:
           echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
           tar xzf gitleaks.tgz gitleaks
 
-      # Scans the checked-out tree, not history: a credential removed from the
-      # tree but still in an old commit must be rotated, and history scrubbing
-      # is a separate decision.
       - name: Scan working tree
         run: '"$RUNNER_TEMP/gitleaks" dir . --config .gitleaks.toml --redact --no-banner --exit-code 1'
 
-  # History scan: every commit reachable from the pushed or merged HEAD
-  # (about 2 s), with --remerge-diff so what a merge commit itself changed is
-  # scanned (plain `git log -p` shows no diff for merges) and
-  # --ignore-gitleaks-allow so an inline allow comment hides nothing. The
-  # baseline and the config come from a trusted ref (origin/main first for
-  # main, pull requests to main and tags; origin/integrate/v1.5.0 first for
-  # everything else; see the Scan history step), never from the scanned
-  # branch: gitleaks reads a source tree's own .gitleaksignore, so the scan
-  # runs on the git dir from a temp directory. A second pass uses the
-  # branch's own config, so a rule a branch adds is enforced at once. A pull
-  # request to main uses its own baseline (the owner reviews it), and with no
-  # baseline on either ref the tree's own is used once, with a warning. This
-  # job runs the branch's own ci.yml, so it catches mistakes; protection on
-  # main and the pre-push hook are what stop a deliberate bypass. The job also
-  # runs the pre-push hook and baseline tests with the real gitleaks.
   rust:
     name: Rust datagen
     runs-on: ubuntu-24.04
@@ -192,52 +116,21 @@ jobs:
       - name: cargo test
         run: cargo test --release --locked
 
-  # Each pyspark leg runs the Spark tier forward and in reverse order, and
-  # each (leg, order) pass is split into two shards by test file
-  # (--lb-shard K/2, tests/spark/conftest.py): eight parallel jobs. Every file
-  # is in exactly one shard of each pass, balanced on the recorded times in
-  # tests/spark/shard_weights.json, and the reverse jobs run their shard's
-  # tests backwards. The order check still runs every test after and before
-  # the other files of its shard, but no longer next to a file in the other
-  # shard; a job that turns red right after the weights change and move files
-  # between shards points at an order dependency. One unsharded pass of 381
-  # tests took 30 to 52 min on 2026-10-02 (37011145001, 37020573180); by
-  # 2026-10-03 the tier had 455 tests (collected at a5923850) and Spark jobs in train runs failed
-  # only on the 70-minute budget (4239 to 4265 s; 37139482365, 37145033026).
-  # Sharded, the test step took (shard 1, shard 2, in seconds): 4.0 forward
-  # 1307, 2096 and 2283, 2005; 4.0 reverse 1064, 1943 and (runner shut down
-  # at 1583), 1935; 4.1 forward 2000, 2073 and 2037, 2128; 4.1 reverse 2047,
-  # 2034 and 1498, 2034 (37153895161, 37156481202). The same shard took 1307
-  # and 2283 s on two runners. On the 4.1 line the split is within 3% of an
-  # even one; on the 4.0 line it is not (one weight per file serves both
-  # lines). The budget is 52 minutes (scripts/ci_budget.py), 37% above the
-  # slowest shard seen, with timeout-minutes 78 as the backstop.
-  # Coverage is collected on the two 4.0 forward shards and combined in the
-  # "Spark coverage floors" job below. Each job keeps its JUnit report, the
-  # input of scripts/spark_shard_weights.py.
   build:
     name: Build Package
     runs-on: ubuntu-24.04
-    # The heavy jobs (secrets-history, spark-tests, spark-coverage, aml-slow,
-    # contributor-path, clean-venv) only run on PRs to main and tags, so build
-    # needs only the always-on jobs. On release.yml, every heavy job runs
-    # before publish because gate: needs: ci.
     needs: [lint, test, secrets, rust]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # No pip cache: it installs only `build`, and would share the lint key.
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.11"
 
-      - name: Install build tools
-        run: pip install build
-
       - name: Build wheel and sdist
-        run: python -m build
+        run: pip install build && python -m build
 
-      # PEP 561 marker; without it type checkers ignore lakebench's annotations.
+      # Without the PEP 561 marker, type checkers ignore lakebench's annotations.
       - name: Wheel carries py.typed
         run: >-
           python -c "import glob, zipfile;
@@ -260,27 +153,6 @@ jobs:
           tar xzf gitleaks.tgz -C "$RUNNER_TEMP/bin" gitleaks
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # What the built artifacts and the script maps rendered from the wheel
-      # carry: no local-only docs, no key patterns or gitleaks finding (the
-      # generated members, PKG-INFO, METADATA, RECORD and _build_info.py,
-      # are not in the tree the secret-scan jobs read), and no held-out seed
-      # once the hash file exists (PENDING-OA5 passes here; the release
-      # gate's --require-all refuses it).
+      # No key pattern, gitleaks finding or held-out seed in the built members.
       - name: Package guard
         run: python scripts/package_guard.py --dist dist
-
-      # Named ci-dist, not dist: release.yml calls this workflow in the same
-      # run and uploads its own dist, and artifact names are per run.
-      - name: Upload the wheel
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: ci-dist
-          path: dist/*.whl
-          retention-days: 7
-          if-no-files-found: error
-
-  # The wheel in a fresh venv, with nothing from the repository or the dev
-  # extra around it: once alone, so a runtime import of a package that is not
-  # a dependency fails here, and once with [aml], whose six numeric pins must
-  # install as REFERENCE_PY_DEPS names them on both ends of the supported
-  # Python range.

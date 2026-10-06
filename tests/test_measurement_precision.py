@@ -175,35 +175,6 @@ class TestUtcTimestamps:
         pb = build_pipeline_benchmark(m)
         assert pb.time_to_value_seconds == pytest.approx(90.0)
 
-    def test_perf_gate_ttv_reads_aware_stage_times(self, tmp_path):
-        from lakebench.metrics import perf_gate
-
-        run_dir = tmp_path / "run-x"
-        run_dir.mkdir()
-        stages = [
-            {
-                "stage_name": "bronze",
-                "stage_type": "batch",
-                "start_time": "2026-09-27T07:11:25.500000+00:00",
-                "end_time": "2026-09-27T07:12:56.250000+00:00",
-                "elapsed_seconds": 90.75,
-                "input_size_gb": 9.0,
-            }
-        ]
-        (run_dir / "metrics.json").write_text(
-            json.dumps(
-                {
-                    "run_id": "x",
-                    "deployment_name": "d",
-                    "start_time": "2026-09-27T07:11:20+00:00",
-                    "pipeline_benchmark": {"stages": stages, "scores": {}},
-                }
-            )
-        )
-        rec = perf_gate.load_run(run_dir)
-        ttv = perf_gate._pipeline_ttv(rec)
-        assert ttv is not None and ttv[0] == pytest.approx(90.75)
-
 
 # ---------------------------------------------------------------------------
 # 2. Batch stage times from the Spark application, not the poll

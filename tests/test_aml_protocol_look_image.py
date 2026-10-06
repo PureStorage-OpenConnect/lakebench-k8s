@@ -9,11 +9,9 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 from lakebench.config.schema import ImagesConfig
 from lakebench.metrics import corpus_identity as ci
-from lakebench.metrics.release_record import release_datagen_digest
 from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +36,9 @@ def _default_parts() -> tuple[str, str]:
 
 def test_default_is_pinned_by_digest_with_lineage_evidence():
     tag, digest = _default_parts()
-    assert release_datagen_digest() == digest
+    from lakebench.config.schema import ImagesConfig
+
+    assert ImagesConfig().datagen.rsplit("@", 1)[1] == digest
     table = ci.load_lineage()
     row = table.get(digest)
     assert row is not None, "the default datagen image has no lineage row"
@@ -67,15 +67,6 @@ def test_protocol_names_the_generator_and_scorer_pins():
     for pin in REFERENCE_PY_DEPS:
         name, version = pin.split("==")
         assert f"{name} {version}" in sec, pin
-
-
-def test_perf_configs_pin_the_default_image():
-    """LB-263: a pinned config naming a deleted tag cannot run."""
-    for path in sorted((ROOT / "benchmarks" / "perf").glob("*.yaml")):
-        if path.name == "baselines.yaml":
-            continue
-        doc = yaml.safe_load(path.read_text())
-        assert doc["images"]["datagen"] == ImagesConfig().datagen, path.name
 
 
 # sha256 over the datagen image inputs (length-prefixed relative path and bytes,

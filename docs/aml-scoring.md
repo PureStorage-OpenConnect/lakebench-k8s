@@ -734,8 +734,8 @@ comparable. An AML batch record written by 1.7 (exp2, or exp1 with
 `v2_unavailable`) that has no alert set, because the fingerprint failed
 (the reason is in `results.alert_set_unavailable`) or gold-finalize did not
 run, cannot show its results match another run's; do not compare it on its
-query results alone. The perf gate and `reproduce` refuse such a run; they
-do not yet compare alert sets with their baseline or package. Records from
+query results alone. `reproduce` refuses such a run; it
+does not yet compare alert sets with its package. Records from
 1.6 have no alert set. A rule that ran
 and raised no alert is absent from `by_rule`, like a rule that did not run;
 which rules ran is recorded separately (`experiment.rules`).
@@ -774,8 +774,8 @@ inside time to detect). Their alert set is taken once after the drain
   Trino, scale 10 and 100, idle, beside one other workload and beside
   everything, at least 100 executions each) moves to v1.7.
 - **AML datagen throughput is reported, not gated.** AML datagen reports
-  per-pod write throughput and CPU-hours per TB, and no release gate fails
-  on either figure. The throughput figures published earlier were measured
+  per-pod write throughput and CPU-hours per TB, and nothing fails on
+  either figure. The throughput figures published earlier were measured
   before the generator freeze and are superseded. v1.6 has no measurements
   on the frozen generator; they are deferred to v1.7.
 - **Recall is uncalibrated.** v1.6 publishes no held-out Level-2 result;
@@ -830,8 +830,7 @@ After the score job of a run that passed its gates, `time-travel-financial`
 reads those snapshots back (`spark/scripts/time_travel_financial.py`),
 newest first. A hash pass fingerprints each recorded snapshot still in the
 table over its business columns (every column less the batch-version
-sentinels `_batch_id`, `_stream_id`, `ingest_ts`, `committed_at`, the
-definition `scripts/release/silver_parity.py` uses), and writes
+sentinels `_batch_id`, `_stream_id`, `ingest_ts`, `committed_at`), and writes
 `scoring/<run_id>/tt_hashes.json` with any snapshot it could not read; the
 read pass reads that file back from storage, times a full scan `VERSION AS
 OF` each snapshot with the same fingerprint, and compares it with the
@@ -1050,8 +1049,8 @@ settled, they return the batch answer. The change moved the AML query-set
 id (12 queries and the 8 before the first TM pass), so no record from
 before it compares with one after; it is part of workload version `aml-2`.
 A batch record is still never compared with a continuous one: the mode is a
-workload identity key, so the two are not comparable, and the perf gate
-and `reproduce` refuse the pair.
+workload identity key, so the two are not comparable, and `reproduce`
+refuses the pair.
 
 **Investigators under load (`architecture.benchmark.investigator_sessions`).**
 Set to N (1 to 32) on an AML config with TM operations on Trino or Spark
@@ -1094,7 +1093,7 @@ beside the verdict: time to detect and continuous throughput keep their
 values and include those ticks. `experiment.investigators` holds
 `{requested, run}`; the identity key `investigator sessions` is the number
 that ran, an outcome condition: two runs that ran different numbers compare
-as not like-for-like, and the perf gate does not refuse on the number (8
+as not like-for-like, and `reproduce` does not refuse on the number (8
 against 3), but it refuses load against no load: sessions that ran against a
 baseline with none configured or none run, and the other way round.
 

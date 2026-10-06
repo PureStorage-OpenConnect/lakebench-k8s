@@ -4,10 +4,7 @@
 # it reaches main.
 #
 # github-actions bumps the SHA pins in .github/workflows/ (each pin keeps its
-# tag as a comment for this), grouped into one pull request a month. A new
-# SHA has no entry in .github/action-runtimes.json, so
-# scripts/check_action_runtimes.py fails that pull request until the entries
-# are added there, with their runtimes.
+# tag as a comment for this), grouped into one pull request a month.
 #
 # pip reads pyproject.toml and ignores the AML reference packages. Their
 # versions are the pins in REFERENCE_PY_DEPS

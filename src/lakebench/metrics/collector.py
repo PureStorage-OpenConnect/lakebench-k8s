@@ -2533,8 +2533,7 @@ def build_config_snapshot(
     Args:
         cfg: A :class:`~lakebench.config.LakebenchConfig` instance.
         config_path: The config file the run loaded. Its bytes' sha256 is
-            recorded as ``config_sha256``, which the perf gate compares with
-            the pinned file's.
+            recorded as ``config_sha256``.
 
     Returns:
         Dict suitable for JSON serialization.
@@ -2645,7 +2644,7 @@ def build_config_snapshot(
                 ),
             }
         ),
-        # What table maintenance the config asks for. Part of the perf-gate
+        # What table maintenance the config asks for. Part of the
         # fingerprint: a run with maintenance turned down or off measures
         # something else than one under the full policy.
         "maintenance": {
@@ -2664,7 +2663,7 @@ def build_config_snapshot(
             ),
         },
         # Config half of the metrics.json experiment block
-        # (metrics/experiment.py). Not a perf-gate fingerprint key.
+        # (metrics/experiment.py). Not a fingerprint key.
         "experiment_inputs": experiment_inputs(cfg, run_mode=run_mode, system=system),
         # Perf-gate fingerprint version and the inputs it hashes beyond the
         # fields above (metrics/fingerprint_inputs.py). Stamped here, at run
@@ -2680,7 +2679,7 @@ def build_config_snapshot(
     if cfg.architecture.workload.schema_type.value == "customer360":
         # What the config asked the gold scripts for, against what each gold
         # job reports it ran (metrics/requested_effective.py). Outside the
-        # perf-gate fingerprint keys: the user conf is already hashed there.
+        # fingerprint keys: the user conf is already hashed there.
         from lakebench.config.c360_run import GOLD_STRATEGY_KEY
 
         value = str((cfg.spark.conf or {}).get(GOLD_STRATEGY_KEY) or "auto").strip().lower()
@@ -2922,7 +2921,7 @@ class MetricsCollector:
         """
         provenance: dict[str, Any] = dict(run_provenance())
         # One source: the snapshot hashed the file's bytes when it was built
-        # (build_config_snapshot), and the perf gate compares that value.
+        # (build_config_snapshot).
         provenance["config_sha256"] = config.get("config_sha256")
         provenance["config_path"] = _prov.config_path_of(config_path)
         provenance["deps"] = _prov.NOT_RECORDED

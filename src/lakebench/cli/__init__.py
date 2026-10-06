@@ -1659,8 +1659,7 @@ def _report_run_data(
     ``load_run`` reads them). Scores are as stored. The verdict carries both
     halves: ``verdict_stored`` as the record holds it, ``verdict_recomputed``
     from the record (``verdict.verdict_from_record``), and ``verdict``, the
-    strictest of them, as the perf gate and the release gate read
-    it. A record that cannot be read as stored gives null for all three and
+    strictest of them. A record that cannot be read as stored gives null for all three and
     for the scores."""
     from lakebench.metrics.verdict import verdict_of
 

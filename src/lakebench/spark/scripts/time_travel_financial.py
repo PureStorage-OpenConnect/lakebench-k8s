@@ -11,8 +11,8 @@ submits this job with those records (``--input``, written by
    metadata, newest first, fingerprint the raw snapshot over its business
    columns (``common.frame_fingerprint``; no sealed filter): every column of
    the snapshot's schema except the batch-version sentinels the input names
-   (``exclude_columns``, the CLI's ``metrics.time_travel.SENTINEL_COLUMNS``,
-   which is release/silver_parity.py's definition), and write
+   (``exclude_columns``, the CLI's ``metrics.time_travel.SENTINEL_COLUMNS``),
+   and write
    ``tt_hashes.json``, with the snapshots it could not read. This is the
    order-independent hash computed for that snapshot after the window.
 2. Read pass, the published measurement: re-read ``tt_hashes.json`` from

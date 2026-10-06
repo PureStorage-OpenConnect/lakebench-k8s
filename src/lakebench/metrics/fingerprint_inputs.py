@@ -1,9 +1,7 @@
-"""What the perf-gate fingerprint hashes beyond the config fields (version 2).
+"""The code inputs a run fingerprints beyond the config fields (version 2).
 
-A run records these in ``config_snapshot["fingerprint_inputs"]`` at run start,
-and the perf gate computes the same block for a pinned config
-(``perf_gate.load_pinned``). The run side is read from the stored snapshot and
-never rebuilt, so a record keeps the fingerprint of the code that ran it.
+A run records these in ``config_snapshot["fingerprint_inputs"]`` at run start.
+They are read from the stored snapshot and never rebuilt, so a record keeps the fingerprint of the code that ran it.
 
 Version 1 hashed config fields only, so a change to a job profile or to the
 Spark conf Lakebench writes left the fingerprint equal while the run measured
@@ -325,7 +323,7 @@ def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
 def fingerprint_inputs(cfg: Any, continuous: bool, *, local: bool = False) -> dict[str, Any]:
     """The version 2 fingerprint inputs of *cfg* for a run of this mode.
 
-    Never raises: a run must not fail on its perf-gate record. A build
+    Never raises: a run must not fail on its fingerprint. A build
     failure is recorded as ``{"error": ...}`` and logged, and the gate
     refuses a snapshot carrying one. A local run submits no Spark job
     manifests, so it records none.
@@ -337,8 +335,7 @@ def fingerprint_inputs(cfg: Any, continuous: bool, *, local: bool = False) -> di
     except Exception as e:  # noqa: BLE001 -- recorded, never raised from a snapshot
         text = " ".join(str(e).split())[:300]
         logger.warning(
-            "perf-gate fingerprint inputs could not be built (%s: %s); this run "
-            "cannot be compared or recorded as a perf baseline",
+            "fingerprint inputs could not be built (%s: %s); this run cannot be compared",
             type(e).__name__,
             text,
         )

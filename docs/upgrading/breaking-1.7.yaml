@@ -286,14 +286,13 @@
   text: A continuous record without a stored round count reads it from its rounds; the stored C360 Trino
     vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
   fix: Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
-- id: perf-gate-fingerprint-version-2
-  title: Perf-gate fingerprint version 2
-  kind: identity
-  subject: perf-gate fingerprint
-  source: src/lakebench/metrics/perf_gate.py:FINGERPRINT_VERSION
-  text: The perf-gate fingerprint is version 2 and the baseline store schema 2; older runs and baselines
-    are refused until re-recorded.
-  fix: Re-record perf-gate baselines under 1.7; pin the profile's executor counts in a pinned config.
+- id: perf-gate-removed
+  title: Perf gate removed
+  kind: refused-command
+  subject: scripts/perf_gate.py
+  source: scripts/perf_gate.py
+  text: '`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.'
+  fix: Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
 - id: deploy-generates-the-polaris-client-secret
   title: Deploy generates the Polaris client secret
   kind: default-change
@@ -551,7 +550,7 @@
   subject:
   - verdict.passed
   source: src/lakebench/metrics/verdict.py:verdict_of
-  text: '`report`, the perf gate and the release gate read the stricter of a record''s stored
+  text: '`report` reads the stricter of a record''s stored
     verdict and the one recomputed from it: three stored AML batch records without a watchlist now read
     FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.'
   fix: Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed`

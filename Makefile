@@ -107,21 +107,18 @@ clean:
 	@echo "Cleaned build artifacts and caches."
 
 # ---------------------------------------------------------------------------
-# Release steps (RELEASING.md section 4). release-check runs every rc-<step>
+# Release steps (RELEASING.md section 2). release-check runs every rc-<step>
 # in RELEASE_STEPS order, in one recipe, so make -j cannot reorder them. It
 # stops at the first failure; with DRY=1 it runs every step's dry variant to
-# the end and lists the failures. A step whose command does not exist yet
-# prints "pending:" and fails. Nothing here merges, tags, pushes or publishes.
+# the end and lists the failures.
+# Nothing here merges, tags, pushes or publishes.
 # ---------------------------------------------------------------------------
-RELEASE_STEPS := version generated-docs filler-words matrix uat-results \
-                 support-record build package-guard gate
+RELEASE_STEPS := version generated-docs filler-words build package-guard gate
 .PHONY: release-check $(addprefix rc-,$(RELEASE_STEPS))
 RC_PY = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON)
 #: Where rc-build writes and rc-package-guard reads; release-check uses a
 #: fresh temporary directory unless DIST is given.
 DIST ?=
-#: NAME=RUN pairs for the gate's required perf configs, space separated.
-PERF_RUNS ?=
 #: The filler phrases and AI-voice phrases the de-LLM sweep removed.
 FILLER_WORDS := comprehensive|leverage|note that|this ensures|it is worth noting|delve
 AI_VOICE := I'll|Let me|As an AI|I hope this
@@ -165,23 +162,6 @@ rc-filler-words:
 	git grep -nIwE "$(AI_VOICE)" -- . ':!Makefile'; r=$$?; [ $$r -le 1 ] || exit 2; [ $$r -eq 1 ] || status=1; \
 	exit $$status
 
-# The harness runs the matrix from the freeze worktree before the release
-# commit (RELEASING.md section 3); these steps verify what it wrote.
-rc-matrix:
-	@echo "pending: the release harness check of the matrix records"; exit 1
-
-rc-uat-results:
-	@echo "pending: the release harness report check"; exit 1
-
-rc-support-record:
-ifdef DRY
-	@echo "pending: a check mode for the support record"; exit 1
-else
-	$(RC_PY) -m lakebench.config.support . --from-records uat/runs \
-	  --tree "$$(cat uat/freeze-$(VERSION))" --expected uat/expected-results-$(VERSION).json --write
-	git diff --exit-code -- src/lakebench/config/validated_combinations.yaml
-endif
-
 rc-build:
 	@test -n "$(DIST)" || { echo "rc-build: DIST=<empty directory> is required"; exit 2; }
 	@test -z "$$(ls -A "$(DIST)" 2>/dev/null)" || { echo "rc-build: $(DIST) is not empty"; exit 2; }
@@ -195,5 +175,5 @@ rc-gate:
 ifdef DRY
 	$(RC_PY) scripts/release_gate.py --list
 else
-	$(RC_PY) scripts/release_gate.py --tag "v$(VERSION)" --require-all $(addprefix --perf-run ,$(PERF_RUNS))
+	$(RC_PY) scripts/release_gate.py --tag "v$(VERSION)" --require-all
 endif

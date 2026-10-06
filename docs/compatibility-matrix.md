@@ -42,7 +42,7 @@ not per recipe:
   an `apache/spark` image (under any registry prefix) with a release tag
   such as `4.1.1-python3`; a run on any other Spark image is never stamped
   supported. The record is generated from the release-matrix run records
-  and never edited by hand (see [Releasing](../RELEASING.md)); lakebench
+  and never edited by hand; lakebench
   refuses to load an entry that is not a release-matrix row at the matrix's
   versions, and the record is empty until the release runs fill it.
 - **unverified**: valid for the workload and mode, but no release validation

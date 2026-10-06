@@ -7,7 +7,6 @@ from datetime import datetime
 import pytest
 import yaml
 
-from lakebench.metrics import perf_gate as pg
 from lakebench.metrics.collector import PipelineBenchmark, PipelineMetrics
 from lakebench.metrics.maintenance_policy import (
     LEGACY_MAINTENANCE_POLICY_ID,
@@ -16,7 +15,6 @@ from lakebench.metrics.maintenance_policy import (
     recorded_policy,
     skipped_policy_id,
 )
-from tests.test_perf_gate import _batch_run, _compare, _record, env  # noqa: F401
 
 NAME = "c360-batch-s10"
 
@@ -50,44 +48,6 @@ def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):
     raw = raw.replace(f'"maintenance_policy_id": "{MAINTENANCE_POLICY_ID}"', '"x_removed": 1')
     path.write_text(raw)
     assert storage.load_run(m.run_id).maintenance_policy_id == LEGACY_MAINTENANCE_POLICY_ID
-
-
-def test_perf_gate_refuses_runs_not_under_the_current_policy(env):  # noqa: F811
-    """Legacy lumps two real policies, and +skipped ran no maintenance."""
-    snap = env.snaps[NAME]
-    _record(env, NAME, _batch_run(snap, "20260924-100000-aaaaaa"))
-    assert _compare(env, NAME, _batch_run(snap, "20260924-110000-bbbbbb")).verdict == pg.PASS
-    for i, policy in enumerate((None, skipped_policy_id(), "m9-future")):
-        run = _batch_run(snap, f"20260924-12000{i}-cccccc")
-        if policy is None:
-            del run["maintenance_policy_id"]
-        else:
-            run["maintenance_policy_id"] = policy
-        c = _compare(env, NAME, run)
-        assert c.verdict == pg.REFUSED, policy
-        assert any("not the current" in r for r in c.reasons)
-
-
-def test_legacy_run_cannot_become_a_baseline(env):  # noqa: F811
-    snap = env.snaps[NAME]
-    legacy = _batch_run(snap, "20260924-100000-aaaaaa")
-    del legacy["maintenance_policy_id"]
-    with pytest.raises(pg.PerfGateError, match="not the current"):
-        _record(env, NAME, legacy)
-
-
-def test_baseline_under_another_policy_refuses_current_runs(env):  # noqa: F811
-    snap = env.snaps[NAME]
-    store = _record(env, NAME, _batch_run(snap, "20260924-100000-aaaaaa"))
-    assert store.baselines[NAME].maintenance_policy_id == MAINTENANCE_POLICY_ID
-    raw = yaml.safe_load(env.store_path.read_text())
-    assert raw["baselines"][NAME]["maintenance_policy_id"] == MAINTENANCE_POLICY_ID
-    del raw["baselines"][NAME]["maintenance_policy_id"]  # a pre-id baseline
-    env.store_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    c = _compare(env, NAME, _batch_run(snap, "20260924-110000-bbbbbb"))
-    assert c.verdict == pg.REFUSED
-    assert any("maintenance policy differs" in r for r in c.reasons)
-    assert c.rows == []
 
 
 def test_skip_maintenance_stamps_a_distinct_id():
@@ -184,47 +144,7 @@ def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
     assert LEGACY_MAINTENANCE_POLICY_ID in html
 
 
-def test_turned_down_maintenance_is_a_fingerprint_difference(env):  # noqa: F811
-    """pre_benchmark_maintenance: false is not the policy's maintenance."""
-    import copy
-
-    snap = env.snaps[NAME]
-    assert snap["maintenance"]["pre_benchmark_maintenance"] is True
-    _record(env, NAME, _batch_run(snap, "20260924-100000-aaaaaa"))
-    off = copy.deepcopy(snap)
-    off["maintenance"]["pre_benchmark_maintenance"] = False
-    c = _compare(env, NAME, _batch_run(off, "20260924-110000-bbbbbb"))
-    assert c.verdict == pg.REFUSED
-    assert any("maintenance.pre_benchmark_maintenance" in r for r in c.reasons)
-
-
-def test_latest_candidate_skips_runs_not_under_the_current_policy(env):  # noqa: F811
-    snap = env.snaps[NAME]
-    good = _batch_run(snap, "20260924-100000-aaaaaa")
-    env.write_run(good)
-    later = _batch_run(snap, "20260924-110000-bbbbbb")
-    later["maintenance_policy_id"] = skipped_policy_id()
-    env.write_run(later)
-    store = env.store()
-    cand = pg.latest_candidate(store.pinned(NAME), env.runs)
-    assert cand is not None and cand.run_id == good["run_id"]
-
-
 # -- per-operation identity (lb16 sweep: Polaris + Thrift orphan removal) ---
-
-
-def _eff_from_run(cfg, fail_orphan_on):
-    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
-    from tests.test_evidence_polish import _trino_maintenance
-
-    outcomes = _trino_maintenance(cfg, fail_orphan_on=fail_orphan_on)
-    return effective_maintenance(
-        MAINTENANCE_POLICY_ID,
-        table_format="iceberg",
-        query_engine="trino",
-        mode="batch",
-        outcomes=[*outcomes, {"kind": "compaction", "total": 2, "succeeded": 2}],
-    )
 
 
 def test_delta_identity_names_vacuum_and_compaction():

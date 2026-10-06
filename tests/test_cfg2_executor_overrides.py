@@ -248,18 +248,6 @@ def test_driver_overrides_are_their_own_architecture_key():
 # -- 6. not a baseline, not evidence -------------------------------------------------------
 
 
-def test_perf_gate_refuses_override_bound_baseline():
-    """A record whose override binds (emitted by the run, not injected) is
-    refused as a run, a baseline and evidence (one predicate,
-    release_record.bound_problems)."""
-    from lakebench.metrics.release_record import bound_problems
-
-    cfg = _cfg()
-    cfg.platform.compute.spark.silver_executors = 4
-    problems = bound_problems(_record_with(cfg))
-    assert "silver-build: executor override bound this run; its numbers measure the cap" in problems
-
-
 def test_a_binding_override_labels_the_metrics_it_caps():
     from lakebench.metrics.metric_registry import capped_by
 
@@ -333,54 +321,3 @@ def test_a_refusal_names_the_overrides():
     assert not result.passed
     assert "with executor overrides silver-build 28" in result.message
     assert "Lower or unset the executor overrides" in result.hint
-
-
-def test_upward_and_driver_overrides_are_not_evidence():
-    from lakebench.metrics.release_record import bound_problems
-
-    cfg = _cfg()
-    cfg.platform.compute.spark.silver_executors = 12
-    cfg.platform.compute.spark.driver_memory = "16g"
-    rec = _record_with(cfg)
-    problems = bound_problems(rec)
-    assert any("silver-build: executor override 12 (profile asks 8)" in p for p in problems)
-    assert any("driver override driver_memory 16g" in p for p in problems)
-    # an override at the profile's count is the proven sizing
-    cfg = _cfg()
-    cfg.platform.compute.spark.silver_executors = 8
-    assert bound_problems(_record_with(cfg)) == []
-
-
-def _pinned(tmp_path: Path, mode: str, spark: dict) -> Path:
-    src = Path(__file__).resolve().parents[1] / "benchmarks" / "perf"
-    name = "c360-continuous-s10.yaml" if mode == "continuous" else "c360-batch-s10.yaml"
-    raw = yaml.safe_load((src / name).read_text())
-    raw.setdefault("platform", {}).setdefault("compute", {}).setdefault("spark", {}).update(spark)
-    path = tmp_path / name
-    path.write_text(yaml.safe_dump(raw))
-    return path
-
-
-def test_pinned_config_with_override_refused(tmp_path):
-    from lakebench.metrics.perf_gate import PerfGateError, load_pinned
-
-    with pytest.raises(PerfGateError, match="silver-build 12 \\(profile asks 8\\)"):
-        load_pinned(_pinned(tmp_path, "batch", {"silver_executors": 12}))
-    with pytest.raises(PerfGateError, match="a driver override"):
-        load_pinned(_pinned(tmp_path, "batch", {"driver_cores": 8}))
-    with pytest.raises(PerfGateError, match="gold-refresh 3 \\(profile asks"):
-        load_pinned(_pinned(tmp_path, "continuous", {"gold_refresh_executors": 3}))
-
-
-def test_shipped_pinned_configs_pin_the_profile_counts():
-    from lakebench.metrics.perf_gate import load_pinned
-
-    src = Path(__file__).resolve().parents[1] / "benchmarks" / "perf"
-    for name in (
-        "aml-batch-s1.yaml",
-        "aml-batch-s10.yaml",
-        "c360-batch-s10.yaml",
-        "c360-batch-s10-polaris.yaml",
-        "c360-continuous-s10.yaml",
-    ):
-        assert load_pinned(src / name)

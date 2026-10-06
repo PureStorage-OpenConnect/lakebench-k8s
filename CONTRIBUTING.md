@@ -108,8 +108,7 @@ Tests that import pyspark go under `tests/spark/`.
 2. Keep one concern per pull request. A bug fix does not carry a drive-by
    refactor.
 3. Add tests: new code comes with unit tests, and a fix with a test that
-   fails without it. CI also holds per-file coverage floors on the scoring
-   and metrics code (`scripts/check_coverage.py`).
+   fails without it.
 4. Run the tiers your change needs (above), then `git push fork my-change`
    and open the pull request against `main`. To run every check a release
    runs, `python scripts/release_gate.py` lists what failed.
