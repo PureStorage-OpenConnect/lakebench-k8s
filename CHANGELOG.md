@@ -74,7 +74,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
 - A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
-- The default datagen image is `lb-datagen:a592385`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
+- The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
 
 - **The Hive recipes default to Spark 4.1.1.** Each recipe's default
   Spark image is now the Spark minor of its release-matrix row:
@@ -1026,16 +1026,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   reference to a datagen image that is not the default, 1.6.0 or an
   allowlisted history entry. `docs/data-generation.md` drops the unsupported
   batch-versus-continuous speed figures.
-- **The default datagen image is `lb-datagen:a592385`, pinned by digest**
+- **The default datagen image is `lb-datagen:2a36ae21`, pinned by digest**
   (`ImagesConfig.datagen` is
-  `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1`;
+  `docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`;
   was `lb-datagen:1.6.0`). It is the one image built after the held-out
   hash, strict-argument, corpus-marker, S3-transport and seed-Secret source
-  changes, from integrate `a5923850`, and the image the registered AML looks
+  changes, from integrate `2a36ae210`, and the image the registered AML looks
   pin (`docs/internal/aml-protocol.md`). The five-case byte-compare against
   1.6.0 (financial seed 43 with and without the robustness perturbation,
   Customer 360 seed 42, and both at two cycles; per-node markers excluded) is
-  equal, recorded in `tests/fixtures/datagen_reference/compare-48e18a417bf8.json`,
+  equal, recorded in `tests/fixtures/datagen_reference/compare-0502b7002999.json`,
   and `src/lakebench/config/datagen_lineage.yaml` maps the new digest to the
   1.6.0 root, so the two images give one corpus lineage. Every perf-gate
   config under `benchmarks/perf/` takes the same pin (they follow the
@@ -1878,6 +1878,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   `PYTHONPATH=src python -m lakebench` instead.
 
 ### Fixed
+- A batch run at scale 50 or above with default settings no longer loses its silver-build executors to "node was low on resource: ephemeral-storage": when `platform.storage.scratch.enabled` is unset, auto-sizing turns scratch PVCs on for batch at scale 50 and above, and `plan`, `validate`, deploy's preflight and `admin install --component all` check or install the scratch StorageClass for it. Set `enabled: false` to keep emptyDir shuffle. Continuous mode is unchanged.
 - A Customer 360 Iceberg batch full rebuild (`--force-rebuild`) of a silver table written by 1.6 or by a continuous run no longer fails on a Hive recipe, where the metastore refused a replace that moved columns and each refused attempt left its data files in the bucket. Silver keeps 1.6's column order (`_batch_id` last), so a 1.6 table is replaced in place as before; a table with other columns (a continuous run's, with `_stream_id`) is dropped from the catalog first (on Hive and Polaris its files stay in the bucket; a write that then fails leaves no table, which the next run builds).
 - A continuous run keeps its completed datagen pods for its window (`--duration` or the config) plus an hour, so the fleet record is still readable at window end; they were deleted an hour after the Job finished.
 - A continuous run whose window gate fails (no data arriving, too few silver commits or gold refreshes, a stream that died or restarted) names that problem in its verdict instead of "Pipeline crashed or was interrupted". Other gates still fall back to it, for example the drain, result check, AML detection, TM verdict, C360 zero-row, in-stream benchmark round and deps-pods gates.
@@ -2235,6 +2236,22 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   like Spark does.
 
 ### Known limitations
+- **Continuous throughput is the configured offered load, not a measured
+  system capacity.** `sustained_throughput_rps` in the report reads the rate
+  the generator fed the pipeline (scale divided by `run_duration`); it is not
+  how fast the system could have gone unbounded. `intake_limit` and
+  `pipeline_saturated` tell the reader when the system was below the
+  configured rate. Batch throughput is a real measured number. Batch and
+  continuous numbers are not comparable with each other; see
+  `docs/data-generation.md`.
+- **AML silver differs batch vs continuous on columns whose value depends on
+  arrival order** (`accounts.currency`/`current_balance`,
+  `account_statements.bal_before`/`bal_after`,
+  `entity_profiles.first_seen_ts`/`active_span_days`). Row counts and
+  transactions match; detection rules read none of these columns, so alerts
+  are unaffected. Not a release blocker because batch and continuous are
+  different workload shapes and are not compared; a run under one mode is
+  reproducible under the same mode. Tracked for v1.7.x (LB-276, LB-264).
 - **The capacity preflight sums free capacity across nodes.** Ten nodes
   with 12 cores free each read as 120 free cores, though each holds one
   8-core pod; only the largest pod is checked against a single node. The
@@ -2252,6 +2269,64 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - **Per-job executor overrides and the driver overrides are not counted**
   in the sizing figures yet; `config show` and `info` say so when a config
   sets one.
+
+- **polaris + AML + continuous is intermittent at scale 1** (LB-279). The
+  silver-stream Spark driver exits silently inside the 30-minute window and
+  the Spark Operator auto-resubmits a second driver; the continuous gate
+  correctly refuses the run on "silver-stream was resubmitted inside the
+  window". Observed on polaris-iceberg-spark-trino and
+  polaris-iceberg-spark-thrift. NOT observed on hive-based catalogs, on
+  polaris-iceberg-spark-none (catalog-only), or on polaris + C360 +
+  continuous. In release-matrix testing the shape was seen in 3 of 4
+  attempts of this combination (R.1.16 under 7-way load, R.1.16 solo retry,
+  R.1.20 under 2-wide load, with R.1.16c solo PASS); the solo reproduction
+  rate itself is not characterised precisely. No `StreamingQueryException`,
+  `OOM` or `SIGTERM` found in 31 MB of preserved first-driver logs from the
+  one PASS. Scoped to all three streaming jobs (bronze-ingest, silver-stream,
+  gold-refresh) because the continuous gate refuses a run on any one of
+  them rotating inside the window, so none can usefully auto-rerun there.
+  Workaround: retry the run. Root cause and fix tracked for v1.8.
+- **`report.html` embeds the configured S3 endpoint value verbatim**
+  (LB-280). The field `S3 Endpoint` inside the `config-item` div is rendered
+  as the live config value, so a shared `report.html` leaks the operator's
+  endpoint. Checked-in `metrics.json` artefacts under `uat/runs/` are
+  sanitised at check-in by the author; `report.html` is not. Access and
+  secret keys were already excluded from `config_snapshot` and never
+  rendered. Fix tracked for v1.7.x: remove the `S3 Endpoint` field from the
+  report config section and redact the raw endpoint value in the
+  `config_snapshot` and the system-identity fingerprint.
+
+- **AML silver tables differ between batch and continuous modes on the same
+  corpus.** Row counts match, and `transactions`, `entities` and
+  `counterparty_edges` are byte-identical; `accounts.currency` and
+  `accounts.current_balance`, `account_statements.bal_before` and
+  `.bal_after`, and `entity_profiles.first_seen_ts` and `.active_span_days`
+  differ because the continuous silver writer picks arrival-order values
+  where the batch writer picks a stable key. Each mode is internally
+  consistent, and each mode's queries return the expected results against
+  the mode's own silver (R.1.03 AML batch and R.1.04 AML continuous both
+  PASS). A reader must not compare batch AML numbers against continuous AML
+  numbers on these tables; invariant 2 covers that case. Fix tracked for
+  v1.7.1.
+
+- **FQ4 answers differ between batch and continuous on the same corpus.**
+  FQ4 reads raw rows from `counterparty_edges`; batch silver dedups edges,
+  continuous silver appends one edge per micro-batch, so counts differ by
+  the number of micro-batches. Each mode is internally consistent and
+  passes its own expected-results check; cross-mode comparison of FQ4 is
+  the uncovered case. Fix tracked for v1.7.1.
+
+- **W5/W6 AML screening alerts grow roughly quadratically with scale.** At
+  scale 1 W5 produces 126 alerts; at scale 100, 7.6M (false-positive rate
+  rises from 0.61 to 0.999 while recall stays near 0.8). The cause is a
+  fixed name pool in the datagen generator (79 first names, 77 last, 50
+  company heads, 18 descriptors) against a watchlist and background that
+  grow linearly with scale, so namesake collisions grow with the product.
+  Each individual scale's run passes; cross-scale totals, the TM funnel and
+  gold time are distorted. A reader must not compare W5/W6 alert totals
+  across scales. Rule-side fix (stricter match key or a per-list collision
+  cap) tracked for v1.7.1; a generator-side fix is deferred further because
+  it voids the AML generator freeze.
 
 ## [1.6.0] - 2026-09-30
 

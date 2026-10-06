@@ -1,6 +1,7 @@
 {
   "comment": "Per-file counts of LB-NNN, AML-GOALS, GOALS P<n>, MISSION-v1.<n>, plan, requirement and work-item id and gotcha <n> citations in shipped files (the pattern is CITATION in tests/test_citations.py), taken at the OSS-3 ratchet commit. Counts may only fall.",
   "counts": {
+    "CHANGELOG.md": 4,
     "datagen_rs/Dockerfile": 1,
     "datagen_rs/entrypoint.py": 4,
     "datagen_rs/src/amounts.rs": 1,
