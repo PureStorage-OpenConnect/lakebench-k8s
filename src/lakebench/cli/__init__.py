@@ -658,8 +658,10 @@ def validate(
         storage_v1 = k8s_client.StorageV1Api()
 
         storage_classes = []
+        from lakebench.config.autosizer import scratch_will_be_enabled
+
         scratch_cfg = cfg.platform.storage.scratch
-        if scratch_cfg.enabled and scratch_cfg.storage_class:
+        if scratch_will_be_enabled(cfg) and scratch_cfg.storage_class:
             # StorageClass is Category 2 shared infrastructure: preflight
             # requires it to exist before deploy runs.
             storage_classes.append((scratch_cfg.storage_class, "scratch", True))

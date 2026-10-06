@@ -333,6 +333,10 @@ def resolve_auto_sizing(
     if schema_change:
         changes.append(schema_change)
 
+    scratch_change = _apply_scratch_autoenable(config)
+    if scratch_change:
+        changes.append(scratch_change)
+
     # -- Cluster capacity: cap to fit --
     # The pod floor goes first so a cluster cap (which also sets the
     # continuous-mode streaming budget) always has the last word.
@@ -414,6 +418,56 @@ def _apply_delta_thrift_default(
     if not changes:
         return None
     return ", ".join(changes) + " (table_format=delta)"
+
+
+#: Batch scale at and above which the autosizer enables scratch PVCs so Spark
+#: shuffle does not spill into pod ephemeral storage (which the kubelet
+#: evicts when the node runs low). Customer 360 batch at scale 50 with
+#: scratch off failed at silver-build with ExitCode 137 "node was low on
+#: ephemeral-storage"; with scratch on (300Gi per silver-build executor) it
+#: passed. Scales 1 and 10 were measured passing without scratch; 11 to 49
+#: are unmeasured. Continuous mode is left alone: it was not measured at
+#: this scale.
+_AUTOSCRATCH_MIN_SCALE = 50.0
+
+
+def _autoscratch_applies(config: LakebenchConfig) -> bool:
+    from lakebench.config.schema import PipelineMode
+
+    return (
+        config.architecture.pipeline.mode == PipelineMode.BATCH
+        and config.architecture.workload.datagen.scale >= _AUTOSCRATCH_MIN_SCALE
+    )
+
+
+def scratch_will_be_enabled(config: LakebenchConfig) -> bool:
+    """Whether the run uses scratch PVCs, before or after auto-sizing."""
+    scratch = config.platform.storage.scratch
+    if "enabled" in scratch.model_fields_set or scratch.enabled:
+        return bool(scratch.enabled)
+    return _autoscratch_applies(config)
+
+
+def _apply_scratch_autoenable(config: LakebenchConfig) -> str | None:
+    """Enable scratch PVCs on a batch run at scale 50 or above.
+
+    Only sets ``platform.storage.scratch.enabled`` when the user did not set
+    it. ``storage_class`` and ``provisioner`` keep their defaults. ``plan``,
+    ``validate``, deploy's preflight and ``admin install --component all``
+    use ``scratch_will_be_enabled``, so a missing StorageClass is reported
+    before the run; ``run --skip-deploy`` skips that preflight.
+    """
+    if not _autoscratch_applies(config):
+        return None
+    scale = config.architecture.workload.datagen.scale
+    scratch = config.platform.storage.scratch
+    if not _set_if_default(scratch, "enabled", True):
+        return None
+    return (
+        f"platform.storage.scratch.enabled=True (scale {scale:g}: "
+        "silver-build shuffle exceeds pod ephemeral storage without a "
+        "scratch PVC per executor)"
+    )
 
 
 def _apply_schema_overrides(

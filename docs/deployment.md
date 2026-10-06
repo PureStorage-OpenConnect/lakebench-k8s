@@ -45,7 +45,7 @@ The deployment engine follows this fixed sequence:
    shuffle volumes exists. Deploy never creates it: it is shared cluster-scoped
    infrastructure. If it is missing, deploy stops and points to
    `lakebench admin install --component scratch-storage-class`, which a
-   cluster admin runs once. Skipped if `platform.storage.scratch.enabled` is false.
+   cluster admin runs once. Skipped when scratch is off (`platform.storage.scratch.enabled` false, or unset below batch scale 50).
 5. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
    the catalog service.
 6. **Hive Metastore or Polaris** -- Deploys the catalog selected by

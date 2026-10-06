@@ -11,7 +11,7 @@ needed: Lakebench makes its OpenShift SCC grants through the Kubernetes API.
 
 | Check | Needed when |
 |---|---|
-| [Scratch StorageClass](#scratch-storage-class) | `platform.storage.scratch.enabled: true` |
+| [Scratch StorageClass](#scratch-storage-class) | `platform.storage.scratch.enabled: true`, or a batch run at scale 50 and above with it unset |
 | [Kubeflow Spark Operator 2.x](#spark-operator) | Always |
 | [Stackable operators (Hive catalog)](#stackable) | `architecture.catalog.type: hive` |
 | [Shared observability stack](#observability-stack) | `observability.enabled: true` |
@@ -24,7 +24,7 @@ needed: Lakebench makes its OpenShift SCC grants through the Kubernetes API.
 
 ## Scratch StorageClass
 
-Check id `scratch-storage-class`. Needed when: `platform.storage.scratch.enabled: true`.
+Check id `scratch-storage-class`. Needed when: `platform.storage.scratch.enabled: true`, or a batch run at scale 50 and above with it unset.
 
 Spark executors put shuffle and spill on per-executor PVCs from the StorageClass named by `platform.storage.scratch.storage_class` (default `px-csi-scratch`, Portworx with one replica). The StorageClass is shared cluster infrastructure: Lakebench uses it and never creates or deletes it during `deploy` or `destroy`.
 

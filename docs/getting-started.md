@@ -19,7 +19,7 @@ lakebench admin install --component all lakebench.yaml             # once per cl
 lakebench admin doctor lakebench.yaml                              # confirm everything is in place
 ```
 
-`--component all` installs what the config uses: the scratch StorageClass (when `platform.storage.scratch.enabled`), the Spark Operator, the Stackable operators (Hive recipes) and the observability stack (when `observability.enabled`). Name components one at a time with `--component spark-operator` and so on. A component that is already installed is left as it is, whatever version the config names (it warns when they differ), so the command is safe to re-run: on a cluster that has everything installed and ready it changes nothing and exits 0. The one thing it refreshes is the shared Grafana dashboard ConfigMap, when it differs from this Lakebench's.
+`--component all` installs what the config uses: the scratch StorageClass (when `platform.storage.scratch.enabled`, or a batch config at scale 50 and above leaves it unset), the Spark Operator, the Stackable operators (Hive recipes) and the observability stack (when `observability.enabled`). Name components one at a time with `--component spark-operator` and so on. A component that is already installed is left as it is, whatever version the config names (it warns when they differ), so the command is safe to re-run: on a cluster that has everything installed and ready it changes nothing and exits 0. The one thing it refreshes is the shared Grafana dashboard ConfigMap, when it differs from this Lakebench's.
 
 Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges; `deploy` never installs a shared component, and stops with the `admin install` command when one is missing. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; deploys and destroys wait for `admin install` up to 10 minutes, and one that waits longer fails, naming the holder, without changing anything shared; see `lakebench admin --help` for the full subcommand tree.
 
@@ -93,7 +93,7 @@ How to read it:
 - **Scratch PVC** is the Spark scratch request when
   `platform.storage.scratch` is enabled (AML batch at scale 100 sets it with
   `bronze-verify`, 11 executors of 500 Gi for its CTAS fallback). With
-  scratch disabled, the default, no PVC is requested.
+  scratch disabled (the default below batch scale 50), no PVC is requested.
 - **Largest pod** must fit on one node. A cluster with 512 GB spread across
   sixteen 32 GB nodes has enough memory on paper and still cannot schedule a
   60 GB `silver-build` executor. The 8 cores are a datagen pod.

@@ -185,7 +185,7 @@ the count changes.
 platform:
   storage:
     scratch:
-      enabled: false                 # Enable Portworx scratch PVCs
+      # enabled: true                # Portworx scratch PVCs; unset, it turns on for a batch run at scale 50 and above
       storage_class: "px-csi-scratch"  # Must be repl=1
 ```
 

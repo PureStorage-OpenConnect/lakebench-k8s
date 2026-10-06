@@ -295,7 +295,7 @@ When you omit optional sections, these defaults apply:
 | `catalog.type` | hive | Stackable Hive Metastore |
 | `query_engine.type` | trino | Trino coordinator + 2 workers |
 | `observability.enabled` | false | No Prometheus/Grafana |
-| `scratch.enabled` | false | emptyDir for shuffle |
+| `scratch.enabled` | false (on for batch at scale 50+) | emptyDir for shuffle below that |
 
 **What to tune first as you scale up:**
 
@@ -330,7 +330,7 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1
+  datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
   spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -373,7 +373,7 @@ platform:
       create_buckets: true
 
     scratch:
-      enabled: false                  # Enable Portworx scratch StorageClass
+      # enabled: true                 # Portworx scratch PVCs; unset, it turns on for a batch run at scale 50 and above
       storage_class: px-csi-scratch   # PVC size per executor: the job profile's
 
   compute:
@@ -592,7 +592,7 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:a592385@sha256:48e18a417bf85528392afeb9b8222bfd3cc1d5f3db3bf1d7d0623e6a4f6ea4b1` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on the five byte-compare cases; this build adds the held-out seed check, strict argument parsing and per-node corpus markers. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on the five byte-compare cases; this build adds the held-out seed check, strict argument parsing and per-node corpus markers. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
@@ -633,7 +633,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `platform.storage.scratch.enabled` | boolean | `false` | advanced | Enable scratch StorageClass for Spark PVCs. |
+| `platform.storage.scratch.enabled` | boolean | `false` | advanced | Enable scratch StorageClass for Spark PVCs. Unset, a batch run at scale 50 and above turns it on (Spark shuffle there outgrows pod ephemeral storage). |
 | `platform.storage.scratch.storage_class` | string | `px-csi-scratch` | advanced | StorageClass name for scratch volumes. |
 | `platform.storage.scratch.provisioner` | string | `pxd.portworx.com` | advanced | CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`, etc. for non-Portworx providers. |
 | `platform.storage.scratch.parameters` | mapping | `{"io_profile": "auto", "priority_io": "high", "repl": "1"}` | advanced | Provider-specific StorageClass parameters. |

@@ -32,7 +32,8 @@ same sizing function as the `run` capacity preflight
 and scale.
 
 **Give scratch and metadata different storage classes.** Scratch PVCs are
-off by default; turn them on with `platform.storage.scratch.enabled: true`
+off by default below batch scale 50 and on at and above it; set
+`platform.storage.scratch.enabled` to choose explicitly
 (setting only the class does nothing). Spark shuffle and spill are
 recomputed on failure, so the scratch class should keep one replica
 (`platform.storage.scratch.storage_class`, `px-csi-scratch` with `repl=1`

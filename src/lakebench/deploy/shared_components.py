@@ -172,8 +172,10 @@ class Settings:
 
 def components_for_config(cfg: LakebenchConfig) -> list[str]:
     """What ``--component all`` means for a config: the components it uses."""
+    from lakebench.config.autosizer import scratch_will_be_enabled
+
     out = []
-    if cfg.platform.storage.scratch.enabled:
+    if scratch_will_be_enabled(cfg):
         out.append(SCRATCH)
     out.append(SPARK_OPERATOR)
     if cfg.architecture.catalog.type.value == "hive":

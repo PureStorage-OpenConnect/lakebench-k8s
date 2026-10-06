@@ -123,8 +123,9 @@ def _fail(msg: str) -> PrereqResult:
 
 
 def _scratch_applies(cfg: LakebenchConfig) -> bool:
-    scratch = cfg.platform.storage.scratch
-    return bool(scratch.enabled and scratch.storage_class)
+    from lakebench.config.autosizer import scratch_will_be_enabled
+
+    return bool(scratch_will_be_enabled(cfg) and cfg.platform.storage.scratch.storage_class)
 
 
 def _check_scratch(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
@@ -360,7 +361,7 @@ PREREQS: tuple[Prereq, ...] = (
         id="scratch-storage-class",
         component="scratch-storage-class",
         title="Scratch StorageClass",
-        when="`platform.storage.scratch.enabled: true`",
+        when="`platform.storage.scratch.enabled: true`, or a batch run at scale 50 and above with it unset",
         applies=_scratch_applies,
         check=_check_scratch,
         fix=(

@@ -810,3 +810,92 @@ class TestDatagenCutIsExplicit:
         res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
         out = " ".join(res.output.split())
         assert "43 -> 30" in out, (out[-2000:], repr(res.exception))
+
+
+class TestScratchAutoenable:
+    """Scale 50 silver-build spilled past node ephemeral storage without a
+    scratch PVC per executor (R.5.2 2026-10-05, ExitCode 137 "node was low
+    on resource: ephemeral-storage"). The autosizer enables scratch for
+    batch at scale 50 and above.
+    """
+
+    def _cfg(
+        self, scale: float, scratch_override: dict | None = None, mode: str = "batch"
+    ) -> LakebenchConfig:
+        from lakebench.config import LakebenchConfig
+
+        return LakebenchConfig.model_validate(
+            {
+                "name": "autoscratch",
+                "architecture": {
+                    "workload": {"datagen": {"scale": scale}},
+                    "pipeline": {"mode": mode},
+                },
+                "platform": {
+                    "storage": {
+                        "s3": {
+                            "endpoint": "http://minio:9000",
+                            "access_key": "a",
+                            "secret_key": "b",
+                        },
+                        **({"scratch": scratch_override} if scratch_override else {}),
+                    }
+                },
+            }
+        )
+
+    def test_small_scale_leaves_scratch_disabled(self):
+        cfg = self._cfg(scale=1)
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.enabled is False
+
+    def test_scale_10_leaves_scratch_disabled(self):
+        """Below the measured failure point (scale 50) scratch stays off:
+        the R.1 matrix proves scales 1-10 pass without it."""
+        cfg = self._cfg(scale=10)
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.enabled is False
+
+    def test_scale_50_enables_scratch(self):
+        """R.5.2 regression: scale 50 batch must enable scratch so silver
+        shuffle does not spill into pod ephemeral and get evicted."""
+        cfg = self._cfg(scale=50)
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.enabled is True
+
+    def test_explicit_user_override_wins(self):
+        """A user who sets scratch.enabled=False explicitly keeps that
+        value even above the threshold."""
+        cfg = self._cfg(scale=50, scratch_override={"enabled": False})
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.enabled is False
+
+    def test_default_storage_class_is_not_changed(self):
+        """The autosizer flips enabled only; storage_class and provisioner
+        stay at their config defaults so a user on a non-Portworx cluster
+        can keep their own values."""
+        cfg = self._cfg(scale=50)
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.storage_class == "px-csi-scratch"
+
+    def test_preflight_checks_the_storage_class_autosizing_will_use(self):
+        """plan and deploy check the scratch StorageClass before auto-sizing
+        runs, so they must see the scale-50 enable too."""
+        from lakebench.deploy.prereqs import _scratch_applies
+
+        assert _scratch_applies(self._cfg(scale=50)) is True
+        assert _scratch_applies(self._cfg(scale=10)) is False
+        assert _scratch_applies(self._cfg(scale=50, scratch_override={"enabled": False})) is False
+        assert _scratch_applies(self._cfg(scale=1, scratch_override={"enabled": True})) is True
+
+    def test_continuous_is_left_alone(self):
+        """Only batch was measured at scale 50."""
+        cfg = self._cfg(scale=50, mode="continuous")
+        resolve_auto_sizing(cfg)
+        assert cfg.platform.storage.scratch.enabled is False
+
+    def test_admin_install_all_includes_the_scratch_class_it_will_need(self):
+        from lakebench.deploy.shared_components import SCRATCH, components_for_config
+
+        assert SCRATCH in components_for_config(self._cfg(scale=50))
+        assert SCRATCH not in components_for_config(self._cfg(scale=10))
