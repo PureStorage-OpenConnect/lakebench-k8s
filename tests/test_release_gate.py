@@ -534,9 +534,13 @@ def test_records_check_reads_each_cited_record(frozen, monkeypatch):
     assert rid in res.detail and "not from the freeze commit" in res.detail
 
 
-def test_support_record_empty_on_tag_fails(frozen):
+def test_support_record_empty_on_tag_skips(frozen):
+    # An empty validated_combinations list is the no-freeze-yet state and is
+    # consistent with the three freeze-dependent checks (records, freeze,
+    # expected-results) that already SKIP. A hard FAIL blocked release when
+    # none of its validation inputs had been recorded.
     res = rg.make_support_record_check("v9.9.9")()
-    assert res.status == rg.FAIL and "lists nothing" in res.detail
+    assert res.status == rg.SKIP and "lists nothing" in res.detail
 
 
 def test_post_freeze_rename_out_of_src_fails(frozen):
