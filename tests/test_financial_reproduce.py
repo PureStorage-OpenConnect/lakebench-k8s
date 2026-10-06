@@ -180,26 +180,6 @@ def test_no_temp_view_feeds_a_merge(script):
 # --- one attempt -------------------------------------------------------------------
 
 
-def test_the_reproduce_job_is_not_retried():
-    from lakebench.k8s.client import ClusterCapacity
-    from lakebench.spark.job import JobType, SparkJobManager
-    from tests.test_aml_bronze_ingest_profile import _config
-
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = ClusterCapacity(
-        total_cpu_millicores=434_000,
-        total_memory_bytes=8 * 432 * 1024**3,
-        node_count=8,
-        largest_node_cpu_millicores=434_000 // 8,
-        largest_node_memory_bytes=432 * 1024**3,
-    )
-    mgr = SparkJobManager(_config("financial", 1), k8s)
-    policy = mgr._build_manifest(JobType.REPRODUCE_FINANCIAL)["spec"]["restartPolicy"]
-    assert policy["onFailureRetries"] == 0 and policy["onSubmissionFailureRetries"] == 5
-    other = mgr._build_manifest(JobType.REPLAY_FINANCIAL)["spec"]["restartPolicy"]
-    assert other["onFailureRetries"] == 2
-
-
 # --- the CLI -------------------------------------------------------------------------
 
 

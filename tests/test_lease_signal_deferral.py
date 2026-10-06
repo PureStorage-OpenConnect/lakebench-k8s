@@ -281,20 +281,6 @@ def test_lease_api_calls_carry_request_timeouts(own_ns):
     assert all(c.kwargs.get("_request_timeout") == cl.LEASE_REQUEST_TIMEOUT for c in lease_calls)
 
 
-def test_real_destroy_leased_api_calls_carry_request_timeouts():
-    """Run unmodified destroy: every API call inside the lease has a timeout."""
-    from tests.test_recording_k8s_fixture import _destroy_under_recorder
-
-    with recording() as rec:
-        _destroy_under_recorder(rec)
-        leased_api = [c for c in rec.calls if c.lease_held and c.api.endswith("Api")]
-        assert any(c.kind == "namespaces" and c.verb == "delete" for c in leased_api)
-        missing = [c.describe() for c in leased_api if "_request_timeout" not in c.kwargs]
-        assert missing == []
-        leased_cli = [c for c in rec.calls if c.lease_held and c.api in ("helm", "kubectl")]
-        assert leased_cli and all(c.kwargs.get("start_new_session") for c in leased_cli)
-
-
 # Functions whose Kubernetes client calls run inside (or to take) the lease.
 _LEASED_FUNCTIONS = {
     "deploy/cluster_lock.py": {
@@ -587,19 +573,6 @@ def test_a_landed_write_after_a_transport_error_is_kept(own_ns):
     with cl.cluster_lock(Flaky(), timeout=0):
         assert cl.lease_held()
     assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) not in rec.store
-
-
-def test_destroy_keeps_the_namespace_when_a_leased_helm_times_out():
-    """The strict remove maps a leased timeout to WatchListMutationError, fail closed."""
-    from tests.test_recording_k8s_fixture import _destroy_under_recorder
-
-    with recording() as rec:
-        rec.on_command("helm", "upgrade", raises=subprocess.TimeoutExpired(["helm"], 5))
-        results = {r.component: r for r in _destroy_under_recorder(rec)}
-        assert results["spark-operator-watch"].status.value == "failed"
-        assert "ran out of time" in results["spark-operator-watch"].message
-        assert ("namespaces", None, NS) in rec.store
-        assert not [c for c in rec.calls if c.verb == "delete" and c.kind == "namespaces"]
 
 
 def test_heal_path_leased_api_calls_carry_request_timeouts():

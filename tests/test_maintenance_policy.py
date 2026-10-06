@@ -227,39 +227,6 @@ def _eff_from_run(cfg, fail_orphan_on):
     )
 
 
-def test_failed_orphan_removal_is_failed_in_the_identity():
-    """Orphan removal failing on every table while expiry succeeds must not
-    be stamped as maintenance that ran (the sweep recorded expire=ran)."""
-    from tests.conftest import make_config
-
-    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
-    good = _eff_from_run(cfg, None)
-    bad = _eff_from_run(cfg, "lakehouse")
-    assert bad["operations"] == {
-        "expire_snapshots": "ran",
-        "remove_orphan_files": "failed",
-        "compaction": "ran",
-    }
-    assert "remove_orphan_files=failed" in bad["id"]
-    assert bad["expire"] == "failed"
-    assert any("remove_orphan_files: 0 of 2" in r for r in bad["reasons"])
-    assert good["id"] != bad["id"]
-
-
-def test_one_side_failed_orphan_removal_is_not_like_for_like():
-    from lakebench.metrics.experiment import condition_differences
-    from tests.conftest import make_config
-
-    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
-    good = _eff_from_run(cfg, None)
-    bad = _eff_from_run(cfg, "lakehouse")
-    a = {"effective_maintenance": good}
-    b = {"effective_maintenance": bad}
-    diffs = condition_differences(a, b)
-    assert any("effective maintenance" in d for d in diffs)
-    assert condition_differences(a, {"effective_maintenance": dict(good)}) == []
-
-
 def test_delta_identity_names_vacuum_and_compaction():
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 

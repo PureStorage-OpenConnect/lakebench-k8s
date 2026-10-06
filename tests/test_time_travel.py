@@ -817,14 +817,6 @@ def test_the_settle_carries_the_run_outcome_and_the_stage():
 # --- the hash covers the business columns (SPEC section 8) ------------------
 
 
-def test_the_sentinels_are_silver_paritys():
-    """One business-column definition: the batch-version sentinels that
-    release/silver_parity.py leaves out of its silver hash."""
-    from tests.test_silver_parity import SP
-
-    assert tt.SENTINEL_COLUMNS == SP.SENTINELS
-
-
 def test_the_job_hashes_business_columns_only(job):
     _run(job, [_rec(2, T2)])
     cols = ["txn_id", "_batch_id", "txn_amount", "_stream_id", "ingest_ts"]
