@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lakebench Scorecard - lb17-r103</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #16a34a;
+            --danger: #dc2626;
+            --warning: #d97706;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-success {
+            background: #dcfce7;
+            color: var(--success);
+        }
+
+        .status-failed {
+            background: #fecaca;
+            color: var(--danger);
+        }
+
+        .status-warning {
+            background: #fef3c7;
+            color: var(--warning);
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .card-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        .card-delta {
+            font-size: 0.75rem;
+            margin-top: 0.25rem;
+        }
+
+        .card-hint {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+            font-style: italic;
+        }
+
+        .card-hint2 {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.125rem;
+        }
+
+        .delta-positive {
+            color: var(--success);
+        }
+
+        .delta-negative {
+            color: var(--danger);
+        }
+
+        section {
+            background: var(--card-bg);
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        section h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        .mono {
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-size: 0.875rem;
+        }
+
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+
+        .config-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .config-key {
+            color: var(--text-muted);
+        }
+
+        footer {
+            text-align: center;
+            padding-top: 2rem;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Lakebench Scorecard</h1>
+            <div class="subtitle">
+                Deployment: <strong>lb17-r103</strong> |
+                Run ID: <code class="mono">20261004-173212-3a9dbe</code> |
+                <span class="status status-success" title="Pipeline completed, data complete (ingest/scale ratio 0.95-1.05), all jobs succeeded, no failed queries">
+                    PASSED
+                </span>
+                <span class="confidence-chip" title="run-count qualifier" style="display: inline-block; margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 9999px; background: rgba(148,163,184,0.15); color: var(--warning); font-size: 0.65em; font-weight: 600; text-transform: none;">single_run</span>
+            </div>
+            
+        </header>
+
+        
+        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
+            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
+                Read this first
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--success);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> AML batch, scale 10.0, 6 of 9 rules ran (W17 skipped: path-cap, W1 skipped: giant-component, W3 skipped: path-cap), n=1</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (calibration corpus: in-sample, the corpus the rules were developed on) (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id b4649ea54b46, scale 10.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 3 samples per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.7.0.dev0, commit commit unknown, tree state unknown</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">52ed8d3139375afb</code></div>
+            </div>
+            <div class="fm-qualifiers" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>Qualifiers and warnings:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>rules skipped on a Lakebench cap: W17_layering_chain (path-cap), W3_round_tripping (path-cap)</li></ul></div>
+            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li><span data-lb-derived="count" data-lb-inputs="count(experiment.rules.skipped)" data-lb-fmt=",d">3</span> detection rule(s) skipped: W17_layering_chain (path-cap), W1_connected_components (giant-component), W3_round_tripping (path-cap)</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
+        </section>
+        
+
+        
+        <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
+            <strong>Batch</strong> pipeline |
+            Financial (FinServ-Crime, AML) at scale 10.0 |
+            hive-iceberg-spark-trino |
+            107m 35s
+        </div>
+        
+
+        
+        <div class="cards">
+            <div class="card">
+                <div class="card-label">Time to Value</div>
+                <div class="card-value">2885.0s</div>
+                <div class="card-hint">wall-clock to queryable gold</div>
+                <div class="card-hint2">&#8595; lower is better | 48m 4s</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Pipeline Throughput</div>
+                <div class="card-value">0.080 GB/s<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-delta" style="color: var(--text-muted);">
+                    230.8 GB of stage inputs; corpus 93.7 GB in bronze
+                </div>
+                <div class="card-hint">stage inputs processed per second (bronze + silver + gold + query reads)</div>
+                <div class="card-hint2">&#8593; higher is better</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Compute Efficiency</div>
+                <div class="card-value">14.40 GB/core-hr</div>
+                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-hint2">&#8593; higher is better</div>
+            </div>
+            <div class="card">
+                <div class="card-label">QpH</div>
+                <div class="card-value">267.5<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, 3 samples/query</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-hint">queries per hour -- higher is better</div>
+                <div class="card-hint2">&#8593; higher is better | ~4 queries/min</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Scale Ratio</div>
+                <div class="card-value"><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">100.0%</span></div>
+                <div class="card-hint">actual vs expected data volume</div>
+                <div class="card-hint2">1.0 = complete</div>
+            </div>
+        </div>
+        <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
+            <span>Total Time: 107m 35s</span>
+            <span>Jobs: <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">3</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span></span>
+        </div>
+        
+
+        
+        <section>
+            <h2>Bottleneck Identification</h2>
+            <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
+                No single bottleneck: the stages' shares of requested core-seconds are within 10 points.
+            </p>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.25rem;">
+                Bar: each stage's share of requested core-seconds (executors x cores x
+                seconds; Trino pod cores x seconds for a Trino query stage), not of time.
+            </div>
+            <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
+                <div style="flex: 6.13; background: #94a3b8; height: 28px; min-width: 0;" title="datagen: share of requested core-seconds"></div><div style="flex: 1.80; background: #f59e0b; height: 28px; min-width: 0;" title="bronze: share of requested core-seconds"></div><div style="flex: 40.65; background: #6366f1; height: 28px; min-width: 0;" title="silver: share of requested core-seconds"></div><div style="flex: 48.86; background: #eab308; height: 28px; min-width: 0;" title="gold: share of requested core-seconds"></div><div style="flex: 2.56; background: #06b6d4; height: 28px; min-width: 0;" title="query: share of requested core-seconds"></div>
+            </div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
+                <span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #94a3b8; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>datagen (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">6%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #f59e0b; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>bronze (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">2%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #6366f1; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>silver (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">41%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #eab308; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>gold (<span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">49%</span>)</span><span style="display: inline-flex; align-items: center; margin-right: 1rem;"><span style="width: 12px; height: 12px; background: #06b6d4; border-radius: 2px; margin-right: 0.3rem; display: inline-block;"></span>query (<span data-lb-derived="pct" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".0f" data-lb-suffix="%">3%</span>)</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stage</th>
+                        <th>Time (s)</th>
+                        <th>% of stage time</th>
+                        <th>Requested core-sec</th>
+                        <th>% of requested core-seconds</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>datagen</td><td>121s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds|pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">3.8%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds" data-lb-fmt=",.0f">3,874</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">6.1%</span></td></tr><tr><td>bronze</td><td>142s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds|pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">4.5%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds" data-lb-fmt=",.0f">1,137</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">1.8%</span></td></tr><tr><td>silver</td><td>803s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds|pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">25.4%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds" data-lb-fmt=",.0f">25,684</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">40.7%</span></td></tr><tr><td>gold</td><td>1,929s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds|pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">61.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds" data-lb-fmt=",.0f">30,872</span></td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">48.9%</span></td></tr><tr><td>query</td><td>162s</td><td><span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.stages[4].elapsed_seconds;pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].elapsed_seconds|pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">5.1%</span></td><td><span data-lb-derived="total" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=",.0f">1,615</span></td><td><span data-lb-derived="pct" data-lb-inputs="config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds;pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds|pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds|pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds|pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds|config_snapshot.trino.coordinator.cpu*pipeline_benchmark.stages[4].elapsed_seconds|config_snapshot.trino.worker.replicas*config_snapshot.trino.worker.cpu*pipeline_benchmark.stages[4].elapsed_seconds" data-lb-fmt=".1f" data-lb-suffix="%">2.6%</span></td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Data Validity</h2>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.75rem;">
+                <div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Scale Ratio:</strong> <span data-lb-derived="pct" data-lb-inputs="pipeline_benchmark.scores.scale_ratio" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">100.0%</span> Complete</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Batch Jobs:</strong> <span data-lb-derived="count" data-lb-inputs="truthy(jobs[*].success)" data-lb-fmt=",d">3</span>/<span data-lb-derived="count" data-lb-inputs="count(jobs)" data-lb-fmt=",d">3</span> passed</div><div style="display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; border-radius: 0.375rem; background: #dcfce7; color: var(--success);"><strong>Query Failures:</strong> <span data-lb-derived="count" data-lb-inputs="falsy(benchmark.queries[*].success)" data-lb-fmt=",d">0</span> failed</div>
+            </div>
+        </section>
+        
+
+        
+        <section>
+            <h2>Table Maintenance</h2>
+            <table>
+                <thead>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Maintenance policy</td><td><code class="mono">m2-2026-09-26</code></td></tr>
+                    <tr><td>Files before</td><td>307</td></tr>
+                    <tr><td>Files after</td><td>267</td></tr>
+                    <tr><td>Compaction ratio</td><td><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.scores.pre_compaction_file_count;pipeline_benchmark.scores.post_compaction_file_count" data-lb-fmt=".1f" data-lb-suffix="x">1.1x</span></td></tr>
+                    <tr><td>Maintenance time</td><td>1053s</td></tr>
+                    <tr><td>Pre-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.pre_compaction_benchmark.queries[*].success)" data-lb-fmt=",d">8</span> queries)</td><td>183.5</td></tr>
+                    <tr><td>Post-compaction QpH (over <span data-lb-derived="count" data-lb-inputs="truthy(pipeline_benchmark.query_benchmark.queries[*].success)" data-lb-fmt=",d">12</span> queries)</td><td>267.5</td></tr>
+                    <tr><td>Pre and post QpH</td><td>unpaired: the two rounds' successful queries differ, so the ratio of these two QpH figures is not the maintenance effect; only a paired change is</td></tr>
+                    <tr><td>QpH change, paired over 8 queries</td><td>not reported (within noise: +4.6% is under the 11% drift between rounds of the same run)</td></tr>
+                    <tr><td>Storage settle wait</td><td>settled after 131s; not counted in time to value</td></tr>
+                    <tr><td>Settle probes (FQ1_txn_full_scan)</td><td>63.1s, 60.0s</td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+        <section>
+            <h2>Pipeline Benchmark</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                Mode: batch | Time-to-Value: <strong>2885.0s</strong> | Stage-input throughput: <strong>0.080 GB/s</strong> | Stage inputs: 230.8 GB (corpus 93.7 GB in bronze)
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        
+                        <th>Stage</th>
+                        <th>Engine</th>
+                        <th>Time</th>
+                        <th>In (GB)</th>
+                        <th>Out (GB)</th>
+                        <th>In Rows</th>
+                        <th>Out Rows</th>
+                        <th>GB/s</th>
+                        <th>Rows/s</th>
+                        <th>Executors</th>
+                        <th>Cores x Mem</th>
+                        <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
+                        <th>QpH</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+                <tr>
+                    <td><strong>datagen</strong></td>
+                    <td>datagen</td>
+                    <td>121.1s</td>
+                    <td>-</td>
+                    <td>93.738</td>
+                    <td>-</td>
+                    <td>266,718,658</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>4</td>
+                    <td>8 x -G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[0].executor_count*pipeline_benchmark.stages[0].executor_cores*pipeline_benchmark.stages[0].elapsed_seconds*/3600" data-lb-fmt=".1f">1.1</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>bronze</strong></td>
+                    <td>spark</td>
+                    <td>142.1s</td>
+                    <td>93.595</td>
+                    <td>93.739</td>
+                    <td>266,718,658</td>
+                    <td>266,718,658</td>
+                    <td>0.9087</td>
+                    <td>2,589,502<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>4</td>
+                    <td>2 x 8G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[1].executor_count*pipeline_benchmark.stages[1].executor_cores*pipeline_benchmark.stages[1].elapsed_seconds*/3600" data-lb-fmt=".1f">0.3</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>silver</strong></td>
+                    <td>spark</td>
+                    <td>802.6s</td>
+                    <td>93.595</td>
+                    <td>86.300</td>
+                    <td>266,718,658</td>
+                    <td>266,718,658</td>
+                    <td>0.1205</td>
+                    <td>343,444<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>8</td>
+                    <td>4 x 48G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[2].executor_count*pipeline_benchmark.stages[2].executor_cores*pipeline_benchmark.stages[2].elapsed_seconds*/3600" data-lb-fmt=".1f">7.1</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>gold</strong></td>
+                    <td>spark</td>
+                    <td>1929.5s</td>
+                    <td>37.780</td>
+                    <td>3.228</td>
+                    <td>266,718,658</td>
+                    <td>6,998,841</td>
+                    <td>0.0198</td>
+                    <td>140,017<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>4</td>
+                    <td>4 x 32G</td>
+                    <td><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.stages[3].executor_count*pipeline_benchmark.stages[3].executor_cores*pipeline_benchmark.stages[3].elapsed_seconds*/3600" data-lb-fmt=".1f">8.6</span></td>
+                    <td>-</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                <tr>
+                    <td><strong>query</strong></td>
+                    <td>trino</td>
+                    <td>161.5s</td>
+                    <td>5.785</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>- x -G</td>
+                    <td>-</td>
+                    <td>267.5</td>
+                    <td><span class="status status-success">OK</span></td>
+                </tr>
+                
+                </tbody>
+            </table>
+            
+            <section><h3>AML results funnel</h3><table><thead><tr><th>Step</th><th>Count</th><th>Source</th></tr></thead><tbody><tr><td>Rule alerts (scoring)</td><td>6,998,841<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span></td><td><code class='mono'>financial_scoring.total_alerts</code></td></tr><tr><td>Rule alerts in gold.alerts (TM)</td><td>6,998,841<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span></td><td><code class='mono'>tm_operations.ops.alerts_total</code></td></tr><tr><td>dispositioned on customers (monitored)</td><td>6,506,132</td><td><code class='mono'>tm_operations.ops.funnel.alerts</code></td></tr><tr><td>&nbsp;&nbsp;of which over the per-customer cap (held back, not worked)</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_over_capacity</code></td></tr><tr><td>&nbsp;&nbsp;of which withdrawn, carried from an earlier cycle</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_withdrawn_carried</code></td></tr><tr><td>dispositioned on non-customers (outside the monitored population)</td><td>492,709</td><td><code class='mono'>tm_operations.ops.alerts_out_of_scope</code></td></tr><tr><td>&nbsp;&nbsp;of which not declared as counterparties</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_noncustomer_undeclared</code></td></tr><tr><td>customer alerts per customer</td><td><span data-lb-derived="ratio" data-lb-inputs="tm_operations.ops.funnel.alerts;tm_operations.ops.reconciliation[&quot;completeness.customers&quot;]" data-lb-fmt=".2f">11.72</span></td><td><code class='mono'>tm_operations.ops.funnel.alerts / tm_operations.ops.reconciliation[&quot;completeness.customers&quot;]</code></td></tr><tr><td>disposition: attached</td><td>813,969</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.attached</code></td></tr><tr><td>disposition: closed_nfa</td><td>5,007,293</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.closed_nfa</code></td></tr><tr><td>disposition: escalated</td><td>596,402</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.escalated</code></td></tr><tr><td>disposition: out_of_scope</td><td>492,709</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.out_of_scope</code></td></tr><tr><td>disposition: pending_l1</td><td>88,468</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.pending_l1</code></td></tr><tr><td>escalated</td><td>596,402</td><td><code class='mono'>tm_operations.ops.funnel.escalated</code></td></tr><tr><td>alert cases</td><td>596,402</td><td><code class='mono'>tm_operations.ops.funnel.cases</code></td></tr><tr><td>continuing-activity review cases</td><td>58,715</td><td><code class='mono'>tm_operations.ops.reconciliation[&quot;funnel.continuing_review_cases&quot;]</code></td></tr><tr><td>SARs filed</td><td>68,002</td><td><code class='mono'>tm_operations.ops.sars_filed</code></td></tr></tbody></table><p style="color: var(--text-muted); font-size: 0.8125rem;">Every count here comes from the rules that ran; rule W17_layering_chain skipped: path-cap; rule W3_round_tripping skipped: path-cap.</p><h4>Reconciliation</h4><ul><li>scoring and TM rule alerts agree</li><li>TM rule alerts = customer + non-customer dispositions - withdrawn carried alerts</li><li>dispositions sum to customer + non-customer dispositions</li><li>SARs filed = 64,360 on alert cases + 3,642 continuing-activity SARs</li></ul></section><section><h3>Transaction Monitoring Operations</h3>
+<p>P10 gate (batch, per cycle): <strong style="color: var(--success);">pass</strong></p>
+<p style="color: var(--text-muted); font-size: 0.8125rem;">Dispositions are simulated from the datagen ground truth: L1 analyst accuracy 0.9, investigator accuracy 0.95, QA sample 0.05, seed 20260924. As of 2026-01-01.</p>
+<h4>Workflow invariants</h4><table><thead><tr><th>Cycle</th><th>Invariant</th><th>Status</th><th>Detail</th></tr></thead><tbody><tr><td>1</td><td>all <span data-lb-derived="count" data-lb-inputs="count(tm_operations.invariants[&quot;1&quot;])" data-lb-fmt=",d">13</span></td><td><span style="color: var(--success, green);">pass</span></td><td></td></tr></tbody></table>
+<h4>Coverage and completeness</h4><table><thead><tr><th>Section</th><th>Item</th><th>Payments</th></tr></thead><tbody><tr><td>completeness</td><td>bronze</td><td>266,718,658</td></tr><tr><td>completeness</td><td>customers</td><td>555,075</td></tr><tr><td>completeness</td><td>excluded</td><td>66,257,384</td></tr><tr><td>completeness</td><td>monitored</td><td>200,461,274</td></tr><tr><td>completeness</td><td>silver</td><td>266,718,658</td></tr><tr><td>completeness</td><td>source</td><td>266,718,658</td></tr><tr><td>dq</td><td>dq_missing_agent_bic</td><td>0</td></tr><tr><td>dq</td><td>dq_nonpositive_amount</td><td>0</td></tr><tr><td>dq</td><td>dq_self_transfer</td><td>0</td></tr><tr><td>dq</td><td>dq_unconvertible_currency</td><td>0</td></tr><tr><td>exclusion</td><td>dq_unconvertible_currency</td><td>0</td></tr><tr><td>exclusion</td><td>no_customer_party</td><td>66,257,384</td></tr></tbody></table>
+<h4>Cycle funnel</h4><table><thead><tr><th>payments</th><th>monitored</th><th>alerts</th><th>escalated</th><th>cases</th><th>sars</th></tr></thead><tbody><tr><td>266,718,658</td><td>200,461,274</td><td>6,506,132</td><td>596,402</td><td>596,402</td><td>64,360</td></tr></tbody></table><p>L1 escalation rate <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.l1_escalation_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">10.6%</span>; QA disagreement <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.qa_disagreement_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">14.0%</span> on 280,439 re-reviewed; 492,709 alerts on non-customers (outside the monitored population).</p>
+<h4>Queue health</h4><table><thead><tr><th>Open alerts 0-30 d</th><th>31-60 d</th><th>61-90 d</th><th>90+ d</th><th>Open cases</th><th>Open cases &gt; 60 d</th><th>SLA breaches</th></tr></thead><tbody><tr><td>117,735</td><td>5,630</td><td>123</td><td>0</td><td>18,903</td><td>157</td><td>56,771</td></tr></tbody></table>
+<h4>Scenario performance</h4><table><thead><tr><th>Scenario</th><th>Customer alerts</th><th>Escalated</th><th title="Share of decided alerts escalated or on a SAR case">Productive rate</th><th>SAR conversion</th></tr></thead><tbody><tr><td>W2_structuring</td><td>28,613</td><td>1,704</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W2_structuring.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">9.1%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W2_structuring.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">4.0%</span></td></tr><tr><td>W4_risk_propagation</td><td>494,383</td><td>56,629</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W4_risk_propagation.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">12.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W4_risk_propagation.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">3.9%</span></td></tr><tr><td>W5_sanctions_match</td><td>71,876</td><td>6,740</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W5_sanctions_match.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">10.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W5_sanctions_match.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">2.6%</span></td></tr><tr><td>W6_pep_counterparty</td><td>164,384</td><td>14,956</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W6_pep_counterparty.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">10.3%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W6_pep_counterparty.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">2.2%</span></td></tr><tr><td>W7_cross_border_high_risk</td><td>5,163,300</td><td>452,926</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W7_cross_border_high_risk.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">10.0%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W7_cross_border_high_risk.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">2.0%</span></td></tr><tr><td>W8_dormant_reactivation</td><td>583,576</td><td>63,447</td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W8_dormant_reactivation.productive_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">11.0%</span></td><td><span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.scenarios.W8_dormant_reactivation.sar_conversion" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">1.8%</span></td></tr></tbody></table>
+<p>SARs filed: <strong>68,002</strong>; determination-to-filing median 15 d, p95 31 d, <span data-lb-derived="pct" data-lb-inputs="tm_operations.ops.filed_over_30_days_pct" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">5.1%</span> over 30 days; continuing-activity reviews due: 62,036 (opened 58,715, folded into an open investigation 3,030, waiting on a case pending filing 1, covered by the SAR that case filed 290).</p>
+<table><thead><tr><th>Filing limit</th><th>SARs filed</th><th>Filed late</th></tr></thead><tbody><tr><td>120_day_continuing</td><td>3,642</td><td>93</td></tr><tr><td>30_day</td><td>61,213</td><td>1,847</td></tr><tr><td>60_day_no_suspect</td><td>3,147</td><td>97</td></tr></tbody></table><p>Continuing-activity SARs filed more than 120 days after the prior SAR: 93.</p>
+</section>
+        <section>
+            <h3>Detection Scorecard</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Rule</th>
+                        <th>Target typology</th>
+                        <th title="Alerts emitted by this rule">Alerts</th>
+                        <th title="Fraction of planted instances detected by this rule. Uncalibrated and in-sample: measured on this run's own corpus, which no registered look names (docs/aml-scoring.md).">Recall (uncalibrated, in-sample)</th>
+                        <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
+                        <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
+                        <th title="Share of this rule's alerts that touch none of its target typology's txns. NOT a production ops-queue false-positive rate; see docs/aml-scoring.md.">Off-target</th>
+                        <th title="Share of the txns in this rule's alerts that are planted target txns">Txn precision</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>W1_connected_components</td><td>gather_scatter</td><td>-</td><td>n/a</td><td>-</td><td>-</td><td>-</td><td>-</td><td><span style="color: var(--warning);">not run</span> (giant-component)</td></tr><tr><td>W2_structuring</td><td>micro_structuring</td><td>28,613</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[8].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">7.3%</span></td><td>-</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[8].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">64.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W2_structuring" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.4%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W2_structuring" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.54%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W3_round_tripping</td><td>cycle</td><td>-</td><td>n/a</td><td>-</td><td>-</td><td>-</td><td>-</td><td><span style="color: var(--warning);">not run</span> (path-cap)</td></tr><tr><td>W4_risk_propagation</td><td>rapid_layering</td><td>987,092</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[11].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">68.9%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.chance_by_rule.W4_risk_propagation" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">7.6%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[11].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">73.2%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W4_risk_propagation" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.3%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W4_risk_propagation" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.04%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W5_sanctions_match</td><td>sanctions_match</td><td>71,876</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[12].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">77.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.chance_by_rule.W5_sanctions_match" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.1%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[12].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">84.3%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W5_sanctions_match" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.0%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W5_sanctions_match" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.93%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W6_pep_counterparty</td><td>pep_match</td><td>164,384</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[9].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">79.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.chance_by_rule.W6_pep_counterparty" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.2%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[9].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">88.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W6_pep_counterparty" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.4%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W6_pep_counterparty" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.58%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W7_cross_border_high_risk</td><td>corridor_high_risk</td><td>5,163,300</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[1].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">80.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.chance_by_rule.W7_cross_border_high_risk" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">3.9%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[1].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">85.6%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W7_cross_border_high_risk" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W7_cross_border_high_risk" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.28%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W8_dormant_reactivation</td><td>dormant_reactivation</td><td>583,576</td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[4].recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">36.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.chance_by_rule.W8_dormant_reactivation" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">6.8%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.typologies[4].incidental_recall" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">52.6%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate_by_rule.W8_dormant_reactivation" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.8%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.txn_precision_by_rule.W8_dormant_reactivation" data-lb-fmt=".2f" data-lb-suffix="%" data-lb-scale="100">0.24%</span></td><td><span style="color: var(--success, green);">scored</span></td></tr><tr><td>W17_layering_chain</td><td>stack</td><td>-</td><td>n/a</td><td>-</td><td>-</td><td>-</td><td>-</td><td><span style="color: var(--warning);">not run</span> (path-cap)</td></tr>
+                </tbody>
+            </table>
+            <div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">Total alerts over the rules that ran (W17_layering_chain skipped: path-cap, W1_connected_components skipped: giant-component, W3_round_tripping skipped: path-cap): <strong>6,998,841<span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap (Lakebench cap); rule W3_round_tripping skipped: path-cap (Lakebench cap)" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span></strong> | Overall off-target rate (alerts touching no planted txn): <strong><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_rate" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">98.9%</span><span class="qual qual-bounded" title="rule W17_layering_chain skipped: path-cap (Lakebench cap); rule W3_round_tripping skipped: path-cap (Lakebench cap)" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: rule W17_layering_chain cap, rule W3_round_tripping cap</span></strong></div><div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">Subject customer check: <strong style="color: var(--success);">ok</strong> (73,012 planted subjects; 0 with no silver entity; 0 not customers)</div><h4>By reason code</h4><table><thead><tr><th>Rule</th><th>Reason code</th><th title="Share of the typology's instances hit by an alert of this rule carrying this code">Recall (uncalibrated, in-sample)</th><th title="1 minus the on-target share of this rule's alerts carrying this code">FP</th></tr></thead><tbody><tr><td>W2_structuring</td><td><code class='mono'>W2_BENEFICIARY_FAN_IN</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W2_structuring.W2_BENEFICIARY_FAN_IN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">7.2%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W2_structuring.W2_BENEFICIARY_FAN_IN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">61.7%</span></td></tr><tr><td>W2_structuring</td><td><code class='mono'>W2_HIGH_COUNT</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W2_structuring.W2_HIGH_COUNT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.0%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W2_structuring.W2_HIGH_COUNT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.9%</span></td></tr><tr><td>W2_structuring</td><td><code class='mono'>W2_SUB_THRESHOLD_BURST</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W2_structuring.W2_SUB_THRESHOLD_BURST" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">7.3%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W2_structuring.W2_SUB_THRESHOLD_BURST" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.4%</span></td></tr><tr><td>W4_risk_propagation</td><td><code class='mono'>W4_FAST_PASS_THROUGH</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W4_risk_propagation.W4_FAST_PASS_THROUGH" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">68.9%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W4_risk_propagation.W4_FAST_PASS_THROUGH" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.3%</span></td></tr><tr><td>W4_risk_propagation</td><td><code class='mono'>W4_MULTI_CHAIN</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W4_risk_propagation.W4_MULTI_CHAIN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">46.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W4_risk_propagation.W4_MULTI_CHAIN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.4%</span></td></tr><tr><td>W5_sanctions_match</td><td><code class='mono'>W5_EXACT</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W5_sanctions_match.W5_EXACT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">57.0%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W5_sanctions_match.W5_EXACT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">17.7%</span></td></tr><tr><td>W5_sanctions_match</td><td><code class='mono'>W5_FUZZY</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W5_sanctions_match.W5_FUZZY" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">20.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W5_sanctions_match.W5_FUZZY" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.7%</span></td></tr><tr><td>W5_sanctions_match</td><td><code class='mono'>W5_RESCREEN</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W5_sanctions_match.W5_RESCREEN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">15.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W5_sanctions_match.W5_RESCREEN" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">97.7%</span></td></tr><tr><td>W5_sanctions_match</td><td><code class='mono'>W5_SANCTIONS_HIT</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W5_sanctions_match.W5_SANCTIONS_HIT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">77.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W5_sanctions_match.W5_SANCTIONS_HIT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.0%</span></td></tr><tr><td>W6_pep_counterparty</td><td><code class='mono'>W6_EXACT</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W6_pep_counterparty.W6_EXACT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">54.8%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W6_pep_counterparty.W6_EXACT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">10.3%</span></td></tr><tr><td>W6_pep_counterparty</td><td><code class='mono'>W6_FUZZY</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W6_pep_counterparty.W6_FUZZY" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">24.8%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W6_pep_counterparty.W6_FUZZY" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.8%</span></td></tr><tr><td>W6_pep_counterparty</td><td><code class='mono'>W6_PEP_HIT</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W6_pep_counterparty.W6_PEP_HIT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">79.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W6_pep_counterparty.W6_PEP_HIT" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.4%</span></td></tr><tr><td>W7_cross_border_high_risk</td><td><code class='mono'>W7_FATF_BLACK</code> <small>(no alert carries this code)</small></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W7_cross_border_high_risk.W7_FATF_BLACK" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.0%</span></td><td>-</td></tr><tr><td>W7_cross_border_high_risk</td><td><code class='mono'>W7_FATF_GREY</code> <small>(no alert carries this code)</small></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W7_cross_border_high_risk.W7_FATF_GREY" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">0.0%</span></td><td>-</td></tr><tr><td>W7_cross_border_high_risk</td><td><code class='mono'>W7_HIGH_RISK_CORRIDOR</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W7_cross_border_high_risk.W7_HIGH_RISK_CORRIDOR" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">80.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W7_cross_border_high_risk.W7_HIGH_RISK_CORRIDOR" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.7%</span></td></tr><tr><td>W7_cross_border_high_risk</td><td><code class='mono'>W7_SYNTHETIC_CORRIDOR</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W7_cross_border_high_risk.W7_SYNTHETIC_CORRIDOR" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">80.7%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W7_cross_border_high_risk.W7_SYNTHETIC_CORRIDOR" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.7%</span></td></tr><tr><td>W8_dormant_reactivation</td><td><code class='mono'>W8_DORMANCY_GAP</code></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.recall_by_code.W8_dormant_reactivation.W8_DORMANCY_GAP" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">36.5%</span></td><td><span data-lb-derived="pct" data-lb-inputs="financial_scoring.fp_by_code.W8_dormant_reactivation.W8_DORMANCY_GAP" data-lb-fmt=".1f" data-lb-suffix="%" data-lb-scale="100">99.8%</span></td></tr></tbody></table><div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">Reason codes: scored</div><div style="margin-top: 0.5rem; color: var(--text-muted); font-size: 0.8125rem;">Leakage: not measured in this run (the AML fidelity gate, <code>scripts/aml_gate.py</code>, runs outside <code>lakebench run</code>).</div>
+        </section>
+        
+        </section>
+        
+
+        
+        <section>
+            <h2>Batch Job Performance</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Input</th>
+                        <th>Output Rows</th>
+                        <th>Throughput</th>
+                        <th>Executors</th>
+                        <th>Cores</th>
+                        <th>CPU-sec</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+            <tr>
+                <td><code class="mono">lakebench-bronze-verify</code></td>
+                <td><span class="status status-success">Passed</span></td>
+                <td>142.1s</td>
+                <td>93.59 GB</td>
+                <td>266,718,658</td>
+                <td>0.91 GB/s</td>
+                <td>4</td>
+                <td>2</td>
+                <td>1,137</td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-silver-build</code></td>
+                <td><span class="status status-success">Passed</span></td>
+                <td>802.6s</td>
+                <td>93.59 GB</td>
+                <td>266,718,658</td>
+                <td>0.12 GB/s</td>
+                <td>8</td>
+                <td>4</td>
+                <td>25,684</td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">lakebench-gold-finalize</code></td>
+                <td><span class="status status-success">Passed</span></td>
+                <td>1929.5s<br><small>excludes 1.2s of Lakebench's alert-set fingerprint</small></td>
+                <td>37.78 GB</td>
+                <td>6,998,841</td>
+                <td>0.02 GB/s</td>
+                <td>4</td>
+                <td>4</td>
+                <td>30,872</td>
+            </tr>
+            
+                </tbody>
+            </table>
+        </section>
+        
+
+        
+
+        
+
+        
+        <section>
+            <h2>Trino query benchmark</h2>
+            <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
+                <span data-lb-derived="count" data-lb-inputs="truthy(benchmark.queries[*].success)" data-lb-fmt=",d">12</span>/<span data-lb-derived="count" data-lb-inputs="count(benchmark.queries)" data-lb-fmt=",d">12</span> queries passed |
+                QpH: <strong>267.5</strong> |
+                Mode: power (3 iter) |
+                Cache: hot |
+                Total: 161.52s
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Query</th>
+                        <th>Description</th>
+                        <th>Class</th>
+                        <th>Duration</th>
+                        <th>Rows</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    
+            <tr>
+                <td><code class="mono">FQ1_txn_full_scan</code></td>
+                <td>Silver transactions full aggregation</td>
+                <td>scan</td>
+                <td>60.34s</td>
+                <td>1</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ2_top_corridors_window</code></td>
+                <td>Top payment corridors by volume (last 30 days)</td>
+                <td>filter_prune</td>
+                <td>5.00s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ6_structuring_scan</code></td>
+                <td>Structuring-band transaction detection (W2 shape)</td>
+                <td>filter_prune</td>
+                <td>7.94s</td>
+                <td>500</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ3_entity_edge_risk</code></td>
+                <td>Entity out-degree + volume via edges</td>
+                <td>aggregation</td>
+                <td>21.96s</td>
+                <td>200</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ7_cross_border_concentration</code></td>
+                <td>Cross-border corridor concentration</td>
+                <td>aggregation</td>
+                <td>18.57s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ4_running_balance_window</code></td>
+                <td>Running balance for high-activity accounts</td>
+                <td>analytics</td>
+                <td>30.19s</td>
+                <td>1,666,253</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ5_alert_triage</code></td>
+                <td>Alert triage by priority + rule</td>
+                <td>operational</td>
+                <td>2.85s</td>
+                <td>11</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">FQ8_alert_to_entity_join</code></td>
+                <td>Case investigation: alert -> entity -> recent txns</td>
+                <td>operational</td>
+                <td>3.11s</td>
+                <td>100</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">IQ1_customer_360</code></td>
+                <td>Investigator: customer 360 for the top open case</td>
+                <td>investigator</td>
+                <td>2.69s</td>
+                <td>1</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">IQ2_case_activity_12m</code></td>
+                <td>Investigator: 12-month activity review for the newest case</td>
+                <td>investigator</td>
+                <td>3.12s</td>
+                <td>12</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">IQ3_counterparty_two_hop</code></td>
+                <td>Investigator: counterparties and two-hop network of the oldest open case</td>
+                <td>investigator</td>
+                <td>3.40s</td>
+                <td>500</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+            <tr>
+                <td><code class="mono">IQ4_open_cases_over_60_days</code></td>
+                <td>Investigator: open cases older than 60 days</td>
+                <td>investigator</td>
+                <td>2.36s</td>
+                <td>157</td>
+                <td><span class="status status-success">Pass</span></td>
+            </tr>
+            
+                </tbody>
+            </table>
+            
+        </section>
+        
+
+        
+
+        
+
+
+        
+
+        
+
+        
+        <section>
+            <h2>Storage multiple</h2>
+            <p style="font-size: 0.875rem;">Physical bytes over the current snapshot's data
+            files, at run end under maintenance policy
+            <code class="mono">m2-2026-09-26</code>
+            (engine trino). A condition of the policy, not a
+            system score.</p>
+            <table><thead><tr><th>Table</th><th>Layer</th><th>Physical</th><th title="Data files of the current snapshot">Current (logical)</th><th title="Data files only retained snapshots reference">Retained</th><th>Metadata</th><th>Other</th><th>Multiple</th></tr></thead><tbody><tr><td><code class='mono'>default.bronze_raw</code></td><td>bronze</td><td colspan='6'>not measured: data files registered in place outside the table location (93.60 GiB)</td></tr><tr><td><code class='mono'>bronze.manifest</code></td><td>bronze</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[1].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[1].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[1].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[1].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[1].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[1].physical_bytes;storage_multiple.tables[1].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.00x</span></td></tr><tr><td><code class='mono'>silver.transactions</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[2].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">41.91 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[2].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">37.78 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[2].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">4.13 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[2].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[2].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[2].physical_bytes;storage_multiple.tables[2].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.11x</span></td></tr><tr><td><code class='mono'>silver.entities</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[3].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.07 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[3].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.03 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[3].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.04 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[3].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[3].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[3].physical_bytes;storage_multiple.tables[3].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">2.09x</span></td></tr><tr><td><code class='mono'>silver.accounts</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[4].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.13 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[4].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.05 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[4].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.05 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[4].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[4].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.04 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[4].physical_bytes;storage_multiple.tables[4].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">2.87x</span></td></tr><tr><td><code class='mono'>silver.account_statements</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[5].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">76.51 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[5].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">46.50 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[5].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">30.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[5].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[5].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[5].physical_bytes;storage_multiple.tables[5].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.65x</span></td></tr><tr><td><code class='mono'>silver.counterparty_edges</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[6].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.46 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[6].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.46 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[6].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[6].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[6].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[6].physical_bytes;storage_multiple.tables[6].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.00x</span></td></tr><tr><td><code class='mono'>silver.entity_profiles</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[7].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.10 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[7].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.10 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[7].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[7].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[7].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[7].physical_bytes;storage_multiple.tables[7].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.00x</span></td></tr><tr><td><code class='mono'>silver.silver_batch_versions</code></td><td>silver</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[8].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[8].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[8].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[8].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[8].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[8].physical_bytes;storage_multiple.tables[8].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">16.27x</span></td></tr><tr><td><code class='mono'>gold.alerts</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[9].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">2.98 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[9].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.80 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[9].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.17 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[9].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[9].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[9].physical_bytes;storage_multiple.tables[9].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.65x</span></td></tr><tr><td><code class='mono'>gold.risk_scores</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[10].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.02 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[10].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[10].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[10].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[10].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[10].physical_bytes;storage_multiple.tables[10].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">2.01x</span></td></tr><tr><td><code class='mono'>gold.entity_clusters</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[11].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[11].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[11].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[11].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[11].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td>-</td></tr><tr><td><code class='mono'>gold.daily_dashboards</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[12].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[12].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[12].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[12].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[12].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[12].physical_bytes;storage_multiple.tables[12].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.82x</span></td></tr><tr><td><code class='mono'>gold.detection_status</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[13].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[13].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[13].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[13].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[13].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[13].physical_bytes;storage_multiple.tables[13].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">58.33x</span></td></tr><tr><td><code class='mono'>gold.tm_reconciliation</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[14].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[14].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[14].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[14].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[14].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[14].physical_bytes;storage_multiple.tables[14].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">54.67x</span></td></tr><tr><td><code class='mono'>gold.scenario_coverage</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[15].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[15].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[15].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[15].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[15].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[15].physical_bytes;storage_multiple.tables[15].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">38.64x</span></td></tr><tr><td><code class='mono'>gold.alert_dispositions</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[16].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">2.72 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[16].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.36 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[16].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">1.36 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[16].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[16].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[16].physical_bytes;storage_multiple.tables[16].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">2.00x</span></td></tr><tr><td><code class='mono'>gold.cases</code></td><td>gold</td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[17].physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.07 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[17].current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.03 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[17].retained_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.04 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[17].metadata_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.tables[17].other_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.00 GiB</span> <small>(unreferenced, bounded by the 24 h 10 min orphan-removal floor)</small></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.tables[17].physical_bytes;storage_multiple.tables[17].current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">2.07x</span></td></tr><tr><td><strong>bronze layer</strong></td><td></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.bronze.physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.bronze.current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">0.01 GiB</span></td><td colspan='3'></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.layers.bronze.physical_bytes;storage_multiple.layers.bronze.current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.00x</span></td></tr><tr><td><strong>gold layer</strong></td><td></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.gold.physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">5.78 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.gold.current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">3.20 GiB</span></td><td colspan='3'></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.layers.gold.physical_bytes;storage_multiple.layers.gold.current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.81x</span></td></tr><tr><td><strong>silver layer</strong></td><td></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.silver.physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">120.19 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.layers.silver.current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">85.92 GiB</span></td><td colspan='3'></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.layers.silver.physical_bytes;storage_multiple.layers.silver.current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.40x</span></td></tr><tr><td><strong>Total (17 of 18 tables)</strong></td><td></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.total.physical_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">125.98 GiB</span></td><td><span data-lb-derived="total" data-lb-inputs="storage_multiple.total.current_bytes*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">89.13 GiB</span></td><td colspan='3'></td><td><span data-lb-derived="ratio" data-lb-inputs="storage_multiple.total.physical_bytes;storage_multiple.total.current_bytes" data-lb-fmt=".2f" data-lb-suffix="x">1.41x</span></td></tr></tbody></table>
+            <p style="color: var(--text-muted); font-size: 0.8125rem;">Excluded: datagen manifest (manifest/) 0.01 GiB; datagen markers (_corpus/) 0.00 GiB; dependency server PVC (lb-deps) (not in object storage); executor scratch PVCs (not in object storage); scoring outputs (scoring/) 0.00 GiB; stream checkpoints 0.00 GiB.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Raw datagen files in bronze: 93.73 GiB, physical only, outside the total.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Counts objects as listed; incomplete multipart uploads not counted.</p>
+        </section>
+        
+        <section>
+            <h2>Resources as run</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Job</th>
+                        <th title="As recorded: batch, the executors the monitor saw (every executor that ran, replacements included), else the job profile's count; continuous, the count the stream was submitted with">Executors</th>
+                        <th>Cores per executor</th>
+                        <th>Memory per executor</th>
+                        <th>Scratch as ran</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td><code class='mono'>bronze-verify</code></td><td>4</td><td>2</td><td>8 GB</td><td>no scratch PVC</td></tr><tr><td><code class='mono'>silver-build</code></td><td>8</td><td>4</td><td>48 GB</td><td>no scratch PVC</td></tr><tr><td><code class='mono'>gold-finalize</code></td><td>4</td><td>4</td><td>32 GB</td><td>no scratch PVC</td></tr>
+                </tbody>
+            </table>
+        </section>
+        
+        <section>
+            <h2>Configuration</h2>
+            <div class="config-grid">
+                
+                <div class="config-item">
+                    <span class="config-key">Name</span>
+                    <span class="mono">lb17-r103</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Scale</span>
+                    <span class="mono">10.0</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Approx Bronze GB</span>
+                    <span class="mono">93.6</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Processing Pattern</span>
+                    <span class="mono">medallion</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">S3 Endpoint</span>
+                    <span class="mono">http://10.0.1.50:80</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Catalog Type</span>
+                    <span class="mono">hive</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Table Format</span>
+                    <span class="mono">iceberg</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Query Engine</span>
+                    <span class="mono">trino</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Trino Workers</span>
+                    <span class="mono">2</span>
+                </div>
+                
+                <div class="config-item">
+                    <span class="config-key">Datagen Image</span>
+                    <span class="mono">docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92</span>
+                </div>
+                
+            </div>
+        </section>
+        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus and mode match and every result fingerprint below (and, for an AML batch run, the alert set) is equal. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>52ed8d3139375afb</code></td></tr><tr><td>Workload</td><td><code class='mono'>financial aml-2</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>b4649ea54b4699e6</code></td></tr><tr><td>Seed</td><td><code class='mono'>43</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>10.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.1.1-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran(trino_optimize:128MB) [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;0s&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>yes (from the datagen pods)</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 3</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>rule W17_layering_chain skipped: path-cap [rule W17_layering_chain cap]; rule W3_round_tripping skipped: path-cap [rule W3_round_tripping cap]</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W2_structuring, W4_risk_propagation, W5_sanctions_match, W6_pep_counterparty, W7_cross_border_high_risk, W8_dormant_reactivation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>W17_layering_chain (path-cap), W1_connected_components (giant-component), W3_round_tripping (path-cap)</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>Query set <code class='mono'>qs12-910d16a91962</code></p><table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead><tbody><tr><td>FQ1_txn_full_scan</td><td><code class='mono'>rf2 rows=1 cols=5 exact=ef01147d46afe4d7 approx{4:13305.1}</code></td></tr><tr><td>FQ2_top_corridors_window</td><td><code class='mono'>rf2 rows=100 cols=5 exact=1bb5351b818953c3</code></td></tr><tr><td>FQ3_entity_edge_risk</td><td><code class='mono'>rf2 rows=200 cols=5 exact=c0a375df1f5426ad</code></td></tr><tr><td>FQ4_running_balance_window</td><td><code class='mono'>rf2 rows=1666253 cols=6 exact=47b5a6f891e688eb</code></td></tr><tr><td>FQ5_alert_triage</td><td><code class='mono'>rf2 rows=11 cols=6 exact=07db1b3cf7c81baa approx{5:8.012}</code></td></tr><tr><td>FQ6_structuring_scan</td><td><code class='mono'>rf2 rows=500 cols=6 exact=d9c53ca434ab968a</code></td></tr><tr><td>FQ7_cross_border_concentration</td><td><code class='mono'>rf2 rows=100 cols=5 exact=4f5348e845c58e6e approx{4:25.65}</code></td></tr><tr><td>FQ8_alert_to_entity_join</td><td><code class='mono'>rf2 rows=100 cols=5 exact=e4b31b91b76290d5</code></td></tr><tr><td>IQ1_customer_360</td><td><code class='mono'>rf2 rows=1 cols=18 exact=44af8a4c45e6273d</code></td></tr><tr><td>IQ2_case_activity_12m</td><td><code class='mono'>rf2 rows=12 cols=6 exact=ecb4d2dc1e318b86</code></td></tr><tr><td>IQ3_counterparty_two_hop</td><td><code class='mono'>rf2 rows=500 cols=8 exact=de5e8d758d05ec2b</code></td></tr><tr><td>IQ4_open_cases_over_60_days</td><td><code class='mono'>rf2 rows=157 cols=10 exact=09177800775b6018</code></td></tr></tbody></table><h3>Alert set</h3><table><thead><tr><th>Rule</th><th>Alerts</th><th>Hash</th></tr></thead><tbody><tr><td>W2_structuring</td><td>28613</td><td><code class='mono'>-149618652119687117545</code></td></tr><tr><td>W4_risk_propagation</td><td>987092</td><td><code class='mono'>3068962960053658627188</code></td></tr><tr><td>W5_sanctions_match</td><td>71876</td><td><code class='mono'>272414806545193631756</code></td></tr><tr><td>W6_pep_counterparty</td><td>164384</td><td><code class='mono'>-413248236819586302991</code></td></tr><tr><td>W7_cross_border_high_risk</td><td>5163300</td><td><code class='mono'>-16887675341536543807805</code></td></tr><tr><td>W8_dormant_reactivation</td><td>583576</td><td><code class='mono'>5050591613366326111765</code></td></tr><tr><td>total</td><td>6998841</td><td><code class='mono'>-9058572850510638857632</code></td></tr></tbody></table></section>
+
+        <footer>
+            Generated by Lakebench | 2026-10-04 19:19:51
+        </footer>
+    </div>
+</body>
+</html>

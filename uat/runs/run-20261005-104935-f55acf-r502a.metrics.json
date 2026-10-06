@@ -1,0 +1,2434 @@
+{
+  "run_id": "20261005-104935-f55acf",
+  "deployment_name": "lb17-r502",
+  "start_time": "2026-10-05T16:49:35.326560+00:00",
+  "end_time": "2026-10-05T17:03:05.633435+00:00",
+  "total_elapsed_seconds": 810.306875,
+  "success": false,
+  "verdict": {
+    "status": "FAILED",
+    "reasons": [
+      "Process exit intent was not OK",
+      "Pipeline crashed or was interrupted",
+      "Batch jobs failed: lakebench-silver-build",
+      "Gate 'pipeline' FAILED"
+    ],
+    "gates": {
+      "pipeline": "FAIL"
+    },
+    "qualifiers": {
+      "pipeline_mode": "batch",
+      "n_batch_jobs": 2
+    }
+  },
+  "bronze_size_gb": 495.8448979984969,
+  "silver_size_gb": 0.0,
+  "gold_size_gb": 0.0,
+  "jobs": [
+    {
+      "job_name": "lakebench-bronze-verify",
+      "job_type": "bronze-verify",
+      "start_time": "2026-10-05T16:50:58.878039+00:00",
+      "end_time": "2026-10-05T16:52:35.952024+00:00",
+      "elapsed_seconds": 96.975942,
+      "success": true,
+      "error_message": null,
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 495.845,
+      "output_size_gb": 495.8448979984969,
+      "input_rows": 123912509,
+      "output_rows": 123912509,
+      "executor_count": 5,
+      "executor_cores": 2,
+      "executor_memory_gb": 4.0,
+      "cpu_seconds_requested": 969.7594200000001,
+      "memory_gb_requested": 30.0,
+      "throughput_gb_per_second": 7.186159420289855,
+      "throughput_rows_per_second": 1795833.463768116,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "rule_elapsed_s": {},
+      "stage_profile": {},
+      "stage_profile_unavailable": {},
+      "stage_profile_cost_s": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "alert_set": null,
+      "alert_set_seconds": null,
+      "alert_set_unavailable": null,
+      "c360_check": null,
+      "c360_bronze": {
+        "rows": 123912509,
+        "silver_filter_rows": 121432990
+      },
+      "silver_tables": {},
+      "extra_metrics": {}
+    },
+    {
+      "job_name": "lakebench-silver-build",
+      "job_type": "silver-build",
+      "start_time": "2026-10-05T16:52:41.273383+00:00",
+      "end_time": "2026-10-05T17:02:59.952024+00:00",
+      "elapsed_seconds": 618.532728,
+      "success": false,
+      "error_message": "Job failed: driver container failed with ExitCode: 1, Reason: Error",
+      "timing_source": "driver_container",
+      "timing_resolution_seconds": 2.0,
+      "submission_failures": [],
+      "submission_retry_seconds": 0,
+      "input_size_gb": 0.0,
+      "output_size_gb": 0.0,
+      "input_rows": 0,
+      "output_rows": 0,
+      "executor_count": 12,
+      "executor_cores": 4,
+      "executor_memory_gb": 48.0,
+      "cpu_seconds_requested": 29689.570944,
+      "memory_gb_requested": 720.0,
+      "throughput_gb_per_second": 0.0,
+      "throughput_rows_per_second": 0.0,
+      "alerts_by_rule": {},
+      "rule_errors": {},
+      "rules_skipped": {},
+      "rule_elapsed_s": {},
+      "stage_profile": {},
+      "stage_profile_unavailable": {},
+      "stage_profile_cost_s": {},
+      "tm_invariants": {},
+      "tm_ops": null,
+      "tm_status": {},
+      "alert_set": null,
+      "alert_set_seconds": null,
+      "alert_set_unavailable": null,
+      "c360_check": null,
+      "c360_bronze": null,
+      "silver_tables": {},
+      "extra_metrics": {}
+    }
+  ],
+  "queries": [],
+  "streaming": [],
+  "config_snapshot": {
+    "name": "lb17-r502",
+    "scale": 50.0,
+    "approx_bronze_gb": 500.0,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "10.0.1.50",
+      "buckets": {
+        "bronze": "scrubbed-bronze",
+        "silver": "scrubbed-silver",
+        "gold": "scrubbed-gold"
+      }
+    },
+    "scratch": {
+      "enabled": false,
+      "storage_class": "px-csi-scratch",
+      "size_per_job": {
+        "bronze-verify": "50Gi",
+        "silver-build": "300Gi",
+        "gold-finalize": "300Gi"
+      }
+    },
+    "spark": {
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "hive",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "spark-thrift",
+    "workload_schema": "customer360",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 50,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 50.0,
+      "mode": "auto",
+      "parallelism": 10,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+      "spark": "apache/spark:4.1.1-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "worker": {
+        "replicas": 2,
+        "cpu": "4",
+        "memory": "16Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 1,
+      "cache": "hot",
+      "iterations": 3,
+      "maintenance_settle": {
+        "enabled": true,
+        "max_seconds": 2700,
+        "interval_seconds": 60,
+        "tolerance_pct": 10.0,
+        "probe_query": null,
+        "probe_samples": 1
+      }
+    },
+    "maintenance": {
+      "pre_benchmark_maintenance": true,
+      "retention_interval": null,
+      "retention_threshold": "30m",
+      "compaction_enabled": true,
+      "compaction_interval": null
+    },
+    "experiment_inputs": {
+      "identity_version": 2,
+      "workload": {
+        "name": "customer360",
+        "version": "c360-2.dev1",
+        "generator_model_version": null,
+        "parameters_id": "12bee0ff88813f11",
+        "parameters": {
+          "customer360": {
+            "unique_customers": 5000000,
+            "unique_customers_source": "scale",
+            "event_window": {
+              "start": "2024-01-01",
+              "end": "2025-01-01"
+            }
+          }
+        }
+      },
+      "corpus": {
+        "schema": "customer360",
+        "generator_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "seed": 42,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 50.0,
+        "timestamp_start": null,
+        "timestamp_end": null,
+        "dirty_data_ratio": 0.08,
+        "id": "b0880f5a7f2d0e42",
+        "unique_customers": 5000000
+      },
+      "architecture": {
+        "recipe": "hive-iceberg-spark-thrift",
+        "catalog": {
+          "type": "hive",
+          "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+        },
+        "table_format": {
+          "type": "iceberg",
+          "version": "1.11.0"
+        },
+        "pipeline_engine": {
+          "type": "spark",
+          "image": "apache/spark:4.1.1-python3"
+        },
+        "query_engine": {
+          "type": "spark-thrift",
+          "version": "apache/spark:4.1.1-python3"
+        },
+        "query_access_path": "catalog"
+      },
+      "maintenance_config": {
+        "pre_benchmark_maintenance": true,
+        "compaction_enabled": true,
+        "settings": {
+          "retention_threshold": "0s",
+          "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+        }
+      },
+      "mode": "batch",
+      "run_mode": "batch",
+      "support": {
+        "workload": "customer360",
+        "mode": "batch",
+        "recipe": "hive-iceberg-spark-thrift",
+        "state": "unverified",
+        "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+      },
+      "config_limits": {
+        "max_files_per_trigger": 50,
+        "benchmark_iterations": 3,
+        "w1_max_vertices": null,
+        "tm_max_alerts_per_customer": null
+      },
+      "system_identity": {
+        "type": "cluster",
+        "version": 3,
+        "fingerprint": "151d77dbc24974f3",
+        "partial": false,
+        "parts": {
+          "api_server_ca": "fc35b751e6c1",
+          "kubernetes": "v1.32.13",
+          "openshift": {
+            "version": "4.19.45",
+            "state": "Completed"
+          },
+          "nodes": [
+            {
+              "role": "worker",
+              "architecture": "amd64",
+              "cpu": 40,
+              "memory_gib": 396,
+              "model": "vsphere-vm.cpu-40.mem-402gb.os-unknown",
+              "count": 11
+            },
+            {
+              "role": "control-plane",
+              "architecture": "amd64",
+              "cpu": 8,
+              "memory_gib": 31,
+              "model": "vsphere-vm.cpu-8.mem-32gb.os-unknown",
+              "count": 3
+            }
+          ],
+          "storage_endpoint": "10.0.1.50",
+          "storage_backend": "unknown",
+          "storage_server": null,
+          "scratch": {
+            "enabled": false,
+            "storage_class": null
+          }
+        }
+      },
+      "observed": {
+        "allocatable": {
+          "start": {
+            "cpu": 434.5,
+            "memory_gib": 4349.1,
+            "nodes": 11,
+            "at": "2026-10-05T16:49:35+00:00"
+          },
+          "end": {
+            "cpu": 434.5,
+            "memory_gib": 4349.1,
+            "nodes": 11,
+            "at": "2026-10-05T17:03:05+00:00"
+          }
+        },
+        "cotenant_requested": {
+          "start": {
+            "cpu": 18.274,
+            "memory_gib": 53.7,
+            "pods": 305,
+            "at": "2026-10-05T16:49:35+00:00"
+          },
+          "end": {
+            "cpu": 18.274,
+            "memory_gib": 53.7,
+            "pods": 305,
+            "at": "2026-10-05T17:03:05+00:00"
+          }
+        },
+        "cotenant_pending": {
+          "start": {
+            "cpu": 0.0,
+            "memory_gib": 0.0,
+            "pods": 0,
+            "at": "2026-10-05T16:49:35+00:00"
+          },
+          "end": {
+            "cpu": 0.0,
+            "memory_gib": 0.0,
+            "pods": 0,
+            "at": "2026-10-05T17:03:05+00:00"
+          }
+        }
+      },
+      "corpus_observation": {
+        "format": 1,
+        "markers": {
+          "format": 1,
+          "scope": "customer/interactions/",
+          "cycles": [
+            {
+              "cycle": 0,
+              "nodes_found": [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9
+              ],
+              "total_nodes": [
+                10
+              ],
+              "cycles": [
+                1
+              ],
+              "corpus_args_sha256": [
+                "12d9959d8aec034931d1a7eb55c145853808e523c0b12a1744aab75b7d6bc702"
+              ],
+              "model_version": [
+                "datagen-v2-rs-0.3"
+              ],
+              "build_commit": [
+                "2a36ae2162d0672c8a46173bc70da448cac497ae"
+              ]
+            }
+          ],
+          "completed_first": "2026-10-05T16:50:51Z",
+          "completed_last": "2026-10-05T16:50:54Z",
+          "corpus_series_sha256": "707f3f24086bef417ca4afdcb07f2665fdbb237b7b359dd765a18b3d37081468",
+          "objects": 8010,
+          "problems": [],
+          "unreadable_format": 0,
+          "series_check": null,
+          "error": null
+        },
+        "series": {
+          "cycles_complete": [
+            0
+          ],
+          "cycles_total": 1,
+          "format": 1,
+          "generation": {
+            "customer_id_max": 5000000,
+            "dirty_ratio": 0.08,
+            "file_size_mb": 64,
+            "image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+            "image_digest": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+            "scale": 50.0,
+            "seed_ref": "42",
+            "target_tb_per_cycle": 0.488281,
+            "timestamp_end": "2025-01-01",
+            "timestamp_start": "2024-01-01"
+          },
+          "schema": "customer360",
+          "updated_utc": "2026-10-05T16:50:57.378502+00:00",
+          "windows": [
+            [
+              "2024-01-01",
+              "2025-01-01"
+            ]
+          ],
+          "written_by_run": "20261005-104935-f55acf"
+        },
+        "bronze_listing_sha256": "61dca63bc7a488756025840ae6381c7b8cdba23aa1a5932c30bb409bf2c89e28",
+        "observed_at": "2026-10-05T17:03:09.299622+00:00",
+        "lineage": {
+          "value": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+          "observed": true,
+          "digest": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+          "tag": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+          "problems": [],
+          "notes": []
+        }
+      }
+    },
+    "fingerprint_version": 2,
+    "fingerprint_inputs": {
+      "basis": "offline manifest build; executor_instances is before any cluster-dependent cap",
+      "job_profiles": {
+        "bronze-verify": {
+          "driver_cores": 2,
+          "driver_memory": "4g",
+          "executor_cores": 2,
+          "executor_memory": "4g",
+          "executor_memory_overhead": "2g",
+          "executor_instances": 5,
+          "scratch_size": "50Gi"
+        },
+        "silver-build": {
+          "driver_cores": 4,
+          "driver_memory": "32g",
+          "executor_cores": 4,
+          "executor_memory": "48g",
+          "executor_memory_overhead": "12g",
+          "executor_instances": 12,
+          "scratch_size": "300Gi"
+        },
+        "gold-finalize": {
+          "driver_cores": 4,
+          "driver_memory": "32g",
+          "executor_cores": 4,
+          "executor_memory": "32g",
+          "executor_memory_overhead": "8g",
+          "executor_instances": 7,
+          "scratch_size": "300Gi"
+        }
+      },
+      "owned_conf": {
+        "bronze-verify": {
+          "spark.default.parallelism": "20",
+          "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.driver.maxResultSize": "8g",
+          "spark.dynamicAllocation.enabled": "false",
+          "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.executor.heartbeatInterval": "30s",
+          "spark.files.useFetchCache": "false",
+          "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.attempts.maximum": "20",
+          "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+          "spark.hadoop.fs.s3a.block.size": "268435456",
+          "spark.hadoop.fs.s3a.connection.maximum": "200",
+          "spark.hadoop.fs.s3a.connection.timeout": "60000",
+          "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+          "spark.hadoop.fs.s3a.fast.upload": "true",
+          "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+          "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+          "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.max.total.tasks": "200",
+          "spark.hadoop.fs.s3a.multipart.size": "268435456",
+          "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+          "spark.hadoop.fs.s3a.path.style.access": "true",
+          "spark.hadoop.fs.s3a.retry.interval": "500ms",
+          "spark.hadoop.fs.s3a.retry.limit": "10",
+          "spark.hadoop.fs.s3a.threads.max": "100",
+          "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+          "spark.kubernetes.driver.service.deleteOnTermination": "true",
+          "spark.kubernetes.executor.deleteOnTermination": "true",
+          "spark.memory.fraction": "0.8",
+          "spark.memory.storageFraction": "0.3",
+          "spark.network.timeout": "600s",
+          "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+          "spark.rpc.askTimeout": "300s",
+          "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+          "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+          "spark.sql.adaptive.coalescePartitions.enabled": "true",
+          "spark.sql.adaptive.enabled": "true",
+          "spark.sql.adaptive.skewJoin.enabled": "true",
+          "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+          "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+          "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+          "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+          "spark.sql.catalog.lakehouse.io.threads": "32",
+          "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+          "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+          "spark.sql.catalog.lakehouse.type": "hive",
+          "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+          "spark.sql.files.maxPartitionBytes": "268435456",
+          "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+          "spark.sql.parquet.compression.codec": "snappy",
+          "spark.sql.parquet.filterPushdown": "true",
+          "spark.sql.shuffle.partitions": "20",
+          "spark.task.maxFailures": "4",
+          "spark.ui.enabled": "false",
+          "spark.ui.liveUpdate.minFlushPeriod": "30s",
+          "spark.ui.liveUpdate.period": "5s",
+          "spark.ui.retainedDeadExecutors": "10",
+          "spark.ui.retainedJobs": "100",
+          "spark.ui.retainedStages": "100",
+          "spark.ui.retainedTasks": "1000"
+        },
+        "silver-build": {
+          "spark.default.parallelism": "96",
+          "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.driver.maxResultSize": "8g",
+          "spark.dynamicAllocation.enabled": "false",
+          "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.executor.heartbeatInterval": "30s",
+          "spark.files.useFetchCache": "false",
+          "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.attempts.maximum": "20",
+          "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+          "spark.hadoop.fs.s3a.block.size": "268435456",
+          "spark.hadoop.fs.s3a.connection.maximum": "200",
+          "spark.hadoop.fs.s3a.connection.timeout": "60000",
+          "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+          "spark.hadoop.fs.s3a.fast.upload": "true",
+          "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+          "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+          "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.max.total.tasks": "200",
+          "spark.hadoop.fs.s3a.multipart.size": "268435456",
+          "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+          "spark.hadoop.fs.s3a.path.style.access": "true",
+          "spark.hadoop.fs.s3a.retry.interval": "500ms",
+          "spark.hadoop.fs.s3a.retry.limit": "10",
+          "spark.hadoop.fs.s3a.threads.max": "100",
+          "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+          "spark.kubernetes.driver.service.deleteOnTermination": "true",
+          "spark.kubernetes.executor.deleteOnTermination": "true",
+          "spark.memory.fraction": "0.8",
+          "spark.memory.storageFraction": "0.3",
+          "spark.network.timeout": "600s",
+          "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+          "spark.rpc.askTimeout": "300s",
+          "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+          "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+          "spark.sql.adaptive.coalescePartitions.enabled": "true",
+          "spark.sql.adaptive.enabled": "true",
+          "spark.sql.adaptive.skewJoin.enabled": "true",
+          "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+          "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+          "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+          "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+          "spark.sql.catalog.lakehouse.io.threads": "32",
+          "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+          "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+          "spark.sql.catalog.lakehouse.type": "hive",
+          "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+          "spark.sql.files.maxPartitionBytes": "268435456",
+          "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+          "spark.sql.parquet.compression.codec": "snappy",
+          "spark.sql.parquet.filterPushdown": "true",
+          "spark.sql.shuffle.partitions": "96",
+          "spark.task.maxFailures": "4",
+          "spark.ui.enabled": "false",
+          "spark.ui.liveUpdate.minFlushPeriod": "30s",
+          "spark.ui.liveUpdate.period": "5s",
+          "spark.ui.retainedDeadExecutors": "10",
+          "spark.ui.retainedJobs": "100",
+          "spark.ui.retainedStages": "100",
+          "spark.ui.retainedTasks": "1000"
+        },
+        "gold-finalize": {
+          "spark.default.parallelism": "56",
+          "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.driver.maxResultSize": "8g",
+          "spark.dynamicAllocation.enabled": "false",
+          "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+          "spark.executor.heartbeatInterval": "30s",
+          "spark.files.useFetchCache": "false",
+          "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.attempts.maximum": "20",
+          "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+          "spark.hadoop.fs.s3a.block.size": "268435456",
+          "spark.hadoop.fs.s3a.connection.maximum": "200",
+          "spark.hadoop.fs.s3a.connection.timeout": "60000",
+          "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+          "spark.hadoop.fs.s3a.fast.upload": "true",
+          "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+          "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+          "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+          "spark.hadoop.fs.s3a.max.total.tasks": "200",
+          "spark.hadoop.fs.s3a.multipart.size": "268435456",
+          "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+          "spark.hadoop.fs.s3a.path.style.access": "true",
+          "spark.hadoop.fs.s3a.retry.interval": "500ms",
+          "spark.hadoop.fs.s3a.retry.limit": "10",
+          "spark.hadoop.fs.s3a.threads.max": "100",
+          "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+          "spark.kubernetes.driver.service.deleteOnTermination": "true",
+          "spark.kubernetes.executor.deleteOnTermination": "true",
+          "spark.memory.fraction": "0.8",
+          "spark.memory.storageFraction": "0.3",
+          "spark.network.timeout": "600s",
+          "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+          "spark.rpc.askTimeout": "300s",
+          "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+          "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+          "spark.sql.adaptive.coalescePartitions.enabled": "true",
+          "spark.sql.adaptive.enabled": "true",
+          "spark.sql.adaptive.skewJoin.enabled": "true",
+          "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+          "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+          "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+          "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+          "spark.sql.catalog.lakehouse.io.threads": "32",
+          "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+          "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+          "spark.sql.catalog.lakehouse.type": "hive",
+          "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+          "spark.sql.files.maxPartitionBytes": "268435456",
+          "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+          "spark.sql.parquet.compression.codec": "snappy",
+          "spark.sql.parquet.filterPushdown": "true",
+          "spark.sql.shuffle.partitions": "56",
+          "spark.task.maxFailures": "4",
+          "spark.ui.enabled": "false",
+          "spark.ui.liveUpdate.minFlushPeriod": "30s",
+          "spark.ui.liveUpdate.period": "5s",
+          "spark.ui.retainedDeadExecutors": "10",
+          "spark.ui.retainedJobs": "100",
+          "spark.ui.retainedStages": "100",
+          "spark.ui.retainedTasks": "1000"
+        }
+      },
+      "user_conf_sha256": {
+        "bronze-verify": null,
+        "silver-build": null,
+        "gold-finalize": null
+      },
+      "query_engine": {
+        "type": "spark-thrift",
+        "spark-thrift": {
+          "cores": 2,
+          "memory": "4g",
+          "catalog_name": "lakehouse"
+        },
+        "derived": {
+          "pod_memory": "5120Mi"
+        }
+      },
+      "catalog": {
+        "type": "hive",
+        "resources": {
+          "cpu_min": "500m",
+          "cpu_max": "2",
+          "memory": "4Gi"
+        }
+      }
+    },
+    "config_sha256": "3626c91c596aa3166a7ab68915053960bc4f61ae3260e186ce5f93ab4271460f",
+    "requested": {
+      "gold_strategy": "auto"
+    }
+  },
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.7.0.dev0",
+    "git_sha": "2a36ae2162d0672c8a46173bc70da448cac497ae",
+    "git_dirty": true,
+    "install": "checkout",
+    "tree_sha256": "f6175329d6f4af2d254c250d21983d459a4094144ed15bc17ab5d56c84181969",
+    "config_sha256": "3626c91c596aa3166a7ab68915053960bc4f61ae3260e186ce5f93ab4271460f",
+    "config_path": "/home/repos/lakebench-k8s/dev-artifacts/ledger-configs/lb17-r502/lakebench.yaml",
+    "deps": {
+      "pinset_sha256": "ed9bfb24bc68ed817780fcc88b4a0efcb47fe750f27ada4956dc1f6bf9dc56fa",
+      "request_sha256": "2475fdaea2144d7ae6fdda5263222f53380845ba0631b283c766a04492d467d8",
+      "repositories": [
+        "https://repo1.maven.org/maven2/",
+        "https://maven-central.storage-download.googleapis.com/maven2/"
+      ],
+      "pypi_index": "",
+      "groups": {
+        "jars": [
+          {
+            "file": "org.apache.hadoop_hadoop-aws-3.4.2.jar",
+            "sha256": "d2d24e6b715b5656b9d238bf13b6682a07e2004dd36aad74a73aeb854319f4d9",
+            "size": 936997
+          },
+          {
+            "file": "org.apache.iceberg_iceberg-aws-bundle-1.11.0.jar",
+            "sha256": "38f01da7e96850cdd05e6616d758b77b43314b712a8808e3f9a824d56976162f",
+            "size": 63613165
+          },
+          {
+            "file": "org.apache.iceberg_iceberg-spark-runtime-4.1_2.13-1.11.0.jar",
+            "sha256": "d6ea6c5d099288daeb7d5a92061bd3d7d8f296492632b42378e5f2f0e3066242",
+            "size": 47959591
+          },
+          {
+            "file": "org.wildfly.openssl_wildfly-openssl-2.1.4.Final.jar",
+            "sha256": "95decbc5d088b40e85f58d7726b8c8f4e3be6312a0f2660c2d714a23cee80279",
+            "size": 443788
+          },
+          {
+            "file": "software.amazon.awssdk_bundle-2.29.52.jar",
+            "sha256": "62638f33045690c6bc5e496b54b0b2e89a9ad38cbedacdf6e017fea6bc85f55c",
+            "size": 641534749
+          },
+          {
+            "file": "software.amazon.s3.analyticsaccelerator_analyticsaccelerator-s3-1.2.1.jar",
+            "sha256": "11029552e37408e41e689b20150f4b372e0b4f232de321ccafd0fcf443cdfb5a",
+            "size": 2299678
+          }
+        ]
+      },
+      "python": {
+        "spark": "3.10.12"
+      },
+      "overlaps": [],
+      "resolved_at": "2026-10-05T16:48:51Z",
+      "server_pod": "4c5baaa7-557d-48db-b4b8-3305d36a5b43",
+      "pods_checked": 1,
+      "pod_mismatches": []
+    },
+    "preflight": {
+      "capacity": "checked",
+      "scratch": "disabled",
+      "scratch_reason": null,
+      "storage_class": null
+    },
+    "scripts_sha256": "e03c7d9afcb0de4edcf5261cf3cee5ee89470a7db332acd549d9d24ddd90479e",
+    "scripts_maps": {
+      "common": "22dd2b70e581c9d1b5bb62c55448ff82a940808e34fb816e3010216ffb07b9aa",
+      "c360": "0ee86acce668ed745d14d95b5b6444e8b994bebaf722625c907a9fa3e510e558",
+      "aml-rules": "62c6dc26180f6f9fe77697f70d8891e47081f7918c28cf4c957974b8891dcfde",
+      "aml-jobs": "77700228cc3d9ec1f974a99e6d1023da4b74713a74816a898d9552ea9f19697f",
+      "aml-gate": "6284ff64e109b5cbbb3ac196bf84d294805946ecf780e99e735daa7603ca6267",
+      "aml-data": "67f9b7dc6060cf89eb7ec828905b4f099ac187047f2b0fb04a13686cf104c99a"
+    },
+    "scripts_files_sha256": {
+      "common.py": "7d34a130fd6394aab1aee3248b9211f27ac5fec39e8ce117b75d563aa3bfb944",
+      "bronze_ingest.py": "d46ec498d375026bec5af5d4cb8ea9b1a6bb1c7769ca0945cf497b390ee1c515",
+      "bronze_ingest_delta.py": "adc6cfea41040b8261ee06d8c17d319470b9685d3b25a6133a39a19a1780be8f",
+      "bronze_verify.py": "250c215ff6716fff839a8898656abbd597544a73b9498e1ae9854a44964b533a",
+      "gold_finalize.py": "9ece9357cee0bcbaa3f3bcf3af4831043642ca41944be21f5302d3c4ea3d5a49",
+      "gold_finalize_delta.py": "23107e9700909fe99af2e5ef7197966f164a0d363467d1833fdae0d7485a746a",
+      "gold_refresh.py": "23f1d813a954c91cfb133a045a13f8cc4d9a00fec0559e1bd2d1211d5ee0546e",
+      "gold_refresh_delta.py": "ca90f6def5cc6a54a6f3b1f189912f98c6f9be55423fa9df996fd43cb94375a9",
+      "silver_build.py": "224d7ebba3b5c784601332639712c3f5a0d3fda3ae99e430ac5c1bb4c5c800c8",
+      "silver_build_delta.py": "366eb7148c9a70d55da5e4ce17a344614c9c16363684a94a77ea01691fa7a2fe",
+      "silver_stream.py": "c62c26669658493d7b46094d11289dd1564f9828004ff82eb323ebe67482076f",
+      "silver_stream_delta.py": "50fb5e3691087f58ef2b4fb6489620ea1d0252a9d3eb2f1648a11b9e581c74bf",
+      "aml_reason_codes.py": "fc4049bf544dd8ce0803c7ce2903c6db87ee5f245f1181a76c154a265e2811c1",
+      "detection_rules.py": "1556549323c61f50f2ebd01fb66c5962c7bd9e04df289e02f2c8f11573a5d061",
+      "tm_operations.py": "908f6af3f5307f230b7dad3cb44a767b82551514440c7a0a9e90ed521518b713",
+      "bronze_ingest_financial.py": "2caf2eb2e9e291b8d155f635d7c9e7ff842f7adc8d2a35d0ddcba198b74f7eae",
+      "bronze_verify_financial.py": "80ed1c7f0e625bf9112356b97e4563ee1d3afe996d05a0b323e376fdb243fd9a",
+      "gold_finalize_financial.py": "c386e86e6be9e127623e7fb858c47cfe4942ec70b0cf90d0d7b202ff255019a3",
+      "gold_refresh_financial.py": "8c8bb37504bc7acb46ad5ba06405b7fe60413c711dffeca46fb9c8f6ea0aeec6",
+      "replay_financial.py": "ed93659a1e05032257b445363d7043e5dd5bec4c31c63d523b88c01fd4c92450",
+      "reproduce_financial.py": "eafc4060b4da70addce026f5284a3777413ed1a271a2bb44d0c865f41fafd27d",
+      "score_financial.py": "8d11a57656d13478c9fab3926741f59da1458c511d403e7cb41b16863238914e",
+      "silver_build_financial.py": "b18a922ea6342464255c7e02d40c8c247eb61e1ba05dfb404aa40f75693f55d3",
+      "silver_stream_financial.py": "62bbb6326f17ab8f80b8029058e8b0ebc8d13589062dcaa5d9f35497012af90e",
+      "time_travel_financial.py": "7d313f3b8e787cdaa32980f2ae8fef9b24a8e63ef48e220cc25f0977e7fb66c9",
+      "aml_features.py": "7b7ee381e9c5bd13649405345ebfd53e8eb92cbcbca24ccfb937d07328fc8547",
+      "datagen_seed.py": "04fc2d7fb38b5ee210c3d36effe3c39c51b8c6ffa6d20b35388759c89ffec2bd",
+      "fidelity_gate.py": "4d758f12c00ba8169a2f33d04f7ee689a2f7b97e59113a8f6158867e1c268e44",
+      "reference_score.py": "c2ab713f9713919e1c3ad9bd0ae0d56a460abf98efb1f2ec98252ef472c97290",
+      "score_financial_reference.py": "6fec282985e1108e443b4ac9f06093cb8f104bb84b0e3233a9c7638ee6185270",
+      "aml_level2_predictions.json": "a1aea5f71bca2794f488d584ffa3611007ba647e55775f5e6fa37edeef2025db",
+      "aml_preregistration.json": "bbff74d0f1a5fb83547a1e560939d2a677b606120fa13b7de65b75a9adfde990",
+      "aml_registered_looks.json": "757c2570c8e8e3089deebf8487ac9fcc839cd60a2ece3344187f7320ec6fbaae",
+      "heldout_hashes.json": "2bbf67d0c7daf084d4ff4295c6cc89f5ce263ee4ea8fd951378f31011d707c9b",
+      "high_risk_jurisdictions.json": "10ec08260ef31ceccf36313ae17587ea640bbd2df0422cdd4e601a7ec1ea8bc1",
+      "synthetic_corridors.json": "53800c53f936b6b2309a139c25116a5fa2479d0d371a3d78e3100a12e74afe55"
+    },
+    "images_observed": {
+      "spark_driver": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a",
+      "thrift": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a",
+      "spark_executor": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a"
+    },
+    "scratch_as_ran": {
+      "bronze-verify": {
+        "size_limit": null,
+        "storage_class": null
+      },
+      "silver-build": {
+        "size_limit": null,
+        "storage_class": null
+      }
+    },
+    "end_sample": {
+      "lakebench_version": "1.7.0.dev0",
+      "git_sha": "2a36ae2162d0672c8a46173bc70da448cac497ae",
+      "git_dirty": true,
+      "install": "checkout",
+      "tree_sha256": "f6175329d6f4af2d254c250d21983d459a4094144ed15bc17ab5d56c84181969",
+      "code_changed_during_run": false
+    }
+  },
+  "autosize_cuts": [],
+  "job_timeout_seconds": 6000,
+  "maintenance_outcomes": [],
+  "storage_multiple": {
+    "not_measured": "the run did not pass"
+  },
+  "cycle_series": {
+    "marker": "written",
+    "reused": false,
+    "cycles_total": 1,
+    "windows": [
+      [
+        "2024-01-01",
+        "2025-01-01"
+      ]
+    ]
+  },
+  "experiment": {
+    "schema": "exp2",
+    "identity_version": 2,
+    "system_identity": {
+      "type": "cluster",
+      "version": 3,
+      "fingerprint": "151d77dbc24974f3",
+      "partial": false,
+      "parts": {
+        "api_server_ca": "fc35b751e6c1",
+        "kubernetes": "v1.32.13",
+        "openshift": {
+          "version": "4.19.45",
+          "state": "Completed"
+        },
+        "nodes": [
+          {
+            "role": "worker",
+            "architecture": "amd64",
+            "cpu": 40,
+            "memory_gib": 396,
+            "model": "vsphere-vm.cpu-40.mem-402gb.os-unknown",
+            "count": 11
+          },
+          {
+            "role": "control-plane",
+            "architecture": "amd64",
+            "cpu": 8,
+            "memory_gib": 31,
+            "model": "vsphere-vm.cpu-8.mem-32gb.os-unknown",
+            "count": 3
+          }
+        ],
+        "storage_endpoint": "10.0.1.50",
+        "storage_backend": "unknown",
+        "storage_server": null,
+        "scratch": {
+          "enabled": false,
+          "storage_class": null
+        }
+      }
+    },
+    "observed": {
+      "allocatable": {
+        "start": {
+          "cpu": 434.5,
+          "memory_gib": 4349.1,
+          "nodes": 11,
+          "at": "2026-10-05T16:49:35+00:00"
+        },
+        "end": {
+          "cpu": 434.5,
+          "memory_gib": 4349.1,
+          "nodes": 11,
+          "at": "2026-10-05T17:03:05+00:00"
+        }
+      },
+      "cotenant_requested": {
+        "start": {
+          "cpu": 18.274,
+          "memory_gib": 53.7,
+          "pods": 305,
+          "at": "2026-10-05T16:49:35+00:00"
+        },
+        "end": {
+          "cpu": 18.274,
+          "memory_gib": 53.7,
+          "pods": 305,
+          "at": "2026-10-05T17:03:05+00:00"
+        }
+      },
+      "cotenant_pending": {
+        "start": {
+          "cpu": 0.0,
+          "memory_gib": 0.0,
+          "pods": 0,
+          "at": "2026-10-05T16:49:35+00:00"
+        },
+        "end": {
+          "cpu": 0.0,
+          "memory_gib": 0.0,
+          "pods": 0,
+          "at": "2026-10-05T17:03:05+00:00"
+        }
+      }
+    },
+    "system": "cluster",
+    "support": {
+      "workload": "customer360",
+      "mode": "batch",
+      "recipe": "hive-iceberg-spark-thrift",
+      "state": "unverified",
+      "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+    },
+    "repetitions": {
+      "runs": 1,
+      "benchmark_samples_per_query": null,
+      "benchmark_rounds": null
+    },
+    "workload": {
+      "name": "customer360",
+      "version": "c360-2.dev1",
+      "generator_model_version": null,
+      "parameters_id": "12bee0ff88813f11",
+      "parameters": {
+        "customer360": {
+          "unique_customers": 5000000,
+          "unique_customers_source": "scale",
+          "event_window": {
+            "start": "2024-01-01",
+            "end": "2025-01-01"
+          }
+        }
+      }
+    },
+    "corpus": {
+      "schema": "customer360",
+      "generator_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+      "seed": 42,
+      "corpus_role": null,
+      "robustness_perturbation": false,
+      "scale": 50.0,
+      "timestamp_start": null,
+      "timestamp_end": null,
+      "dirty_data_ratio": 0.08,
+      "id": "b0880f5a7f2d0e42",
+      "unique_customers": 5000000,
+      "observed": true,
+      "datagen": {
+        "configured_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "pod_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "digest": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "observed": true,
+        "seed": 42,
+        "scale": null,
+        "data_quality": "complete",
+        "mixed_params": []
+      },
+      "id_v2": "dce2a6733f1ad3b8",
+      "id_version": 2,
+      "args_sha256": "707f3f24086bef417ca4afdcb07f2665fdbb237b7b359dd765a18b3d37081468",
+      "lineage": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+      "lineage_observed": true,
+      "declared": {
+        "schema": "customer360",
+        "generator_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "seed": 42,
+        "corpus_role": null,
+        "robustness_perturbation": false,
+        "scale": 50.0,
+        "timestamp_start": null,
+        "timestamp_end": null,
+        "dirty_data_ratio": 0.08,
+        "unique_customers": 5000000
+      }
+    },
+    "architecture": {
+      "recipe": "hive-iceberg-spark-thrift",
+      "catalog": {
+        "type": "hive",
+        "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+      },
+      "table_format": {
+        "type": "iceberg",
+        "version": "1.11.0"
+      },
+      "pipeline_engine": {
+        "type": "spark",
+        "image": "apache/spark:4.1.1-python3"
+      },
+      "query_engine": {
+        "type": "spark-thrift",
+        "version": "apache/spark:4.1.1-python3"
+      },
+      "query_access_path": "catalog",
+      "access_paths": {
+        "pipeline": "catalog",
+        "query": "catalog"
+      }
+    },
+    "maintenance_settings": {
+      "retention_threshold": "0s",
+      "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+    },
+    "mode": "batch",
+    "maintenance_policy_id": "m2-2026-09-26",
+    "effective_maintenance": {
+      "id": "m2-2026-09-26:expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run",
+      "detail_id": "m2-2026-09-26:expire_snapshots=off,remove_orphan_files=off,compaction=off",
+      "operations": {
+        "expire_snapshots": "not_run",
+        "remove_orphan_files": "not_run",
+        "compaction": "not_run"
+      },
+      "expire": "not_run",
+      "compaction": "not_run",
+      "detail": {
+        "expire_snapshots": "off",
+        "remove_orphan_files": "off",
+        "compaction": "off"
+      },
+      "basis": "recorded outcomes",
+      "reasons": [
+        "expire_snapshots: never reached (the run ended before maintenance)",
+        "remove_orphan_files: never reached (the run ended before maintenance)",
+        "compaction: never reached (the run ended before maintenance)"
+      ],
+      "known_limitations": []
+    },
+    "stages": {
+      "executed": [
+        "datagen",
+        "bronze"
+      ],
+      "skipped": [
+        "silver (failed)",
+        "benchmark (not run)"
+      ]
+    },
+    "rules": {},
+    "limits": {
+      "benchmark_iterations": 3,
+      "w1_max_vertices": null,
+      "tm_max_alerts_per_customer": null,
+      "executors": [
+        {
+          "job_type": "bronze-verify",
+          "scale_derived": 5,
+          "cap": 20,
+          "override": null,
+          "cap_hit": false,
+          "observed": 5
+        },
+        {
+          "job_type": "silver-build",
+          "scale_derived": 12,
+          "cap": 28,
+          "override": null,
+          "cap_hit": false,
+          "observed": 12
+        }
+      ],
+      "autosize_cuts": [],
+      "maintenance_stopped": false,
+      "bound": [],
+      "bound_kinds": [],
+      "headroom_pct": {
+        "bronze-verify": 98.4,
+        "silver-build": null
+      }
+    },
+    "requested_effective": {
+      "pipeline_mode": {
+        "requested": "batch",
+        "effective": "batch",
+        "source": "config",
+        "stage": null
+      },
+      "executors[bronze-verify]": {
+        "requested": 5,
+        "effective": 5,
+        "source": "profile",
+        "stage": "bronze-verify"
+      },
+      "executors[silver-build]": {
+        "requested": 12,
+        "effective": 12,
+        "source": "profile",
+        "stage": "silver-build"
+      }
+    },
+    "requested_effective_mismatches": [],
+    "results": {
+      "query_set_id": null,
+      "fingerprints": {},
+      "not_checked": "no benchmark ran"
+    },
+    "lakebench": {
+      "lakebench_version": "1.7.0.dev0",
+      "git_sha": "2a36ae2162d0672c8a46173bc70da448cac497ae",
+      "git_dirty": true,
+      "install": "checkout",
+      "tree_sha256": "f6175329d6f4af2d254c250d21983d459a4094144ed15bc17ab5d56c84181969",
+      "deps": {
+        "pinset_sha256": "ed9bfb24bc68ed817780fcc88b4a0efcb47fe750f27ada4956dc1f6bf9dc56fa",
+        "request_sha256": "2475fdaea2144d7ae6fdda5263222f53380845ba0631b283c766a04492d467d8",
+        "repositories": [
+          "https://repo1.maven.org/maven2/",
+          "https://maven-central.storage-download.googleapis.com/maven2/"
+        ],
+        "pypi_index": "",
+        "groups": {
+          "jars": [
+            {
+              "file": "org.apache.hadoop_hadoop-aws-3.4.2.jar",
+              "sha256": "d2d24e6b715b5656b9d238bf13b6682a07e2004dd36aad74a73aeb854319f4d9",
+              "size": 936997
+            },
+            {
+              "file": "org.apache.iceberg_iceberg-aws-bundle-1.11.0.jar",
+              "sha256": "38f01da7e96850cdd05e6616d758b77b43314b712a8808e3f9a824d56976162f",
+              "size": 63613165
+            },
+            {
+              "file": "org.apache.iceberg_iceberg-spark-runtime-4.1_2.13-1.11.0.jar",
+              "sha256": "d6ea6c5d099288daeb7d5a92061bd3d7d8f296492632b42378e5f2f0e3066242",
+              "size": 47959591
+            },
+            {
+              "file": "org.wildfly.openssl_wildfly-openssl-2.1.4.Final.jar",
+              "sha256": "95decbc5d088b40e85f58d7726b8c8f4e3be6312a0f2660c2d714a23cee80279",
+              "size": 443788
+            },
+            {
+              "file": "software.amazon.awssdk_bundle-2.29.52.jar",
+              "sha256": "62638f33045690c6bc5e496b54b0b2e89a9ad38cbedacdf6e017fea6bc85f55c",
+              "size": 641534749
+            },
+            {
+              "file": "software.amazon.s3.analyticsaccelerator_analyticsaccelerator-s3-1.2.1.jar",
+              "sha256": "11029552e37408e41e689b20150f4b372e0b4f232de321ccafd0fcf443cdfb5a",
+              "size": 2299678
+            }
+          ]
+        },
+        "python": {
+          "spark": "3.10.12"
+        },
+        "overlaps": [],
+        "resolved_at": "2026-10-05T16:48:51Z",
+        "server_pod": "4c5baaa7-557d-48db-b4b8-3305d36a5b43",
+        "pods_checked": 1,
+        "pod_mismatches": []
+      },
+      "images_observed": {
+        "spark_driver": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a",
+        "thrift": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a",
+        "spark_executor": "docker.io/apache/spark@sha256:0b8f5befe00d258df03b252158b3894b8654390f1958741accf98155539a662a"
+      }
+    }
+  },
+  "pipeline_benchmark": {
+    "run_id": "20261005-104935-f55acf",
+    "deployment_name": "lb17-r502",
+    "pipeline_mode": "batch",
+    "scale_factor": 50.0,
+    "start_time": "2026-10-05T16:49:35.326560+00:00",
+    "end_time": "2026-10-05T17:03:05.633435+00:00",
+    "success": false,
+    "scorecard": {
+      "time_to_value_seconds": 721.07,
+      "total_elapsed_seconds": 791.61,
+      "total_data_processed_gb": 495.845,
+      "pipeline_throughput_gb_per_second": 0.6876,
+      "total_core_hours": 8.52,
+      "compute_efficiency_gb_per_core_hour": 58.2218,
+      "scale_ratio": 0.992
+    },
+    "scores": {
+      "time_to_value_seconds": 721.07,
+      "total_elapsed_seconds": 791.61,
+      "total_data_processed_gb": 495.845,
+      "pipeline_throughput_gb_per_second": 0.6876,
+      "total_core_hours": 8.52,
+      "compute_efficiency_gb_per_core_hour": 58.2218,
+      "scale_ratio": 0.992
+    },
+    "stages": [
+      {
+        "stage_name": "datagen",
+        "stage_type": "datagen",
+        "engine": "datagen",
+        "elapsed_seconds": 76.104384,
+        "success": true,
+        "error_message": null,
+        "timing_source": "",
+        "timing_resolution_seconds": null,
+        "submission_failures": [],
+        "submission_retry_seconds": 0.0,
+        "input_size_gb": 0.0,
+        "output_size_gb": 495.8448979984969,
+        "input_rows": 0,
+        "output_rows": 123912509,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 10,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "bronze",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-10-05T16:50:58.878039+00:00",
+        "end_time": "2026-10-05T16:52:35.952024+00:00",
+        "elapsed_seconds": 96.975942,
+        "success": true,
+        "error_message": null,
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 495.845,
+        "output_size_gb": 495.8448979984969,
+        "input_rows": 123912509,
+        "output_rows": 123912509,
+        "throughput_gb_per_second": 7.186159420289855,
+        "throughput_rows_per_second": 1795833.463768116,
+        "executor_count": 5,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "batch",
+        "engine": "spark",
+        "start_time": "2026-10-05T16:52:41.273383+00:00",
+        "end_time": "2026-10-05T17:02:59.952024+00:00",
+        "elapsed_seconds": 618.532728,
+        "success": false,
+        "error_message": "Job failed: driver container failed with ExitCode: 1, Reason: Error",
+        "timing_source": "driver_container",
+        "timing_resolution_seconds": 2.0,
+        "submission_failures": [],
+        "submission_retry_seconds": 0,
+        "input_size_gb": 0.0,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 12,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "batch_span_seconds": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "window_input_rows": null,
+        "pre_window_input_rows": null,
+        "window_commits": null,
+        "window_new_data_cycles": null,
+        "last_write_offset_seconds": null,
+        "trickle_start_offset_seconds": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      }
+    ],
+    "stage_matrix": {
+      "datagen": {
+        "engine": "datagen",
+        "elapsed_seconds": 76.1,
+        "input_size_gb": 0.0,
+        "output_size_gb": 495.845,
+        "input_rows": 0,
+        "output_rows": 123912509,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 10,
+        "executor_cores": 8,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 96.98,
+        "input_size_gb": 495.845,
+        "output_size_gb": 495.845,
+        "input_rows": 123912509,
+        "output_rows": 123912509,
+        "throughput_gb_per_second": 7.1862,
+        "throughput_rows_per_second": 1795833.5,
+        "executor_count": 5,
+        "executor_cores": 2,
+        "executor_memory_gb": 4.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 618.53,
+        "input_size_gb": 0.0,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 12,
+        "executor_cores": 4,
+        "executor_memory_gb": 48.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": false
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 495.845,
+      "silver_gb": 0.0,
+      "gold_gb": 0.0
+    },
+    "config_snapshot": {
+      "name": "lb17-r502",
+      "scale": 50.0,
+      "approx_bronze_gb": 500.0,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "10.0.1.50",
+        "buckets": {
+          "bronze": "scrubbed-bronze",
+          "silver": "scrubbed-silver",
+          "gold": "scrubbed-gold"
+        }
+      },
+      "scratch": {
+        "enabled": false,
+        "storage_class": "px-csi-scratch",
+        "size_per_job": {
+          "bronze-verify": "50Gi",
+          "silver-build": "300Gi",
+          "gold-finalize": "300Gi"
+        }
+      },
+      "spark": {
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "hive",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "spark-thrift",
+      "workload_schema": "customer360",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 50,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 50.0,
+        "mode": "auto",
+        "parallelism": 10,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+        "spark": "apache/spark:4.1.1-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "2",
+          "memory": "8Gi"
+        },
+        "worker": {
+          "replicas": 2,
+          "cpu": "4",
+          "memory": "16Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 1,
+        "cache": "hot",
+        "iterations": 3,
+        "maintenance_settle": {
+          "enabled": true,
+          "max_seconds": 2700,
+          "interval_seconds": 60,
+          "tolerance_pct": 10.0,
+          "probe_query": null,
+          "probe_samples": 1
+        }
+      },
+      "maintenance": {
+        "pre_benchmark_maintenance": true,
+        "retention_interval": null,
+        "retention_threshold": "30m",
+        "compaction_enabled": true,
+        "compaction_interval": null
+      },
+      "experiment_inputs": {
+        "identity_version": 2,
+        "workload": {
+          "name": "customer360",
+          "version": "c360-2.dev1",
+          "generator_model_version": null,
+          "parameters_id": "12bee0ff88813f11",
+          "parameters": {
+            "customer360": {
+              "unique_customers": 5000000,
+              "unique_customers_source": "scale",
+              "event_window": {
+                "start": "2024-01-01",
+                "end": "2025-01-01"
+              }
+            }
+          }
+        },
+        "corpus": {
+          "schema": "customer360",
+          "generator_image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+          "seed": 42,
+          "corpus_role": null,
+          "robustness_perturbation": false,
+          "scale": 50.0,
+          "timestamp_start": null,
+          "timestamp_end": null,
+          "dirty_data_ratio": 0.08,
+          "id": "b0880f5a7f2d0e42",
+          "unique_customers": 5000000
+        },
+        "architecture": {
+          "recipe": "hive-iceberg-spark-thrift",
+          "catalog": {
+            "type": "hive",
+            "version": "oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod)"
+          },
+          "table_format": {
+            "type": "iceberg",
+            "version": "1.11.0"
+          },
+          "pipeline_engine": {
+            "type": "spark",
+            "image": "apache/spark:4.1.1-python3"
+          },
+          "query_engine": {
+            "type": "spark-thrift",
+            "version": "apache/spark:4.1.1-python3"
+          },
+          "query_access_path": "catalog"
+        },
+        "maintenance_config": {
+          "pre_benchmark_maintenance": true,
+          "compaction_enabled": true,
+          "settings": {
+            "retention_threshold": "0s",
+            "retention_source": "resolve_maintenance_retention (batch pre-benchmark)"
+          }
+        },
+        "mode": "batch",
+        "run_mode": "batch",
+        "support": {
+          "workload": "customer360",
+          "mode": "batch",
+          "recipe": "hive-iceberg-spark-thrift",
+          "state": "unverified",
+          "basis": "valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"
+        },
+        "config_limits": {
+          "max_files_per_trigger": 50,
+          "benchmark_iterations": 3,
+          "w1_max_vertices": null,
+          "tm_max_alerts_per_customer": null
+        },
+        "system_identity": {
+          "type": "cluster",
+          "version": 3,
+          "fingerprint": "151d77dbc24974f3",
+          "partial": false,
+          "parts": {
+            "api_server_ca": "fc35b751e6c1",
+            "kubernetes": "v1.32.13",
+            "openshift": {
+              "version": "4.19.45",
+              "state": "Completed"
+            },
+            "nodes": [
+              {
+                "role": "worker",
+                "architecture": "amd64",
+                "cpu": 40,
+                "memory_gib": 396,
+                "model": "vsphere-vm.cpu-40.mem-402gb.os-unknown",
+                "count": 11
+              },
+              {
+                "role": "control-plane",
+                "architecture": "amd64",
+                "cpu": 8,
+                "memory_gib": 31,
+                "model": "vsphere-vm.cpu-8.mem-32gb.os-unknown",
+                "count": 3
+              }
+            ],
+            "storage_endpoint": "10.0.1.50",
+            "storage_backend": "unknown",
+            "storage_server": null,
+            "scratch": {
+              "enabled": false,
+              "storage_class": null
+            }
+          }
+        },
+        "observed": {
+          "allocatable": {
+            "start": {
+              "cpu": 434.5,
+              "memory_gib": 4349.1,
+              "nodes": 11,
+              "at": "2026-10-05T16:49:35+00:00"
+            },
+            "end": {
+              "cpu": 434.5,
+              "memory_gib": 4349.1,
+              "nodes": 11,
+              "at": "2026-10-05T17:03:05+00:00"
+            }
+          },
+          "cotenant_requested": {
+            "start": {
+              "cpu": 18.274,
+              "memory_gib": 53.7,
+              "pods": 305,
+              "at": "2026-10-05T16:49:35+00:00"
+            },
+            "end": {
+              "cpu": 18.274,
+              "memory_gib": 53.7,
+              "pods": 305,
+              "at": "2026-10-05T17:03:05+00:00"
+            }
+          },
+          "cotenant_pending": {
+            "start": {
+              "cpu": 0.0,
+              "memory_gib": 0.0,
+              "pods": 0,
+              "at": "2026-10-05T16:49:35+00:00"
+            },
+            "end": {
+              "cpu": 0.0,
+              "memory_gib": 0.0,
+              "pods": 0,
+              "at": "2026-10-05T17:03:05+00:00"
+            }
+          }
+        },
+        "corpus_observation": {
+          "format": 1,
+          "markers": {
+            "format": 1,
+            "scope": "customer/interactions/",
+            "cycles": [
+              {
+                "cycle": 0,
+                "nodes_found": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9
+                ],
+                "total_nodes": [
+                  10
+                ],
+                "cycles": [
+                  1
+                ],
+                "corpus_args_sha256": [
+                  "12d9959d8aec034931d1a7eb55c145853808e523c0b12a1744aab75b7d6bc702"
+                ],
+                "model_version": [
+                  "datagen-v2-rs-0.3"
+                ],
+                "build_commit": [
+                  "2a36ae2162d0672c8a46173bc70da448cac497ae"
+                ]
+              }
+            ],
+            "completed_first": "2026-10-05T16:50:51Z",
+            "completed_last": "2026-10-05T16:50:54Z",
+            "corpus_series_sha256": "707f3f24086bef417ca4afdcb07f2665fdbb237b7b359dd765a18b3d37081468",
+            "objects": 8010,
+            "problems": [],
+            "unreadable_format": 0,
+            "series_check": null,
+            "error": null
+          },
+          "series": {
+            "cycles_complete": [
+              0
+            ],
+            "cycles_total": 1,
+            "format": 1,
+            "generation": {
+              "customer_id_max": 5000000,
+              "dirty_ratio": 0.08,
+              "file_size_mb": 64,
+              "image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+              "image_digest": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+              "scale": 50.0,
+              "seed_ref": "42",
+              "target_tb_per_cycle": 0.488281,
+              "timestamp_end": "2025-01-01",
+              "timestamp_start": "2024-01-01"
+            },
+            "schema": "customer360",
+            "updated_utc": "2026-10-05T16:50:57.378502+00:00",
+            "windows": [
+              [
+                "2024-01-01",
+                "2025-01-01"
+              ]
+            ],
+            "written_by_run": "20261005-104935-f55acf"
+          },
+          "bronze_listing_sha256": "61dca63bc7a488756025840ae6381c7b8cdba23aa1a5932c30bb409bf2c89e28",
+          "observed_at": "2026-10-05T17:03:09.299622+00:00",
+          "lineage": {
+            "value": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+            "observed": true,
+            "digest": "sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+            "tag": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+            "problems": [],
+            "notes": []
+          }
+        }
+      },
+      "fingerprint_version": 2,
+      "fingerprint_inputs": {
+        "basis": "offline manifest build; executor_instances is before any cluster-dependent cap",
+        "job_profiles": {
+          "bronze-verify": {
+            "driver_cores": 2,
+            "driver_memory": "4g",
+            "executor_cores": 2,
+            "executor_memory": "4g",
+            "executor_memory_overhead": "2g",
+            "executor_instances": 5,
+            "scratch_size": "50Gi"
+          },
+          "silver-build": {
+            "driver_cores": 4,
+            "driver_memory": "32g",
+            "executor_cores": 4,
+            "executor_memory": "48g",
+            "executor_memory_overhead": "12g",
+            "executor_instances": 12,
+            "scratch_size": "300Gi"
+          },
+          "gold-finalize": {
+            "driver_cores": 4,
+            "driver_memory": "32g",
+            "executor_cores": 4,
+            "executor_memory": "32g",
+            "executor_memory_overhead": "8g",
+            "executor_instances": 7,
+            "scratch_size": "300Gi"
+          }
+        },
+        "owned_conf": {
+          "bronze-verify": {
+            "spark.default.parallelism": "20",
+            "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.driver.maxResultSize": "8g",
+            "spark.dynamicAllocation.enabled": "false",
+            "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.executor.heartbeatInterval": "30s",
+            "spark.files.useFetchCache": "false",
+            "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.attempts.maximum": "20",
+            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            "spark.hadoop.fs.s3a.block.size": "268435456",
+            "spark.hadoop.fs.s3a.connection.maximum": "200",
+            "spark.hadoop.fs.s3a.connection.timeout": "60000",
+            "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+            "spark.hadoop.fs.s3a.fast.upload": "true",
+            "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+            "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+            "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.max.total.tasks": "200",
+            "spark.hadoop.fs.s3a.multipart.size": "268435456",
+            "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+            "spark.hadoop.fs.s3a.path.style.access": "true",
+            "spark.hadoop.fs.s3a.retry.interval": "500ms",
+            "spark.hadoop.fs.s3a.retry.limit": "10",
+            "spark.hadoop.fs.s3a.threads.max": "100",
+            "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+            "spark.kubernetes.driver.service.deleteOnTermination": "true",
+            "spark.kubernetes.executor.deleteOnTermination": "true",
+            "spark.memory.fraction": "0.8",
+            "spark.memory.storageFraction": "0.3",
+            "spark.network.timeout": "600s",
+            "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+            "spark.rpc.askTimeout": "300s",
+            "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+            "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+            "spark.sql.adaptive.coalescePartitions.enabled": "true",
+            "spark.sql.adaptive.enabled": "true",
+            "spark.sql.adaptive.skewJoin.enabled": "true",
+            "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+            "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+            "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+            "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+            "spark.sql.catalog.lakehouse.io.threads": "32",
+            "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+            "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+            "spark.sql.catalog.lakehouse.type": "hive",
+            "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+            "spark.sql.files.maxPartitionBytes": "268435456",
+            "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+            "spark.sql.parquet.compression.codec": "snappy",
+            "spark.sql.parquet.filterPushdown": "true",
+            "spark.sql.shuffle.partitions": "20",
+            "spark.task.maxFailures": "4",
+            "spark.ui.enabled": "false",
+            "spark.ui.liveUpdate.minFlushPeriod": "30s",
+            "spark.ui.liveUpdate.period": "5s",
+            "spark.ui.retainedDeadExecutors": "10",
+            "spark.ui.retainedJobs": "100",
+            "spark.ui.retainedStages": "100",
+            "spark.ui.retainedTasks": "1000"
+          },
+          "silver-build": {
+            "spark.default.parallelism": "96",
+            "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.driver.maxResultSize": "8g",
+            "spark.dynamicAllocation.enabled": "false",
+            "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.executor.heartbeatInterval": "30s",
+            "spark.files.useFetchCache": "false",
+            "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.attempts.maximum": "20",
+            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            "spark.hadoop.fs.s3a.block.size": "268435456",
+            "spark.hadoop.fs.s3a.connection.maximum": "200",
+            "spark.hadoop.fs.s3a.connection.timeout": "60000",
+            "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+            "spark.hadoop.fs.s3a.fast.upload": "true",
+            "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+            "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+            "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.max.total.tasks": "200",
+            "spark.hadoop.fs.s3a.multipart.size": "268435456",
+            "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+            "spark.hadoop.fs.s3a.path.style.access": "true",
+            "spark.hadoop.fs.s3a.retry.interval": "500ms",
+            "spark.hadoop.fs.s3a.retry.limit": "10",
+            "spark.hadoop.fs.s3a.threads.max": "100",
+            "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+            "spark.kubernetes.driver.service.deleteOnTermination": "true",
+            "spark.kubernetes.executor.deleteOnTermination": "true",
+            "spark.memory.fraction": "0.8",
+            "spark.memory.storageFraction": "0.3",
+            "spark.network.timeout": "600s",
+            "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+            "spark.rpc.askTimeout": "300s",
+            "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+            "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+            "spark.sql.adaptive.coalescePartitions.enabled": "true",
+            "spark.sql.adaptive.enabled": "true",
+            "spark.sql.adaptive.skewJoin.enabled": "true",
+            "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+            "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+            "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+            "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+            "spark.sql.catalog.lakehouse.io.threads": "32",
+            "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+            "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+            "spark.sql.catalog.lakehouse.type": "hive",
+            "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+            "spark.sql.files.maxPartitionBytes": "268435456",
+            "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+            "spark.sql.parquet.compression.codec": "snappy",
+            "spark.sql.parquet.filterPushdown": "true",
+            "spark.sql.shuffle.partitions": "96",
+            "spark.task.maxFailures": "4",
+            "spark.ui.enabled": "false",
+            "spark.ui.liveUpdate.minFlushPeriod": "30s",
+            "spark.ui.liveUpdate.period": "5s",
+            "spark.ui.retainedDeadExecutors": "10",
+            "spark.ui.retainedJobs": "100",
+            "spark.ui.retainedStages": "100",
+            "spark.ui.retainedTasks": "1000"
+          },
+          "gold-finalize": {
+            "spark.default.parallelism": "56",
+            "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.driver.maxResultSize": "8g",
+            "spark.dynamicAllocation.enabled": "false",
+            "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+            "spark.executor.heartbeatInterval": "30s",
+            "spark.files.useFetchCache": "false",
+            "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.attempts.maximum": "20",
+            "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+            "spark.hadoop.fs.s3a.block.size": "268435456",
+            "spark.hadoop.fs.s3a.connection.maximum": "200",
+            "spark.hadoop.fs.s3a.connection.timeout": "60000",
+            "spark.hadoop.fs.s3a.endpoint.region": "us-east-1",
+            "spark.hadoop.fs.s3a.fast.upload": "true",
+            "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
+            "spark.hadoop.fs.s3a.fast.upload.buffer": "bytebuffer",
+            "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+            "spark.hadoop.fs.s3a.max.total.tasks": "200",
+            "spark.hadoop.fs.s3a.multipart.size": "268435456",
+            "spark.hadoop.fs.s3a.multipart.threshold": "268435456",
+            "spark.hadoop.fs.s3a.path.style.access": "true",
+            "spark.hadoop.fs.s3a.retry.interval": "500ms",
+            "spark.hadoop.fs.s3a.retry.limit": "10",
+            "spark.hadoop.fs.s3a.threads.max": "100",
+            "spark.hadoop.hive.metastore.client.socket.timeout": "300s",
+            "spark.kubernetes.driver.service.deleteOnTermination": "true",
+            "spark.kubernetes.executor.deleteOnTermination": "true",
+            "spark.memory.fraction": "0.8",
+            "spark.memory.storageFraction": "0.3",
+            "spark.network.timeout": "600s",
+            "spark.redaction.regex": "(?i)secret|password|token|access[.]?key|credential",
+            "spark.rpc.askTimeout": "300s",
+            "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+            "spark.sql.adaptive.advisoryPartitionSizeInBytes": "268435456",
+            "spark.sql.adaptive.coalescePartitions.enabled": "true",
+            "spark.sql.adaptive.enabled": "true",
+            "spark.sql.adaptive.skewJoin.enabled": "true",
+            "spark.sql.catalog.lakehouse": "org.apache.iceberg.spark.SparkCatalog",
+            "spark.sql.catalog.lakehouse.hive.metastore-timeout": "5m",
+            "spark.sql.catalog.lakehouse.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+            "spark.sql.catalog.lakehouse.io.manifest-encoder-threads": "16",
+            "spark.sql.catalog.lakehouse.io.threads": "32",
+            "spark.sql.catalog.lakehouse.s3.multipart.size": "268435456",
+            "spark.sql.catalog.lakehouse.s3.path-style-access": "true",
+            "spark.sql.catalog.lakehouse.type": "hive",
+            "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+            "spark.sql.files.maxPartitionBytes": "268435456",
+            "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+            "spark.sql.parquet.compression.codec": "snappy",
+            "spark.sql.parquet.filterPushdown": "true",
+            "spark.sql.shuffle.partitions": "56",
+            "spark.task.maxFailures": "4",
+            "spark.ui.enabled": "false",
+            "spark.ui.liveUpdate.minFlushPeriod": "30s",
+            "spark.ui.liveUpdate.period": "5s",
+            "spark.ui.retainedDeadExecutors": "10",
+            "spark.ui.retainedJobs": "100",
+            "spark.ui.retainedStages": "100",
+            "spark.ui.retainedTasks": "1000"
+          }
+        },
+        "user_conf_sha256": {
+          "bronze-verify": null,
+          "silver-build": null,
+          "gold-finalize": null
+        },
+        "query_engine": {
+          "type": "spark-thrift",
+          "spark-thrift": {
+            "cores": 2,
+            "memory": "4g",
+            "catalog_name": "lakehouse"
+          },
+          "derived": {
+            "pod_memory": "5120Mi"
+          }
+        },
+        "catalog": {
+          "type": "hive",
+          "resources": {
+            "cpu_min": "500m",
+            "cpu_max": "2",
+            "memory": "4Gi"
+          }
+        }
+      },
+      "config_sha256": "3626c91c596aa3166a7ab68915053960bc4f61ae3260e186ce5f93ab4271460f",
+      "requested": {
+        "gold_strategy": "auto"
+      }
+    },
+    "scale_ratio": 0.992,
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+      "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)"
+    },
+    "advanced_metrics": null
+  },
+  "datagen_fleet": {
+    "image": "docker.io/sillidata/lb-datagen:2a36ae21@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92",
+    "image_ids": [
+      "docker.io/sillidata/lb-datagen@sha256:3f93e4369285d8c555f3c932bf08775c43a631de3c6c142bfe044a3a9f5a8b92"
+    ],
+    "seed": 42,
+    "scale": null,
+    "schema": "customer360",
+    "pods_expected": 10,
+    "pods_reported": 10,
+    "pods_missing": 0,
+    "data_quality": "complete",
+    "total_bytes_written": 532409395563,
+    "total_files_written": 7999,
+    "total_rows_written": 123912509,
+    "aggregate_mbps": 8179.181,
+    "wall_elapsed_max_s": 65.093,
+    "wall_elapsed_min_s": 61.771,
+    "cores_total": 80.0,
+    "cpu_seconds_total": 5053.463,
+    "cpu_hr_per_tb": 2.637,
+    "phase_pct": {
+      "build_batch": 19.97,
+      "encode_parquet": 80.03,
+      "s3_put": 80.03
+    },
+    "phase_p50_s": {
+      "build_batch": 99.959,
+      "encode_parquet": 402.144,
+      "s3_put": 402.148
+    },
+    "phase_p95_s": {
+      "build_batch": 103.779,
+      "encode_parquet": 419.888,
+      "s3_put": 419.888
+    },
+    "worst_pod_elapsed_s": 65.093,
+    "best_pod_elapsed_s": 61.771,
+    "customer_id_max": 5000000,
+    "mixed_params": [],
+    "delivery_mode": "continuous",
+    "per_pod": [
+      {
+        "node_id": 0,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247122856,
+        "rows_written": 12392800,
+        "elapsed_s": 61.852258,
+        "setup_s": 0.076168,
+        "gen_s": 61.776057,
+        "build_batch_s": 100.509116,
+        "encode_parquet_s": 388.655152,
+        "s3_put_s": 388.654541,
+        "throughput_mbps": 860.875975,
+        "cpu_seconds": 494.818063,
+        "cpu_hr_per_tb": 2.58135,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-0-6gscr"
+      },
+      {
+        "node_id": 1,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247727265,
+        "rows_written": 12392800,
+        "elapsed_s": 63.139206,
+        "setup_s": 0.075706,
+        "gen_s": 63.063467,
+        "build_batch_s": 101.32423,
+        "encode_parquet_s": 401.594072,
+        "s3_put_s": 401.593404,
+        "throughput_mbps": 843.338567,
+        "cpu_seconds": 505.113646,
+        "cpu_hr_per_tb": 2.63503,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-1-nsgh6"
+      },
+      {
+        "node_id": 2,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247813142,
+        "rows_written": 12392800,
+        "elapsed_s": 62.992699,
+        "setup_s": 0.076189,
+        "gen_s": 62.916476,
+        "build_batch_s": 102.938042,
+        "encode_parquet_s": 398.005891,
+        "s3_put_s": 398.00521,
+        "throughput_mbps": 845.301345,
+        "cpu_seconds": 503.941592,
+        "cpu_hr_per_tb": 2.628911,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-2-fzxnk"
+      },
+      {
+        "node_id": 3,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247858267,
+        "rows_written": 12392800,
+        "elapsed_s": 65.09324,
+        "setup_s": 0.075993,
+        "gen_s": 65.017215,
+        "build_batch_s": 99.364366,
+        "encode_parquet_s": 419.888485,
+        "s3_put_s": 419.887635,
+        "throughput_mbps": 818.024395,
+        "cpu_seconds": 520.74592,
+        "cpu_hr_per_tb": 2.716572,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-3-7gcv8"
+      },
+      {
+        "node_id": 4,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247668971,
+        "rows_written": 12392800,
+        "elapsed_s": 63.788257,
+        "setup_s": 0.07585,
+        "gen_s": 63.712375,
+        "build_batch_s": 101.330386,
+        "encode_parquet_s": 406.744242,
+        "s3_put_s": 406.743727,
+        "throughput_mbps": 834.756602,
+        "cpu_seconds": 510.306059,
+        "cpu_hr_per_tb": 2.66212,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-4-lphtn"
+      },
+      {
+        "node_id": 5,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247762851,
+        "rows_written": 12392800,
+        "elapsed_s": 61.771129,
+        "setup_s": 0.076177,
+        "gen_s": 61.69492,
+        "build_batch_s": 97.438133,
+        "encode_parquet_s": 394.059395,
+        "s3_put_s": 394.058798,
+        "throughput_mbps": 862.016986,
+        "cpu_seconds": 494.169036,
+        "cpu_hr_per_tb": 2.577933,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-5-n5z5c"
+      },
+      {
+        "node_id": 6,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247891223,
+        "rows_written": 12392800,
+        "elapsed_s": 62.049817,
+        "setup_s": 0.075406,
+        "gen_s": 61.974379,
+        "build_batch_s": 99.408069,
+        "encode_parquet_s": 394.050815,
+        "s3_put_s": 394.050065,
+        "throughput_mbps": 858.147427,
+        "cpu_seconds": 496.39854,
+        "cpu_hr_per_tb": 2.589558,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-6-2jg85"
+      },
+      {
+        "node_id": 7,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247365464,
+        "rows_written": 12392800,
+        "elapsed_s": 63.818221,
+        "setup_s": 0.07843,
+        "gen_s": 63.739752,
+        "build_batch_s": 103.778581,
+        "encode_parquet_s": 403.42499,
+        "s3_put_s": 403.424253,
+        "throughput_mbps": 834.359914,
+        "cpu_seconds": 510.545769,
+        "cpu_hr_per_tb": 2.663386,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-7-z6kmq"
+      },
+      {
+        "node_id": 8,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 800,
+        "bytes_written": 53247609356,
+        "rows_written": 12392800,
+        "elapsed_s": 64.230999,
+        "setup_s": 0.075535,
+        "gen_s": 64.155432,
+        "build_batch_s": 98.874654,
+        "encode_parquet_s": 412.22018,
+        "s3_put_s": 412.219659,
+        "throughput_mbps": 829.001733,
+        "cpu_seconds": 513.847991,
+        "cpu_hr_per_tb": 2.6806,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-8-m4h6x"
+      },
+      {
+        "node_id": 9,
+        "node_count": 10,
+        "schema": "customer360",
+        "cores_used": 8,
+        "bucket": "scrubbed-bronze",
+        "prefix": "customer/interactions",
+        "file_size_mb": 64,
+        "rows_per_file": 15491,
+        "total_files": 7999,
+        "files_written": 799,
+        "bytes_written": 53180576168,
+        "rows_written": 12377309,
+        "elapsed_s": 62.947071,
+        "setup_s": 0.075918,
+        "gen_s": 62.871121,
+        "build_batch_s": 98.598449,
+        "encode_parquet_s": 402.693169,
+        "s3_put_s": 402.703405,
+        "throughput_mbps": 844.845923,
+        "cpu_seconds": 503.576567,
+        "cpu_hr_per_tb": 2.630328,
+        "cpu_request_millicores": 8000,
+        "world_s": null,
+        "typology_s": null,
+        "reference_s": null,
+        "scale": null,
+        "corpus_months": null,
+        "population": null,
+        "total_txns": null,
+        "typology_instances": null,
+        "target_tb": 0.488281,
+        "customer_id_max": 5000000,
+        "dirty_ratio": 0.08,
+        "delivery_mode": "continuous",
+        "pod_name": "lakebench-datagen-9-2xc2h"
+      }
+    ],
+    "namespace": "lb17-r502",
+    "written_at": "2026-10-05T16:50:57.573285+00:00"
+  }
+}
