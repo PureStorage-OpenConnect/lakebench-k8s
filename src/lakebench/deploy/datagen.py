@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 def _pod_owned_by_job(pod, job_uid: str) -> bool:
-    """True when ``pod`` is controlled by the Job with ``job_uid`` (LB-200).
+    """True when ``pod`` is controlled by the Job with ``job_uid``.
 
     Scopes datagen progress to the current job incarnation so a prior
     generation's stale pod (same name/label, still Terminating) cannot be
@@ -725,7 +725,7 @@ class DatagenDeployer:
         self.context = engine.context
 
     # Payload size was a template context knob feeding --payload-kb; dropped
-    # with the CLI arg 2026-09-28 (LB-191 companion). The Rust binary now
+    # with the CLI arg 2026-09-28. The Rust binary now
     # hardcodes 2 KiB. Kept here as documentation of what the fixed value is.
     _PAYLOAD_SIZE_BYTES = 2048  # 2 KiB hex payloads for compression profiling
 
@@ -808,7 +808,7 @@ class DatagenDeployer:
         # datagen_duration context var dropped 2026-09-28 (Wave 2 D8). The
         # entrypoint.py argparse layer silently discarded --duration; the Rust
         # binary never read it; a continuous / sustained pipeline is driven by
-        # the pipeline side trickle-reading a pre-written finite corpus (LB-156)
+        # the pipeline side trickle-reading a pre-written finite corpus
         # or, in a future release, by a producer-driven delivery mode
         # (--delivery-mode). Passing --duration was misleading.
 
@@ -1237,7 +1237,7 @@ class DatagenDeployer:
             succeeded = status.succeeded or 0
             failed = status.failed or 0
             active = status.active or 0
-            # LB-200: scope progress to the CURRENT job's pods. A re-generate
+            # Scope progress to the CURRENT job's pods. A re-generate
             # reuses the name/label, so a prior job's OOMKilled pod (still
             # Terminating) would otherwise be scanned and false-abort the new,
             # healthy generation. Pods carry the owning Job's uid in an owner

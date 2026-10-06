@@ -1,4 +1,4 @@
-"""Detection rule modules (LB-108).
+"""Detection rule modules.
 
 Provides rule dispatchers for the fraud-aml pipeline. Each rule takes a
 silver.transactions DataFrame (already filtered/time-travelled by the
@@ -142,7 +142,7 @@ HIGH_PRIORITY_CUTOFFS = {
 # the Spark driver under /opt/spark/scripts; aml_queries does not). It exists
 # here so score_financial can attribute a rule SKIP to the typologies that rule
 # was the sole detector for, and mark their recall "not run" instead of 0%
-# (LB-119 review F1). A None target means the rule has no planted typology.
+# A None target means the rule has no planted typology.
 RULE_TARGET_TYPOLOGY = {
     "W1_connected_components": "gather_scatter",
     "W2_structuring": "micro_structuring",
@@ -197,8 +197,8 @@ class RuleSkipped(Exception):
     vertex cap. The caller (gold_finalize / replay) must treat this as a
     THIRD outcome, distinct from both "ran and found zero alerts" and
     "raised an unexpected error". Reporting a skip as ``alerts=0`` makes a
-    scale-100 W1 skip read as a 0% recall regression on the scorecard
-    (LB-119); reporting it as ``error=`` would falsely imply a defect.
+    scale-100 W1 skip read as a 0% recall regression on the scorecard;
+    reporting it as ``error=`` would falsely imply a defect.
 
     ``reason`` is a short machine-parseable slug (e.g. ``vertex-cap``);
     ``detail`` carries the human-readable specifics for the driver log.
@@ -207,7 +207,7 @@ class RuleSkipped(Exception):
     def __init__(self, reason: str, detail: str = "") -> None:
         # Normalise reason to a non-empty slug: the collector's skip parser
         # matches ``skipped=[A-Za-z0-9_-]+`` and would silently drop a line
-        # whose reason is empty or contains spaces (LB-119 review F2).
+        # whose reason is empty or contains spaces.
         # Collapse any run of non-slug chars to a single '-' and fall back
         # to "unknown" so a skip is never lost, whatever a future caller
         # passes.
@@ -640,7 +640,7 @@ PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
 # PATH_SEARCH_ROWS_PER_PARTITION rows per partition, and is never below the
 # job's own count. Scale 10 (266.7M transfers) gets 534 partitions. The cap
 # keeps a stage near the ~2,000 tasks the driver's status listener handles
-# at scale 100 (LB-049); scale 100 reaches it.
+# at scale 100; scale 100 reaches it.
 PATH_SEARCH_ROWS_PER_PARTITION = 2_000_000
 PATH_SEARCH_LEVEL_EDGE_RATIO = 4
 PATH_SEARCH_MAX_PARTITIONS = 2048
@@ -1844,7 +1844,7 @@ def w1_connected_components(
         # returning an empty alerts DF) lets gold_finalize / replay emit a
         # ``skipped=vertex-cap`` log line the metrics collector records as a
         # third state, so a scale-100 W1 skip is never rendered as a 0%
-        # recall regression (LB-119). Raise the cap via the
+        # recall regression. Raise the cap via the
         # ``financial.w1_max_vertices`` config field (env
         # ``LB_FINANCIAL_W1_MAX_VERTICES``), which gold_finalize threads
         # into this parameter -- there is no separate CLI flag.

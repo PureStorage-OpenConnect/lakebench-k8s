@@ -9,7 +9,7 @@ This is the continuous-pipeline equivalent of silver_build.py. Where
 silver_build processes all data in a single batch pass, silver_stream
 processes micro-batches as new rows arrive in bronze_raw.
 
-Replay idempotency (E3, the LB-109 protocol of silver_stream_financial,
+Replay idempotency (E3, the replay protocol of silver_stream_financial,
 scoped to the stream): Structured Streaming re-runs a micro-batch with the
 same batchId when the driver dies after the table commit but before the
 checkpoint commit, and a plain append wrote it twice. Every silver row
@@ -74,7 +74,7 @@ from pyspark.sql.functions import lit
 
 _TABLE_WAIT_INTERVAL = 15  # seconds between checks
 # A3 (silver-plan): capped from run_duration / 4 by job.py so the wait loop
-# cannot spend the whole window before the LB-044 gate fires. Fallback 1800 is
+# cannot spend the whole window before the empty-rows gate fires. Fallback 1800 is
 # only used when job.py did not export the env var (test harness, older
 # deployments), matching the previous hardcoded default.
 _TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))

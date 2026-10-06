@@ -28,7 +28,7 @@ MANAGED_LABEL = "lakebench.managed"
 # Fingerprint of the requested ComponentSpec. Stamped as a label on every
 # container so `apply()` can tell "same image, but different env/ports/mounts"
 # apart from "identical spec" -- comparing image alone lets a redeploy with a
-# changed S3 endpoint silently reuse the previous config (LB-092).
+# changed S3 endpoint silently reuse the previous config.
 SPEC_FINGERPRINT_LABEL = "lakebench.spec-fingerprint"
 
 
@@ -89,7 +89,7 @@ class ContainerRuntime:
         alone; anything else (different image, env, ports, mounts, args, or
         command) forces a recreate.
 
-        The identity check used to compare image alone (LB-092): a redeploy
+        The identity check used to compare image alone: a redeploy
         that changed only the S3 endpoint or bucket kept the running Garage
         container with its old config and quietly diverged. Fingerprinting
         the whole spec closes that.
@@ -132,7 +132,7 @@ class ContainerRuntime:
                 # SELinux relabel, required on RHEL hosts. Lowercase "z" is a
                 # shared label; uppercase "Z" is private and exclusive.
                 #
-                # It must be "z" (LB-054). Local mode points more than one
+                # It must be "z". Local mode points more than one
                 # container at the same host tree -- Garage at its config and
                 # data, Spark at the Ivy cache beside them. With "Z", the
                 # second container to start relabels the tree with its own MCS

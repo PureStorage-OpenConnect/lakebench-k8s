@@ -8,12 +8,12 @@ seconds). Each tick does two things against the moving silver corpus:
    alerts into gold.alerts.
 2. Refresh the daily_dashboards baseline rows (rule_id='baseline').
 
-Before LB-127 this script refreshed only the baseline dashboard and ran NO
+Previously this script refreshed only the baseline dashboard and ran NO
 detection: a continuous AML run produced zero alerts, nothing to score, and
-(with the LB-044 honest-runner gap) could still report PASS. This is the
+(before the honest-runner gate landed) could still report PASS. This is the
 continuous half of the detection spine.
 
-Why full re-detection each tick, not a sliding window (LB-127, post-review):
+Why full re-detection each tick, not a sliding window:
 An earlier design scanned a data-clock window [max(txn_timestamp) - w, max]
 each tick. Adversarial review found two fatal flaws: (a) the corpus is a
 static historical dataset trickled onto bronze OUT OF event-time order, so
@@ -44,7 +44,7 @@ ticks of the run, and its status for the tick is 'error' or 'skipped'. So a
 transient failure on the last tick scores that rule's typologies as not run,
 never as the previous tick's alerts under a status that says otherwise.
 
-detected_ts semantics in continuous (LB-127): because each tick rewrites a
+detected_ts semantics in continuous: because each tick rewrites a
 rule's alerts, detected_ts carries the LAST re-detection time, not the first.
 
 Time to detect (Phase 4a): alert_id is a fresh uuid() on every tick, so first
@@ -83,7 +83,7 @@ Refresh discipline:
   detection rows (other rule_ids) written the same tick are never wiped.
 - SIGTERM/SIGINT triggers a clean loop exit rather than a kubelet SIGKILL.
 - After MAX_CONSECUTIVE_FAILURES consecutive whole-tick failures the script
-  exits non-zero so K8s Job status reflects reality (LB-044). A single
+  exits non-zero so K8s Job status reflects reality. A single
   misbehaving rule is isolated inside run_detection_rules and does NOT count
   as a tick failure.
 """
@@ -229,7 +229,7 @@ def _install_signal_handlers() -> None:
 
 def _bootstrap_gold_tables(spark) -> None:
     """Create ALL gold tables the tick touches if absent, and add detected_ts
-    to a pre-LB-125 reused gold.alerts.
+    to an older reused gold.alerts missing the column.
 
     In continuous mode gold_finalize NEVER runs, so this script owns the full
     gold-table bootstrap -- not just alerts. The tick issues DELETE FROM
@@ -703,7 +703,7 @@ class TickState:
         self.window_end_s = window_end_s
         # Consecutive ticks whose baseline refresh failed; run_tick raises at
         # MAX_CONSECUTIVE_FAILURES so a dashboard that never refreshes still
-        # fails the job (LB-044), as it did when the baseline ran first.
+        # fails the job, as it did when the baseline ran first.
         self.baseline_failures = 0
 
     @classmethod
@@ -836,7 +836,7 @@ def run_tick(spark, state, cycle) -> dict:
     log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
     log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
     log(f"Cycle {cycle}: completed run={RUN_ID}")
-    # Collector line formats (LB-136). Freshness: how long ago the newest row
+    # Collector line formats. Freshness: how long ago the newest row
     # this tick's detection saw entered bronze, i.e. how stale the alerts are
     # against the input. Reported when silver moved on, and also whenever
     # bronze holds rows silver has not seen: a stalled silver-stream then

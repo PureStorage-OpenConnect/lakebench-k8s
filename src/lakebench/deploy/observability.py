@@ -236,7 +236,7 @@ PODMONITOR_TEMPLATES = [
 ]
 
 # The Grafana dashboard is rendered ONCE into the shared observability namespace,
-# not per-deployment (LB-192: a fixed uid rendered per-namespace collides in the
+# not per-deployment (a fixed uid rendered per-namespace collides in the
 # shared Grafana). A namespace + run_id template variable makes the single
 # dashboard serve every deployment/run.
 DASHBOARD_TEMPLATE = "grafana/dashboard-configmap.yaml.j2"
@@ -400,7 +400,7 @@ class ObservabilityDeployer:
         monitoring. This deployment's PodMonitors and Pushgateway are in its
         own namespace and are removed with it (or by destroy's category1 step
         when the namespace survives); the shared dashboard ConfigMap
-        in the observability namespace (LB-192) is left in place. The one release destroy
+        in the observability namespace is left in place. The one release destroy
         removes is a pre-v1.6 release installed into this deployment's own
         namespace: it scrapes only that namespace, and deleting the namespace
         without uninstalling it would orphan its cluster-scoped webhooks and
@@ -572,7 +572,7 @@ def build_helm_values(observability: ObservabilityConfig) -> dict[str, str]:
         # install into the Secret <release>-grafana. An existing install
         # keeps the value it was installed with.
         # The dashboard ConfigMap lives in the shared observability
-        # namespace (LB-192); ALL also picks up older per-namespace ones.
+        # namespace; ALL also picks up older per-namespace ones.
         "grafana.sidecar.dashboards.searchNamespace": "ALL",
     }
     # No namespace selector: the chart default ({}) watches every

@@ -71,7 +71,7 @@ def _dataclass_from_dict(
 ):
     """Reconstruct a dataclass instance from a JSON-dict, iterating fields.
 
-    Class-level fix for the LB-123 defect shape on the LOAD side. Two
+    Class-level fix for a hand-copy-drift shape on the LOAD side. Two
     live-caught instances (silver-plan r3 silver_tables + extra_metrics on
     JobMetrics; extra_metrics on StreamingJobMetrics) reached metrics.json
     via asdict() but reverted to defaults on load because the hand-written
@@ -632,7 +632,7 @@ class MetricsStorage:
             # Class-level reload: iterate dataclass fields so every JobMetrics
             # field flows automatically. The hand-written kwargs list here
             # previously omitted silver_tables + extra_metrics -- disk showed
-            # them via asdict() but load reverted to defaults (LB-123 shape on
+            # them via asdict() but load reverted to defaults (hand-copy drift on
             # the READ side, adversarial-review finding 2026-09-28). Same
             # mirror defect on StreamingJobMetrics.extra_metrics, fixed below.
             job = _dataclass_from_dict(JobMetrics, job_data, aliases=_JOB_ALIASES)

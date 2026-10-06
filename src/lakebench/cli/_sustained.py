@@ -446,7 +446,7 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
 
 
 def _c360_only_fresh_generate(cfg, existing: list[str]) -> bool:
-    """True when the only state found is the raw landing zone (LB-154).
+    """True when the only state found is the raw landing zone.
 
     That is the documented deploy -> generate -> run flow on a deployment
     that has never run: no tables, no stream checkpoints, just a raw corpus.
@@ -496,7 +496,7 @@ def _datagen_job_state(namespace: str) -> tuple[str, str]:
 
 
 # How long a continuous run waits for its datagen Job to finish before it
-# budgets the streams with datagen's cores still reserved (LB-158).
+# budgets the streams with datagen's cores still reserved.
 _DATAGEN_RELEASE_WAIT_S = 300
 
 
@@ -3430,7 +3430,7 @@ def _run_sustained(
         engine = DeploymentEngine(cfg)
         # Every continuous run starts clean; see _reset_continuous_state, and
         # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
-        # bronze_verify LB_CONTINUOUS_RESET (c360, LB-142).
+        # bronze_verify LB_CONTINUOUS_RESET (c360).
         # Ownership first: stopping streams in a namespace this run does
         # not own would already be the damage the gate exists to prevent.
         _stage = "reset"
@@ -3440,7 +3440,7 @@ def _run_sustained(
             # a large raw corpus or a batch run's tables took hours to build.
             # A raw-only corpus no larger than this run regenerates, with no
             # datagen still writing, is the plain deploy -> generate -> run
-            # flow and is replaced (LB-154).
+            # flow and is replaced.
             _existing = _c360_existing_state(cfg, clear_raw=not skip_generate)
             _raw_only = _c360_only_fresh_generate(cfg, _existing)
             _raw_problem = _c360_raw_replace_problem(cfg) if _raw_only else None
@@ -3530,7 +3530,7 @@ def _run_sustained(
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
 
-        # LB-091: AML sustained mode needs the bronze Iceberg table to
+        # AML sustained mode needs the bronze Iceberg table to
         # exist before bronze_ingest_financial starts -- the streaming
         # source cannot infer a schema from parquet files, so it hard-
         # exits with `sys.exit(2)` when the table is missing. Only
@@ -3608,7 +3608,7 @@ def _run_sustained(
                 f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
             )
         else:
-            # c360 (LB-142): a batch run, or an earlier continuous run, leaves
+            # c360: a batch run, or an earlier continuous run, leaves
             # bronze_raw, silver and gold full. The checkpoints were deleted
             # above, and silver-stream refuses a fresh checkpoint over a full
             # table, so drop the tables before any stream starts. Unlike the
@@ -3626,7 +3626,7 @@ def _run_sustained(
 
         # The corpus is finite and usually written within minutes; a finished
         # datagen Job holds no cores, so the streaming budget stops reserving
-        # them (LB-158). Wait a bounded time for it so the executor counts do
+        # them. Wait a bounded time for it so the executor counts do
         # not depend on a race with one API read. Unfinished or unknown keeps
         # the reservation, so the streams never over-commit the cluster.
         job_manager.datagen_running = not _datagen_released(
@@ -3647,7 +3647,7 @@ def _run_sustained(
             message="Starting streaming pipeline",
             details={
                 "jobs": [name for _, name in streaming_jobs],
-                # LB-158: whether the budget reserved datagen's cores, so
+                # Whether the budget reserved datagen's cores, so
                 # runs with different executor counts can be told apart.
                 "datagen_cores_reserved": job_manager.datagen_running,
             },
@@ -4090,11 +4090,11 @@ def _run_sustained(
             # to parse Parquet footers). Leaving _datagen_output_rows at 0
             # correctly signals "unmeasurable" downstream -- ingest_ratio and
             # pipeline_saturated become None rather than being computed against
-            # a fictional `scale * 1_500_000` denominator (LB-044 pattern).
+            # a fictional `scale * 1_500_000` denominator.
         except Exception as e:
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
 
-        # LB-136: when every datagen pod has finished and reported, their
+        # When every datagen pod has finished and reported, their
         # summed rows_written IS the produced-row count, for either workload
         # (both generators are finite and emit LB_METRICS_JSON). A window
         # that ends before the corpus is consumed then honestly reads as
@@ -4387,19 +4387,18 @@ def _run_sustained(
             collector.current_run.continuous["settle"] = settle
             collector.current_run.continuous["result_check"] = result_check
 
-        # LB-127 honest continuous runner (closes LB-044 for AML). A
-        # continuous AML run whose gold stage produced ZERO alerts is a
-        # FAILURE, not a PASS: it means detection never fired (empty silver,
-        # a data-clock/window miss, or a broken rule), and the whole point of
-        # the run -- measuring detection under a sustained trickle -- did not
-        # happen. Exit-code-only success let this masquerade as PASS for two
-        # UAT rounds on the C360 side (LB-044); AML asserts on real output.
+        # Honest continuous runner. A continuous AML run whose gold stage
+        # produced ZERO alerts is a FAILURE, not a PASS: it means detection
+        # never fired (empty silver, a data-clock/window miss, or a broken
+        # rule), and the whole point of the run -- measuring detection under
+        # a sustained trickle -- did not happen. Exit-code-only success let
+        # this masquerade as PASS on the C360 side; AML asserts on real output.
         # Evaluated BEFORE the per-stage record loop so streaming_metrics.success
         # is recorded consistent with the run-level verdict, and it only sets
         # the flag here -- the non-zero exit is raised at the end of the try so
         # metrics + streaming stats still persist. Gated to financial so
         # non-detection C360 sustained runs (no alerts by design) are unaffected.
-        # None gold-refresh logs => FAILURE by deliberate LB-044 policy
+        # None gold-refresh logs => FAILURE by deliberate policy
         # (absence of proof is not proof of success); the trade-off is a
         # possible false-fail if driver-log capture times out on a very long
         # run, which is preferred over silently passing an unverifiable run.
@@ -4461,7 +4460,7 @@ def _run_sustained(
             if _report_tm_verdict(_tm, "AML continuous gate"):
                 pipeline_success = False
 
-        # c360 honest continuous gate (LB-044 for c360; AML has its own above).
+        # c360 honest continuous gate (AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows
         # moved no data, whatever the exit codes say.
         if cfg.architecture.workload.schema_type.value != "financial":
@@ -4629,13 +4628,13 @@ def _run_sustained(
                 )
             )
 
-        # LB-127 P0 fix: a flagged failure MUST exit non-zero. Every other
-        # failed step in this function raises typer.Exit(ExitCode.FAILED); the gate above
-        # only set the flag (so the record loop + benchmark aggregation could
-        # still persist). Raise now, inside the try, so the finally block still
-        # runs (metrics + journal persist with success=False) and the process
-        # exits 1 -- the exact signal an exit-code-only UAT runner reads, which
-        # is the whole point of closing LB-044.
+        # A flagged failure MUST exit non-zero. Every other failed step in
+        # this function raises typer.Exit(ExitCode.FAILED); the gate above
+        # only set the flag (so the record loop + benchmark aggregation
+        # could still persist). Raise now, inside the try, so the finally
+        # block still runs (metrics + journal persist with success=False)
+        # and the process exits 1 -- the exact signal an exit-code-only UAT
+        # runner reads.
         if not pipeline_success:
             raise typer.Exit(ExitCode.FAILED)
 
@@ -4814,8 +4813,7 @@ def _run_sustained(
                             )
                             + ": freshness covers only gold cycles that saw new data, and rows/s "
                             "is taken over the seconds data was arriving. Lower "
-                            "max_files_per_trigger or shorten the window so arrival lasts it "
-                            "(LB-145)."
+                            "max_files_per_trigger or shorten the window so arrival lasts it."
                         )
                     _trickle = pb.trickle_note()
                     if _trickle:

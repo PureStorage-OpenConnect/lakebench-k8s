@@ -465,7 +465,7 @@ def reference_score(
     whether a canonical detector (a GBT trained on non-leaky features) can
     recover each typology, and whether any planted signal leaks through the raw
     amount band. A relative-threshold rule rewrite (e.g. the W4/W8 precision
-    work, LB-130) is validated against this envelope before it ships -- a rule
+    work) is validated against this envelope before it ships -- a rule
     whose precision/recall diverges sharply from the reference is scoring
     against label knowledge it should not have. The job installs scikit-learn
     and its pinned dependencies for the GBT half in an init container on each

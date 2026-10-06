@@ -302,7 +302,7 @@ def _destroy_impl(
 
     # Load configuration
     try:
-        # A namespace too long to finish deploying (LB-153) still has to be
+        # A namespace too long to finish deploying still has to be
         # destroyable, so the derived-name length check is skipped here.
         cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
     except ConfigFileNotFoundError as e:
@@ -418,7 +418,7 @@ def _destroy_impl(
             _dg_step_start.pop(component, None)
             if component in ("namespace", "table-cleanup"):
                 # The namespace was kept or is still terminating, or tables
-                # were left registered (LB-186): never silent.
+                # were left registered: never silent.
                 console.print(f"    [yellow]![/yellow] {message}")
                 _journal_safe(
                     j.record,
@@ -492,8 +492,8 @@ def _destroy_impl(
     console.print()
     passed = sum(1 for r in results if r.status == DeploymentStatus.SUCCESS)
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
-    # LB-186: tables destroy left registered because their data is in buckets
-    # it does not own (or bucket cleanup was off). Never hidden by the panel.
+    # Tables destroy left registered because their data is in buckets it
+    # does not own (or bucket cleanup was off). Never hidden by the panel.
     left_registered = [
         entry
         for r in results

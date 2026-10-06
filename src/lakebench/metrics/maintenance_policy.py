@@ -15,10 +15,10 @@ Policy history:
 
 - ``m1-legacy``: everything recorded before the id was stamped. That lumps
   two real policies: before f63cb38 Iceberg expire_snapshots and
-  remove_orphan_files never succeeded on either engine (LB-172, LB-174), so
-  only compaction ran; from f63cb38 they did. Because the two cannot be told
-  apart, reproduce accepts only runs under the current id.
-- ``m2-2026-09-26``: LB-174 fixed statement forms (Trino SET SESSION
+  remove_orphan_files never succeeded on either engine, so only compaction
+  ran; from f63cb38 they did. Because the two cannot be told apart,
+  reproduce accepts only runs under the current id.
+- ``m2-2026-09-26``: fixed statement forms (Trino SET SESSION
   min-retention in the same submission, Spark TIMESTAMP literal); continuous
   expiry floored at 1 h and orphan removal at 24 h 10 min on every path;
   destroy runs DROP only; continuous Delta VACUUM at the 7 d default and no

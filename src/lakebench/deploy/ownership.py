@@ -65,7 +65,7 @@ ANNOTATION_STAMPED_AT = "lakebench.deployment/stamped-at"
 # Bucket tag keys.
 TAG_DEPLOYMENT_NAME = "lakebench.deployment"
 TAG_WORKLOAD_SCHEMA = "lakebench.workload"
-# LB-159: set only on buckets deploy itself created. Destroy deletes a bucket
+# Set only on buckets deploy itself created. Destroy deletes a bucket
 # only when it carries this marker (or is listed in the namespace annotation
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
@@ -113,7 +113,7 @@ class IdentityVerdict(str, Enum):
     #: Backend does not implement the tagging API (e.g. FlashBlade returns
     #: ``NotImplemented`` on ``GetBucketTagging`` / ``PutBucketTagging``).
     #: Tag-based ownership is impossible; callers must fall back to a
-    #: weaker check (name-prefix on buckets) or refuse. See LB-088.
+    #: weaker check (name-prefix on buckets) or refuse.
     #: Among the ownership verdicts it means: tagless, no owner marker, and not
     #: in this namespace's created or adopted-empty record (row 7 of the
     #: matrix in ``verify_bucket_ownership``).
@@ -654,7 +654,7 @@ def write_bucket_ownership_tag(
     given it is written as ``lakebench.cluster`` and verified too. A row-4
     bucket (``LEGACY_UNPROVEN``) is never passed here.
 
-    ``created`` adds the created-by-lakebench marker (LB-159). The whole tag
+    ``created`` adds the created-by-lakebench marker. The whole tag
     set is rewritten, so a caller re-tagging a bucket lakebench created on an
     earlier deploy must pass ``created=True`` again to keep the marker.
 
@@ -704,7 +704,7 @@ def write_bucket_ownership_tag(
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code == "NotImplemented":
-            # Backend does not implement bucket tagging at all (LB-088:
+            # Backend does not implement bucket tagging at all (e.g.
             # FlashBlade returns HTTP 501 NotImplemented). Cannot
             # enforce tag-based ownership. Caller handles the fallback
             # identity check. Narrow to NotImplemented only: HTTP 405
@@ -748,7 +748,7 @@ def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] |
 
     Never raises for the "no tags on this bucket" case (S3 returns
     NoSuchTagSet). Raises ``BucketTaggingUnsupported`` for backends that
-    do not implement the tagging API at all (LB-088: FlashBlade returns
+    do not implement the tagging API at all (e.g. FlashBlade returns
     ``NotImplemented``, not ``NoSuchTagSet``). Other errors propagate.
     """
     from botocore.exceptions import ClientError
@@ -760,7 +760,7 @@ def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] |
         if code in ("NoSuchTagSet", "NoSuchTagSetError"):
             return None
         if code == "NotImplemented":
-            # LB-088: FlashBlade returns HTTP 501 NotImplemented.
+            # FlashBlade returns HTTP 501 NotImplemented.
             # Narrow to this code only: MethodNotAllowed and other
             # 4xx codes indicate permissions / policy problems, not a
             # missing feature.
@@ -840,7 +840,7 @@ def tagless_contents_are_ours(core_v1: Any, namespace: str, bucket: str) -> bool
 
 
 def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
-    """Add ``buckets`` to the namespace's created-buckets annotation (LB-159).
+    """Add ``buckets`` to the namespace's created-buckets annotation.
 
     Union with what is already recorded, so a redeploy (which sees the
     buckets as existing) does not forget that an earlier deploy created them.

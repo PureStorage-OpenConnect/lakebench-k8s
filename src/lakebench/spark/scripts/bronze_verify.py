@@ -4,11 +4,10 @@ Fails the job (exit 1) when bronze could not produce a meaningful silver:
 no rows, a missing or wrongly typed column that silver or gold computes on,
 a key column that is entirely null, or no row that survives the silver
 quality filter. These used to be warnings or not checked at all, so an empty
-or schema-broken bronze passed and the run reported success on no data
-(LB-044 class).
+or schema-broken bronze passed and the run reported success on no data.
 
-LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead
-(LB-142): it drops the tables the continuous jobs write (bronze_raw, silver,
+LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead:
+it drops the tables the continuous jobs write (bronze_raw, silver,
 gold) with their data, and verifies nothing. A batch run leaves silver and
 gold full, and silver-stream rightly refuses to start a fresh checkpoint over
 a full table. The CLI deletes the stream checkpoints before submitting this

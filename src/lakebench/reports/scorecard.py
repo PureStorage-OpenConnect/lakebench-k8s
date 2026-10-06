@@ -218,9 +218,9 @@ class FinancialScorecardBlock:
     Renders a per-rule detection table (batch, or continuous from the
     gold-refresh time-to-detect counts): alert count, the
     planted typology each rule targets, recall (from the folded-in
-    ``financial score``, LB-123), and a status that reads "not run" for a
-    rule the gold-finalize step skipped (e.g. W1 above its vertex cap,
-    LB-119) -- never 0%, which would misreport a skip as a miss.
+    ``financial score``), and a status that reads "not run" for a
+    rule the gold-finalize step skipped (e.g. W1 above its vertex cap)
+    -- never 0%, which would misreport a skip as a miss.
     """
 
     schema_name = "financial"
@@ -343,7 +343,7 @@ class FinancialScorecardBlock:
         # Known rules first (in RULE_TARGETS order), then any rule that
         # emitted alerts or skipped but is not yet in RULE_TARGETS -- so a
         # newly added detection rule's alerts are never silently dropped from
-        # the report (LB-123 review).
+        # the report.
         known = list(RULE_TARGETS)
         extra = sorted((set(alerts_by_rule) | set(rules_skipped) | set(rule_errors)) - set(known))
         rules = known + extra

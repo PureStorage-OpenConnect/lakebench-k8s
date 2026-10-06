@@ -647,7 +647,7 @@ class S3Client:
                         before_batch()
                     for upload in uploads:
                         # FlashBlade can still list an upload that its async
-                        # GC or a writer has already finished (LB-149). Gone
+                        # GC or a writer has already finished. Gone
                         # is the state we want; step 3 still verifies it.
                         try:
                             self._client.abort_multipart_upload(
@@ -705,7 +705,7 @@ class S3Client:
 
         except ClientError as e:
             # A concurrent destroy of the same deployment can delete the
-            # bucket while this loop is listing it (LB-159).
+            # bucket while this loop is listing it.
             if e.response.get("Error", {}).get("Code", "") in ("NoSuchBucket", "404"):
                 raise S3BucketVanished(  # noqa: B904
                     f"bucket {bucket_name} was deleted while being emptied "
@@ -714,7 +714,7 @@ class S3Client:
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
 
     def delete_bucket(self, bucket_name: str, max_wait: int = 300) -> bool:
-        """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
+        """Delete a bucket that ``empty_bucket`` has already emptied.
 
         The caller is responsible for proving the bucket is this
         deployment's; this method only removes it. ``BucketNotEmpty`` is

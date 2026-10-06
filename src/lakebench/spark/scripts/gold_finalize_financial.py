@@ -26,7 +26,7 @@ this). Steps:
 The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
 from `metrics.json` without a separate `lakebench financial replay`
-invocation (LB-092).
+invocation.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_STATUS} (
 ) USING iceberg
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
-# LB-119: durable, data-plane record of what each detection rule did this
+# Durable, data-plane record of what each detection rule did this
 # run -- 'ran' (with alert_count), 'skipped' (with reason, e.g. vertex-cap),
 # or 'error' (with the exception class). This is the bridge that lets
 # score_financial mark a skipped rule's target typology "not run" in
@@ -523,7 +523,7 @@ def run_detection_rules(
 
     total_alerts = 0
     # Per-rule status accumulated for the durable gold.detection_status table
-    # (LB-119). Each entry: (rule_id, status, reason, target_typology,
+    # Each entry: (rule_id, status, reason, target_typology,
     # alert_count). status in {'pending','ran','skipped','error'}.
     status_rows: list[tuple] = []
     # Mark this run as in progress BEFORE touching gold.alerts. The per-rule
@@ -756,7 +756,7 @@ def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int) -> None:
 
 
 def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
-    """Persist per-rule detection status to gold.detection_status (LB-119).
+    """Persist per-rule detection status to gold.detection_status.
 
     Overwrites the table with this run's status so it reflects the run that
     produced the current gold.alerts. Not best-effort: scoring scopes alerts
@@ -810,8 +810,8 @@ def _project_derived_gold(spark, run_id: str) -> None:
     that SKIPPED this run (W1 above its vertex cap) would leave a prior
     run's W1 rows in gold.alerts, and this projection would re-emit them as
     "freshly detected" (detected_ts = now) while the alert scorecard says
-    W1 did not run -- a direct contradiction on a reused catalog (LB-119
-    review F1). Filtering by run_id makes a skipped rule contribute zero
+    W1 did not run -- a direct contradiction on a reused catalog.
+    Filtering by run_id makes a skipped rule contribute zero
     rows this run, so the derived table correctly shows "not run".
     """
     from pyspark.sql.functions import array, current_timestamp, size, when
@@ -825,7 +825,7 @@ def _project_derived_gold(spark, run_id: str) -> None:
     # gold.entity_clusters from W1 connected-components alerts. The
     # ``related_entity_ids IS NOT NULL`` filter guarantees the NOT NULL
     # member_entity_ids / cluster_size columns receive non-null input
-    # regardless of the Spark storeAssignmentPolicy (LB-119 review F2):
+    # regardless of the Spark storeAssignmentPolicy:
     # gold.alerts declares related_entity_ids nullable, so a by-name write
     # into the NOT NULL target would otherwise rely on ANSI runtime
     # assertion, and under STRICT would throw and (being caught below)

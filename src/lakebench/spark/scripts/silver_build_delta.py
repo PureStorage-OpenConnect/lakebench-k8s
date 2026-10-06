@@ -131,7 +131,7 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     # Customers and skew from the sample's per-customer counts. The distinct
     # count is not scaled by 1 / sample_fraction: that treated every sampled
     # customer as unique to the sample and reported 14.7M customers at
-    # scale 10, where there are 1M (LB-144).
+    # scale 10, where there are 1M.
     approx_customer_count, skew_factor = sample_key_profile(
         sample_df, "customer_id", sample_estimate
     )
@@ -336,7 +336,7 @@ def rows_added_by_last_commit(spark, silver_tbl):
 
     A4 (silver-plan): the previous fallback ``spark.table(silver_tbl).count()``
     returned the cumulative table row count, which masked a zero-write cycle
-    in incremental mode (LB-044 class). Callers now treat None as "unknown"
+    in incremental mode. Callers now treat None as "unknown"
     and refuse to publish it as ``output_rows``.
     """
     try:
@@ -764,7 +764,7 @@ log(f"data_clock_source: {env('LB_DATA_CLOCK_SOURCE', 'unknown')}")
 # earlier `estimated_rows` emission is dropped.
 log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")
 # A4 (silver-plan): output_rows is `unknown` when the commit-metrics
-# fallback fired; the LB-044 gate below then refuses the run rather than
+# fallback fired; the gate below then refuses the run rather than
 # publishing a cumulative table count as this cycle's output.
 if silver_count is None:
     log("output_rows: unknown")
@@ -778,6 +778,6 @@ if silver_count is None:
     raise SilverAbort(
         "silver-build: output_rows unknown (commit metrics unavailable); refusing exit-0 pass"
     )
-# A1: LB-044 gate; see silver_build.py for the rationale.
+# A1 gate; see silver_build.py for the rationale.
 assert_progress(silver_count, "silver-build")
 spark.stop()

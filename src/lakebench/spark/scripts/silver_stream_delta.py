@@ -119,7 +119,7 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
     Window is 100 rather than 20: concurrent OPTIMIZE / VACUUM / a second
     writer to the same table can push our commit past a small window
     between our write and our history read, and returning ``None`` on a
-    real commit would silently under-count against A1's LB-044 accumulator
+    real commit would silently under-count against A1's accumulator
     (invariant 5 label drift, not corruption -- rows are still written).
     100 is a cheap Delta metadata scan and covers realistic maintenance
     burst rates.

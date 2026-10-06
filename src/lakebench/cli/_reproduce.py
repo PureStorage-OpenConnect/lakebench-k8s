@@ -354,7 +354,7 @@ def _experiment_refusal(meta: dict[str, Any], metrics: Any) -> str | None:
 
 
 def _benchmark_samples(metrics: Any) -> int | None:
-    """Timed samples per query behind the run's QpH; 1 for pre-LB-150 records."""
+    """Timed samples per query behind the run's QpH; 1 for older records without a samples field."""
     from lakebench.benchmark.spread import samples_per_query
 
     pb = getattr(metrics, "pipeline_benchmark", None)

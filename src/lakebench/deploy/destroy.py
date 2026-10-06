@@ -40,7 +40,7 @@ _LEGACY_SECRETCLASSES = ("lakebench-s3-credentials-class", "lakebench-s3-ca-cert
 _POSTGRES_PVC_RE = re.compile(r"^data-lakebench-postgres-\d+$")
 
 
-# LB-157: a namespace delete returns as soon as the API server accepts it; the
+# A namespace delete returns as soon as the API server accepts it; the
 # namespace then sits in Terminating until its content is gone (a PVC held by
 # kubernetes.io/pvc-protection until its pod stops can take minutes). Destroy
 # waits for NotFound before it says "deleted".
@@ -639,7 +639,7 @@ class _BucketPlan:
     """What the bucket step will do with each of the deployment's buckets.
 
     ``buckets`` is the list destroy empties (refused ones removed). The table
-    step reads it to decide whether a file-deleting DROP is safe (LB-186); the
+    step reads it to decide whether a file-deleting DROP is safe; the
     bucket step recomputes it right before emptying, so a verdict never goes
     stale between the check and the delete.
     """
@@ -670,7 +670,7 @@ def _files_left_in_refused_buckets(engine, refused: set[str], unregistered: list
     The table step removed these tables from the catalog only; their data
     and metadata files live in their layer's bucket, and a refused bucket is
     not emptied. Without this the user learned only that the bucket was kept
-    (lb16-checks2, LB-186).
+    (lb16-checks2).
     """
     if not refused or not unregistered:
         return []
@@ -770,7 +770,7 @@ def _classify_buckets(
         _kclient.CoreV1Api(),
         exclude=engine.config.get_namespace(),
     )
-    # LB-177: the namespace records which buckets lakebench
+    # The namespace records which buckets lakebench
     # created, possibly under an earlier config. Consider those
     # too (each still has to pass the ownership check below),
     # or they leak and the namespace delete erases the record.
@@ -787,7 +787,7 @@ def _classify_buckets(
     buckets = buckets + recorded_only
     refused_names: list[str] = []
     # Recorded-only buckets are not named by the current config.
-    # Review of LB-177: on backends without tagging the only
+    # On backends without tagging the only
     # ownership proof is the name, and another deployment may be
     # using such a bucket now (S-P6 style shared bronze), so a
     # non-empty one is left in place, never emptied.
@@ -1065,7 +1065,7 @@ def _classify_buckets(
         _progress("s3-buckets", DeploymentStatus.IN_PROGRESS, refusal_msg)
     else:
         refusal_msg = ""
-    # LB-177: a refusal on one bucket leaves it alone but does not
+    # A refusal on one bucket leaves it alone but does not
     # stop the deployment's other, owned buckets.
     refused_set = set(refused_names)
     buckets = [b for b in buckets if b not in refused_set]
@@ -1094,7 +1094,7 @@ def _drop_deletes_files(maint_engine: str, table_format: str) -> bool:
     """Whether this engine's DROP TABLE (no PURGE) deletes the table's files.
 
     Spark Thrift on Iceberg drops the catalog entry only; every other
-    engine and format lakebench drops with can delete files (LB-186, see
+    engine and format lakebench drops with can delete files (see
     the table step for the source references). Unknown pairs count as
     deleting.
     """
@@ -1661,11 +1661,11 @@ def destroy_all(
             of ownership"; a warn-and-proceed defeats it). Foreign
             annotations/tags are refused regardless of this flag.
         namespace_wait_timeout: Seconds to wait, after issuing the namespace
-            delete, for the namespace to be gone (LB-157). 0 skips the wait (the result is then still_terminating).
+            delete, for the namespace to be gone. 0 skips the wait (the result is then still_terminating).
             A namespace still Terminating at the deadline is reported as a
             warning (status SKIPPED), never as deleted.
         delete_buckets: After emptying, delete the buckets this deployment
-            provably owns (LB-159). False empties them and keeps them.
+            provably owns. False empties them and keeps them.
         expected_incarnation: The ``uid#nonce`` the caller verified (a
             nameless config's state check, or ``reproduce``'s own deploy).
             When set and the namespace is not that incarnation at
@@ -1713,7 +1713,7 @@ def destroy_all(
     # steps below therefore require a verified namespace or --force-legacy.
     ownership_proven = False
     namespace_present = engine.k8s.namespace_exists(namespace)
-    # The incarnation this destroy is about (LB-157). A concurrent destroy of
+    # The incarnation this destroy is about. A concurrent destroy of
     # the same deployment can finish and a redeploy re-create the name while
     # this run is still working; the watch-list and namespace steps compare
     # against this and leave a newer namespace alone.
@@ -2606,7 +2606,7 @@ def destroy_all(
                 # skipped (policy, 2026-09-26): the bucket step empties the
                 # buckets destroy owns, so it would only cost time.
                 #
-                # LB-186: this step must never delete files. Which statements
+                # This step must never delete files. Which statements
                 # delete what (Trino 479, Iceberg 1.10, Spark 4.0 sources):
                 # - Trino DROP TABLE, Iceberg on Hive: every file the table
                 #   references (TrinoHiveCatalog.dropTable -> dropTableData),
@@ -2970,7 +2970,7 @@ def destroy_all(
                 # (--keep-buckets, create_buckets false) is still provably
                 # this deployment's after the namespace and its record go.
                 stamp_notes = _stamp_legacy_proven(engine, s3, namespace, plan_b, guard)
-                # LB-159: only buckets lakebench created are deleted. The
+                # Only buckets lakebench created are deleted. The
                 # record is the namespace annotation (all backends) plus
                 # the created tag where tagging works. An unreadable
                 # record keeps the buckets, never deletes them.
@@ -3004,7 +3004,7 @@ def destroy_all(
                     total_deleted += deleted
                     if bucket == s3_cfg.buckets.bronze:
                         bronze_emptied = True
-                # LB-159: emptying alone leaked one empty bucket per
+                # Emptying alone leaked one empty bucket per
                 # deployment. Delete only buckets proven to be this
                 # deployment's (ownership tag, or the name-prefix claim
                 # on backends without tagging) and only when lakebench
@@ -3263,7 +3263,7 @@ def destroy_all(
     # A concurrent destroy may have finished while this run emptied buckets,
     # and a redeploy re-created the namespace. Every step below deletes
     # components by name inside the namespace, so stop here rather than tear
-    # down the newer deployment (review of LB-157/LB-159).
+    # down the newer deployment.
     unverifiable_msg = None
     if namespace_gone_midway:
         _note_secretclasses_left()

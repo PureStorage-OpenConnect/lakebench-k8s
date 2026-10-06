@@ -429,13 +429,13 @@ class ImagesConfig(ConfigModel):
     # Python layer bytes. Rust source unchanged from 25f1aa8, so corpus
     # bytes at a fixed seed are unchanged; MODEL_VERSION stays
     # datagen-v2-rs-0.3. Datagen_rs freeze wiring carried forward from
-    # 25f1aa8: LB-191 dirty-ratio semantics, screening rates in prereg
+    # 25f1aa8: dirty-ratio semantics, screening rates in prereg
     # 3.6.1, calibration-replicate seed refusal in perturbation_for_seed,
     # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
     # --delivery-mode {batch|continuous} MpuWriter switch with continuous
     # as the Rust binary default, and the #52 registered_looks_open freeze
     # wiring.
-    # 30603b1 re-fits the datagen peak-RSS memory model (LB-199): the autosizer
+    # 30603b1 re-fits the datagen peak-RSS memory model: the autosizer
     # under-sized financial node-0 at scale 100, OOMKilling it at the 17Gi
     # default. Only datagen_rs/entrypoint.py (thread cap) and config/autosizer.py
     # (pod memory request) change; the Rust generator is unchanged, so the corpus
@@ -446,9 +446,9 @@ class ImagesConfig(ConfigModel):
     # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
     # registered-look / calibration corpus -- those runs pass an explicit frozen
     # digest via --generator-image (aml-protocol.md), never this default.
-    # e14d0fd (LB-204): mimalloc allocator, typology payloads pruned to each
+    # e14d0fd: mimalloc allocator, typology payloads pruned to each
     # pod's own files, world columns recomputed on demand, fixed 64 MB files,
-    # re-fit memory model with a 16Gi pod cap, LB-196 delivery-mode forwarding.
+    # re-fit memory model with a 16Gi pod cap, delivery-mode forwarding.
     # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
     # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
     # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
@@ -465,7 +465,7 @@ class ImagesConfig(ConfigModel):
     # 034f998 and e14d0fd were deleted with the repository wipe of 2026-09-30.
     # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
     # rebuild from source to reproduce):
-    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
+    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) memory refit
     #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
     #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
@@ -473,7 +473,7 @@ class ImagesConfig(ConfigModel):
     #   7c24641 (sha256:c5a6bc80...)
     # 1.6.0: the v1.6 release image, rebuilt from the same datagen_rs source as
     # 034f998 (datagen_rs unchanged 034f998..release; base images digest-pinned,
-    # cargo --locked) after the docker.io repository was wiped (LB-209). Release
+    # cargo --locked) after the docker.io repository was wiped. Release
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
     # 2a36ae21: the v1.7 release image, built from integrate
@@ -2070,7 +2070,7 @@ class WorkloadConfig(ConfigModel):
     # Default sits above the scale-10 vertex count (1.1M entities) so W1 runs
     # out of the box at scale 10; raise it for larger scales that have the
     # executor budget. Whether W1 completes in acceptable wall-clock above
-    # the cap is a measured question (LB-120), not a config guarantee, so the
+    # the cap is a measured question, not a config guarantee, so the
     # ceiling stays generous rather than unbounded. Consumed by
     # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
     w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
@@ -2473,7 +2473,7 @@ class MaintenanceSettleConfig(ConfigModel):
 
     On FlashBlade at c360 scale 10 the compacted tables read QpH 546 two
     minutes after maintenance, 569 at +15 min and 841 at +35 min, against 828
-    before it (LB-150). A post round taken straight away measured the object
+    before it. A post round taken straight away measured the object
     store working off the delete and rewrite burst. The wait probes one
     storage-bound query until it is stable; see ``lakebench.benchmark.settle``.
     Batch mode only: continuous-mode maintenance runs during the stream and
@@ -2563,7 +2563,7 @@ class BenchmarkConfig(ConfigModel):
     # One sample per query cannot tell a change from noise: same-run rounds
     # on the live cluster differed 3-11% in QpH and a post-maintenance round
     # read 10-80% slower per query with nothing to compare that against
-    # (LB-150). Three samples give a median and a measured spread.
+    # Three samples give a median and a measured spread.
     iterations: int = Field(
         default=3,
         ge=1,
@@ -2919,8 +2919,7 @@ S3_BUCKET_MAX = 63
 # The metastore pod volume is the tightest: 40 + len(namespace) <= 63, so a
 # Hive recipe accepts a namespace of at most 23 characters. Past that the
 # metastore pod is rejected, no pod is ever created, the hive-operator logs
-# "metastore listener has no adress", and deploy times out after 600 s
-# (LB-153).
+# "metastore listener has no adress", and deploy times out after 600 s.
 _S3_CRED_CLASS = "lakebench-s3-credentials-{ns}"
 _S3_CA_CLASS = "lakebench-s3-ca-cert-{ns}"
 _DERIVED_NAMES: tuple[tuple[str, str, str], ...] = (
@@ -3461,7 +3460,7 @@ class LakebenchConfig(ConfigModel):
         See ``derived_name_violations`` for the objects and limits checked.
         Without this, a namespace a few characters too long deploys up to
         the Hive metastore and then hangs until the readiness timeout
-        (LB-153). Teardown and diagnostic commands load with
+        Teardown and diagnostic commands load with
         ``allow_long_names`` in the validation context (see ``load_config``)
         so a deployment that failed this way can still be torn down.
         """

@@ -114,7 +114,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
-        # LB-201: 100Gi filled to 88-92% at scale 100 and spilled
+        # 100Gi filled to 88-92% at scale 100 and spilled
         # "No space left on device" in a skewed detection sort (stage 184),
         # losing 5 tasks (recovered, but marginal). Raised to 300Gi, matching
         # the proven silver-build scratch, so the spill-heavy detection DAG
@@ -164,7 +164,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # Recall/precision scoring (LB-123). A manifest read + a linear
+    # Recall/precision scoring. A manifest read + a linear
     # explode-and-join against gold.alerts (score_financial.py rewrote the
     # old N*M crossjoin to a single explode per side, so it stays linear in
     # the UETR footprint). Deliberately small: without this entry the job
@@ -276,7 +276,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 # bronze_verify_financial.py -- a full parquet rewrite through an Iceberg
 # write, whose per-executor staging + shuffle spill overwhelms the 50 Gi
 # base PVC. Live at scale 10 this hit ``No space left on device`` after
-# 78 min (LB-118).
+# 78 min.
 #
 # Sizing headroom: at scale 10, ~25 GB input/executor blew out 50 Gi
 # (~2x amplification through the Iceberg CTAS shuffle+staging path).
@@ -301,7 +301,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 # hitting its own limit, not eviction), so it bites regardless of scheduling in
 # both modes.
 #
-# The pressure is OFF-HEAP, not heap (adversarial review, LB-135): there is no
+# The pressure is OFF-HEAP, not heap: there is no
 # aggregation/ORDER BY in the CTAS. What blows the container is the partitioned
 # write -- the days() clustering shuffle plus S3A `fast.upload.buffer=bytebuffer`
 # uploads (256 MB direct ByteBuffers, uncapped active blocks) and Iceberg
@@ -381,7 +381,7 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
         # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
         # ran back to back. Every tick recomputes all of silver (windowing
-        # loses recall, LB-127), so tick cost follows silver's size, and those
+        # loses recall), so tick cost follows silver's size, and those
         # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
         # up it holds the whole scale-10 corpus, 266.7M rows, by the time
         # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
@@ -594,7 +594,7 @@ def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, 
             profile, so the returned memory/scratch/executor fields match what
             the job actually deploys. The metrics/scorecard path MUST pass this
             or it under-reports AML resources (e.g. bronze-verify as 6Gi when
-            the pod requests 20Gi -- LB-135 review finding). Omitting it keeps
+            the pod requests 20Gi). Omitting it keeps
             the c360 base for backward compatibility.
 
     Returns:
@@ -795,7 +795,7 @@ def compute_peak_requirements(
         schema_type: Workload schema (``"c360"``, ``"financial"``). Selects
             per-workload profile overrides; ``None`` uses the Customer360
             baseline. AML at scale >= 5 needs a larger bronze-verify PVC
-            than c360 (LB-118).
+            than c360.
         config: The deployment's config, when there is one: the drivers are
             then the ones its manifests request (driver overrides, the
             Spark 3 driver size). Without it, the profile drivers.
@@ -869,7 +869,7 @@ def _streaming_concurrent_budget(
 
     ``datagen_running=False`` drops the datagen reservation: the continuous
     corpus is finite and usually written before the streams start, and a
-    finished Job holds no cores (LB-158). The default stays conservative
+    finished Job holds no cores. The default stays conservative
     for callers that cannot know whether datagen is still running.
 
     Returns:
@@ -1089,7 +1089,7 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
 # catalog.View from an interface to something else, breaking every Iceberg
 # release that implements it. This is a real binary incompatibility, not a
 # lakebench config gap, and blocks table writes entirely (silver-build fails
-# on the first createOrReplace). See LB-069.
+# on the first createOrReplace).
 
 # ---------------------------------------------------------------------------
 # Table format version compatibility matrix
@@ -1139,7 +1139,7 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
     (4, 1): "4.0",  # default for Iceberg releases with no 4.1 runtime
 }
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
-# the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
+# the 4.1 jar there throws IncompatibleClassChangeError.
 
 # Additional Maven repository for ``spark.jars.repositories`` /
 # ``--repositories`` on every job. Google mirrors Maven Central at
@@ -1424,7 +1424,7 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
 # aws_sdk_version is hadoop-project's own ``aws-java-sdk.version`` pin for
 # that Hadoop release -- 1.12.720 for every 3.4.x line checked, so the prior
 # flat "1.12.367 for all Spark 4.x" was already behind what Hadoop itself
-# declares, independent of and prior to any Spark 4.2 work. See LB-068.
+# declares, independent of and prior to any Spark 4.2 work.
 _HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
     (3, 5): ("3.3.4", "1.12.262"),
     (4, 0): ("3.4.1", "1.12.720"),
@@ -1433,9 +1433,9 @@ _HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
 
 
 # Completeness gate: every supported Spark minor must have an explicit
-# hadoop-aws + AWS SDK pin. A silent fallback here previously reproduced
-# LB-069 (Spark 4.2 borrowed the (4,0) pair, driver started clean, S3
-# signing diverged at runtime). Adding a Spark minor to
+# hadoop-aws + AWS SDK pin. A silent fallback here previously let Spark
+# 4.2 borrow the (4,0) pair -- the driver started clean, then S3 signing
+# diverged at runtime. Adding a Spark minor to
 # ``_SUPPORTED_SPARK_VERSIONS`` without touching this table now fails
 # at import instead of at S3 request time.
 _missing_hadoop_aws = set(_SUPPORTED_SPARK_VERSIONS) - set(_HADOOP_AWS_COMPAT)
@@ -1585,7 +1585,7 @@ class JobType(Enum):
     TIME_TRAVEL_FINANCIAL = "time-travel-financial"
     # Reference detector + leakage gate: the "distribution checks do not
     # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
-    # W4/W8 precision work, LB-130) must be validated against before it ships.
+    # W4/W8 precision work) must be validated against before it ships.
     SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
 
 
@@ -1750,7 +1750,7 @@ class SparkJobManager:
         # Streaming jobs the concurrent budget capped, for the CLI to show.
         self.budget_warnings: list[str] = []
         # Whether the streaming budget reserves datagen's cores. The
-        # continuous CLI clears it once the datagen Job has finished (LB-158).
+        # continuous CLI clears it once the datagen Job has finished.
         self.datagen_running: bool = True
         # Set by deploy_scripts_configmap: {"scripts_sha256", "scripts_maps"}
         # for run provenance. None until the maps are applied.
@@ -2042,7 +2042,7 @@ class SparkJobManager:
 
         # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
-        # the CTAS fallback path (LB-118).
+        # the CTAS fallback path.
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
         profile = _resolve_job_profile(job_type.value, _schema)
         if profile is None:
@@ -2253,7 +2253,7 @@ class SparkJobManager:
         spark_conf.update(
             {
                 "spark.hadoop.fs.s3a.endpoint": s3.endpoint,
-                # LB-052: without an explicit region, S3A signs with a default
+                # Without an explicit region, S3A signs with a default
                 # (observed us-east-2). FlashBlade ignores the region, but
                 # backends that validate the sigv4 scope reject the signature
                 # with an opaque 400 and a null message.
@@ -2301,7 +2301,7 @@ class SparkJobManager:
                 spark_conf.update(
                     {
                         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-                        # LB-148 / LB-034: Delta's metadata-only MIN/MAX
+                        # Delta's metadata-only MIN/MAX
                         # rewrite throws ClassCastException (LocalDate ->
                         # java.sql.Date) on date partition columns.
                         # gold_incremental reads max(interaction_date) inside
@@ -2445,7 +2445,7 @@ class SparkJobManager:
         # Parquet tuning
         # BUG-006: Fixed 256MB partitions caused 26k tasks at scale 500,
         # overwhelming driver with Iceberg commit metadata. Scale-aware sizing.
-        # LB-049: 5000 tasks overwhelms AppStatusListener at scale 100+ with
+        # 5000 tasks overwhelms AppStatusListener at scale 100+ with
         # Spark 4.0.2 (O(liveTasks) flush per heartbeat). Target 2000 tasks
         # and allow up to 2GB partitions to keep the driver responsive.
         # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
@@ -2468,7 +2468,7 @@ class SparkJobManager:
             }
         )
 
-        # LB-049: AppStatusListener + SQLAppStatusListener driver OOM at
+        # AppStatusListener + SQLAppStatusListener driver OOM at
         # scale 100+.  Each onExecutorMetricsUpdate triggers a full flush of
         # ALL live entities (O(liveTasks)).  With 5000+ tasks and 18+
         # executors, flush takes 15-135s per event, starving the task
@@ -2720,7 +2720,7 @@ class SparkJobManager:
             spark_conf["spark.local.dir"] = "/tmp/spark-local"
 
         _restart_policy: dict[str, Any] = (
-            # Streaming jobs: do NOT auto-rerun a failed driver (LB-279).
+            # Streaming jobs: do NOT auto-rerun a failed driver.
             # The continuous gate at cli/_sustained.py refuses the window on
             # "driver was resubmitted inside the window; earlier driver's
             # work is not in the log", so an uncapped "Always" guarantees any
@@ -3109,7 +3109,7 @@ class SparkJobManager:
             env.extend(
                 {"name": k, "value": v} for k, v in cfg.architecture.tables.financial_env().items()
             )
-            # W1 connected-components vertex cap (LB-119/LB-120). Read by
+            # W1 connected-components vertex cap. Read by
             # gold_finalize_financial and threaded into the W1 rule so the
             # graph detector runs at scale 10 by default and can be raised
             # for larger scales via config rather than a code edit.
@@ -3189,7 +3189,7 @@ class SparkJobManager:
                 ]
             )
             # A3 (silver-plan): silver-stream reads this cap so its bronze
-            # wait loop cannot spend the whole window before the LB-044 gate
+            # wait loop cannot spend the whole window before the empty-rows gate
             # fires. See SustainedConfig.effective_silver_bronze_wait_seconds.
             if job_type == JobType.SILVER_STREAM:
                 env.append(
@@ -3198,7 +3198,7 @@ class SparkJobManager:
                         "value": str(sustained.effective_silver_bronze_wait_seconds()),
                     }
                 )
-            # LB-090: AML sustained scripts read a different set of env
+            # AML sustained scripts read a different set of env
             # var names than the schema-agnostic C360 scripts do.
             # Rather than rename either side (both have callers), set
             # BOTH spellings under financial so bronze_ingest_financial,

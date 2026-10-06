@@ -2044,7 +2044,7 @@ def _run_once(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    # Cuts to fit the cluster are shown with their reason, never silent.
     autosize_cuts = [str(c) for c in resolve_auto_sizing(cfg, cluster_cap) or []]
     for cut in autosize_cuts:
         print_warning(f"Auto-sizing: {cut}")
@@ -2113,9 +2113,9 @@ def _run_once(
         from lakebench.cli._prerequisites import run_prerequisites
 
         # The --sustained flag does not write back to the config, so the
-        # capacity check is told the mode the run will use (LB-155). Datagen
-        # is left out only where the run itself releases its cores: under
-        # --skip-generate with a finished lakebench-datagen Job (LB-158).
+        # capacity check is told the mode the run will use. Datagen is left
+        # out only where the run itself releases its cores: under
+        # --skip-generate with a finished lakebench-datagen Job.
         _use_sustained = _plan.mode == "continuous"
         _datagen_runs = True
         if _use_sustained and skip_generate:
@@ -2549,7 +2549,7 @@ def _run_once(
                     # Leaving _datagen_output_rows at 0 signals "unmeasurable"
                     # so ingest_ratio and pipeline_saturated stay None instead
                     # of being computed against a fictional `scale * 1_500_000`
-                    # denominator (LB-044 pattern).
+                    # denominator.
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except typer.Exit as e:
@@ -2953,7 +2953,7 @@ def _run_once(
                 # Populate resource metrics from job profile. Pass the schema so
                 # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
                 # are reflected -- otherwise the scorecard under-reports the
-                # deployed resources (LB-135 review finding).
+                # deployed resources.
                 _schema = cfg.architecture.workload.schema_type.value
                 _profile = get_job_profile(stage_name, _schema)
                 if _profile:
@@ -3138,8 +3138,8 @@ def _run_once(
             },
         )
 
-        # LB-123: fold financial recall scoring into the batch run so the
-        # scorecard shows real recall/precision, not just alert counts. Only
+        # Fold financial recall scoring into the batch run so the scorecard
+        # shows real recall/precision, not just alert counts. Only
         # for a full financial pipeline run (not a single --stage), and only
         # when the pipeline succeeded (gold.alerts + manifest must both exist).
         if (
@@ -3159,8 +3159,8 @@ def _run_once(
             )
             _stage = "pipeline"
 
-        # AML batch honesty gate (LB-044 class), after scoring so a single
-        # crashed rule does not also throw away the other rules' recall.
+        # AML batch honesty gate, after scoring so a single crashed rule
+        # does not also throw away the other rules' recall.
         # Crashed rules or zero alerts mean detection measured nothing,
         # whatever the stage exit codes say; skipped rules are "not run".
         if (
@@ -3315,8 +3315,8 @@ def _run_once(
                     console.print("[bold]Pre-compaction benchmark[/bold]")
                     print_info("Benchmarking before maintenance (uncompacted data)...")
                     _pre_runner = _BR(cfg)
-                    # LB-117: 60s is too tight for AML pre-compaction
-                    # queries even at small scale; bump to 180s for AML.
+                    # 60 s is too tight for AML pre-compaction queries even
+                    # at small scale; bump to 180 s for AML.
                     # Same timeout as the post-compaction run: with 180 s here
                     # and 900 s there, a query that timed out before counted
                     # only after, and the maintenance delta read -40% on a
@@ -3451,7 +3451,7 @@ def _run_once(
                 )
                 print_warning(f"Maintenance failed (non-fatal): {e}")
 
-            # 5. Wait for storage to settle before the post round (LB-150).
+            # 5. Wait for storage to settle before the post round.
             # Runs after maint_elapsed is taken and outside every stage, so it
             # cannot move time to value or maintenance_pct_of_pipeline.
             # Nothing to settle when no statement ran (DuckDB, or every
@@ -3543,9 +3543,9 @@ def _run_once(
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
-                # LB-117: AML analytical queries (aggregate_typology_coverage
-                # etc) can exceed the 300s default at scale >= 5; a timeout
-                # here masquerades as a failed query and drops QpH to 0.
+                # AML analytical queries (aggregate_typology_coverage etc)
+                # can exceed the 300 s default at scale >= 5; a timeout here
+                # masquerades as a failed query and drops QpH to 0.
                 _bench_timeout = (
                     900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                 )
@@ -3555,7 +3555,7 @@ def _run_once(
                 if pre_compaction_qph > 0:
                     # The pre round was measured after a warm-up pass; give
                     # this one the same, or the comparison measures the
-                    # warm-up rather than maintenance (LB-141).
+                    # warm-up rather than maintenance.
                     print_info("Warm-up pass (not measured)...")
                     _warm_benchmark(bench_runner, _bench_timeout)
                 bench_result = bench_runner.run_power(
@@ -3836,7 +3836,7 @@ def _run_once(
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
             run_metrics.interrupted = _interrupted
-            # LB-123: attach folded-in financial recall scoring (if any) so it
+            # Attach folded-in financial recall scoring (if any) so it
             # persists into metrics.json and renders in the scorecard.
             if _financial_scoring is not None:
                 run_metrics.financial_scoring = _financial_scoring
@@ -3888,7 +3888,7 @@ def _run_once(
                         pb.post_compaction_qph = benchmark_qph
                         # Only a paired comparison after a compaction that
                         # changed files is a maintenance value; otherwise
-                        # leave it null (LB-141).
+                        # leave it null.
                         if _maint_value is not None and _maint_value[0] is not None:
                             pb.maintenance_value_pct = _maint_value[0]
                             pb.maintenance_paired_queries = _maint_value[1]

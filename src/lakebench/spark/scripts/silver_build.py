@@ -133,7 +133,7 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     # Customers and skew from the sample's per-customer counts. The distinct
     # count is not scaled by 1 / sample_fraction: that treated every sampled
     # customer as unique to the sample and reported 14.7M customers at
-    # scale 10, where there are 1M (LB-144).
+    # scale 10, where there are 1M.
     approx_customer_count, skew_factor = sample_key_profile(
         sample_df, "customer_id", sample_estimate
     )
@@ -306,7 +306,7 @@ def rows_added_by_last_commit(spark, silver_tbl):
 
     A4 (silver-plan): the previous fallback ``spark.table(silver_tbl).count()``
     returned the cumulative table row count, which masked a zero-write cycle
-    in incremental mode (LB-044 class). Callers now treat None as "unknown"
+    in incremental mode. Callers now treat None as "unknown"
     and refuse to publish it as ``output_rows``.
     """
     try:
@@ -328,7 +328,7 @@ def rows_added_by_last_commit(spark, silver_tbl):
 # an in-place ALTER (or an older table missing a property) does not silently
 # fall back to defaults. Cheap; metadata only, no data touched. Excludes
 # `write.distribution-mode` and `write.spark.fanout.enabled` because those are
-# operator-overridable per Spark conf (LB-049) -- the helper reads them at
+# operator-overridable per Spark conf -- the helper reads them at
 # call time so a scale-5TB+ deployment that set
 # `spark.lb.silver.distribution_mode=none` on cycle 0 keeps that setting on
 # cycle 1+ instead of being silently reverted to `hash`.
@@ -349,8 +349,8 @@ def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
     script, or a schema evolution) would keep the wrong defaults for the
     lifetime of the deployment. This ALTER is idempotent and cheap.
 
-    Distribution mode and fanout are honoured from ``spark.conf`` (LB-049
-    escape hatch), so a cycle-1+ append cannot silently overwrite an
+    Distribution mode and fanout are honoured from ``spark.conf`` (escape
+    hatch), so a cycle-1+ append cannot silently overwrite an
     operator's scale-5TB+ ``distribution_mode=none`` choice with the
     ``hash`` default.
     """
@@ -513,7 +513,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
         apply_silver_transformations_anchored(tag_batch(df_bronze, cycle, appending), anchor)
     )
 
-    # LB-049: distribution-mode is overridable via Spark conf for scale
+    # Distribution-mode is overridable via Spark conf for scale
     # testing. Default changed from "none" to "hash" -- see docstring.
     dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
     fanout = spark.conf.get("spark.lb.silver.fanout_enabled", "false")
@@ -719,7 +719,7 @@ log(f"data_clock_source: {env('LB_DATA_CLOCK_SOURCE', 'unknown')}")
 # earlier `estimated_rows` emission is dropped.
 log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")
 # A4 (silver-plan): output_rows is `unknown` when the snapshot fallback
-# fired; the LB-044 gate below then refuses the run rather than publishing
+# fired; the gate below then refuses the run rather than publishing
 # a cumulative table count as this cycle's output.
 if silver_count is None:
     log("output_rows: unknown")
@@ -735,7 +735,7 @@ if silver_count is None:
     raise SilverAbort(
         "silver-build: output_rows unknown (snapshot summary unavailable); refusing exit-0 pass"
     )
-# A1: LB-044 gate. A zero-row silver run refuses to exit 0 so the K8s Job
+# A1 gate. A zero-row silver run refuses to exit 0 so the K8s Job
 # reports failure and the collector records it. Runs after metrics emission
 # so a failing gate still leaves the metrics block on stdout.
 assert_progress(silver_count, "silver-build")

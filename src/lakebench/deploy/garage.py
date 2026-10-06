@@ -139,7 +139,7 @@ class GarageDeployer:
             image: Garage image reference.
             port: Host port for the S3 API.
             region: S3 region. Garage validates the sigv4 region scope, so
-                this must match what clients sign with (see LB-052).
+                this must match what clients sign with.
             buckets: Buckets to create and grant access to.
             key_name: Name of the access key to create.
         """

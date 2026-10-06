@@ -917,8 +917,8 @@ def benchmark(
     # outside the known-upstream allowlist, any zero-row query not
     # declared allow_empty, and the empty-set / all-failed case all fail
     # the run. Also refuse when composite mode's throughput half
-    # produced qph=0 (the LB-044 shape: power passes, throughput is
-    # empty, composite headline is 0.0 but exit was previously 0).
+    # produced qph=0 (power passes, throughput is empty, composite
+    # headline is 0.0 but exit was previously 0).
     from lakebench.cli._run import _benchmark_gate_problems
 
     total_queries = len(primary_result.queries)

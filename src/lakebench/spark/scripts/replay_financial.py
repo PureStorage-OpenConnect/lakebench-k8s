@@ -4,7 +4,7 @@ Reads the Iceberg snapshot closest to but not after (now - depth_months)
 via time-travel, runs the requested detection rule against that historical
 silver state, writes alerts to the specified output table.
 
-Rule modules ship alongside the workload scripts (LB-108, deferred). Until
+Rule modules ship alongside the workload scripts (deferred). Until
 those land, the replay path writes an empty alerts frame WITH THE FULL
 gold.alerts SCHEMA so downstream scoring can join on `related_txn_ids`
 without an AnalysisException. Callers using this against `gold.alerts` (as

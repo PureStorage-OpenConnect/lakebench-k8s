@@ -17,10 +17,10 @@ class SilverAbort(RuntimeError):
     """A silver-stage run refused to succeed for a defined reason.
 
     Raised in silver mains (batch or stream) when a hard invariant fails
-    that would otherwise let a zero-row or corrupted run exit 0 -- the
-    LB-044 class. The message names the invariant and, where useful, the
-    remediation. Callers (job.py, the K8s driver wrapper) surface the
-    exception verbatim: exit 0 is not a pass.
+    that would otherwise let a zero-row or corrupted run exit 0. The
+    message names the invariant and, where useful, the remediation.
+    Callers (job.py, the K8s driver wrapper) surface the exception
+    verbatim: exit 0 is not a pass.
     """
 
 
@@ -38,7 +38,7 @@ def env(name, default=None):
 
 
 def assert_progress(rows_written, job_type):
-    """Refuse an exit-0 pass when a silver job wrote zero rows (LB-044).
+    """Refuse an exit-0 pass when a silver job wrote zero rows.
 
     ``rows_written`` is the primary output-row count the caller tracked
     (silver.transactions rows for AML; the sole silver table for c360;
@@ -55,7 +55,7 @@ def assert_progress(rows_written, job_type):
     if bypass and testing:
         log(f"{job_type}: zero rows written; bypassed by LB_SILVER_TEST_ALLOW_EMPTY (test-only)")
         return
-    raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass (LB-044 gate)")
+    raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass")
 
 
 def assert_preflight_rows(df, name, minimum=1):
@@ -892,7 +892,7 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
             n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
             log(f"Continuous reset: deleted {n} data entries under {location}")
         how = "DROP"
-        # LB-188: PURGE deletes every file the table metadata references,
+        # PURGE deletes every file the table metadata references,
         # wherever it sits, so it runs only for a table whose directory this
         # deployment owns. A table whose location is unreadable or outside this
         # deployment is dropped catalog-only (its files kept), matching the
@@ -922,7 +922,7 @@ def estimate_distinct_from_sample(sample_rows, distinct, singletons, doubletons,
     Dividing the sample's distinct count by the sampling fraction assumes
     every sampled value is unseen elsewhere, which overstates a key that
     repeats: a 0.1% sample of 24.8M rows over 1M customers holds about 24K
-    customers, and 24K / 0.001 reported 14.7M (LB-144). Chao1 adds the
+    customers, and 24K / 0.001 reported 14.7M. Chao1 adds the
     unseen values implied by how many sampled values appear once versus
     twice. It is a lower-bound estimator, capped here at the population
     row count, and exact when the sample is the population.
@@ -1805,8 +1805,7 @@ def await_stream(spark, query):
     SIGTERM and SIGINT only set a flag; the loop below stops the query, so
     the handler never calls into py4j while the main thread may be inside
     it. A query that died with an exception fails the driver, so the
-    Kubernetes job reports the real outcome instead of a pass with no data
-    (LB-044).
+    Kubernetes job reports the real outcome instead of a pass with no data.
     """
     import signal
     import time
@@ -2215,7 +2214,7 @@ def gold_date_coverage_problem(gold_rows: int, distinct_silver_dates: int) -> st
     one KPI row per date, and the incremental strategy's watermark-inclusive
     recompute plus the kept older rows also cover every date. A mismatch means
     gold dropped or duplicated dates and the run must fail rather than report a
-    degenerate gold as success (LB batch runs once passed with 0 rows, LB-044).
+    degenerate gold as success (a batch run once passed with 0 rows).
     """
     if gold_rows != distinct_silver_dates:
         return (
@@ -2701,7 +2700,7 @@ def refuse_orphan_delta_log(spark, fq_table, location=None):
     """Refuse to create a Delta table over an unregistered _delta_log.
 
     Destroy unregisters tables whose files sit in a bucket it does not own
-    and leaves the files (LB-186). A later run with the same names would find
+    and leaves the files. A later run with the same names would find
     the table missing from the catalog and create it at the same location,
     appending to or adopting the old log. Stop instead. *location* is the
     table's explicit path when it has one; otherwise the managed location

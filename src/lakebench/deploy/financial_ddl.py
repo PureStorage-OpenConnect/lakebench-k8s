@@ -293,7 +293,7 @@ TBLPROPERTIES (
     'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
-# LB-109: `_batch_id` mirrors silver_build_financial's DDL so
+# `_batch_id` mirrors silver_build_financial's DDL so
 # silver_stream's DELETE+append idempotency protocol works against the
 # tables the deployer creates. `cumulative_amount_usd` widened to
 # decimal(38, 2) to match silver_build's schema; the previous (18, 2)
@@ -305,7 +305,7 @@ TBLPROPERTIES (
 # per entity_id, aggregating both sides (as originator and as beneficiary) so a
 # detection rule can ask "is this behaviour anomalous FOR THIS ENTITY" instead of
 # applying a population-wide absolute threshold. This is the enabler for reducing
-# W4/W8 over-firing (LB-130): W8 compares a reactivation gap against the entity's
+# W4/W8 over-firing: W8 compares a reactivation gap against the entity's
 # own typical inter-transaction gap; W4 compares pass-through behaviour against
 # the entity's own baseline (a payment intermediary that always forwards funds is
 # not anomalous). Full-rebuild in batch; MERGE in continuous.
@@ -430,7 +430,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     run_id             STRING NOT NULL,          -- lakebench execution id
     narrative          STRING,                   -- regulator-facing summary (optional in v1)
     evidence           MAP<STRING, STRING>,      -- rule-specific evidence pointers
-    detected_ts        TIMESTAMP,                -- LB-125: wall-clock at rule execution (freshness/TTD)
+    detected_ts        TIMESTAMP,                -- wall-clock at rule execution (freshness/TTD)
     reason_codes       ARRAY<STRING>             -- base code of the rule, then its conditional codes
 )
 USING iceberg

@@ -74,7 +74,7 @@ class JobMetrics:
     # A rule that declined to run for a structural reason (e.g. W1 above
     # its vertex cap) shows up in ``rules_skipped[rule_id]`` with the skip
     # reason, and is deliberately ABSENT from ``alerts_by_rule`` so a skip
-    # is never read as a zero-recall result (LB-119).
+    # is never read as a zero-recall result.
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
@@ -118,7 +118,7 @@ class JobMetrics:
     # from bronze-verify. None on other jobs and workloads.
     c360_check: dict[str, Any] | None = None
     c360_bronze: dict[str, int] | None = None
-    # A2 (LB-044 gate metrics): per-silver-table row counts a silver-build
+    # A2 gate metrics: per-silver-table row counts a silver-build
     # job wrote (`silver_transactions_rows`, `silver_entities_rows`,
     # `silver_accounts_rows`, `silver_statements_rows`, `silver_edges_rows`,
     # `silver_profiles_rows`). Empty on non-silver jobs; empty on c360 silver
@@ -158,7 +158,7 @@ class StreamingJobMetrics:
     # None on bronze and silver (they have no freshness), and on a gold stage
     # that logged no freshness line.
     freshness_seconds: float | None = None
-    # LB-145. Gold cycles tagged "(silver idle)" saw no new silver data. Only
+    # Gold cycles tagged "(silver idle)" saw no new silver data. Only
     # the TRAILING run of idle cycles (after the last cycle that saw data) can
     # be a drained corpus; an idle stretch followed by new data is a stall and
     # stays in freshness_active_seconds. None when no cycle is outside the
@@ -449,7 +449,7 @@ class PipelineMetrics:
     datagen_stale_bronze: dict[str, Any] | None = None
 
     # Financial (AML) recall scoring (optional -- populated for a batch
-    # financial run when `financial score` is folded into `run` (LB-123)).
+    # financial run when `financial score` is folded into `run`).
     # Shape: the recall.json sidecar written by score_financial.py --
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",
@@ -832,7 +832,7 @@ class StageMetrics:
     # Streaming-specific (None = unmeasurable, 0.0 = measured-and-zero)
     latency_ms: float | None = None
     freshness_seconds: float | None = None
-    freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
+    freshness_active_seconds: float | None = None  # all but the trailing idle run
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
     committed_rows: int | None = None  # silver: rows in committed micro-batches
     batch_span_seconds: float | None = None  # bronze: first to last batch that wrote rows
@@ -1026,7 +1026,7 @@ class PipelineBenchmark:
     # before the window ended, so later gold cycles had nothing new to read.
     # Freshness then covers only the cycles that saw data, and
     # sustained_throughput_rps is corpus rows / window, a lower bound on what
-    # the pipeline could sustain (LB-145). None when ingest_ratio is unknown.
+    # the pipeline could sustain. None when ingest_ratio is unknown.
     corpus_drained: bool | None = None
     # What bounded intake when ingest_ratio < 0.95. "bronze_capacity": bronze
     # micro-batches ran back to back for most of the window, so its processing
@@ -1119,12 +1119,12 @@ class PipelineBenchmark:
     maintenance_value_pct: float | None = None
     maintenance_paired_queries: int = 0
     # Set when maintenance_value_pct is None after both rounds ran: the
-    # difference was unmeasurable or inside the within-round spread (LB-150).
+    # difference was unmeasurable or inside the within-round spread.
     maintenance_value_reason: str = ""
     # The pre-maintenance round as BenchmarkResult.to_dict(), every sample
     # included, so the noise judgement can be rechecked from metrics.json.
     pre_compaction_benchmark: dict[str, Any] | None = None
-    # Storage settle wait between maintenance and the post round (LB-150).
+    # Storage settle wait between maintenance and the post round.
     # None when the wait did not run. Not a stage: it adds to the run's wall
     # clock only, never to time_to_value or maintenance_elapsed_seconds.
     maintenance_settle_seconds: float | None = None
@@ -1305,7 +1305,7 @@ class PipelineBenchmark:
         # so a trickle that has not yet offered the rest of the corpus is not
         # read as a pipeline that fell behind. Records without the window or
         # the corpus file count keep the corpus ratio. Both stay None when
-        # the denominator is unknown (LB-044 shape).
+        # the denominator is unknown.
         if datagen_rows > 0:
             self.corpus_ingest_ratio = total_bronze_rows / datagen_rows
             released = None
@@ -1362,7 +1362,7 @@ class PipelineBenchmark:
         # The offered load is the configured trickle (max_files_per_trigger
         # per bronze trigger), not the corpus. A corpus larger than trickle
         # rate x window reads short on ingest_ratio while every stage keeps
-        # pace (LB-156, c360 scale 100: 19% of the corpus in 1800 s, bronze
+        # pace (c360 scale 100: 19% of the corpus in 1800 s, bronze
         # idle 32% of the window), so that is not saturation, provided silver
         # kept up with what bronze took. The ratio verdict stands for every
         # other short run: a stall, a late start or a bronze at capacity did
@@ -1389,7 +1389,7 @@ class PipelineBenchmark:
 
         # Drained: every datagen row reached bronze and silver COMMITTED all
         # of it, so the trailing idle gold cycles measured an empty feed, not a
-        # slow pipeline (LB-145). A stall (rows missing, silver behind or its
+        # slow pipeline. A stall (rows missing, silver behind or its
         # last commit unlogged) is not drained and keeps its full staleness.
         if self.ingest_ratio is None:
             self.corpus_drained = None
@@ -2098,7 +2098,7 @@ def build_pipeline_benchmark(
                 from lakebench.spark.job import get_job_profile as _get_profile
 
                 # Schema-aware so AML overrides (e.g. bronze-verify 20Gi) are
-                # reported, not the c360 base (LB-135 review finding).
+                # reported, not the c360 base.
                 _schema = run.config_snapshot.get("workload_schema")
                 _b_profile = _get_profile(job.job_type, _schema)
                 if _b_profile:
@@ -2695,7 +2695,7 @@ _BRONZE_BUSY_BOUND = 0.8
 
 # Share of the window's bronze triggers that must have run a micro-batch for
 # intake to count as held to the trickle rate. The shortfall allowed covers
-# stream startup (60 of 60 triggers ran on the LB-156 scale-100 run; 0.9
+# stream startup (60 of 60 triggers ran on a scale-100 run; 0.9
 # leaves 180 s of an 1800 s window at a 30 s trigger).
 _TRIGGER_COVERAGE = 0.9
 
@@ -3261,7 +3261,7 @@ class MetricsCollector:
             if time_match:
                 metrics.elapsed_seconds = float(time_match.group(2))
 
-        # LB-116: per-rule alert counts and per-rule errors, from the
+        # Per-rule alert counts and per-rule errors, from the
         # driver log line ``[detection] {rule_id}: alerts=N ...``.
         # Emitter format is fixed with ``elapsed=Ns`` as the trailing token:
         #   success: ``[detection] {rule}: alerts=N prior=P elapsed=Ts``
@@ -3297,7 +3297,7 @@ class MetricsCollector:
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()
 
-        # LB-119: structural skips are a THIRD shape, distinct from
+        # Structural skips are a THIRD shape, distinct from
         # ``alerts=N``. Emitter format:
         #   ``[detection] {rule}: skipped=<reason> detail=<...> elapsed=Ts``
         # A skipped rule is recorded in ``rules_skipped`` and left OUT of
@@ -3430,7 +3430,7 @@ class MetricsCollector:
         batch_ids: set[int] = set()
         batch_durations: list[float] = []
         freshness_values: list[float] = []
-        # (value, idle) per gold cycle, in log order (LB-145).
+        # (value, idle) per gold cycle, in log order.
         freshness_cycles: list[tuple[float, bool]] = []
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}

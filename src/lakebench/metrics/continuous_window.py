@@ -167,7 +167,7 @@ def window_stats(
       each cycle). None when unmeasured.
     - ``freshness_seconds`` / ``freshness_active_seconds`` /
       ``trailing_idle_cycles``: gold only, over the freshness lines inside the
-      window, with the trailing idle run split off as in LB-145.
+      window, with the trailing idle run split off.
     - ``last_write_offset_seconds``: bronze only, seconds from the window's
       start to its last write inside it (None when none).
     """
@@ -319,7 +319,7 @@ def drained_rps_excluded(corpus_drained: Any, window_arrival_fraction: Any) -> s
             f"corpus drained with data arriving for {window_arrival_fraction:.0%} of the "
             f"window (under {GATED_ARRIVAL_FRACTION:.0%}); rows/s is over a short arrival"
         )
-    return "corpus drained before the window ended; rows/s is a lower bound (LB-145)"
+    return "corpus drained before the window ended; rows/s is a lower bound"
 
 
 #: Share of the window data must keep arriving for: a corpus that runs out

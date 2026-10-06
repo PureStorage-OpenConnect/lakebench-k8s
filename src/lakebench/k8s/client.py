@@ -484,7 +484,7 @@ class K8sClient:
             name: Namespace name
             uid: When set, the delete carries a UID precondition so the API
                 server refuses it if the name now belongs to a different
-                namespace (LB-157).
+                namespace.
 
         Returns:
             True if this call started the deletion, False if the namespace

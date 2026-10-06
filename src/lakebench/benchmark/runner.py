@@ -39,7 +39,7 @@ class QueryResult:
     error_message: str = ""
     # Every timed execution of this query in the round, in run order. The
     # score (elapsed_seconds) is their median. Empty means one untracked
-    # sample, which is how records written before LB-150 read.
+    # sample, which is how older records (without a samples field) read.
     samples: list[float] = field(default_factory=list)
     # benchmark.fingerprint of the rows, from one untimed execution after the
     # timed samples. None: not fingerprinted (failed query, or a benchmark

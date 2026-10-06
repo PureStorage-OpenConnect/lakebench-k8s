@@ -1040,7 +1040,7 @@ def main() -> None:
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial").getOrCreate()
-    # LB-126: force sort-merge joins. The recall/FP joins explode
+    # Force sort-merge joins. The recall/FP joins explode
     # gold.alerts.related_txn_ids to (alert_id, uetr) -- at realistic alert
     # volumes (100k+ alerts, each with a related-txn array) that side is far
     # larger than Spark's size estimate, so auto-broadcast tries to build a
@@ -1162,7 +1162,7 @@ def main() -> None:
     n_rows = per_typology.count()
     log(f"Wrote recall.parquet: {n_rows} typology rows")
 
-    # LB-123: write a small recall.json sidecar next to recall.parquet so
+    # Write a small recall.json sidecar next to recall.parquet so
     # `lakebench run` can fold recall into the batch scorecard using boto3
     # alone -- the CLI has no pandas/pyarrow to read the parquet. Written as
     # a single object through the already-configured S3A FileSystem, so no

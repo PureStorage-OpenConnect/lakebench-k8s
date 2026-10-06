@@ -392,7 +392,7 @@ def load_config(
             when only ``allow_long_names`` is given.
         name_override: The name for a config that sets none (``--name``).
             It must equal the config's own name when the config has one.
-        allow_long_names: Skip the derived-name length check (LB-153).
+        allow_long_names: Skip the derived-name length check.
             TEARDOWN, READ and INSPECT always skip it. Given alone it means TEARDOWN,
             as in v1.6; with an explicit purpose it only skips the length
             check, which ``clean`` uses so a deployment

@@ -3,8 +3,8 @@
 Historically a run reported a single ``success`` boolean. That was too coarse:
 the process exit code, the HTML badge, and the underlying pipeline / benchmark
 gate outcomes can disagree. A run whose CLI exited 0 with all jobs succeeded
-can still be FAILED by the badge (e.g. LB-044, sustained runs where bronze
-never kept pace with the trickle, or gold was stale for most of the window).
+can still be FAILED by the badge (e.g. sustained runs where bronze never
+kept pace with the trickle, or gold was stale for most of the window).
 
 This module defines the ``Verdict`` value object, the shared badge helper
 (``compute_badge_status``) that both this module and ``reports.generator``
@@ -365,7 +365,7 @@ def compute_badge_status(
             and pb.pipeline_saturated is False
         ):
             # The configured trickle bounded intake and the pipeline kept
-            # pace with it (LB-156): a caveat on the ratio, not a failure.
+            # pace with it: a caveat on the ratio, not a failure.
             warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
         elif (
             is_sustained
@@ -412,7 +412,7 @@ def compute_badge_status(
     if is_sustained and pb is not None and pb.corpus_drained:
         warnings.append(
             "Corpus fully ingested before the window ended: freshness covers only gold "
-            "cycles that saw new data, and rows/s is a lower bound set by corpus size (LB-145)"
+            "cycles that saw new data, and rows/s is a lower bound set by corpus size"
         )
 
     # Job / streaming success

@@ -72,7 +72,7 @@ _refresh_count = 0
 _read_failures = 0  # consecutive cycles whose silver lookup errored
 _MAX_READ_FAILURES = 5
 _last_max_date = None  # Track last-seen max interaction_date for incremental reads
-_last_silver_max_ts = None  # newest silver_processing_timestamp seen last cycle (LB-145)
+_last_silver_max_ts = None  # newest silver_processing_timestamp seen last cycle
 _incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
 if _incremental:
@@ -206,7 +206,7 @@ def refresh_gold(trigger_df, batch_id):
     # no new data, so its value only measures wall-clock since silver last
     # moved. It is tagged "(silver idle)". The collector drops only the
     # trailing idle run, and only when the corpus was fully ingested and
-    # committed (a drained finite corpus, LB-145); an idle stretch that new
+    # committed (a drained finite corpus); an idle stretch that new
     # data later ends is a stall and keeps its staleness.
     try:
         from pyspark.sql.functions import col, current_timestamp

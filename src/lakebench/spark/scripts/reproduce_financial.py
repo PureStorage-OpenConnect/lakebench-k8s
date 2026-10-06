@@ -26,7 +26,7 @@ micro-batches are sealed.
 
 Writes ``--output`` (``scoring/reproduce/<alert_id>/result.json``) and exits
 0 for every determined outcome; a non-zero exit is a crash. Writes no
-table. Never feeds a temp view over a table into a MERGE (LB-226: Iceberg
+table. Never feeds a temp view over a table into a MERGE (Iceberg
 1.11 on Spark 4.1 fails that plan).
 """
 

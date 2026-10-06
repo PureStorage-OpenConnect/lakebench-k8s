@@ -87,7 +87,7 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return to_millicores(cpu)
 
 
-# Datagen memory model (LB-204 re-fit, 2026-09-29). Fitted to the cgroup
+# Datagen memory model (re-fit 2026-09-29). Fitted to the cgroup
 # memory high-watermark (memory.peak) of the busiest pod of datagen-only
 # cluster Jobs: generator with mimalloc and owned-file typology pruning, the
 # fixed 64 MB file size, 8 threads (request = limit = 8 CPU), 8 pods (4 for
@@ -181,7 +181,7 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
     )
 
 
-# Datagen pod floor (LB-204): each pod keeps typology row payloads only for the
+# Datagen pod floor: each pod keeps typology row payloads only for the
 # files it owns, so per-pod memory rises as the pod count falls. The memory
 # model was measured at 8 or more pods, so financial datagen above scale 100
 # runs at least that many (the Indexed Job queues pods a small cluster cannot
@@ -255,7 +255,7 @@ def resolve_auto_sizing(
 
     Returns:
         The cuts made to fit the cluster, each with its reason, so callers
-        can show them. Every cut is also logged at WARNING (LB-160).
+        can show them. Every cut is also logged at WARNING.
     """
 
     scale = config.architecture.workload.datagen.scale
@@ -323,7 +323,7 @@ def resolve_auto_sizing(
     # Per-executor scratch PVCs are _JOB_PROFILES["scratch_size"] (silver-build
     # 300Gi) with _SCHEMA_PROFILE_OVERRIDES on top, applied at manifest-build
     # time in modules/pipeline_engines/spark/job.py.
-    # -- Spark Thrift on Delta (LB-148) --
+    # -- Spark Thrift on Delta --
     # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)
     if delta_change:
@@ -358,7 +358,7 @@ def resolve_auto_sizing(
     return cuts
 
 
-# LB-148: Spark Thrift default for Delta tables. The Thrift server is Spark
+# Spark Thrift default for Delta tables. The Thrift server is Spark
 # local mode in one pod, so its cores are the query parallelism. Iceberg is
 # compacted before the benchmark and passes all 8 c360 queries at 2 cores /
 # 4g; Delta OPTIMIZE is skipped for Thrift (it OOMs), so
@@ -383,7 +383,7 @@ def _apply_delta_thrift_default(
     config: LakebenchConfig,
     cluster_capacity: ClusterCapacity | None = None,
 ) -> str | None:
-    """Raise the Spark Thrift defaults for Delta + Hive (LB-148).
+    """Raise the Spark Thrift defaults for Delta + Hive.
 
     Only fields the user did not set are touched. On a cluster whose
     largest node cannot hold the default, the target is fitted down with a
@@ -478,9 +478,9 @@ def _apply_schema_overrides(
 
     Baseline (Customer360) leaves everything at scale-tier guidance.
     Financial (FinServ-Crime, AML) lifts the Spark Thrift default from 4g
-    toward 16g -- LB-093, first live
-    S1 run OOM'd every AML benchmark query at 4g because the silver
-    aggregation and rule-target joins are heavier than C360's silver.
+    toward 16g -- the first live S1 run OOM'd every AML benchmark query at
+    4g because the silver aggregation and rule-target joins are heavier
+    than C360's silver.
     Only fields the user did not explicitly set are touched.
 
     Cluster-cap on the thrift bump: on a small cluster whose largest
@@ -506,7 +506,7 @@ def _apply_schema_overrides(
     changes: list[str] = []
     if config.architecture.query_engine.type.value == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
-        # LB-117: 16g was on the edge for AML analytical queries -- three
+        # 16g was on the edge for AML analytical queries -- three
         # S1 iters saw QpH 6.6 / 0.0 / 8.2 with the 0.0 being a thrift-pod
         # OOM mid-benchmark on aggregate_typology_coverage.sql. 24g clears
         # it with headroom. Cluster-cap threshold is 36 GiB *allocatable*:
@@ -680,7 +680,7 @@ def _apply_cluster_scaling(
     if datagen.parallelism > 0:
         datagen_cpu_m = _parse_cpu_millicores(datagen.cpu)
         cluster_max_datagen = _round_down_even(datagen_budget_m // datagen_cpu_m)
-        # A cut must say why (LB-160): at scale 250 and 500 the Trino tier's
+        # A cut must say why: at scale 250 and 500 the Trino tier's
         # workers held 85 and 165 of 434 cores and 43 pods silently became
         # 38 and 30.
         share = f"{int(_STREAMING_DATAGEN_SHARE * 100)}% of " if is_streaming else ""

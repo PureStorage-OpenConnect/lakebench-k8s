@@ -77,7 +77,7 @@ def test_bypass_only_at_exact_value_1(monkeypatch, common):
 
 
 def test_message_names_job_type_and_gate(monkeypatch, common):
-    """Failure diagnostic names the job that failed and the gate id.
+    """Failure diagnostic names the job that failed and the invariant.
 
     The K8s Job's exit message ends up in the operator log; naming the
     invariant here saves a manual grep.
@@ -88,7 +88,8 @@ def test_message_names_job_type_and_gate(monkeypatch, common):
         common.assert_progress(0, "silver-stream-financial")
     msg = str(exc.value)
     assert "silver-stream-financial" in msg
-    assert "LB-044" in msg
+    assert "zero rows written" in msg
+    assert "refusing exit-0" in msg
 
 
 def test_accepts_string_int_from_iceberg_stats(monkeypatch, common):
