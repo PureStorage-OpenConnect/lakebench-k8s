@@ -167,6 +167,10 @@ jobs:
   # runs the pre-push hook and baseline tests with the real gitleaks.
   secrets-history:
     name: Secret scan (history)
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -336,6 +340,10 @@ jobs:
   # input of scripts/spark_shard_weights.py.
   spark-tests:
     name: Spark (pyspark ${{ matrix.pyspark }}, ${{ matrix.shard }}/2)
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 78
     strategy:
@@ -487,10 +495,7 @@ jobs:
     name: AML statistics (slow)
     if: >-
       github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/heads/integrate/')
-      || startsWith(github.ref, 'refs/heads/train/')
       || startsWith(github.ref, 'refs/tags/')
-      || (github.event_name == 'pull_request' && startsWith(github.base_ref, 'integrate/'))
       || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -548,7 +553,11 @@ jobs:
   build:
     name: Build Package
     runs-on: ubuntu-24.04
-    needs: [lint, test, secrets, secrets-history, rust, spark-tests, spark-coverage]
+    # The heavy jobs (secrets-history, spark-tests, spark-coverage, aml-slow,
+    # contributor-path, clean-venv) only run on PRs to main and tags, so build
+    # needs only the always-on jobs. On release.yml, every heavy job runs
+    # before publish because gate: needs: ci.
+    needs: [lint, test, secrets, rust]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -613,6 +622,10 @@ jobs:
   clean-venv:
     name: Clean-venv install (Python ${{ matrix.python-version }})
     needs: build
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -703,6 +716,10 @@ jobs:
   # installs; build does not wait for this job.
   contributor-path:
     name: Contributor path
+    if: >-
+      github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
+      || (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     container:
