@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Continuous Customer360 gold-refresh recomputes only the dates silver changed on since its last refresh, from all of their rows, so its cost no longer grows with the corpus. Gold equals a full aggregation (a Spark-tier test checks it, rows landing on older dates included). The old incremental mode, which read only dates at or after the newest one seen and missed rows that landed on older dates, is replaced.
 - `silver_bronze_wait_seconds` auto is run_duration / 4 floored at 600 s (was 10 s): the wait now runs before the window opens.
 - Datagen source is not frozen: the byte-pin tests and the image-input hash pin are removed. A registered AML look names its datagen image by digest.
+- A continuous run's record carries `stage_capacity`: per stage the busy share and the MB/s per core at full busy, and datagen's MB/s per core, in the units of the continuous sizing rates, so a run measures them as it goes.
+- The report's storage section gives a continuous run's raw datagen growth per hour and the space a 24-hour run needs: the raw files are kept, as a bank keeps its raw messages.
 
 ### Fixed
 

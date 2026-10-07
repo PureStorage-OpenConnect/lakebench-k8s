@@ -1431,7 +1431,8 @@ policy, not a system score (`storage_multiple_total` is diagnostic).
   the ML loop's `<gold>/_ml_loop/`. Named without bytes, because they are not
   in object storage: the executor scratch PVCs and the dependency server's
   `lb-deps` PVC. The raw datagen files in bronze are reported as physical
-  only, outside the total. Incomplete multipart uploads do not appear in a
+  only, outside the total; a continuous run adds their growth per hour of
+  datagen and the space a 24-hour run needs for them. Incomplete multipart uploads do not appear in a
   listing and are not counted.
 - A table is "not measured", with the reason, when the catalog does not
   know it, when its data files are registered in place outside its

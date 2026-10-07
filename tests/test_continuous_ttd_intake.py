@@ -283,3 +283,39 @@ def test_fallback_is_dropped_with_an_exhausted_carry():
     assert b.begin(3, 1.0) == (3, 1.0)  # not measured
     assert b.begin(4, 2.0) == (3, 1.0)  # carried once
     assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 3.0) == (c.TTD_SNAPSHOT_UNKNOWN, 3.0)
+
+
+def test_stage_capacity_is_in_the_autosizer_units():
+    """Raw MB/s per core at full busy (CONTINUOUS_MB_S_PER_CORE units), from
+    window rows, busy time, datagen bytes per row and the stage's cores."""
+
+    def stage(name, batches, ms, cores):
+        return StageMetrics(
+            stage_name=name,
+            stage_type="streaming",
+            engine="spark",
+            elapsed_seconds=900,
+            input_rows=9_000_000,
+            window_input_rows=9_000_000,
+            latency_ms=ms,
+            total_batches=batches,
+            executor_count=cores // 4,
+            executor_cores=4,
+        )
+
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=_T0,
+        end_time=_T0 + timedelta(seconds=900),
+        success=True,
+        stages=[stage("bronze", 20, 30_000.0, 20), stage("silver", 3, 300_000.0, 40)],
+        config_snapshot={"datagen_bytes_per_row": 400.0, "datagen_mb_s_per_core": 31.0},
+    )
+    pb.compute_aggregates()
+    cap = pb.to_dict()["stage_capacity"]
+    assert cap["bronze"]["busy_fraction"] == pytest.approx(0.667, abs=1e-3)
+    assert cap["bronze"]["mb_s_per_core"] == pytest.approx(0.3)
+    assert cap["silver"] == {"busy_fraction": 1.0, "mb_s_per_core": 0.1, "cores": 40}
+    assert cap["datagen"] == {"mb_s_per_core": 31.0}

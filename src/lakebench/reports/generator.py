@@ -3190,11 +3190,24 @@ class ReportGenerator:
                     else f"{label} {value / (1024**3):.2f} GiB"
                 )
             notes.append("Excluded: " + "; ".join(parts) + ".")
+        # Continuous datagen keeps writing for the whole window and its files
+        # are kept (a bank keeps its raw messages), so the rate sizes a
+        # longer run's bucket.
+        fleet = getattr(metrics, "datagen_fleet", None) or {}
+        wall = fleet.get("wall_elapsed_max_s") if isinstance(fleet, dict) else None
+        continuous = bool(getattr(metrics, "streaming", None))
         for layer, value in sorted((sm.get("raw_files") or {}).items()):
-            notes.append(
+            note = (
                 f"Raw datagen files in {layer}: {value / (1024**3):.2f} GiB, physical only, "
                 "outside the total."
             )
+            if continuous and isinstance(wall, (int, float)) and wall > 0 and value:
+                per_hour = value / (1024**3) / wall * 3600
+                note += (
+                    f" They grew {per_hour:,.0f} GiB per hour of datagen and are kept, "
+                    f"so a 24-hour run needs about {per_hour * 24 / 1024:,.1f} TiB for them."
+                )
+            notes.append(note)
         # One entry per bucket, the name a value (never a key: the fixture
         # scrubber refuses a record keyed by bucket name). Development builds
         # of 1.7.0 keyed these by bucket name; that shape was never released

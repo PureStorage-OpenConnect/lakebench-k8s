@@ -1068,6 +1068,12 @@ class PipelineBenchmark:
     # Share of the window bronze spent inside micro-batches (batches x mean
     # batch time / window). None when bronze logged no batch times.
     bronze_busy_fraction: float | None = None
+    # Continuous: per stage (bronze, silver) its busy fraction and the raw
+    # MB/s per core it would take busy all window (window rows / busy time x
+    # datagen bytes per row / cores), plus datagen's own MB/s per core: the
+    # units of the autosizer's CONTINUOUS_MB_S_PER_CORE. A measurement, not
+    # a score; a low busy fraction extrapolates further.
+    stage_capacity: dict[str, dict[str, float]] | None = None
     # When intake_limit is "trickle_rate": seconds the trickle needs to
     # ingest the whole corpus at the rate it held (datagen rows / rows/s).
     corpus_drain_seconds: float | None = None
@@ -1407,6 +1413,7 @@ class PipelineBenchmark:
             self.bronze_busy_fraction = min(
                 1.0, bronze_batches * batch_ms / 1000.0 / bronze.elapsed_seconds
             )
+        self.stage_capacity = _stage_capacity(streaming, self.config_snapshot) or None
         if self.ingest_ratio is not None:
             if self.ingest_ratio >= 0.95:
                 self.intake_limit = "none"
@@ -1973,6 +1980,8 @@ class PipelineBenchmark:
             )
             d["pipeline_saturated"] = self.pipeline_saturated
             d["corpus_drained"] = self.corpus_drained
+            if self.stage_capacity:
+                d["stage_capacity"] = self.stage_capacity
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
         if self.pre_compaction_benchmark:
@@ -2351,6 +2360,14 @@ def build_pipeline_benchmark(
         _elapsed = _fleet.get("wall_elapsed_max_s")
         if isinstance(_elapsed, (int, float)) and _elapsed > 0:
             snapshot["datagen_elapsed_s"] = float(_elapsed)
+        # Raw bytes per row and datagen's MB/s per core: the sizing units
+        # (PipelineBenchmark.stage_capacity). Only from a complete fleet.
+        _bytes, _rows = _fleet.get("total_bytes_written"), _fleet.get("total_rows_written")
+        _cores = _fleet.get("cores_total")
+        if _fleet.get("data_quality") == "complete" and _bytes and _rows:
+            snapshot["datagen_bytes_per_row"] = _bytes / _rows
+            if _cores and isinstance(_elapsed, (int, float)) and _elapsed > 0:
+                snapshot["datagen_mb_s_per_core"] = _bytes / 1e6 / _elapsed / _cores
 
     benchmark = PipelineBenchmark(
         run_id=run.run_id,
@@ -2816,6 +2833,37 @@ _TRIGGER_REGULARITY = 0.95
 _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 
 _INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
+
+
+def _stage_capacity(streaming: list, snapshot: dict) -> dict[str, dict[str, float]]:
+    """Per stage, busy fraction and raw MB/s per core at full busy, and
+    datagen's MB/s per core (``PipelineBenchmark.stage_capacity``). A stage
+    is left out when its batch times, window rows or cores are unknown."""
+    out: dict[str, dict[str, float]] = {}
+    bytes_per_row = snapshot.get("datagen_bytes_per_row")
+    if not isinstance(bytes_per_row, (int, float)) or bytes_per_row <= 0:
+        return out
+    for name in ("bronze", "silver"):
+        stage = next((s for s in streaming if s.stage_name == name), None)
+        if stage is None or stage.elapsed_seconds <= 0:
+            continue
+        batch_ms = stage.median_batch_ms or stage.latency_ms
+        batches = _window_batches(stage)
+        rows = stage.window_input_rows
+        cores = stage.executor_count * stage.executor_cores
+        if not (batch_ms and batches and rows and cores):
+            continue
+        busy = min(1.0, batches * batch_ms / 1000.0 / stage.elapsed_seconds)
+        rows_per_s = rows / (busy * stage.elapsed_seconds)
+        out[name] = {
+            "busy_fraction": round(busy, 3),
+            "mb_s_per_core": round(rows_per_s * bytes_per_row / 1e6 / cores, 3),
+            "cores": cores,
+        }
+    dg = snapshot.get("datagen_mb_s_per_core")
+    if isinstance(dg, (int, float)) and dg > 0:
+        out["datagen"] = {"mb_s_per_core": round(float(dg), 3)}
+    return out
 
 
 def _window_batches(stage: StageMetrics) -> int:
