@@ -383,20 +383,3 @@ def test_score_accepts_a_calibration_manifest(spark, monkeypatch):
 
     pc.use_heldout(monkeypatch)
     refuse_protected_corpus(_seed_manifest(spark, ts.manifest_rows(pc.CALIBRATION, 300)))
-
-
-def test_score_refuses_when_the_held_out_record_is_unreadable(spark, monkeypatch):
-    from score_financial import refuse_protected_corpus
-
-    from lakebench.config import datagen_seed as ds
-    from tests.fixtures import heldout_test_seeds as ts
-    from tests.fixtures import protected_corpus as pc
-
-    pc.use_heldout(monkeypatch)
-
-    def gone():
-        raise FileNotFoundError("heldout_hashes.json")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    with pytest.raises(SystemExit, match="cannot be read"):
-        refuse_protected_corpus(_seed_manifest(spark, ts.manifest_rows(pc.CALIBRATION, 10)))

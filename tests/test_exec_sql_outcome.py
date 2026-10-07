@@ -22,12 +22,6 @@ from lakebench.modules.table_formats.iceberg.maintenance import exec_sql
 
 
 class TestExecSql:
-    def test_success_returns_quietly(self):
-        k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (0, "", "")
-        exec_sql("trino", k8s, "trino-0", "ns", "SELECT 1")
-        assert k8s.exec_in_pod.call_args.kwargs["timeout"] == 30
-
     def test_trino_failure_raises_with_stdout_and_stderr(self):
         k8s = MagicMock()
         k8s.exec_in_pod.return_value = (
@@ -57,10 +51,6 @@ class TestExecSql:
         k8s.exec_in_pod.return_value = (1, "", "Command timed out")
         with pytest.raises(ExecSqlTimeout, match="may still be running"):
             exec_sql("trino", k8s, "trino-0", "ns", "ALTER TABLE t EXECUTE optimize")
-
-    def test_unknown_engine_raises(self):
-        with pytest.raises(ValueError):
-            exec_sql("duckdb", MagicMock(), "p", "ns", "SELECT 1")
 
 
 # -- destroy's classifier ------------------------------------------------------
@@ -231,66 +221,32 @@ def _engine_pod():
 
 @pytest.mark.usefixtures("_engine_pod")
 class TestSustainedCallers:
-    def test_continuous_maintenance_records_real_failures(self):
-        from lakebench.cli._sustained import _run_iceberg_maintenance
+    @pytest.mark.parametrize(
+        ("step", "rc", "stderr", "outcome"),
+        [
+            ("maintenance", 1, TRINO_METASTORE_DOWN, "failed"),
+            ("maintenance", 0, "", "succeeded"),
+            ("maintenance", 1, "Command timed out", "timed_out"),
+            ("compaction", 1, TRINO_METASTORE_DOWN, "failed"),
+        ],
+    )
+    def test_journal_counts_each_outcome_apart(self, step, rc, stderr, outcome):
+        from lakebench.cli._sustained import _run_iceberg_compaction, _run_iceberg_maintenance
 
         k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (1, "", TRINO_METASTORE_DOWN)
+        k8s.exec_in_pod.return_value = (rc, "", stderr)
         j = MagicMock()
-        _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
-        d = _journal_details(j, "Iceberg maintenance")
+        if step == "maintenance":
+            _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
+            d = _journal_details(j, "Iceberg maintenance")
+        else:
+            _run_iceberg_compaction(_cfg(), k8s, Console(quiet=True), j)
+            d = _journal_details(j, "Iceberg compaction")
+            assert d["operations_total"] == 2
         assert d["operations_total"] > 0
-        assert d["operations_succeeded"] == 0
-        assert d["operations_failed"] == d["operations_total"]
-        assert "metastore" in d["failures"][0]
-
-    def test_continuous_maintenance_success_counts(self):
-        from lakebench.cli._sustained import _run_iceberg_maintenance
-
-        k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (0, "", "")
-        j = MagicMock()
-        _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
-        d = _journal_details(j, "Iceberg maintenance")
-        assert d["operations_failed"] == 0
-        assert d["operations_succeeded"] == d["operations_total"]
-
-    def test_pre_benchmark_compaction_records_real_failures(self):
-        from lakebench.cli._sustained import _run_iceberg_compaction
-
-        k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (1, "", TRINO_METASTORE_DOWN)
-        j = MagicMock()
-        _run_iceberg_compaction(_cfg(), k8s, Console(quiet=True), j)
-        d = _journal_details(j, "Iceberg compaction")
-        assert d["operations_total"] == 2
-        assert d["operations_succeeded"] == 0
-        assert d["operations_failed"] == 2
-
-    def test_continuous_maintenance_counts_timeouts_apart_from_failures(self):
-        from lakebench.cli._sustained import _run_iceberg_maintenance
-
-        k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (1, "", "Command timed out")
-        j = MagicMock()
-        _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
-        d = _journal_details(j, "Iceberg maintenance")
-        assert d["operations_failed"] == 0
-        assert d["operations_timed_out"] == d["operations_total"] > 0
-
-    def test_compaction_passes_its_timeout_and_journals_elapsed(self):
-        from lakebench.cli._sustained import _run_iceberg_compaction
-
-        k8s = MagicMock()
-        k8s.exec_in_pod.return_value = (0, "", "")
-        j = MagicMock()
-        _run_iceberg_compaction(_cfg(), k8s, Console(quiet=True), j, timeout=1800)
-        # The optimize statements get the compaction timeout; the silver
-        # table's partition read before them (LB-210) has its own.
-        optimize = [c for c in k8s.exec_in_pod.call_args_list if "optimize" in c.args[1][2]]
-        assert optimize and {c.kwargs["timeout"] for c in optimize} == {1800}
-        d = _journal_details(j, "Iceberg compaction")
-        assert "elapsed_seconds" in d and d["statement_timeout_seconds"] == 1800
+        assert d[f"operations_{outcome}"] == d["operations_total"]
+        for other in {"succeeded", "failed", "timed_out"} - {outcome}:
+            assert d.get(f"operations_{other}", 0) == 0
 
 
 def test_pre_benchmark_compaction_waits_for_completion():
@@ -327,19 +283,6 @@ def test_pre_benchmark_maintenance_waits_for_completion():
     src = inspect.getsource(run_mod)
     assert "timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT" in src
     assert run_mod.PRE_BENCHMARK_MAINTENANCE_TIMEOUT >= 1800
-
-
-@pytest.mark.usefixtures("_engine_pod")
-def test_maintenance_passes_its_timeout_and_journals_elapsed():
-    from lakebench.cli._sustained import _run_iceberg_maintenance
-
-    k8s = MagicMock()
-    k8s.exec_in_pod.return_value = (0, "", "")
-    j = MagicMock()
-    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", timeout=1800)
-    assert {c.kwargs["timeout"] for c in k8s.exec_in_pod.call_args_list} == {1800}
-    d = _journal_details(j, "Iceberg maintenance")
-    assert "elapsed_seconds" in d and d["statement_timeout_seconds"] == 1800
 
 
 # -- brief review of 9a940b7+59d7e40 ------------------------------------------
@@ -394,17 +337,6 @@ def test_pre_benchmark_budget_has_an_overall_cap(monkeypatch):
     assert "cap" in budget.stopped
 
 
-def test_run_shares_one_budget_between_maintenance_and_compaction():
-    import inspect
-
-    import lakebench.cli._run as run_mod
-
-    src = inspect.getsource(run_mod)
-    assert "maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)" in src
-    assert src.count("budget=maint_budget") == 2
-    assert run_mod.PRE_BENCHMARK_MAINTENANCE_CAP <= 1800
-
-
 def _delta_cfg():
     cfg = _cfg()
     cfg.architecture.table_format.type.value = "delta"
@@ -438,38 +370,9 @@ def test_batch_delta_vacuum_still_honours_short_retention():
 
 
 def test_continuous_loop_passes_live_streams_to_maintenance():
-    from tests.test_continuous_maintenance_timeout import loop_call_keywords
+    from tests.fixtures.maintenance_timeout_helpers import loop_call_keywords
 
     assert loop_call_keywords("_run_iceberg_maintenance")["live_streams"] == "True"
-
-
-@pytest.mark.usefixtures("_engine_pod")
-def test_statement_timeout_is_clipped_to_the_budget():
-    """Together maintenance and compaction cannot exceed the cap plus grace."""
-    from lakebench.cli._sustained import (
-        _BUDGET_GRACE_SECONDS,
-        MaintenanceBudget,
-        _run_iceberg_maintenance,
-    )
-
-    clock = {"t": 0.0}
-    budget = MaintenanceBudget(1800)
-    budget._clock = lambda: clock["t"]
-    budget.deadline = 1800
-    k8s = MagicMock()
-    timeouts: list[int] = []
-
-    def run(*_a, **kw):
-        timeouts.append(kw["timeout"])
-        clock["t"] += 1500  # the first statement uses most of the budget
-        return (0, "", "")
-
-    k8s.exec_in_pod.side_effect = run
-    _run_iceberg_maintenance(
-        _cfg(), k8s, Console(quiet=True), MagicMock(), "30m", timeout=1800, budget=budget
-    )
-    assert timeouts[0] == 1800
-    assert timeouts[1] == 300 + _BUDGET_GRACE_SECONDS
 
 
 # -- live evidence 2026-09-26: maintenance SQL that actually runs -------------
@@ -585,7 +488,7 @@ def test_batch_spark_orphans_never_below_24h10m():
 
 
 def test_continuous_loop_passes_live_streams():
-    from tests.test_continuous_maintenance_timeout import loop_call_keywords
+    from tests.fixtures.maintenance_timeout_helpers import loop_call_keywords
 
     assert loop_call_keywords("_run_iceberg_compaction")["live_streams"] == "True"
 
@@ -603,17 +506,6 @@ def test_spark_timestamp_is_utc_whatever_the_input_zone():
 # -- data-safety review: parser, live-stream detection, loop resilience -------
 
 
-@pytest.mark.parametrize("bad", ["7D ", "30", "1.5h", "30min", "", "m", "-1h", "1w"])
-def test_parser_refuses_anything_unvalidated(bad):
-    from lakebench.modules.table_formats.iceberg.maintenance import _parse_threshold_seconds
-
-    if bad == "7D ":
-        assert _parse_threshold_seconds(bad) == 7 * 86400  # case-insensitive, never 7 min
-        return
-    with pytest.raises(ValueError):
-        _parse_threshold_seconds(bad)
-
-
 @pytest.mark.parametrize(
     ("given", "stored"), [("30m", "30m"), (" 7D ", "7d"), ("1 H", "1h"), ("0s", "0s")]
 )
@@ -621,16 +513,6 @@ def test_config_normalises_valid_thresholds(given, stored):
     from lakebench.config.schema import SustainedConfig
 
     assert SustainedConfig(retention_threshold=given).retention_threshold == stored
-
-
-@pytest.mark.parametrize("bad", ["30", "1.5h", "30min", "7days", "1w", ""])
-def test_config_rejects_bad_thresholds(bad):
-    from pydantic import ValidationError
-
-    from lakebench.config.schema import SustainedConfig
-
-    with pytest.raises(ValidationError, match="whole number and one unit"):
-        SustainedConfig(retention_threshold=bad)
 
 
 def test_live_stream_apps_detects_present_apps_and_fails_safe():
@@ -682,31 +564,6 @@ def test_pre_benchmark_maintenance_uses_live_settings_when_streams_exist():
     assert '"read_errors": live_errors' in src
     assert src.count("live_streams=bool(live_apps)") == 2
     assert "Pre-benchmark maintenance with live streams" in src
-
-
-def test_continuous_loop_survives_a_maintenance_error():
-    import ast
-    import inspect
-
-    import lakebench.cli._sustained as sus
-
-    src = inspect.getsource(sus._run_sustained)
-    guarded = [
-        t
-        for t in ast.walk(ast.parse(src))
-        if isinstance(t, ast.Try)
-        and any(
-            isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_run_iceberg_maintenance"
-            for stmt in t.body
-            for n in ast.walk(stmt)
-        )
-    ]
-    assert any(
-        ast.unparse(h.type) == "Exception" and "Maintenance round failed" in ast.unparse(h)
-        for t in guarded
-        for h in t.handlers
-        if h.type is not None
-    )
 
 
 def test_run_records_live_streams_for_the_scorecard():

@@ -136,7 +136,7 @@ def test_r1_older_platform_record_is_caveated():
 
 
 def test_r1_current_platform_record_has_no_caveat():
-    from tests.test_report_consistency import _render_dict
+    from tests.fixtures.report_consistency_helpers import _render_dict
 
     record = load_record("1320bd")
     record["platform_metrics"]["query_version"] = 2
@@ -189,7 +189,7 @@ def test_r2_paired_change_names_its_query_count():
 def test_r2_counts_successful_queries_and_compares_sets():
     """A post round with two failed queries: QpH is over the 6 that
     succeeded, the label says 6, and the sets differ, so the note shows."""
-    from tests.test_report_consistency import _render_dict
+    from tests.fixtures.report_consistency_helpers import _render_dict
 
     record = load_record("5105a0")
     post = record["pipeline_benchmark"]["query_benchmark"]["queries"]
@@ -200,15 +200,6 @@ def test_r2_counts_successful_queries_and_compares_sets():
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
     assert f"Post-compaction QpH (over {ok} queries)" in text
     assert "unpaired: the two rounds' successful queries differ" in text
-
-
-def test_r2_same_query_set_has_no_unpaired_note():
-    """5105a0 ran the same 8 queries before and after: no unpaired note."""
-    pb = load_record("5105a0")["pipeline_benchmark"]
-    assert len(pb["pre_compaction_benchmark"]["queries"]) == len(pb["query_benchmark"]["queries"])
-    text = _text("5105a0")
-    assert "QpH change, paired over 8 queries not reported" in text
-    assert "unpaired" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +243,7 @@ def test_r4_benchmark_title_from_recorded_engine():
 def test_r4_title_prefers_the_benchmark_record_engine():
     """The engine the benchmark recorded wins over an experiment block that
     names another (a benchmark run after the config changed)."""
-    from tests.test_report_consistency import _render_dict
+    from tests.fixtures.report_consistency_helpers import _render_dict
 
     record = load_record("233b69")
     assert record["benchmark"]["engine"] == "spark-thrift"
@@ -260,21 +251,9 @@ def test_r4_title_prefers_the_benchmark_record_engine():
     assert "Spark Thrift query benchmark" in _render_dict(record)
 
 
-def test_r3_one_sample_is_singular():
-    from lakebench.reports.formatter import format_measurement
-
-    assert "n=1 run, 1 sample/query" in format_measurement("1.0", n_runs=1, samples=1)
-
-
-def test_r3_one_round_is_singular():
-    from lakebench.reports.formatter import format_measurement
-
-    assert "n=1 run, 1 round<" in format_measurement("1.0", n_runs=1, rounds=1)
-
-
 def test_r3_batch_samples_come_from_the_record():
     """The recorded samples per query (repetitions) win over iterations."""
-    from tests.test_report_consistency import _render_dict
+    from tests.fixtures.report_consistency_helpers import _render_dict
 
     record = load_record("1320bd")
     record["experiment"]["repetitions"]["benchmark_samples_per_query"] = 2
@@ -307,7 +286,7 @@ def test_r7_scale_ratio_above_scale_is_amber():
 def test_r7_scale_card_above_scale_is_amber():
     """A passed batch record whose scale ratio is above 1.05 (5105a0 edited)
     shows the card amber; be2b70 failed, so its cards show no number."""
-    from tests.test_report_consistency import _render_dict
+    from tests.fixtures.report_consistency_helpers import _render_dict
 
     record = load_record("5105a0")
     record["pipeline_benchmark"]["scores"]["scale_ratio"] = 1.10

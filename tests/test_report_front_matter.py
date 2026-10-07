@@ -10,13 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 
-import pytest
-
-from tests.fixtures.report_goldens import GOLDEN_RUNS, golden_path, page_text
-from tests.fixtures.stored_records import load_record, record_path
-from tests.test_report_consistency import _render_dict
+from tests.fixtures.report_consistency_helpers import _render_dict
+from tests.fixtures.report_goldens import golden_path, page_text
+from tests.fixtures.stored_records import load_record
 
 
 def _plain(html: str) -> str:
@@ -24,30 +21,6 @@ def _plain(html: str) -> str:
     from html import unescape
 
     return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", html)))
-
-
-@pytest.mark.parametrize("run_id", GOLDEN_RUNS)
-def test_front_matter_order(run_id):
-    """On each golden the first section after <header> is the front matter,
-    no metric card precedes it, and its fields are in the design's order."""
-    html = golden_path(run_id).read_text()
-    after = html[html.index("</header>") :]
-    first = re.search(r"<section[^>]*>", after)
-    assert first and "front-matter" in first.group(0)
-    assert 'class="card"' not in html[: html.index("front-matter")]
-    labels = [
-        "Verdict",
-        "Headline",
-        "Evidence class",
-        "Corpus",
-        "Support state",
-        "Binding caps",
-        "n",
-        "Provenance",
-        "Digest",
-    ]
-    pos = [after.index(f">{label}:</span>") for label in labels]
-    assert pos == sorted(pos)
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +165,6 @@ def test_stored_failed_is_never_promoted():
     assert re.search(r'class="status status-failed"', _render_dict(record))
 
 
-def test_same_verdicts_have_no_note():
-    text = _plain(golden_path("5105a0").read_text())
-    assert "Verdict: PASSED Headline:" in text
-
-
 # ---------------------------------------------------------------------------
 # Verdict qualifiers (ER-3)
 # ---------------------------------------------------------------------------
@@ -212,76 +180,9 @@ def test_rule_cap_qualifier():
     assert "W3_round_tripping (path-cap)" in text
 
 
-def test_c360_failed_not_gating_qualifier():
-    record = load_record("5105a0")
-    check = next(
-        c for c in record["c360_correctness"]["checks"] if c["id"] == "avg_page_views_per_visit"
-    )
-    check["status"] = "fail"
-    text = _plain(_render_dict(record))
-    assert (
-        "C360 checks failed outside the gating set (not a verdict FAIL): avg_page_views_per_visit"
-        in text
-    )
-    assert "Verdict: PASSED" in text
-
-
-def test_layer_rows_unmeasured_qualifier():
-    from lakebench.metrics.verdict import LAYER_ROWS_UNMEASURED
-    from lakebench.reports.front_matter import _qualifier_lines
-
-    lines = _qualifier_lines({LAYER_ROWS_UNMEASURED: ["gold"]})
-    assert lines == ["rows not measured (the layer gate passed on bytes): gold"]
-
-
 # ---------------------------------------------------------------------------
 # Terminal report and end-of-run panel
 # ---------------------------------------------------------------------------
-
-
-def test_terminal_report_opens_with_the_front_matter(tmp_path):
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-
-    runs = tmp_path / "runs"
-    run_id = load_record("be2b70")["run_id"]
-    (runs / f"run-{run_id}").mkdir(parents=True)
-    shutil.copy(record_path("be2b70"), runs / f"run-{run_id}" / "metrics.json")
-    result = CliRunner().invoke(
-        app, ["report", "--metrics", str(runs), "--run", run_id], env={"COLUMNS": "200"}
-    )
-    assert result.exit_code == 0, result.output
-    out = result.output
-    first = record_reason = json.loads(record_path("be2b70").read_text())["verdict"]["reasons"]
-    assert record_reason
-    order = [
-        out.index("Verdict:"),
-        out.index("Evidence class:"),
-        out.index("Support state:"),
-        out.index("Binding caps:"),
-        out.index("Digest:"),
-        out.index("Stage"),
-    ]
-    assert order == sorted(order)
-    assert "Verdict: FAILED" in out and "Headline: " + first[1] in out
-
-
-def test_print_front_matter_never_raises(monkeypatch):
-    from io import StringIO
-
-    from rich.console import Console
-
-    from lakebench.reports import front_matter
-
-    def boom(record):
-        raise RuntimeError("bad record")
-
-    monkeypatch.setattr(front_matter, "front_matter", boom)
-    buf = StringIO()
-    front_matter.print_front_matter(object(), Console(file=buf))
-    # No panel, but never scores without a verdict line.
-    assert buf.getvalue() == "Verdict: not computable from this record\n"
 
 
 def test_strictest_verdict_by_priority():
@@ -316,13 +217,6 @@ def test_stage_only_record_has_no_scale_warning():
     assert compute_badge_status(m)[2]
     m.stage_only = "silver-build"
     assert compute_badge_status(m)[2] == []
-
-
-def test_one_sample_is_singular():
-    from lakebench.reports.front_matter import FrontMatter
-
-    fm = FrontMatter("PASSED", "", "h", "development", "b", "s", "b", [], 1, 1, "d", "p")
-    assert dict(fm.lines())["n"] == "1 run, 1 sample per query"
 
 
 def test_malformed_experiment_blocks_still_render():

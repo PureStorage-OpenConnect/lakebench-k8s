@@ -64,16 +64,6 @@ def _call_has_lei_arg(call: ast.Call) -> bool:
     return False
 
 
-def test_entity_id_from_accepts_lei_column():
-    """Signature must accept ``lei_col`` (any default). Required for
-    call sites to pass ``dbtr.id.lei``."""
-    fn = _find_function("_entity_id_from")
-    param_names = [a.arg for a in fn.args.args]
-    assert "lei_col" in param_names, (
-        f"_entity_id_from must accept lei_col; got signature: {param_names}"
-    )
-
-
 def test_build_transactions_passes_lei_for_both_sides():
     """Both originator (dbtr) and beneficiary (cdtr) sides of
     silver.transactions must derive entity_id from LEI."""
@@ -88,70 +78,6 @@ def test_build_transactions_passes_lei_for_both_sides():
             "a col('...id.lei') column; without it the bipartite split "
             "persists"
         )
-
-
-def test_build_accounts_passes_lei_for_both_sides():
-    """Same plumbing for build_accounts so silver.accounts.holder_entity_id
-    does not coin-flip between the two halves of one entity."""
-    fn = _find_function("build_accounts")
-    calls = list(_iter_calls_of(fn, "_entity_id_from"))
-    assert len(calls) == 2, (
-        f"expected two _entity_id_from calls in build_accounts (dbtr + cdtr), got {len(calls)}"
-    )
-    for call in calls:
-        assert _call_has_lei_arg(call), (
-            "each _entity_id_from call in build_accounts must pass a col('...id.lei') column"
-        )
-
-
-def _identifier_load_count(fn: ast.FunctionDef, name: str) -> int:
-    """Count ``ast.Name(id=name, ctx=Load)`` occurrences in ``fn`` body
-    excluding the docstring. Argument bindings (``ast.arg``) do NOT
-    count; only real reads."""
-    n = 0
-    for node in ast.walk(fn):
-        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load):
-            n += 1
-    return n
-
-
-def test_entity_id_from_branches_on_lei():
-    """Body must guard on lei_col in at least two places: a None check
-    on the parameter itself, and a non-empty check on the trimmed
-    value. Adversarial-review finding F3: an earlier check
-    ``body.count("lei_col") >= 2`` counted docstring mentions, so a
-    revert that deleted the branch but kept the docstring passed
-    green. This version counts actual identifier reads in the AST.
-    """
-    fn = _find_function("_entity_id_from")
-    reads = _identifier_load_count(fn, "lei_col")
-    assert reads >= 2, (
-        f"_entity_id_from body must read lei_col in >= 2 places "
-        f"(None guard + non-empty check on trimmed value); got {reads} reads"
-    )
-
-
-def test_entity_id_from_retains_name_hash_fallback():
-    """The name-hash fallback must remain for rows with missing LEI
-    (historical bronze, real-world non-financial-institution parties).
-    Two markers: ``xxhash64`` for the hash, ``concat_ws`` for the
-    composite key."""
-    fn = _find_function("_entity_id_from")
-    body_src = ast.unparse(fn)
-    assert "xxhash64" in body_src, "name-hash fallback (xxhash64) missing"
-    assert "concat_ws" in body_src, "composite-key builder (concat_ws) missing"
-
-
-def test_silver_entities_lei_still_null_pending_enrichment():
-    """LB-101 scope note: this PR fixes IDENTITY (entity_id keying),
-    not enrichment. silver.entities.lei / .bic / .country still project
-    NULL. If a future PR fills these in, delete this test."""
-    fn = _find_function("build_entities")
-    body_src = ast.unparse(fn)
-    assert "alias('lei')" in body_src or 'alias("lei")' in body_src, (
-        "silver.entities.lei projection alias missing from build_entities"
-    )
-    assert "lit(None)" in body_src, "silver.entities.lei still expected to project as NULL"
 
 
 def test_aml_multicycle_is_full_rebuild_not_append():

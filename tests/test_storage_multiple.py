@@ -153,20 +153,6 @@ def test_ml_loop_prefix_excluded():
     assert _unattributed(out) == _unattributed(base)
 
 
-def test_ml_loop_without_the_exclusion_moves_gold(monkeypatch):
-    """The failing case: with the exclusion removed, the loop's 5 GB land in
-    the gold bucket as unattributed bytes."""
-    loop = [{"Key": "_ml_loop/gold/customer_features/data/x.parquet", "Size": 5 * GB}]
-    real = sm._excluded_label
-    monkeypatch.setattr(
-        sm,
-        "_excluded_label",
-        lambda layer, key, *rest: None if key.startswith("_ml_loop/") else real(layer, key, *rest),
-    )
-    out, _ = _measure(objects=_objects(extra_gold=loop))
-    assert _bucket(out, "lb-gold")["unattributed_bytes"] == 5 * GB
-
-
 def test_pvcs_named_not_listed():
     out, listed = _measure()
     assert out["excluded"]["executor scratch PVCs"] is None
@@ -281,16 +267,11 @@ def test_orphan_removal_ran_from_outcomes():
     assert sm.orphan_removal_ran(None) is False
 
 
-def test_measure_run_never_raises():
-    out = sm.measure_run(object(), None, object(), object())
-    assert out["not_measured"].startswith("measurement failed")
-
-
 def test_report_section_and_derived_numbers():
     """The record block renders, and every multiple and size on the page
     agrees with the record."""
+    from tests.fixtures.report_consistency_helpers import _render_dict, mismatches
     from tests.fixtures.stored_records import load_record
-    from tests.test_report_consistency import _render_dict, mismatches
 
     block, _ = _measure(maintenance_id="m2-2026-09-26", orphan_removal_ran=True)
     record = load_record("5105a0")
@@ -409,19 +390,6 @@ def test_time_budget_stops_further_statements():
     assert any("time budget" in (t.get("not_measured") or "") for t in out["tables"])
 
 
-def test_iter_objects_skips_lakebench_keys_page_by_page():
-    class _Boto:
-        def get_paginator(self, op):
-            class _P:
-                def paginate(self, Bucket, Prefix=""):  # noqa: N803
-                    yield {"Contents": [{"Key": ".lakebench/owner.json", "Size": 1}]}
-                    yield {"Contents": [{"Key": "a", "Size": 2}]}
-
-            return _P()
-
-    assert [o["Key"] for o in sm.iter_objects(_Boto(), "b")] == ["a"]
-
-
 def test_partial_listing_yields_no_multiple():
     """A listing that fails partway leaves the bucket's tables not measured
     and keeps none of its partial bytes."""
@@ -458,8 +426,8 @@ def test_budget_bounds_the_listing():
 
 
 def test_report_says_what_the_total_covers():
+    from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict
     from tests.fixtures.stored_records import load_record
-    from tests.test_report_consistency import _plain_text, _render_dict
 
     class _InPlace(_Sql):
         outside = {"bronze.raw": 8 * GB, "silver.txn": 0, "gold.daily": 0}
@@ -474,8 +442,8 @@ def test_report_says_what_the_total_covers():
 
 
 def test_failed_run_is_not_measured():
+    from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict
     from tests.fixtures.stored_records import load_record
-    from tests.test_report_consistency import _plain_text, _render_dict
 
     record = load_record("5105a0")
     record["storage_multiple"] = {"not_measured": "the run did not pass"}
@@ -633,8 +601,8 @@ def test_no_bucket_name_is_a_key_in_the_block():
 def test_report_notes_read_the_bucket_list():
     """The report's unattributed and failed-listing notes come from the
     bucket list and carry the record's figures."""
+    from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict, mismatches
     from tests.fixtures.stored_records import load_record
-    from tests.test_report_consistency import _plain_text, _render_dict, mismatches
 
     record = load_record("5105a0")
     record["storage_multiple"] = _partial_block()

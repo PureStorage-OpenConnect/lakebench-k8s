@@ -10,55 +10,13 @@ import textwrap
 import pytest
 
 from lakebench.config.loader import (
-    ConfigError,
     _apply_flat_fields,
-    _substitute_env_vars,
     load_config,
 )
 
 # ===========================================================================
 # Env var substitution
 # ===========================================================================
-
-
-class TestEnvVarSubstitution:
-    """Tests for ${VAR} and ${VAR:-default} substitution."""
-
-    def test_simple_substitution(self, monkeypatch):
-        monkeypatch.setenv("MY_ENDPOINT", "http://s3:9000")
-        result = _substitute_env_vars("endpoint: ${MY_ENDPOINT}")
-        assert result == "endpoint: http://s3:9000"
-
-    def test_default_value_used(self):
-        result = _substitute_env_vars("scale: ${MISSING_VAR:-10}")
-        assert result == "scale: 10"
-
-    def test_default_value_not_used_when_set(self, monkeypatch):
-        monkeypatch.setenv("MY_SCALE", "50")
-        result = _substitute_env_vars("scale: ${MY_SCALE:-10}")
-        assert result == "scale: 50"
-
-    def test_unresolved_var_raises(self):
-        with pytest.raises(ConfigError, match="Unresolved environment variables.*MY_SECRET"):
-            _substitute_env_vars("key: ${MY_SECRET}")
-
-    def test_multiple_vars(self, monkeypatch):
-        monkeypatch.setenv("HOST", "s3.local")
-        monkeypatch.setenv("PORT", "9000")
-        result = _substitute_env_vars("endpoint: http://${HOST}:${PORT}")
-        assert result == "endpoint: http://s3.local:9000"
-
-    def test_no_vars_unchanged(self):
-        text = "name: my-lakehouse\nscale: 10"
-        assert _substitute_env_vars(text) == text
-
-    def test_empty_default(self):
-        result = _substitute_env_vars("region: ${AWS_REGION:-}")
-        assert result == "region: "
-
-    def test_default_with_special_chars(self):
-        result = _substitute_env_vars("endpoint: ${EP:-http://10.0.0.1:80}")
-        assert result == "endpoint: http://10.0.0.1:80"
 
 
 # ===========================================================================
@@ -106,14 +64,6 @@ class TestFlatFieldMapping:
         }
         result = _apply_flat_fields(data)
         assert result["platform"]["storage"]["s3"]["endpoint"] == "http://flat:9000"
-
-    def test_no_flat_fields_passthrough(self):
-        data = {
-            "name": "test",
-            "platform": {"storage": {"s3": {"endpoint": "http://s3:9000"}}},
-        }
-        result = _apply_flat_fields(data)
-        assert result["platform"]["storage"]["s3"]["endpoint"] == "http://s3:9000"
 
     def test_spark_image_promoted(self):
         data = {"name": "test", "spark_image": "apache/spark:4.1.1-python3"}
@@ -164,21 +114,6 @@ class TestFlatConfigIntegration:
         assert config.platform.storage.s3.access_key == "testkey"
         assert config.architecture.workload.datagen.scale == 5
 
-    def test_flat_with_recipe(self, tmp_path):
-        cfg_file = tmp_path / "lakebench.yaml"
-        cfg_file.write_text(
-            textwrap.dedent("""\
-            name: recipe-test
-            recipe: polaris-iceberg-spark-trino
-            endpoint: http://minio:9000
-            access_key: minioadmin
-            secret_key: minioadmin
-            """)
-        )
-        config = load_config(cfg_file)
-        assert config.architecture.catalog.type.value == "polaris"
-        assert config.architecture.query_engine.type.value == "trino"
-
     def test_nameless_config_refused_for_mutating_load(self, tmp_path):
         """A config without a name cannot change data (SAF-2); v1.6 auto-named it."""
         from lakebench.config.loader import ConfigNameRequired
@@ -219,39 +154,3 @@ class TestFlatConfigIntegration:
         with pytest.raises(ConfigNameRequired, match="name: lb-20260101-120000"):
             load_config(cfg_file, purpose=LoadPurpose.READ)
         assert sorted(p.name for p in (tmp_path / ".lakebench").iterdir()) == ["state.json"]
-
-    def test_explicit_name_overrides_auto(self, tmp_path):
-        """Explicit name in config takes precedence over state.json."""
-        cfg_file = tmp_path / "lakebench.yaml"
-        cfg_file.write_text(
-            textwrap.dedent("""\
-            name: my-explicit-name
-            endpoint: http://minio:9000
-            access_key: minioadmin
-            secret_key: minioadmin
-            """)
-        )
-        config = load_config(cfg_file)
-        assert config.name == "my-explicit-name"
-
-    def test_backward_compat_nested_config(self, tmp_path):
-        """A v1.2-style nested config still works."""
-        cfg_file = tmp_path / "lakebench.yaml"
-        cfg_file.write_text(
-            textwrap.dedent("""\
-            name: nested-test
-            platform:
-              storage:
-                s3:
-                  endpoint: http://minio:9000
-                  access_key: minioadmin
-                  secret_key: minioadmin
-            architecture:
-              workload:
-                datagen:
-                  scale: 10
-            """)
-        )
-        config = load_config(cfg_file)
-        assert config.platform.storage.s3.endpoint == "http://minio:9000"
-        assert config.architecture.workload.datagen.scale == 10

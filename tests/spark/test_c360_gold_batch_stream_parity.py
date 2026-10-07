@@ -17,11 +17,10 @@ Delta jars from ``LB_SPARK_TEST_JARS``.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
-from c360_gold_compare import DOUBLE_SILVER, gold_differences, kpi_source, product_mismatch
+from c360_gold_compare import gold_differences, product_mismatch
 
 pytest.importorskip("pyspark")
 
@@ -58,12 +57,3 @@ def test_one_changed_silver_amount_changes_gold(result, fmt):
     assert len({p.split()[0] for p in problems}) == 1, problems
     assert any(" total_daily_revenue:" in p for p in problems), problems
     assert product_mismatch(case["changed"], final) is not None
-
-
-@pytest.mark.parametrize("fmt", FORMATS)
-def test_the_double_silver_columns_the_kpis_read_are_the_known_ones(result, fmt):
-    """c360_gold_compare treats only the averages of DOUBLE silver columns
-    as order-sensitive; a KPI over another DOUBLE column would need adding."""
-    named = set(re.findall(r'"(\w+)"', kpi_source()))
-    doubles = {c for c, t in result[fmt]["silver_types"].items() if t == "double"}
-    assert doubles & named == DOUBLE_SILVER

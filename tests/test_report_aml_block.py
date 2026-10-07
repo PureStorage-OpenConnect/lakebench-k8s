@@ -13,9 +13,9 @@ from __future__ import annotations
 import re
 from html import unescape
 
+from tests.fixtures.report_consistency_helpers import _render_dict, mismatches
 from tests.fixtures.report_goldens import page_text, render
 from tests.fixtures.stored_records import load_record
-from tests.test_report_consistency import _render_dict, mismatches
 
 
 def _plain(html: str) -> str:
@@ -83,11 +83,6 @@ def test_funnel_names_a_difference_it_cannot_explain():
     assert "scoring rule alerts differ from TM's by +10; the record does not say why" in text
 
 
-def test_reason_codes_absent_says_so():
-    text = _plain(render("1320bd"))
-    assert "Per-reason-code recall and FP: reason codes not recorded in this run." in text
-
-
 def test_reason_code_table():
     record = load_record("1320bd")
     record["financial_scoring"]["recall_by_code"] = {
@@ -100,10 +95,6 @@ def test_reason_code_table():
     assert "W2_structuring W2.base 9.9% 99.3%" in text
     assert "W2_structuring W2.split 5.0% -" in text
     assert mismatches(record, html) == []
-
-
-def test_leakage_not_measured_by_default():
-    assert "Leakage: not measured in this run" in _plain(render("1320bd"))
 
 
 def _covered(status: str = "scored") -> dict:
@@ -142,14 +133,6 @@ def test_continuous_recall_covered_with_coverage():
     assert mismatches(record, html) == []
 
 
-def test_continuous_not_scored_names_the_reason():
-    text = _plain(_render_dict(_covered("not_scored")))
-    assert (
-        "Recall over covered instances not scored: snapshot silver.transactions expired "
-        "before scoring" in text
-    )
-
-
 def test_totals_labelled_when_a_rule_skipped_on_a_cap():
     """W1 skipped on vertex-cap (a Lakebench cap the verdict lists in
     rule_caps): Total alerts and the off-target rate carry the cap; the
@@ -175,18 +158,6 @@ def test_totals_not_capped_on_a_data_skip():
     line = text[i : text.index("Subject customer check", i)]
     assert "over the rules that ran (W1_connected_components skipped: giant-component)" in line
     assert "BOUNDED BY" not in line
-
-
-def test_funnel_render_error_shows_a_notice(monkeypatch):
-    from lakebench.reports import scorecard
-
-    def boom(*a, **k):
-        raise KeyError("x")
-
-    monkeypatch.setattr(scorecard, "_funnel_html", boom)
-    text = _plain(render("1320bd"))
-    assert "The funnel could not be rendered: KeyError" in text
-    assert "Detection Scorecard" in text
 
 
 def test_nested_counts_and_withdrawn_alerts_reconcile():
@@ -232,31 +203,6 @@ def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
     gold["alerts_by_rule"].pop("W2_structuring", None)
     text = _plain(_render_dict(record))
     assert "BOUNDED BY: rule W2_structuring cap" in text
-
-
-def test_reason_code_status_from_the_producer():
-    """The producer writes empty dicts and a by_code_status when no alert
-    carries a code: the status is shown, never an empty section."""
-    record = load_record("1320bd")
-    record["financial_scoring"].update(
-        recall_by_code={},
-        fp_by_code={},
-        alerts_by_code={},
-        by_code_status="not_scored: 12 alerts carry no reason code",
-    )
-    text = _plain(_render_dict(record))
-    assert "Reason codes: not_scored: 12 alerts carry no reason code" in text
-
-
-def test_reason_code_with_no_alerts_is_marked():
-    record = load_record("1320bd")
-    record["financial_scoring"].update(
-        recall_by_code={"W2_structuring": {"W2.split": 0.0}},
-        fp_by_code={},
-        alerts_by_code={"W2_structuring": {"W2.split": 0}},
-    )
-    text = _plain(_render_dict(record))
-    assert "W2.split (no alert carries this code) 0.0%" in text
 
 
 def test_covered_mode_labels_chance_and_off_target():

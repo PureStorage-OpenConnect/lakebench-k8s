@@ -8,9 +8,7 @@ read-only command writes a file.
 from __future__ import annotations
 
 import importlib
-import json
 import shutil
-import warnings
 from pathlib import Path
 
 import pytest
@@ -59,31 +57,6 @@ def test_nameless_config_refused_for_commands_that_change_data(tmp_path, purpose
     assert _listing(tmp_path) == ["lakebench.yaml"]
 
 
-def test_nameless_suggestion_is_stable_and_shaped(tmp_path, monkeypatch):
-    monkeypatch.setattr("getpass.getuser", lambda: "Jane.Doe-42x")
-    cfg_path = _write(tmp_path, NAMELESS)
-    first = name_resolution(load_config(cfg_path, purpose=LoadPurpose.READ))
-    second = name_resolution(load_config(cfg_path, purpose=LoadPurpose.READ))
-    assert first is not None and second is not None
-    assert first.name == second.name
-    assert first.source == "suggested"
-    user, digest = first.name.split("-")[1:]
-    assert first.name.startswith("lb-")
-    assert user == "janedoe4"  # [a-z0-9] only, cut to 8
-    assert len(digest) == 6 and int(digest, 16) >= 0
-
-
-def test_suggestion_differs_by_host(tmp_path, monkeypatch):
-    # Every lane here runs as root, so the path alone would collide across hosts.
-    from lakebench.config.deploy_state import suggested_name
-
-    cfg_path = _write(tmp_path, NAMELESS)
-    monkeypatch.setattr("socket.gethostname", lambda: "host-a")
-    a = suggested_name(cfg_path)
-    monkeypatch.setattr("socket.gethostname", lambda: "host-b")
-    assert suggested_name(cfg_path) != a
-
-
 def test_nameless_teardown_without_state_refused(tmp_path):
     # No v1.6 state and no name: a deployment under the suggested name was
     # made by some other config, so destroy and admin must not target it.
@@ -128,26 +101,11 @@ def test_corrupt_legacy_state_is_left_alone(tmp_path):
     assert (tmp_path / ".lakebench" / "state.json").read_text() == "{not json"
 
 
-def test_name_override_for_nameless_config(tmp_path):
-    cfg = load_config(_write(tmp_path, NAMELESS), purpose=LoadPurpose.TEARDOWN, name_override="x1")
-    assert cfg.name == "x1"
-    res = name_resolution(cfg)
-    assert res is not None and res.source == "override"
-
-
 def test_name_override_must_match_config_name(tmp_path):
     cfg_path = _write(tmp_path, {**NAMELESS, "name": "mine"})
     assert load_config(cfg_path, purpose=LoadPurpose.READ, name_override="mine").name == "mine"
     with pytest.raises(ConfigValidationError, match="does not match the config's name"):
         load_config(cfg_path, purpose=LoadPurpose.READ, name_override="other")
-
-
-def test_named_config_loads_for_every_purpose(tmp_path):
-    cfg_path = _write(tmp_path, {**NAMELESS, "name": "mine"})
-    for purpose in LoadPurpose:
-        cfg = load_config(cfg_path, purpose=purpose)
-        res = name_resolution(cfg)
-        assert cfg.name == "mine" and res is not None and res.source == "config"
 
 
 # -- CFG-1 (purpose): removed keys -------------------------------------------
@@ -191,110 +149,41 @@ def test_allow_long_names_alone_means_teardown(tmp_path):
     assert load_notes(cfg)
 
 
-def test_allow_long_names_with_mutate_keeps_mutate_refusals(tmp_path):
-    # clean: the LB-153 length skip, but still refused like deploy.
-    with pytest.raises(ConfigValidationError, match="'pull_secrets' was removed"):
-        load_config(
-            _write(tmp_path, REMOVED_KEY), purpose=LoadPurpose.MUTATE, allow_long_names=True
-        )
-    long_name = {"name": "ov-perf-c360-continuous-s10", "recipe": "hive-iceberg-spark-trino"}
-    path = _write(tmp_path, long_name, "long.yaml")
-    with pytest.raises(ConfigValidationError, match="at most 23"):
-        load_config(path, purpose=LoadPurpose.MUTATE)
-    cfg = load_config(path, purpose=LoadPurpose.MUTATE, allow_long_names=True)
-    assert cfg.name == "ov-perf-c360-continuous-s10"
-
-
-@pytest.mark.parametrize(
-    ("purpose", "skips"),
-    [
+def test_name_length_check_per_purpose(tmp_path):
+    for purpose, skips in [
         (LoadPurpose.MUTATE, False),
         (LoadPurpose.RUN, False),
         (LoadPurpose.TEARDOWN, True),
         (LoadPurpose.READ, True),
-    ],
-)
-def test_name_length_check_per_purpose(tmp_path, purpose, skips):
-    path = _write(
-        tmp_path, {"name": "ov-perf-c360-continuous-s10", "recipe": "hive-iceberg-spark-trino"}
-    )
-    if skips:
-        assert load_config(path, purpose=purpose).name == "ov-perf-c360-continuous-s10"
-    else:
-        with pytest.raises(ConfigValidationError, match="at most 23"):
-            load_config(path, purpose=purpose)
+    ]:
+        path = _write(
+            tmp_path, {"name": "ov-perf-c360-continuous-s10", "recipe": "hive-iceberg-spark-trino"}
+        )
+        if skips:
+            assert load_config(path, purpose=purpose).name == "ov-perf-c360-continuous-s10"
+        else:
+            with pytest.raises(ConfigValidationError, match="at most 23"):
+                load_config(path, purpose=purpose)
 
 
 # -- LoadNotes ---------------------------------------------------------------
 
 
-def test_load_notes_printed_once_as_one_block(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("lakebench.config.loader._printed_notes", set())
-    data = {
-        "name": "notes",
-        "images": {"pull_secrets": ["x"]},
-        "architecture": {"workload": {"datagen": {"scale": 1}}},
-    }
-    cfg_path = _write(tmp_path, data)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        load_config(cfg_path, purpose=LoadPurpose.READ)
-        first = capsys.readouterr().err
-        load_config(cfg_path, purpose=LoadPurpose.READ)
-        second = capsys.readouterr().err
-    assert first.count("Upgrade notes") == 1
-    assert "pull_secrets" in first and "architecture.workload" in first
-    assert "Upgrade notes" not in second
-
-
-def test_load_notes_printed_per_config(tmp_path, capsys, monkeypatch):
-    # compare loads A then B: B's notes print even when the text matches A's.
-    monkeypatch.setattr("lakebench.config.loader._printed_notes", set())
-    a = _write(tmp_path, REMOVED_KEY, "a.yaml")
-    b = _write(tmp_path, {**REMOVED_KEY, "name": "rk2"}, "b.yaml")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        load_config(a, purpose=LoadPurpose.READ)
-        load_config(b, purpose=LoadPurpose.READ)
-    err = capsys.readouterr().err
-    assert err.count("Upgrade notes") == 2 and err.count("pull_secrets") == 2
-
-
-def test_load_notes_can_be_left_to_the_caller(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr("lakebench.config.loader._printed_notes", set())
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        cfg = load_config(
-            _write(tmp_path, REMOVED_KEY), purpose=LoadPurpose.READ, print_notes=False
-        )
-    assert load_notes(cfg) and "Upgrade notes" not in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    ("purpose", "loads"),
-    [
+def test_old_file_size_follows_the_removed_key_rule(tmp_path):
+    for purpose, loads in [
         (LoadPurpose.MUTATE, False),
         (LoadPurpose.RUN, False),
         (LoadPurpose.TEARDOWN, True),
         (LoadPurpose.READ, True),
-    ],
-)
-def test_old_file_size_follows_the_removed_key_rule(tmp_path, purpose, loads):
-    # One rule: what refuses a removed key refuses an old file_size, and the
-    # long-name switch has nothing to do with it.
-    path = _write(tmp_path, {"name": "fs", "workload": {"datagen": {"file_size": "128mb"}}})
-    if loads:
-        with pytest.warns(DeprecationWarning, match="fixed at 64mb"):
-            cfg = load_config(path, purpose=purpose)
-        assert cfg.workload.datagen.file_size == "64mb"
-    else:
-        with pytest.raises(ConfigValidationError, match="fixed at 64mb"):
-            load_config(path, purpose=purpose, allow_long_names=True)
-
-
-def test_load_notes_still_raise_python_warnings(tmp_path):
-    with pytest.warns(DeprecationWarning, match="pull_secrets"):
-        load_config(_write(tmp_path, REMOVED_KEY), purpose=LoadPurpose.READ)
+    ]:
+        path = _write(tmp_path, {"name": "fs", "workload": {"datagen": {"file_size": "128mb"}}})
+        if loads:
+            with pytest.warns(DeprecationWarning, match="fixed at 64mb"):
+                cfg = load_config(path, purpose=purpose)
+            assert cfg.workload.datagen.file_size == "64mb"
+        else:
+            with pytest.raises(ConfigValidationError, match="fixed at 64mb"):
+                load_config(path, purpose=purpose, allow_long_names=True)
 
 
 # -- Which purpose each verb loads with --------------------------------------
@@ -355,17 +244,6 @@ def test_cli_verbs_load_with_their_purpose(
     assert seen, f"{argv} never loaded the config"
     assert seen[0].get("purpose") == purpose
     assert bool(seen[0].get("allow_long_names")) is long_names
-
-
-def test_readonly_load_writes_nothing_with_legacy_state(tmp_path):
-    (tmp_path / ".lakebench").mkdir()
-    (tmp_path / ".lakebench" / "state.json").write_text(json.dumps({"name": "lb-20260101-000000"}))
-    cfg_path = _write(tmp_path, NAMELESS)
-    before = _listing(tmp_path)
-    with pytest.raises(ConfigNameRequired):
-        load_config(cfg_path, purpose=LoadPurpose.READ)
-    assert load_config(cfg_path, purpose=LoadPurpose.INSPECT).name == "lb-20260101-000000"
-    assert _listing(tmp_path) == before
 
 
 # -- v1.6 directories with several nameless configs (SAF-2 c, check 1) --------

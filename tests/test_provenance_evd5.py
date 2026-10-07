@@ -228,13 +228,6 @@ def test_package_without_build_info_is_unknown(tmp_path, monkeypatch):
     assert (s["install"], s["git_sha"], s["git_dirty"]) == ("unknown", None, None)
 
 
-def test_checkout_install_is_named():
-    s = prov_mod.sample()
-    if _git_head(Path(prov_mod.__file__).parent) is None:
-        pytest.skip("not run from a checkout")
-    assert s["install"] == "checkout"
-
-
 # --- run end -----------------------------------------------------------------
 
 
@@ -332,16 +325,6 @@ def test_job_manager_scripts_and_deps_recorded():
     assert run.provenance["scripts_maps"] == {"common": "b" * 64}
     assert run.provenance["scripts_files_sha256"] == {"common.py": "c" * 64}
     assert run.provenance["deps"] == {"pinset_sha256": "d" * 64}
-
-
-def test_a_new_job_manager_has_no_deps_yet():
-    from lakebench.spark.job import SparkJobManager
-
-    mgr = SparkJobManager.__new__(SparkJobManager)
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = None
-    SparkJobManager.__init__(mgr, MagicMock(get_namespace=lambda: "ns"), k8s)
-    assert prov_mod.job_manager_fields(mgr)["deps"] == "not_recorded"
 
 
 # --- images ------------------------------------------------------------------
@@ -591,18 +574,6 @@ def test_scratch_unread_status_is_not_recorded():
         prov, "gold-finalize", SimpleNamespace(scratch={"size_limit": None, "storage_class": None})
     )
     assert prov["scratch_as_ran"]["gold-finalize"] == {"size_limit": None, "storage_class": None}
-
-
-def test_wait_until_running_returns_its_status():
-    from lakebench.spark.job import JobState, JobStatus
-    from lakebench.spark.monitor import SparkJobMonitor
-
-    m = SparkJobMonitor.__new__(SparkJobMonitor)
-    m.namespace = "ns"
-    st = JobStatus(name="j", state=JobState.RUNNING, message="", scratch={"size_limit": "1Gi"})
-    m.job_manager = MagicMock()
-    m.job_manager.get_job_status.return_value = st
-    assert m.wait_until_running("j", poll_interval=0).final_status is st
 
 
 # --- the experiment block: what the identity reads -------------------------

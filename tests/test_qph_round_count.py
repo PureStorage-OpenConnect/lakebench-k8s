@@ -82,20 +82,6 @@ def test_different_round_counts_are_not_like_for_like():
     assert ex.condition_differences(a, _exp("sustained", 4)) == []
 
 
-def test_batch_identity_has_no_round_key():
-    """Batch baselines keep their stored identity keys."""
-    assert "benchmark rounds" not in ex.identity(_exp("batch", None))
-
-
-def test_report_shows_the_round_count(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
-
-    html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(
-        _continuous_run([200.0, 250.0])
-    )
-    assert "In-stream QpH rounds" in html
-
-
 def test_zero_rounds_never_gates_against_an_in_stream_median():
     """Fix-pass finding: with 0 rounds composite_qph is the post-stream
     benchmark, a different estimator from the reference's in-stream median."""

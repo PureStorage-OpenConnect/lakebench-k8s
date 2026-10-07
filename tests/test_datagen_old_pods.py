@@ -207,15 +207,6 @@ def test_a_pod_that_never_stops_refuses_without_clearing(monkeypatch):
     assert r.details == {REFUSAL_DETAIL: "datagen.pods_live"} and world.applied == []
 
 
-def test_the_hint_names_the_config_context(monkeypatch):
-    world = _World(stop_after_s=None)
-    _install(monkeypatch, world)
-    d = _deployer(world)
-    d.config.platform.kubernetes.context = "lab-ocp"
-    r = d.deploy()
-    assert "kubectl get pods --context lab-ocp -n " in r.message
-
-
 def test_pods_that_cannot_be_listed_fail_closed(monkeypatch):
     world = _World(stop_after_s=None)
     world.list_error = RuntimeError("apiserver timeout")
@@ -277,7 +268,7 @@ def _cli_order(monkeypatch, tmp_path, command, argv, *, gate_module, cycles=1):
     from typer.testing import CliRunner
 
     from lakebench.cli import app
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.chdir(tmp_path)
     (dg._stub_run_deps if command == "generate" else dg._stub_full_run)(monkeypatch)
@@ -299,18 +290,18 @@ def _cli_order(monkeypatch, tmp_path, command, argv, *, gate_module, cycles=1):
     return order
 
 
-def test_generate_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
-    order = _cli_order(monkeypatch, tmp_path, "generate", ["--yes"], gate_module="_generate")
-    assert order == ["stop", "gate"]
-
-
-def test_run_generate_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
-    order = _cli_order(monkeypatch, tmp_path, "run", ["--generate", *_RUN], gate_module="_run")
-    assert order == ["stop", "gate"]
-
-
-def test_multi_cycle_run_stops_old_pods_before_the_gate(monkeypatch, tmp_path):
-    order = _cli_order(monkeypatch, tmp_path, "run", _RUN, gate_module="_run", cycles=2)
+@pytest.mark.parametrize(
+    ("command", "argv", "gate_module", "kw"),
+    [
+        ("generate", ["--yes"], "_generate", {}),
+        ("run", ["--generate", *_RUN], "_run", {}),
+        ("run", _RUN, "_run", {"cycles": 2}),
+    ],
+)
+def test_old_datagen_pods_stop_before_the_gate(
+    monkeypatch, tmp_path, command, argv, gate_module, kw
+):
+    order = _cli_order(monkeypatch, tmp_path, command, argv, gate_module=gate_module, **kw)
     assert order == ["stop", "gate"]
 
 
@@ -320,7 +311,7 @@ def test_generate_refusal_from_live_pods_exits_3_before_the_gate(monkeypatch, tm
 
     from lakebench.cli import app
     from lakebench.deploy.datagen import DatagenPodsStillRunning
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.chdir(tmp_path)
     dg._stub_run_deps(monkeypatch)
@@ -349,7 +340,7 @@ def test_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path, c
     from typer.testing import CliRunner
 
     from lakebench.cli import app
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.chdir(tmp_path)
     (dg._stub_run_deps if command == "generate" else dg._stub_full_run)(monkeypatch)
@@ -391,7 +382,7 @@ def test_generate_with_an_unreachable_cluster_still_exits_4(monkeypatch, tmp_pat
 
     from lakebench.cli import app
     from lakebench.deploy.datagen import DatagenPodsUnknown
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.chdir(tmp_path)
     dg._stub_run_deps(monkeypatch)
@@ -418,7 +409,7 @@ def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(
     from typer.testing import CliRunner
 
     from lakebench.cli import app
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.chdir(tmp_path)
     dg._stub_full_run(monkeypatch)

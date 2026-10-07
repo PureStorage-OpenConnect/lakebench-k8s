@@ -198,28 +198,22 @@ def test_clean_unregisters_each_layer_before_emptying_it(tmp_path):
         assert order == [("unregister", f"my-clean-{target}"), ("empty", f"my-clean-{target}")]
 
 
-def test_a_table_left_registered_keeps_the_bucket_and_fails_the_clean(tmp_path):
-    """Emptying it anyway left an entry no engine could drop on a re-run."""
+@pytest.mark.parametrize(
+    ("outcome", "emptied"),
+    [
+        # a table left registered keeps its bucket: emptying it anyway left an
+        # entry no engine could drop on a re-run
+        ({"failed": [("t.silver", "Access Denied")]}, False),
+        # an entry whose files are gone still empties, but the clean fails
+        ({"stuck": [("t.silver", "NotFoundException")]}, True),
+    ],
+)
+def test_unregister_problems_fail_the_clean(tmp_path, outcome, emptied):
     from lakebench.deploy.unregister import LayerUnregister
 
-    order, code = _clean(
-        tmp_path,
-        lambda layer: LayerUnregister(failed=[(f"t.{layer}", "Access Denied")]),
-        target="silver",
-    )
-    assert order == [("unregister", "my-clean-silver")]
-    assert code not in (None, 0)
-
-
-def test_an_entry_whose_files_are_gone_still_empties_but_fails(tmp_path):
-    from lakebench.deploy.unregister import LayerUnregister
-
-    order, code = _clean(
-        tmp_path,
-        lambda layer: LayerUnregister(stuck=[(f"t.{layer}", "NotFoundException")]),
-        target="silver",
-    )
-    assert ("empty", "my-clean-silver") in order
+    order, code = _clean(tmp_path, lambda layer: LayerUnregister(**outcome), target="silver")
+    assert (("empty", "my-clean-silver") in order) is emptied
+    assert order[0] == ("unregister", "my-clean-silver")
     assert code not in (None, 0)
 
 

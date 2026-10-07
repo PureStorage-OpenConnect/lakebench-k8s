@@ -103,84 +103,47 @@ def _clean(cfg, **kw):
         return clean(**args)
 
 
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=None)
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_refuses_when_siblings_unknown(
-    s3_cls, verify, _names, _batch, _crd, _k8s, tmp_path
+@pytest.mark.parametrize(
+    ("siblings", "tagless_ours", "other_buckets", "cleaned"),
+    [
+        (None, True, False, False),  # sibling list unreadable: refuse
+        (["my"], True, True, False),  # the bucket names do not match this deployment
+        ([], True, False, True),  # prefix match and contents recorded as ours
+        ([], False, False, False),  # prefix match but no record: a user's bucket
+    ],
+)
+def test_tagless_bucket_is_cleaned_only_when_provably_ours(
+    tmp_path, siblings, tagless_ours, other_buckets, cleaned
 ):
     s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    with pytest.raises(typer.Exit) as exc:
-        _clean(_cfg(tmp_path))
-    assert exc.value.exit_code == 1
-    assert s3.empty_bucket.call_count == 0
-
-
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=["my"])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_refuses_when_other_deployment_has_prefix_claim(
-    s3_cls, verify, _names, _batch, _crd, _k8s, tmp_path
-):
-    # Another deployment named "my-clean-x" would win buckets it prefixes;
-    # here the bucket name does not match "my-clean" at all.
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(
-        CFG.replace("my-clean-bronze", "other-bronze")
-        .replace("my-clean-silver", "other-silver")
-        .replace("my-clean-gold", "other-gold")
-    )
-    with pytest.raises(typer.Exit):
-        _clean(cfg)
-    assert s3.empty_bucket.call_count == 0
-
-
-@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=True)
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_cleans_on_prefix_match(
-    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
-):
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 1  # clean silver: one bucket
-
-
-@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=False)
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_prefix_match_without_record_is_not_cleaned(
-    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
-):
-    """Review: clean still wiped a user's pre-existing, name-matching bucket
-    on FlashBlade after destroy had stopped doing so."""
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    with pytest.raises(typer.Exit):
-        _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 0
+    if other_buckets:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            CFG.replace("my-clean-bronze", "other-bronze")
+            .replace("my-clean-silver", "other-silver")
+            .replace("my-clean-gold", "other-gold")
+        )
+    else:
+        cfg = _cfg(tmp_path)
+    with (
+        patch("lakebench.s3.S3Client", return_value=s3),
+        patch(
+            "lakebench.deploy.ownership.verify_bucket_ownership",
+            side_effect=lambda _c, b, _n, **_k: _unsupported(b),
+        ),
+        patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=siblings),
+        patch("kubernetes.client.BatchV1Api"),
+        patch("kubernetes.client.CustomObjectsApi"),
+        patch("lakebench.k8s.get_k8s_client"),
+        patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=tagless_ours),
+    ):
+        if cleaned:
+            _clean(cfg)
+        else:
+            with pytest.raises(typer.Exit) as exc:
+                _clean(cfg)
+            assert exc.value.exit_code != 0
+    assert s3.empty_bucket.call_count == (1 if cleaned else 0)  # clean silver: one bucket
 
 
 @patch("lakebench.k8s.get_k8s_client")

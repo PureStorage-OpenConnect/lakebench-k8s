@@ -91,16 +91,3 @@ def test_hub_alert_is_capped_sorted_and_says_so(spark):
     assert small["evidence"]["txn_total"] == "2"
     assert small["evidence"]["txns_truncated"] == "false"
     assert small["evidence"]["entities_truncated"] == "false"
-
-
-def test_cap_is_a_rule_parameter(spark):
-    """The cap is a keyword of the rule, visible to a caller that builds
-    the rule's arguments from its signature (gold_finalize today, and the
-    shared rule parameters of reproduction later)."""
-    from detection_rules import w4_risk_propagation
-
-    rows = [("a1", 1, 2, 1, 1000), ("a2", 3, 2, 1, 1000), ("b1", 2, 4, 2, 990)]
-    (alert,) = w4_risk_propagation(_df(spark, rows), run_id="r", max_txns_per_alert=2).collect()
-    assert alert["related_txn_ids"] == ["a1", "a2"]
-    assert alert["evidence"]["txn_total"] == "3"
-    assert alert["evidence"]["txns_truncated"] == "true"

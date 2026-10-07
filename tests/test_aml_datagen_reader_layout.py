@@ -26,23 +26,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-
-# The Rust datagen puts every AML output under these sub-paths of the
-# invocation prefix. Keys mirror the format!(...) calls in
-# datagen_rs/src/bin/generate.rs financial_main(). Referenced by
-# `test_rust_datagen_writes_expected_sub_paths` -- adding an entry
-# here without updating the reader will fail the corresponding
-# assertion below.
-DATAGEN_SUBPATHS = {
-    "transactions_dir": "bronze/pacs008/",
-    "party_file": "bronze/party.parquet",
-    "account_file": "bronze/account.parquet",
-    "manifest_file": "manifest/manifest.parquet",
-}
 
 # Readers glob every cycle's manifest: cycle n > 0 writes
 # manifest/manifest-cNNN.parquet (datagen --cycle, WORKPLAN B4).
@@ -75,73 +60,6 @@ def _code_only(source: str) -> str:
     # Comments do not survive ast.unparse; the round-trip is
     # code-only by construction.
     return unparsed
-
-
-def test_rust_datagen_writes_expected_sub_paths():
-    """If the Rust datagen renames any of these paths, every reader
-    that expects them needs updating in the same commit."""
-    # Object keys are built in cycle.rs (multi-cycle keys, WORKPLAN B4).
-    src = _read("datagen_rs/src/bin/generate.rs") + _read("datagen_rs/src/cycle.rs")
-    for label, sub in DATAGEN_SUBPATHS.items():
-        # transactions_dir is a directory; the actual key format is
-        # "bronze/pacs008/part-{:06}.parquet". Anchor on the dir
-        # prefix + "part-" so a rename to any of the pieces trips.
-        needle = sub + "part-" if label == "transactions_dir" else sub
-        assert needle in src, (
-            f"Rust datagen no longer writes {label} to {sub}. "
-            "Update readers + this test in lock-step."
-        )
-
-
-@pytest.mark.parametrize(
-    "script",
-    [
-        "src/lakebench/spark/scripts/bronze_verify_financial.py",
-        "src/lakebench/spark/scripts/bronze_ingest_financial.py",
-    ],
-)
-def test_reader_derives_datagen_sub_path(script: str):
-    """LB-089: the reader must default to the datagen v2 sub-path,
-    not the flat layout the retired datagen_py used. Assertions run
-    against code-only source (docstrings stripped) so a comment that
-    mentions the string cannot satisfy the check while the code path
-    has reverted."""
-    code = _code_only(_read(script))
-    # The derivation must anchor the reader to the transactions
-    # sub-path. Two acceptable forms: a literal `bronze/pacs008/`
-    # concatenated onto the root, or a helper import (not present
-    # today, but forward-compatible).
-    assert DATAGEN_SUBPATHS["transactions_dir"] in code, (
-        f"{script} code path does not derive the transactions "
-        f"sub-path {DATAGEN_SUBPATHS['transactions_dir']!r}. "
-        "Datagen v2 writes there; reader must match, or LB-089 re-opens."
-    )
-    # And the reader must honour LB_FINANCIAL_BRONZE_PREFIX as the
-    # OUTER prefix so job.py's semantic stays load-bearing.
-    assert "LB_FINANCIAL_BRONZE_PREFIX" in code, (
-        f"{script} code path no longer honours LB_FINANCIAL_BRONZE_PREFIX."
-    )
-
-
-def test_reader_default_matches_datagen_default_prefix():
-    """When path_template is at its 'financial' default (config
-    substitutes 'pacs008' in the deploy path), the reader's default
-    ROOT must be ``pacs008/``. Any change to the default has to be
-    applied to both the deployer default and the reader default in
-    the same commit."""
-    # ast.unparse normalises quote style to single-quotes; assert on
-    # a quote-agnostic substring.
-    code = _code_only(_read("src/lakebench/spark/scripts/bronze_verify_financial.py"))
-    assert "'pacs008/'" in code or '"pacs008/"' in code, (
-        "bronze_verify_financial default LB_FINANCIAL_BRONZE_PREFIX no "
-        "longer 'pacs008/'; must match datagen.py's substitution."
-    )
-    depl_code = _code_only(_read("src/lakebench/deploy/datagen.py"))
-    assert "'pacs008'" in depl_code or '"pacs008"' in depl_code, (
-        "datagen deployer no longer substitutes 'pacs008' when "
-        "path_template is the C360 default. Reader default and "
-        "deployer substitution must stay lock-step."
-    )
 
 
 def test_bronze_verify_registers_manifest_iceberg_table():

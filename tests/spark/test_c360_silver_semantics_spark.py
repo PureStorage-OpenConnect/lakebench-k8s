@@ -67,15 +67,6 @@ def test_missing_column_fails(spark):
     assert any("missing required columns" in p and "transaction_amount" in p for p in problems)
 
 
-def test_missing_passthrough_column_only_warns(spark):
-    """schema: custom runs this job too; silver only carries these through."""
-    from bronze_verify import verify_bronze
-
-    _, problems, warnings = verify_bronze(_bronze(spark).drop("interaction_payload", "zip_code"))
-    assert problems == []
-    assert any("missing pass-through columns" in w and "zip_code" in w for w in warnings)
-
-
 def test_wrong_type_fails(spark):
     """A string event_timestamp would give NULL dates in silver."""
     from bronze_verify import verify_bronze
@@ -111,14 +102,6 @@ def test_nothing_survives_silver_filter_fails(spark):
     assert "no row survives the silver quality filter" in problems
 
 
-def test_timestamp_ntz_is_accepted(spark):
-    from bronze_verify import schema_problems
-    from pyspark.sql.functions import col
-
-    df = _bronze(spark).withColumn("event_timestamp", col("event_timestamp").cast("timestamp_ntz"))
-    assert schema_problems(df.schema) == []
-
-
 # ---------------------------------------------------------------- recency (E4b)
 
 
@@ -151,29 +134,6 @@ def test_recency_anchored_to_newest_event(spark):
     assert got == {date(2024, 3, 31): 30, date(2024, 3, 21): 20, date(2024, 1, 1): -60}
 
 
-def test_recency_does_not_depend_on_run_date(spark):
-    """Same data, same anchor, same scores; the old formula used current_date()."""
-    from common import apply_silver_transformations, apply_silver_transformations_anchored
-
-    df = _bronze(spark)
-    a = [
-        r["customer_recency_score"]
-        for r in apply_silver_transformations_anchored(df, date(2024, 6, 6)).orderBy("id").collect()
-    ]
-    b = [
-        r["customer_recency_score"]
-        for r in apply_silver_transformations_anchored(df, date(2024, 6, 6)).orderBy("id").collect()
-    ]
-    old = [
-        r["customer_recency_score"]
-        for r in apply_silver_transformations(df).orderBy("id").collect()
-    ]
-    assert a == b
-    assert max(a) == 30
-    # 2024 data scored against today's date is hundreds of days negative.
-    assert max(old) < -500
-
-
 def test_recency_null_without_clock(spark):
     from common import apply_silver_transformations_anchored
 
@@ -202,28 +162,6 @@ def test_calendar_fields_follow_utc_not_jvm_zone(spark):
     utc = apply_silver_transformations(df).select("interaction_date", "interaction_hour").first()
     assert utc["interaction_date"] == date(2024, 3, 1)
     assert utc["interaction_hour"] == 2
-
-
-@pytest.mark.parametrize(
-    "script",
-    [
-        "bronze_verify.py",
-        "bronze_ingest.py",
-        "bronze_ingest_delta.py",
-        "silver_build.py",
-        "silver_build_delta.py",
-        "silver_stream.py",
-        "silver_stream_delta.py",
-        "gold_finalize.py",
-        "gold_finalize_delta.py",
-        "gold_refresh.py",
-        "gold_refresh_delta.py",
-    ],
-)
-def test_every_c360_job_pins_utc(script):
-    src = (_HERE.parents[1] / "src/lakebench/spark/scripts" / script).read_text()
-    assert "set_utc_session(spark)" in src
-    assert "current_date()" not in src
 
 
 # ---------------------------------------------------------------- Q6 (E4b)

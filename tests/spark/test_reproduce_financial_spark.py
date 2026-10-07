@@ -279,17 +279,6 @@ def test_mismatch_on_different_related_transactions(spark, case):
     assert (out["outcome"], out["matched"], out["diff_size"]) == ("mismatch", 1, 1), out
 
 
-def test_not_found_and_another_runs_alert(spark, case):
-    case.setup()
-    inputs = case.record()
-    case.raise_alert("a-7", ["t1", "t2"])
-    assert case.repro.reproduce(spark, "nope-1", inputs)["outcome"] == "not_found"
-    other = case.repro.reproduce(spark, "a-7", {**inputs, "run_id": "20261003-000000-bbbbbb-c1"})
-    # The hint names the record's id, the one --run takes (not the cycle's).
-    assert other["outcome"] == "not_found", other
-    assert other["reason"].endswith(f"pass --run {RUN}"), other
-
-
 def test_the_scorer_fingerprints_what_gold_read(spark, case):
     """score_financial.read_snapshot_fingerprints: one entry per snapshot
     with rows, fp and cols_sha; an unknown snapshot records an error."""

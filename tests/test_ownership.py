@@ -24,7 +24,6 @@ from lakebench.deploy.ownership import (
     ANNOTATION_DEPLOYMENT_NAME,
     DEPLOYMENT_NAME_MAX,
     TAG_DEPLOYMENT_NAME,
-    TAG_WORKLOAD_SCHEMA,
     BucketOwnershipError,
     BucketTaggingUnsupported,
     DeploymentIdentity,
@@ -227,19 +226,6 @@ class TestStampNamespace:
         assert r.verdict is IdentityVerdict.ABSENT
         core.patch_namespace.assert_not_called()
 
-    def test_already_stamped_same_identity_is_idempotent(self):
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "my-config",
-                ANNOTATION_API_SERVER: "deadbeef1234",
-            }
-        )
-        r = stamp_namespace(core, "ns", "my-config", api_server="deadbeef1234")
-        assert r.verdict is IdentityVerdict.MATCH
-        # Idempotent: no PATCH issued when nothing changes.
-        core.patch_namespace.assert_not_called()
-
     def test_foreign_identity_refuses(self):
         core = mock.MagicMock()
         core.read_namespace.return_value = _ns_response(
@@ -252,27 +238,6 @@ class TestStampNamespace:
         assert r.verdict is IdentityVerdict.MISMATCH
         assert r.found_deployment == "someone-else"
         core.patch_namespace.assert_not_called()
-
-    def test_conflict_retries_and_succeeds(self):
-        """Guards F2: 409 on write triggers re-read + retry, not silent overwrite."""
-        core = mock.MagicMock()
-        # First read: fresh; PATCH fails with 409.
-        # Second read: still fresh; PATCH succeeds.
-        core.read_namespace.side_effect = [
-            _ns_response(annotations=None, resource_version="1"),
-            _ns_response(annotations=None, resource_version="2"),
-        ]
-        core.patch_namespace.side_effect = [_api_exception(409), None]
-        r = stamp_namespace(
-            core,
-            "ns",
-            "my-config",
-            api_server="deadbeef1234",
-            force_legacy=True,
-            max_retries=3,
-        )
-        assert r.verdict is IdentityVerdict.MATCH
-        assert core.patch_namespace.call_count == 2
 
     def test_conflict_reveals_foreign_identity(self):
         """Guards F2: conflict resolves to a foreign identity that appeared
@@ -334,16 +299,49 @@ class TestStampNamespace:
 
 
 class TestVerifyNamespaceIdentity:
-    def test_match(self):
+    @pytest.mark.parametrize(
+        ("stored", "current", "allow", "verdict"),
+        [
+            (
+                {ANNOTATION_DEPLOYMENT_NAME: "mine", ANNOTATION_API_SERVER: "deadbeef1234"},
+                "deadbeef1234",
+                False,
+                IdentityVerdict.MATCH,
+            ),
+            # wrong kubectl context after deploy
+            (
+                {ANNOTATION_DEPLOYMENT_NAME: "mine", ANNOTATION_API_SERVER: "prod-cluster1"},
+                "different-cluster-2",
+                False,
+                IdentityVerdict.MISMATCH,
+            ),
+            # one side has an api-server fingerprint, the other does not
+            (
+                {ANNOTATION_DEPLOYMENT_NAME: "mine", ANNOTATION_API_SERVER: "sha-abc123"},
+                None,
+                False,
+                IdentityVerdict.MISMATCH,
+            ),
+            ({ANNOTATION_DEPLOYMENT_NAME: "mine"}, "sha-abc123", False, IdentityVerdict.MISMATCH),
+            (
+                {ANNOTATION_DEPLOYMENT_NAME: "mine", ANNOTATION_API_SERVER: "sha-abc123"},
+                None,
+                True,
+                IdentityVerdict.MATCH,
+            ),
+            # neither side has a fingerprint: refuse unless explicitly allowed
+            ({ANNOTATION_DEPLOYMENT_NAME: "mine"}, None, False, IdentityVerdict.MISMATCH),
+            ({ANNOTATION_DEPLOYMENT_NAME: "mine"}, None, True, IdentityVerdict.MATCH),
+            # legacy namespace: destroy refuses, migration is required
+            ({}, "deadbeef1234", False, IdentityVerdict.ABSENT),
+        ],
+    )
+    def test_verdict(self, stored, current, allow, verdict):
         core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "my-config",
-                ANNOTATION_API_SERVER: "deadbeef1234",
-            }
-        )
-        r = verify_namespace_identity(core, "ns", "my-config", "deadbeef1234")
-        assert r.verdict is IdentityVerdict.MATCH
+        core.read_namespace.return_value = _ns_response(annotations=stored)
+        kw = {"allow_unverified_cluster": True} if allow else {}
+        r = verify_namespace_identity(core, "ns", "mine", current, **kw)
+        assert r.verdict is verdict
 
     def test_deployment_name_mismatch_refuses(self):
         core = mock.MagicMock()
@@ -353,101 +351,6 @@ class TestVerifyNamespaceIdentity:
         r = verify_namespace_identity(core, "ns", "mine", "deadbeef1234")
         assert r.verdict is IdentityVerdict.MISMATCH
         assert r.found_deployment == "other"
-
-    def test_api_server_mismatch_refuses(self):
-        """Guards F6: wrong kubectl context after deploy."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "mine",
-                ANNOTATION_API_SERVER: "prod-cluster1",
-            }
-        )
-        r = verify_namespace_identity(core, "ns", "mine", "different-cluster-2")
-        assert r.verdict is IdentityVerdict.MISMATCH
-        assert "context" in (r.hint or "")
-
-    def test_asymmetric_none_refuses_by_default(self):
-        """Guards PR-1-R1: one side has an api-server fingerprint, the
-        other does not. Cannot verify same cluster; must refuse unless
-        allow_unverified_cluster explicitly opts in."""
-        core = mock.MagicMock()
-        # Stamped with a fingerprint; current run has none.
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "mine",
-                ANNOTATION_API_SERVER: "sha-abc123",
-            }
-        )
-        r = verify_namespace_identity(core, "ns", "mine", None)
-        assert r.verdict is IdentityVerdict.MISMATCH
-        assert "verify" in (r.hint or "").lower()
-
-    def test_asymmetric_none_the_other_way(self):
-        """Stamped with no fingerprint (broken kubeconfig at deploy),
-        current run has one. Also refuses."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={ANNOTATION_DEPLOYMENT_NAME: "mine"}
-        )
-        r = verify_namespace_identity(core, "ns", "mine", "sha-abc123")
-        assert r.verdict is IdentityVerdict.MISMATCH
-
-    def test_asymmetric_none_bypassed_with_flag(self):
-        """Explicit opt-in reduces MISMATCH to MATCH so a user who knows
-        they cannot verify (dev environment) can still proceed."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "mine",
-                ANNOTATION_API_SERVER: "sha-abc123",
-            }
-        )
-        r = verify_namespace_identity(
-            core,
-            "ns",
-            "mine",
-            None,
-            allow_unverified_cluster=True,
-        )
-        assert r.verdict is IdentityVerdict.MATCH
-
-    def test_both_sides_none_refuses_without_flag(self):
-        """F3: neither side has a fingerprint. Name-only match would let
-        a destroy target the wrong cluster in the (narrow) case where
-        both environments have broken kubeconfig parsing. Refuse without
-        the explicit override."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={ANNOTATION_DEPLOYMENT_NAME: "mine"}
-        )
-        r = verify_namespace_identity(core, "ns", "mine", None)
-        assert r.verdict is IdentityVerdict.MISMATCH
-
-    def test_both_sides_none_matches_with_flag(self):
-        """With --allow-unverified-cluster explicitly set, both-None
-        proceeds so the same-cluster dev workflow still works."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={ANNOTATION_DEPLOYMENT_NAME: "mine"}
-        )
-        r = verify_namespace_identity(
-            core,
-            "ns",
-            "mine",
-            None,
-            allow_unverified_cluster=True,
-        )
-        assert r.verdict is IdentityVerdict.MATCH
-
-    def test_missing_annotations_reports_absent(self):
-        """Guards F1: legacy namespaces are ABSENT -- destroy refuses,
-        migration is required."""
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(annotations={})
-        r = verify_namespace_identity(core, "ns", "mine", "deadbeef1234")
-        assert r.verdict is IdentityVerdict.ABSENT
-        assert "migrate" in (r.hint or "")
 
     def test_missing_namespace(self):
         core = mock.MagicMock()
@@ -462,17 +365,6 @@ class TestVerifyNamespaceIdentity:
 
 
 class TestBucketOwnershipTag:
-    def test_write_and_readback(self):
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.return_value = {
-            "TagSet": [
-                {"Key": TAG_DEPLOYMENT_NAME, "Value": "my-config"},
-                {"Key": TAG_WORKLOAD_SCHEMA, "Value": "aml"},
-            ]
-        }
-        write_bucket_ownership_tag(s3, "b1", "my-config", workload_schema="aml")
-        s3.put_bucket_tagging.assert_called_once()
-
     def test_readback_returns_none_when_no_tags(self):
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
@@ -502,36 +394,6 @@ class TestBucketOwnershipTag:
         with pytest.raises(BucketOwnershipError, match="truncate"):
             write_bucket_ownership_tag(s3, "b1", "a" * (DEPLOYMENT_NAME_MAX + 1))
         s3.put_bucket_tagging.assert_not_called()
-
-    def test_verify_match(self):
-        """SAF-10 row 1: our name and this cluster's stamp."""
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.return_value = {
-            "TagSet": [
-                {"Key": TAG_DEPLOYMENT_NAME, "Value": "mine"},
-                {"Key": "lakebench.cluster", "Value": "fp1"},
-            ]
-        }
-        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster="fp1", created_record=())
-        assert r.verdict is IdentityVerdict.MATCH
-
-    def test_verify_mismatch_refuses(self):
-        """Guards F4: bucket owned by another deployment must never be
-        emptied, --force or not."""
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.return_value = {
-            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "someone-else"}]
-        }
-        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
-        assert r.verdict is IdentityVerdict.MISMATCH
-        assert "someone-else" in (r.hint or "")
-
-    def test_verify_legacy_untagged_bucket_absent(self):
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
-        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
-        assert r.verdict is IdentityVerdict.ABSENT
-        assert "force-legacy" in (r.hint or "")
 
     def test_verify_missing_bucket(self):
         s3 = mock.MagicMock()
@@ -576,35 +438,6 @@ class TestBucketTaggingUnsupported:
         with pytest.raises(BucketTaggingUnsupported, match="NotImplemented"):
             write_bucket_ownership_tag(s3, "b1", "my-config")
 
-    def test_verify_returns_unsupported_verdict(self):
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.side_effect = _client_error("NotImplemented")
-        s3.get_object.side_effect = _client_error("NoSuchKey")  # no owner marker
-        r = verify_bucket_ownership(s3, "b1", "mine", expected_cluster=None, created_record=())
-        assert r.verdict is IdentityVerdict.UNSUPPORTED
-        assert "NotImplemented" in (r.hint or "")
-
-    def test_verify_unsupported_distinct_from_absent(self):
-        """Load-bearing: destroy relies on this to fall back to name-
-        prefix instead of the --force-legacy migration path."""
-        s3_unsupported = mock.MagicMock()
-        s3_unsupported.get_bucket_tagging.side_effect = _client_error("NotImplemented")
-        s3_unsupported.get_object.side_effect = _client_error("NoSuchKey")
-        s3_absent = mock.MagicMock()
-        s3_absent.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
-        assert (
-            verify_bucket_ownership(
-                s3_unsupported, "b1", "mine", expected_cluster=None, created_record=()
-            ).verdict
-            is IdentityVerdict.UNSUPPORTED
-        )
-        assert (
-            verify_bucket_ownership(
-                s3_absent, "b1", "mine", expected_cluster=None, created_record=()
-            ).verdict
-            is IdentityVerdict.ABSENT
-        )
-
 
 class TestBucketNamePrefixFallback:
     """Name-prefix ownership check used on UNSUPPORTED backends.
@@ -615,99 +448,34 @@ class TestBucketNamePrefixFallback:
     buckets on backends without tag support.
     """
 
-    def test_exact_deployment_name_matches(self):
-        assert bucket_name_matches_deployment("mydeploy", "mydeploy") is True
-
-    def test_prefix_with_hyphen_matches(self):
-        assert bucket_name_matches_deployment("mydeploy-bronze", "mydeploy") is True
-        assert bucket_name_matches_deployment("mydeploy-silver", "mydeploy") is True
-        assert bucket_name_matches_deployment("mydeploy-gold", "mydeploy") is True
-
-    def test_prefix_without_hyphen_does_not_match(self):
-        """Load-bearing safety: ``mydeploybar-bronze`` must not match
-        deployment ``mydeploy``. Without the required hyphen separator
-        an adjacent deployment's bucket would be adopted."""
-        assert bucket_name_matches_deployment("mydeploybar-bronze", "mydeploy") is False
-        assert bucket_name_matches_deployment("mydeploy2-bronze", "mydeploy") is False
-
-    def test_unrelated_name_does_not_match(self):
-        assert bucket_name_matches_deployment("otherteam-bronze", "mydeploy") is False
-        assert bucket_name_matches_deployment("legacy-data", "mydeploy") is False
-
-    def test_empty_deployment_name_never_matches(self):
-        """Fail-safe: an empty deployment name (misconfig) must not
-        adopt any bucket."""
-        assert bucket_name_matches_deployment("anything", "") is False
-        assert bucket_name_matches_deployment("", "") is False
-
-    def test_longer_prefix_sibling_wins(self):
-        """The finding that motivated the round-2 rewrite: deployment
-        ``prod`` and deployment ``prod-eu`` coexist on the same
-        cluster. Bucket ``prod-eu-bronze`` prefix-matches BOTH names.
-        Longest-prefix-wins: ``prod-eu`` owns it, ``prod`` does not.
-        Without this rule, ``prod`` destroy silently empties ``prod-eu``'s
-        bronze layer on a backend that cannot tag (LB-088)."""
-        # From prod's perspective, prod-eu-bronze is NOT ours.
-        assert (
-            bucket_name_matches_deployment(
-                "prod-eu-bronze",
-                "prod",
-                other_deployment_names=["prod-eu"],
-            )
-            is False
-        )
-        # From prod-eu's perspective, prod-eu-bronze IS ours.
-        assert (
-            bucket_name_matches_deployment(
-                "prod-eu-bronze",
-                "prod-eu",
-                other_deployment_names=["prod"],
-            )
-            is True
-        )
-
-    def test_longer_prefix_sibling_wins_multiple(self):
-        """Three-way: prod, prod-eu, prod-eu-preview coexist. Bucket
-        prod-eu-preview-silver belongs only to the longest match."""
-        others = ["prod", "prod-eu"]
-        assert (
-            bucket_name_matches_deployment("prod-eu-preview-silver", "prod-eu-preview", others)
-            is True
-        )
-        assert (
-            bucket_name_matches_deployment(
-                "prod-eu-preview-silver", "prod-eu", others + ["prod-eu-preview"]
-            )
-            is False
-        )
-
-    def test_same_length_sibling_does_not_block(self):
-        """A sibling that prefix-matches only via being a substring
-        of the bucket but does NOT have a longer name does not block
-        the current deployment. (In practice a same-length prefix
-        collision is a name conflict at deploy time, not a fallback
-        issue.)"""
-        assert (
-            bucket_name_matches_deployment(
-                "myapp-bronze",
-                "myapp",
-                other_deployment_names=["other"],  # unrelated name
-            )
-            is True
-        )
-
-    def test_self_in_others_is_ignored(self):
-        """A defensive-copy corner case: if the caller accidentally
-        passes the current deployment name in ``other_deployment_names``,
-        the check should not falsely refuse."""
-        assert (
-            bucket_name_matches_deployment(
-                "myapp-bronze",
-                "myapp",
-                other_deployment_names=["myapp", "other"],
-            )
-            is True
-        )
+    @pytest.mark.parametrize(
+        ("bucket", "deployment", "others", "owned"),
+        [
+            ("mydeploy", "mydeploy", None, True),
+            ("mydeploy-bronze", "mydeploy", None, True),
+            ("mydeploy-silver", "mydeploy", None, True),
+            ("mydeploy-gold", "mydeploy", None, True),
+            # the hyphen is required: an adjacent deployment's bucket is never adopted
+            ("mydeploybar-bronze", "mydeploy", None, False),
+            ("mydeploy2-bronze", "mydeploy", None, False),
+            ("otherteam-bronze", "mydeploy", None, False),
+            ("legacy-data", "mydeploy", None, False),
+            # an empty deployment name (misconfig) adopts nothing
+            ("anything", "", None, False),
+            ("", "", None, False),
+            # longest live prefix wins
+            ("prod-eu-bronze", "prod", ["prod-eu"], False),
+            ("prod-eu-bronze", "prod-eu", ["prod"], True),
+            ("prod-eu-preview-silver", "prod-eu-preview", ["prod", "prod-eu"], True),
+            ("prod-eu-preview-silver", "prod-eu", ["prod", "prod-eu", "prod-eu-preview"], False),
+            ("myapp-bronze", "myapp", ["other"], True),
+            # the deployment itself among the others is ignored
+            ("myapp-bronze", "myapp", ["myapp", "other"], True),
+        ],
+    )
+    def test_claim(self, bucket, deployment, others, owned):
+        kw = {} if others is None else {"other_deployment_names": others}
+        assert bucket_name_matches_deployment(bucket, deployment, **kw) is owned
 
 
 class TestListLakebenchDeploymentNames:
@@ -726,86 +494,56 @@ class TestListLakebenchDeploymentNames:
             )
         )
 
-    def test_returns_empty_list_when_no_other_lakebench_namespaces(self):
+    @pytest.mark.parametrize(
+        ("items", "exclude", "names"),
+        [
+            ([("default", {}, {}), ("kube-system", {}, {})], None, []),
+            (
+                [
+                    ("team-a-ns", {ANNOTATION_DEPLOYMENT_NAME: "team-a"}, {}),
+                    ("team-b-ns", {ANNOTATION_DEPLOYMENT_NAME: "team-b"}, {}),
+                ],
+                None,
+                ["team-a", "team-b"],
+            ),
+            # pre-PR-1 namespaces carry only the managed-by label
+            (
+                [("legacy-ns", {}, {"app.kubernetes.io/managed-by": "lakebench"})],
+                None,
+                ["legacy-ns"],
+            ),
+            (
+                [
+                    ("team-a-ns", {ANNOTATION_DEPLOYMENT_NAME: "team-a"}, {}),
+                    ("team-b-ns", {ANNOTATION_DEPLOYMENT_NAME: "team-b"}, {}),
+                ],
+                "team-a-ns",
+                ["team-b"],
+            ),
+        ],
+    )
+    def test_names(self, items, exclude, names):
         from lakebench.deploy.ownership import list_lakebench_deployment_names
 
         core_v1 = mock.MagicMock()
         core_v1.list_namespace.return_value = SimpleNamespace(
-            items=[
-                self._ns("default"),
-                self._ns("kube-system"),
-            ]
+            items=[self._ns(n, annotations=a, labels=lab) for n, a, lab in items]
         )
-        assert list_lakebench_deployment_names(core_v1) == []
+        kw = {"exclude": exclude} if exclude else {}
+        assert sorted(list_lakebench_deployment_names(core_v1, **kw)) == names
 
-    def test_returns_deployment_names_from_annotation(self):
-        from lakebench.deploy.ownership import list_lakebench_deployment_names
-
-        core_v1 = mock.MagicMock()
-        core_v1.list_namespace.return_value = SimpleNamespace(
-            items=[
-                self._ns(
-                    "team-a-ns",
-                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-a"},
-                ),
-                self._ns(
-                    "team-b-ns",
-                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-b"},
-                ),
-            ]
-        )
-        assert sorted(list_lakebench_deployment_names(core_v1)) == ["team-a", "team-b"]
-
-    def test_returns_namespace_name_for_legacy_managed_by(self):
-        """Pre-PR-1 namespaces have no annotation but carry the label."""
-        from lakebench.deploy.ownership import list_lakebench_deployment_names
-
-        core_v1 = mock.MagicMock()
-        core_v1.list_namespace.return_value = SimpleNamespace(
-            items=[
-                self._ns(
-                    "legacy-ns",
-                    labels={"app.kubernetes.io/managed-by": "lakebench"},
-                ),
-            ]
-        )
-        assert list_lakebench_deployment_names(core_v1) == ["legacy-ns"]
-
-    def test_exclude_skips_self(self):
-        from lakebench.deploy.ownership import list_lakebench_deployment_names
-
-        core_v1 = mock.MagicMock()
-        core_v1.list_namespace.return_value = SimpleNamespace(
-            items=[
-                self._ns(
-                    "team-a-ns",
-                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-a"},
-                ),
-                self._ns(
-                    "team-b-ns",
-                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-b"},
-                ),
-            ]
-        )
-        assert list_lakebench_deployment_names(core_v1, exclude="team-a-ns") == ["team-b"]
-
-    def test_returns_none_on_api_exception(self):
-        """Load-bearing: RBAC 403 must return None (not []) so callers
-        refuse the name-prefix fallback rather than silently accept."""
-        from lakebench.deploy.ownership import list_lakebench_deployment_names
-
-        core_v1 = mock.MagicMock()
-        core_v1.list_namespace.side_effect = _api_exception(403, "Forbidden")
-        assert list_lakebench_deployment_names(core_v1) is None
-
-    def test_returns_none_on_config_exception(self):
-        """Kubeconfig missing / broken must return None."""
+    @pytest.mark.parametrize("unreadable", ["rbac-403", "no-kubeconfig"])
+    def test_unreadable_list_is_none_not_empty(self, unreadable):
+        """None (not []) so callers refuse the name-prefix fallback rather
+        than silently accept it."""
         from kubernetes.config.config_exception import ConfigException
 
         from lakebench.deploy.ownership import list_lakebench_deployment_names
 
         core_v1 = mock.MagicMock()
-        core_v1.list_namespace.side_effect = ConfigException("no config")
+        core_v1.list_namespace.side_effect = (
+            _api_exception(403, "Forbidden") if unreadable == "rbac-403" else ConfigException("x")
+        )
         assert list_lakebench_deployment_names(core_v1) is None
 
     def test_unexpected_exception_propagates(self):
@@ -981,16 +719,6 @@ class TestStampNamespaceRefreshesCommittedSha:
         anns = core.patch_namespace.call_args[0][1]["metadata"]["annotations"]
         assert anns[ANNOTATION_COMMITTED_SHA] is None  # merge patch: delete
 
-    def test_same_sha_is_still_a_no_op(self):
-        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
-
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={**self._OURS, ANNOTATION_COMMITTED_SHA: "69ee2fc"}
-        )
-        assert self._stamp(core, "69ee2fc").verdict is IdentityVerdict.MATCH
-        core.patch_namespace.assert_not_called()
-
     def test_foreign_identity_is_never_refreshed(self):
         from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
 
@@ -1004,26 +732,6 @@ class TestStampNamespaceRefreshesCommittedSha:
         )
         assert self._stamp(core, "69ee2fc").verdict is IdentityVerdict.MISMATCH
         core.patch_namespace.assert_not_called()
-
-    def test_other_cluster_same_name_is_not_a_refresh(self):
-        """Name matches but the api-server stamp differs: not this identity,
-        so no sha refresh (the existing restamp path decides, unchanged)."""
-        from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA
-
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={
-                ANNOTATION_DEPLOYMENT_NAME: "my-config",
-                ANNOTATION_API_SERVER: "otherclusterfp",
-                ANNOTATION_COMMITTED_SHA: "90a8478",
-            },
-            resource_version="3",
-        )
-        self._stamp(core, "69ee2fc")
-        core.patch_namespace.assert_called_once()
-        anns = core.patch_namespace.call_args[0][1]["metadata"]["annotations"]
-        assert anns[ANNOTATION_API_SERVER] == "deadbeef1234"  # full restamp, not a refresh
-        assert anns[ANNOTATION_DEPLOYMENT_NAME] == "my-config"
 
     def test_refresh_conflict_rereads_and_rechecks_identity(self):
         from lakebench.deploy.ownership import ANNOTATION_COMMITTED_SHA

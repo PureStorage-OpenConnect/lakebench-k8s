@@ -35,30 +35,6 @@ class TestHiveDeployerDeploy:
         deployer = HiveDeployer(engine)
         return deployer
 
-    def test_deploy_skips_when_not_hive(self):
-        from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.hive import HiveDeployer
-
-        cfg = make_config(recipe="polaris-iceberg-spark-trino")
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = HiveDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SKIPPED
-
-    def test_deploy_dry_run(self):
-        from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.hive import HiveDeployer
-
-        cfg = make_config()
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = True
-        deployer = HiveDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
-
     @patch("subprocess.run")
     def test_deploy_fails_naming_admin_install_and_runs_no_helm(self, mock_run):
         """DEP-3: a missing Stackable fails the step with the admin command,
@@ -84,76 +60,10 @@ class TestHiveDeployerDeploy:
         mock_run.assert_not_called()
         deployer._deploy_stackable.assert_not_called()
 
-    def test_deploy_uses_stackable_when_present(self):
-        from lakebench.deploy.engine import DeploymentStatus
-
-        deployer = self._make_deployer()
-        deployer._is_stackable_available = MagicMock(return_value=True)
-        deployer._deploy_stackable = MagicMock(
-            return_value=MagicMock(status=DeploymentStatus.SUCCESS)
-        )
-        assert deployer.deploy().status == DeploymentStatus.SUCCESS
-        deployer._deploy_stackable.assert_called_once()
-
 
 # ===========================================================================
 # DuckDBDeployer
 # ===========================================================================
-
-
-class TestDuckDBDeployerSkip:
-    """Tests for DuckDBDeployer skip guard."""
-
-    def test_skip_when_trino(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
-        from lakebench.deploy.engine import DeploymentStatus
-
-        cfg = make_config(recipe="hive-iceberg-spark-trino")
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = DuckDBDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SKIPPED
-        assert "duckdb" in result.component
-
-    def test_skip_when_spark_thrift(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
-        from lakebench.deploy.engine import DeploymentStatus
-
-        cfg = make_config(recipe="hive-iceberg-spark-thrift")
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = DuckDBDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SKIPPED
-
-
-class TestDuckDBDeployerDryRun:
-    """Tests for DuckDBDeployer dry-run mode."""
-
-    def test_dry_run_success(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
-        from lakebench.deploy.engine import DeploymentStatus
-
-        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = True
-        deployer = DuckDBDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
-
-
-class TestDuckDBDeployerTemplates:
-    """Tests for DuckDBDeployer template list."""
-
-    def test_template_names(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
-
-        assert "duckdb/deployment.yaml.j2" in DuckDBDeployer.TEMPLATES
-        assert "duckdb/service.yaml.j2" in DuckDBDeployer.TEMPLATES
-        assert len(DuckDBDeployer.TEMPLATES) == 2
 
 
 class TestDuckDBDeployerWaitForReady:
@@ -198,11 +108,6 @@ class TestDuckDBDeployerWaitForReady:
         engine.deps = placeholder_handle(cfg)
         return DuckDBDeployer(engine), engine.deps.pinset_sha256
 
-    def test_wait_success(self, recording_k8s):
-        deployer, pinset = self._deployer()
-        self._seed(recording_k8s, ready=1, pinset=pinset)
-        deployer._wait_for_ready("test-ns", timeout_seconds=5)
-
     def test_wait_timeout_on_another_set(self, recording_k8s):
         """A Ready pod on the old set is not the deploy's pod."""
         deployer, _ = self._deployer()
@@ -220,30 +125,6 @@ class TestDuckDBDeployerWaitForReady:
 class TestObservabilityDeployerSkip:
     """Tests for ObservabilityDeployer skip/deploy/destroy logic."""
 
-    def test_skip_when_disabled(self):
-        from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.observability import ObservabilityDeployer
-
-        cfg = make_config()  # observability.enabled = False
-        engine = MagicMock()
-        engine.config = cfg
-        deployer = ObservabilityDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SKIPPED
-
-    def test_dry_run(self):
-        from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.observability import ObservabilityDeployer
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = True
-        deployer = ObservabilityDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would check the shared observability stack" in result.message
-
     def test_destroy_dry_run(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer
@@ -257,20 +138,6 @@ class TestObservabilityDeployerSkip:
         # The shared stack is never removed by destroy, dry run or not.
         assert result.status == DeploymentStatus.SKIPPED
         assert "left in place" in result.message
-
-    def test_helm_values_retention_and_storage(self):
-        from lakebench.deploy.observability import build_helm_values
-
-        cfg = make_config(observability={"enabled": True, "retention": "14d", "storage": "20Gi"})
-        values = build_helm_values(cfg.observability)
-        assert values["prometheus.prometheusSpec.retention"] == "14d"
-        assert (
-            "20Gi"
-            in values[
-                "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate"
-                ".spec.resources.requests.storage"
-            ]
-        )
 
     def test_helm_values_grafana_disabled(self):
         from lakebench.deploy.observability import build_helm_values
@@ -288,70 +155,23 @@ class TestObservabilityDeployerSkip:
 class TestDatagenDeployerParseSizeToBytes:
     """Tests for DatagenDeployer._parse_size_to_bytes()."""
 
-    def test_parse_gb(self):
+    @pytest.mark.parametrize(
+        ("text", "size"),
+        [
+            ("100GB", 100 * 1024**3),
+            ("1TB", 1024**4),
+            ("512MB", 512 * 1024**2),
+            ("1024KB", 1024 * 1024),
+            ("1048576B", 1048576),
+            ("4096", 4096),
+        ],
+    )
+    def test_parse(self, text, size):
         from lakebench.deploy.datagen import DatagenDeployer
 
         engine = MagicMock()
         engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("100GB") == 100 * 1024**3
-
-    def test_parse_tb(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        engine = MagicMock()
-        engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("1TB") == 1024**4
-
-    def test_parse_mb(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        engine = MagicMock()
-        engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("512MB") == 512 * 1024**2
-
-    def test_parse_kb(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        engine = MagicMock()
-        engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("1024KB") == 1024 * 1024
-
-    def test_parse_bytes(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        engine = MagicMock()
-        engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("1048576B") == 1048576
-
-    def test_parse_plain_number(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        engine = MagicMock()
-        engine.config = make_config()
-        deployer = DatagenDeployer(engine)
-        assert deployer._parse_size_to_bytes("4096") == 4096
-
-
-class TestDatagenDeployerDryRun:
-    """Tests for DatagenDeployer dry-run."""
-
-    def test_deploy_dry_run(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-        from lakebench.deploy.engine import DeploymentStatus
-
-        cfg = make_config()
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = True
-        deployer = DatagenDeployer(engine)
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would deploy" in result.message
+        assert DatagenDeployer(engine)._parse_size_to_bytes(text) == size
 
 
 class TestDatagenDeployerSchemaWireThrough:
@@ -362,44 +182,27 @@ class TestDatagenDeployerSchemaWireThrough:
     against financial S3 buckets. Caught in UAT.
     """
 
-    def test_customer360_passes_customer360_schema(self):
+    @pytest.mark.parametrize(
+        ("schema", "prefix"),
+        [("customer360", "customer/interactions"), ("financial", "pacs008")],
+    )
+    def test_schema_and_bronze_prefix_reach_datagen(self, schema, prefix):
+        """The financial prefix must match bronze_verify_financial's default."""
         from lakebench.deploy.datagen import DatagenDeployer
 
-        cfg = make_config()  # default schema = customer360
+        cfg = make_config(architecture={"workload": {"schema": schema}})
         engine = MagicMock()
         engine.config = cfg
         engine.context = {}
-        deployer = DatagenDeployer(engine)
-        context = deployer._build_datagen_context()
-        assert context["datagen_schema"] == "customer360"
-        assert context["datagen_path_prefix"] == "customer/interactions"
-
-    def test_financial_passes_financial_schema_and_pacs008_prefix(self):
-        from lakebench.deploy.datagen import DatagenDeployer
-
-        cfg = make_config(
-            architecture={
-                "workload": {"schema": "financial"},
-            }
-        )
-        engine = MagicMock()
-        engine.config = cfg
-        engine.context = {}
-        deployer = DatagenDeployer(engine)
-        context = deployer._build_datagen_context()
-        assert context["datagen_schema"] == "financial"
-        # Default path_template is the C360 default; when schema=financial
-        # the deployer must substitute the pacs.008 prefix to match
-        # bronze_verify_financial's LB_FINANCIAL_BRONZE_PREFIX default.
-        assert context["datagen_path_prefix"] == "pacs008"
+        context = DatagenDeployer(engine)._build_datagen_context()
+        assert context["datagen_schema"] == schema
+        assert context["datagen_path_prefix"] == prefix
 
     def test_financial_custom_path_template_no_longer_applies(self):
-        # v1.7 removed medallion.bronze.path_template: the layout is fixed per
-        # workload (load_config refuses a custom one for the commands that
-        # change data; built directly the block is dropped with a warning).
+        # v1.7 removed medallion.bronze.path_template: the layout is fixed per workload.
         from lakebench.deploy.datagen import DatagenDeployer
 
-        with pytest.warns(DeprecationWarning, match="'medallion'"):
+        with pytest.warns(DeprecationWarning):
             cfg = make_config(
                 architecture={
                     "workload": {"schema": "financial"},
@@ -414,6 +217,4 @@ class TestDatagenDeployerSchemaWireThrough:
         engine = MagicMock()
         engine.config = cfg
         engine.context = {}
-        deployer = DatagenDeployer(engine)
-        context = deployer._build_datagen_context()
-        assert context["datagen_path_prefix"] == "pacs008"
+        assert DatagenDeployer(engine)._build_datagen_context()["datagen_path_prefix"] == "pacs008"

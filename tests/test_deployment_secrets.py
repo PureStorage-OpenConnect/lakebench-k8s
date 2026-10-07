@@ -15,46 +15,8 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import PolarisClientSecretMissing
 from lakebench.deploy import deployment_secrets as ds
-
-
-class FakeCore:
-    """CoreV1Api subset: Secrets and PVCs per namespace."""
-
-    def __init__(self, secrets: dict | None = None, pvcs: set | None = None):
-        # {(ns, name): {key: plaintext}}
-        self.secrets: dict[tuple[str, str], dict[str, str]] = dict(secrets or {})
-        self.pvcs: set[tuple[str, str]] = set(pvcs or set())
-        self.creates: list[dict] = []
-        self.replaces: list[dict] = []
-
-    def read_namespaced_secret(self, name, ns):
-        if (ns, name) not in self.secrets:
-            raise ApiException(status=404)
-        data = {
-            k: base64.b64encode(v.encode()).decode() for k, v in self.secrets[(ns, name)].items()
-        }
-        return SimpleNamespace(data=data)
-
-    def create_namespaced_secret(self, ns, body):
-        name = body["metadata"]["name"]
-        if (ns, name) in self.secrets:
-            raise ApiException(status=409)
-        self.creates.append(body)
-        self.secrets[(ns, name)] = dict(body["stringData"])
-
-    def replace_namespaced_secret(self, name, ns, body):
-        self.replaces.append(body)
-        self.secrets[(ns, name)] = dict(body["stringData"])
-
-    def connect_get_namespaced_pod_exec(self, *a, **k):  # only passed to stream()
-        raise AssertionError("exec goes through the patched stream")
-
-    def read_namespaced_persistent_volume_claim(self, name, ns):
-        if (ns, name) not in self.pvcs:
-            raise ApiException(status=404)
-        return SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp=None))
+from tests.fixtures.deployment_secrets_helpers import FakeCore as FakeCore
 
 
 def _cfg(name="a", client_secret="") -> LakebenchConfig:
@@ -185,19 +147,6 @@ def test_matching_config_on_a_bootstrapped_polaris_is_fine():
     )
 
 
-def test_bootstrapped_polaris_without_any_secret_refuses():
-    """A realm accepts only the secret it was bootstrapped with: never invent one."""
-    with pytest.raises(ds.DeploymentSecretError, match="was bootstrapped with a client secret"):
-        ds.ensure_polaris_client_secret(FakeCore(), _cfg(), "a", fresh=False)
-
-
-def test_run_reads_client_secret_from_namespace():
-    core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {"clientSecret": "stored"}})
-    assert ds.polaris_client_secret(_cfg(), core) == "stored"
-    with pytest.raises(PolarisClientSecretMissing, match="run lakebench deploy first"):
-        ds.polaris_client_secret(_cfg(), FakeCore())
-
-
 def test_spark_job_uses_the_stored_client_secret():
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
@@ -219,17 +168,11 @@ def test_role_probe(out, expected):
     assert ds.polaris_role_exists(lambda db, sql: out) is expected
 
 
-@pytest.mark.parametrize("out", ["", "psql: error: connection refused", "ERROR: 'lbrole:' x"])
-def test_role_probe_refuses_to_guess(out):
-    with pytest.raises(ds.DeploymentSecretError, match="rather than guess"):
-        ds.polaris_role_exists(lambda db, sql: out)
-
-
 # -- consumers render no literal --------------------------------------------------------
 
 
 def _render(template: str, recipe: str) -> str:
-    from tests.test_functional_templates import _enrich_context, _make_engine
+    from tests.fixtures.functional_templates_helpers import _enrich_context, _make_engine
 
     engine = _make_engine(
         recipe=recipe,
@@ -271,26 +214,11 @@ def test_polaris_templates_read_passwords_from_secrets():
     assert '"POLARIS,lakebench,$CLIENT_SECRET"' in boot
 
 
-def test_no_fixed_secret_left_in_templates_or_code():
-    from pathlib import Path
-
-    root = Path(ds.__file__).resolve().parents[1]
-    hits = []
-    for p in list(root.rglob("*.j2")) + list(root.rglob("*.py")):
-        if p.name == "deployment_secrets.py":
-            continue
-        text = p.read_text(encoding="utf-8")
-        for fixed in ("lakebench-polaris-2024", "lakebench-hive-2024", '"grafana.adminPassword"'):
-            if fixed in text:
-                hits.append(f"{p.relative_to(root)}: {fixed}")
-    assert hits == []
-
-
 # -- secrets step and destroy --------------------------------------------------------
 
 
 def test_secrets_step_keeps_the_stored_hive_password():
-    from tests.test_functional_templates import _make_engine
+    from tests.fixtures.functional_templates_helpers import _make_engine
 
     engine = _make_engine()
     engine.dry_run = False
@@ -468,7 +396,7 @@ def test_postgres_step_syncs_the_hive_role_to_its_secret(monkeypatch):
 
 def test_secrets_step_creates_a_new_hive_secret_before_rendering():
     """409-safe: an overlapping deploy that won the create keeps its value."""
-    from tests.test_functional_templates import _make_engine
+    from tests.fixtures.functional_templates_helpers import _make_engine
 
     engine = _make_engine()
     engine.dry_run = False

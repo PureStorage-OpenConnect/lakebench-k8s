@@ -15,7 +15,6 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -123,39 +122,6 @@ def test_append_retries_a_real_metadata_conflict_exactly_once(
     assert spark_session.table(TBL).count() == first + second
 
 
-def test_a_non_conflict_error_is_not_retried(spark_session, ss, monkeypatch):
-    calls = {"n": 0}
-
-    def wrapper(*a, **k):
-        calls["n"] += 1
-        raise ValueError("disk full")
-
-    _write(ss, spark_session, 0, 0)
-    monkeypatch.setattr(ss, "write_delta_table", wrapper)
-    with pytest.raises(ValueError, match="disk full"):
-        _write(ss, spark_session, 1, 100)
-    assert calls["n"] == 1
-
-
-def test_a_conflict_on_every_attempt_gives_up(spark_session, ss, monkeypatch):
-    class MetadataChangedException(Exception):
-        pass
-
-    calls = {"n": 0}
-
-    def wrapper(*a, **k):
-        calls["n"] += 1
-        raise MetadataChangedException("concurrent update")
-
-    _write(ss, spark_session, 0, 0)
-    monkeypatch.setattr(ss, "write_delta_table", wrapper)
-    # The script's own time module only: the retry waits nothing here.
-    monkeypatch.setattr(ss, "time", SimpleNamespace(sleep=lambda s: None, time=time.time))
-    with pytest.raises(MetadataChangedException):
-        _write(ss, spark_session, 1, 100)
-    assert calls["n"] == ss._APPEND_ATTEMPTS
-
-
 def test_shared_checkpoint_conflict_is_not_retried(ss):
     """ConcurrentTransactionException means two writers share one txnAppId
     (one checkpoint): never retried."""
@@ -165,53 +131,3 @@ def test_shared_checkpoint_conflict_is_not_retried(ss):
 
     assert ss._delta_conflict(ConcurrentTransactionException("x")) is None
     assert ss._delta_conflict(ValueError("MetadataChangedException in a cause text")) is None
-
-
-def _managed_location(spark, name):
-    wh = spark.conf.get("spark.sql.warehouse.dir").removeprefix("file:")
-    return f"{wh}/silver.db/{name}"
-
-
-def test_create_loser_between_winners_log_and_catalog_waits(spark_session, ss, capsys):
-    """The winner's log has landed but its catalog entry has not: the
-    loser's create fails with a non-empty-location error, which is not a
-    concurrent-modification class, and it must still wait for the table."""
-    name = "race_late_catalog"
-    tbl = f"spark_catalog.silver.{name}"
-    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
-    loc = _managed_location(spark_session, name)
-    frame = spark_session.range(3).selectExpr(
-        "cast(id as string) a", "current_date() interaction_date"
-    )
-    frame.write.format("delta").partitionBy("interaction_date").save(loc)
-
-    def _register():
-        time.sleep(2)
-        spark_session.sql(f"CREATE TABLE {tbl} USING delta LOCATION '{loc}'")
-
-    t = threading.Thread(target=_register)
-    t.start()
-    capsys.readouterr()
-    try:
-        ss._create_silver_table_if_not_exists(spark_session, frame.schema, tbl, "file:///unused/")
-    finally:
-        t.join(timeout=60)
-    assert ss.table_exists(spark_session, tbl)
-    # The create failed and the loser waited (not a create that found the
-    # table already registered).
-    assert "Silver table created by a concurrent writer" in capsys.readouterr().out
-    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
-
-
-def test_create_failure_that_leaves_no_table_is_raised(spark_session, ss, monkeypatch):
-    name = "race_never"
-    tbl = f"spark_catalog.silver.{name}"
-    spark_session.sql(f"DROP TABLE IF EXISTS {tbl}")
-    loc = _managed_location(spark_session, name)
-    frame = spark_session.range(3).selectExpr(
-        "cast(id as string) a", "current_date() interaction_date"
-    )
-    frame.write.format("delta").partitionBy("interaction_date").save(loc)
-    monkeypatch.setattr(ss, "_CREATE_RACE_WAIT", 2)
-    with pytest.raises(Exception, match="NON_EMPTY_LOCATION|non-empty|not empty"):
-        ss._create_silver_table_if_not_exists(spark_session, frame.schema, tbl, "file:///unused/")

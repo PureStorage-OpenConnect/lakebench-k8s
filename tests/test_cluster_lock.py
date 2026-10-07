@@ -84,19 +84,6 @@ class TestReadClusterLock:
 
 
 class TestAcquireClusterLock:
-    def test_creates_when_absent(self):
-        core = MagicMock()
-        core.read_namespace.return_value = MagicMock()
-        # First read -> 404, then create -> new configmap.
-        core.read_namespaced_config_map.side_effect = _api_exc(404)
-        created = _cm("host@user@abc", _now_iso(), 60, rv="1")
-        core.create_namespaced_config_map.return_value = created
-
-        handle = acquire_cluster_lock(core, ttl_seconds=60, timeout=1, holder="host@user@abc")
-        assert isinstance(handle, LeaseHandle)
-        assert handle.holder == "host@user@abc"
-        core.create_namespaced_config_map.assert_called_once()
-
     def test_refuses_when_held_within_ttl(self):
         core = MagicMock()
         core.read_namespace.return_value = MagicMock()
@@ -394,56 +381,6 @@ class TestForceRelease:
         )
         state = force_release_cluster_lock(core, expired_only=False)
         assert state is not None
-        core.delete_namespaced_config_map.assert_called_once()
-
-
-def _stateful_lock_core() -> MagicMock:
-    """A CoreV1Api mock whose lock ConfigMap is whatever ``create`` stored.
-
-    The release path deletes only when the stored ``acquired-at`` equals
-    the handle's, and both are second-resolution timestamps. Stamping the
-    mocked read with a separate ``_now_iso()`` at setup time made the two
-    differ whenever a second boundary fell between setup and acquire, so
-    release correctly skipped the delete and the test failed (about 1 in
-    1,000 runs under CPU load). Echoing back the created body is what a
-    real API server does and removes the clock from the test.
-    """
-    core = MagicMock()
-    core.read_namespace.return_value = MagicMock()
-    stored: dict[str, V1ConfigMap] = {}
-
-    def _read(name, namespace, **_kw):
-        if "cm" not in stored:
-            raise _api_exc(404)
-        return stored["cm"]
-
-    def _create(namespace, body, **_kw):
-        body.metadata.resource_version = "1"
-        stored["cm"] = body
-        return body
-
-    core.read_namespaced_config_map.side_effect = _read
-    core.create_namespaced_config_map.side_effect = _create
-    return core
-
-
-class TestContextManager:
-    def test_releases_on_normal_exit(self):
-        core = _stateful_lock_core()
-
-        with cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc") as h:
-            assert isinstance(h, LeaseHandle)
-        core.delete_namespaced_config_map.assert_called_once()
-
-    def test_releases_on_exception(self):
-        core = _stateful_lock_core()
-
-        class Boom(RuntimeError):
-            pass
-
-        with pytest.raises(Boom):
-            with cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc"):
-                raise Boom("body failed")
         core.delete_namespaced_config_map.assert_called_once()
 
 

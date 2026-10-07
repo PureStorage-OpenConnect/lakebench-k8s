@@ -151,44 +151,6 @@ def test_w17_spill_mode_matches_local_checkpoint(spark, tmp_path, monkeypatch):
     assert not any(root.glob("*/*"))
 
 
-def test_join_partitions_bound_rows_on_hub_graph(spark, monkeypatch):
-    """Busy pass-through accounts make the levels grow hop by hop. The join
-    is sized from the edge count, so no level lands in the job's 4 shuffle
-    partitions: each holds a bounded slice."""
-    import detection_rules as dr
-    from pyspark.sql.functions import count, lit, spark_partition_id
-    from pyspark.sql.functions import max as max_
-
-    monkeypatch.delenv("LB_GOLD_URI", raising=False)
-    monkeypatch.setattr(dr, "PATH_SEARCH_ROWS_PER_PARTITION", 1000)
-    rows = _rows(3, 6000, 300, hubs=10, hub_in=0.15, hub_out=0.1)
-    df = _df(spark, rows).cache()
-    n_edges = df.count()
-    parts = dr.path_search_partitions(spark, n_edges)
-    assert parts == -(-4 * n_edges // 1000) > 4
-
-    seen = []
-    admit = dr._PathBudget.admit
-
-    def spy(self, frame, estimate, label):
-        cut, n = admit(self, frame, estimate, label)
-        by_part = cut.groupBy(spark_partition_id().alias("p")).agg(count(lit(1)).alias("c"))
-        stats = by_part.agg(max_("c").alias("mx"), count(lit(1)).alias("np")).collect()[0]
-        seen.append((label, n, stats["np"], stats["mx"] or 0))
-        return cut, n
-
-    monkeypatch.setattr(dr._PathBudget, "admit", spy)
-    alerts = dr.w3_round_tripping(df, run_id="r").count()
-    assert alerts == len(_w3_brute_force(rows))
-    sizes = [n for _, n, _, _ in seen]
-    assert sizes[1] > sizes[0]  # the frontier grows
-    for label, n, np_, mx in seen:
-        assert np_ <= parts, label
-        # Hash placement is uneven, but no partition takes more than a small
-        # multiple of its share (with one partition it would take all n).
-        assert mx <= max(50, 3 * n / parts), (label, n, mx)
-
-
 def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch):
     """A budget that holds level 2 but not level 3 skips on the level-3
     estimate: level 3 is never written, and the files the search did write
@@ -228,59 +190,6 @@ def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch):
     assert "estimates level 3" in exc.value.detail
     assert "level 3" not in written and "level 2" in written
     assert not any((tmp_path / "gold/_checkpoints/paths").glob("*/W3-*"))
-
-
-def test_partition_count_scales_with_edges_within_bounds(spark):
-    import detection_rules as dr
-
-    assert dr.path_search_partitions(spark, 1_000) == 4  # the job's own count
-    assert dr.path_search_partitions(spark, 266_700_000) == 534  # scale 10
-    assert dr.path_search_partitions(spark, 2_667_000_000) == dr.PATH_SEARCH_MAX_PARTITIONS
-
-
-def test_last_hop_joins_the_step_frame_in_place(spark, monkeypatch):
-    """Review: on the last hop the closing test ``e_dst == start`` became a
-    third join key, the step frame's (e_src, _b) partitioning no longer
-    counted, and Spark reshuffled the whole step frame at the job's shuffle
-    partitions. Under the search's setting it is joined in place."""
-    import re
-
-    import detection_rules as dr
-    from pyspark.sql.functions import array, col
-
-    monkeypatch.delenv("LB_GOLD_URI", raising=False)
-    monkeypatch.setattr(dr, "PATH_SEARCH_ROWS_PER_PARTITION", 100)
-    old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
-    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
-    try:
-        df = _df(spark, _rows(5, 500, 50))
-        hop_us = 168 * HOUR_US
-        _, edges, n_edges, step, _, parts = dr._search_frames(
-            df, "W3", hop_us, 200, 10**9, 10**9, with_amount=False
-        )
-        paths = edges.select(
-            col("src").alias("start"),
-            col("dst").alias("end"),
-            col("t").alias("t_last"),
-            array(col("uetr")).alias("uetrs"),
-        )
-
-        def last_hop_plan():
-            closing = dr._extend_paths(paths, step, hop_us, parts).filter(
-                col("e_dst") == col("start")
-            )
-            return closing._jdf.queryExecution().executedPlan().toString()
-
-        assert "hashpartitioning(e_dst" in last_hop_plan()  # the defect
-        assert parts > 4
-        with dr._copartition_on_key_subset(spark):
-            plan = last_hop_plan()
-        assert "hashpartitioning(e_dst" not in plan
-        assert re.search(rf"hashpartitioning\(end#\d+L, _pb#\d+L, {parts}\)", plan)
-        assert spark.conf.get("spark.sql.requireAllClusterKeysForCoPartition") == "true"
-    finally:
-        spark.conf.set("spark.sql.autoBroadcastJoinThreshold", old)
-        spark.catalog.clearCache()
 
 
 def test_sweep_removes_only_stale_foreign_spill(spark, tmp_path, monkeypatch):

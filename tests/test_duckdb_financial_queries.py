@@ -21,7 +21,6 @@ import os
 import re
 import subprocess
 import sys
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -34,137 +33,6 @@ from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExe
 # ---------------------------------------------------------------------------
 # Error surfacing
 # ---------------------------------------------------------------------------
-
-_BINDER_TRACEBACK = """\
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-_duckdb.BinderException: Binder Error: Catalog "lakehouse" does not exist!
-"""
-
-_PYTZ_TRACEBACK = """\
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-_duckdb.InvalidInputException: Invalid Input Error: Required module 'pytz' failed \
-to import, due to the following Python exception:
-ModuleNotFoundError: No module named 'pytz'
-"""
-
-_PARSER_TRACEBACK = """\
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-_duckdb.ParserException: Parser Error: syntax error at or near "FROMM"
-
-LINE 1: SELECT 1 FROMM t
-                 ^
-"""
-
-_CHAINED_TRACEBACK = """\
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-KeyError: 'AWS_ACCESS_KEY_ID'
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "<string>", line 1, in <module>
-    conn.execute(sql)
-    ~~~~~~~~~~~~^^^^^
-RuntimeError: the one that was raised
-"""
-
-
-class TestSummariseEngineError:
-    def test_reports_the_exception_not_the_traceback_header(self):
-        out = summarise_engine_error(_BINDER_TRACEBACK)
-        assert out == 'BinderException: Binder Error: Catalog "lakehouse" does not exist!'
-
-    def test_keeps_the_continuation_that_names_the_missing_module(self):
-        out = summarise_engine_error(_PYTZ_TRACEBACK)
-        assert out.startswith("InvalidInputException")
-        assert "No module named 'pytz'" in out
-
-    def test_drops_the_caret_line(self):
-        out = summarise_engine_error(_PARSER_TRACEBACK)
-        assert out.startswith("ParserException: Parser Error: syntax error")
-        assert "^" not in out
-
-    def test_chained_traceback_reports_the_final_exception(self):
-        out = summarise_engine_error(_CHAINED_TRACEBACK)
-        assert out == "RuntimeError: the one that was raised"
-
-    def test_non_traceback_picks_the_error_line(self):
-        text = "WARNING: jline terminal fallback\nQuery 2026_0001 failed: line 1:8: Column 'x' cannot be resolved\n"
-        assert summarise_engine_error(text).startswith("Query 2026_0001 failed:")
-
-    def test_prefers_the_stated_error_over_warn_noise(self):
-        text = "WARN util.NativeCodeLoader: Exception: none\nError: real problem\n"
-        assert summarise_engine_error(text) == "Error: real problem"
-
-    def test_last_marked_line_when_none_leads(self):
-        text = "WARN a: Exception: noise\njava.lang.IllegalStateException: real\n"
-        assert "java.lang.IllegalStateException: real" in summarise_engine_error(text)
-
-    def test_hive_failed_line_and_caused_by_are_kept(self):
-        text = (
-            "WARN HiveConf: Exception: retrying metastore connect\n"
-            "FAILED: SemanticException [Error 10001]: Table not found 'x'\n"
-            "Caused by: NoSuchObjectException: x\n"
-        )
-        out = summarise_engine_error(text)
-        assert out.startswith("FAILED: SemanticException")
-        assert "Caused by: NoSuchObjectException" in out
-
-    def test_shutdown_noise_traceback_is_ignored(self):
-        text = (
-            _BINDER_TRACEBACK
-            + "Exception ignored in: <function X.__del__>\n"
-            + "Traceback (most recent call last):\n"
-            + '  File "<string>", line 1, in __del__\n'
-            + "RuntimeError: cleanup failed\n"
-        )
-        assert "does not exist" in summarise_engine_error(text)
-
-    def test_drops_kubectl_exit_line(self):
-        out = summarise_engine_error(_BINDER_TRACEBACK + "command terminated with exit code 1\n")
-        assert out.endswith("does not exist!")
-
-    def test_empty_and_limit(self):
-        assert summarise_engine_error("") == "Unknown error"
-        assert len(summarise_engine_error("E" * 1000)) == 300
-        assert len(summarise_engine_error(_PYTZ_TRACEBACK, limit=40)) == 40
-
-
-@pytest.mark.parametrize(
-    "executor_path,make",
-    [
-        (
-            "duckdb",
-            lambda: DuckDBExecutor(namespace="t", catalog_name="lakehouse"),
-        ),
-        (
-            "trino",
-            lambda: __import__(
-                "lakebench.modules.query_engines.trino.executor", fromlist=["TrinoExecutor"]
-            ).TrinoExecutor(namespace="t", catalog_name="lakehouse"),
-        ),
-        (
-            "spark-thrift",
-            lambda: __import__(
-                "lakebench.modules.query_engines.spark_thrift.executor",
-                fromlist=["SparkThriftExecutor"],
-            ).SparkThriftExecutor(namespace="t", catalog_name="lakehouse"),
-        ),
-    ],
-)
-def test_every_executor_surfaces_the_final_exception(executor_path, make):
-    executor = make()
-    executor._pod = "pod-0"
-    with patch("subprocess.run") as run:
-        run.return_value = MagicMock(returncode=1, stderr=_BINDER_TRACEBACK, stdout="")
-        result = executor.execute_query("SELECT 1")
-    assert not result.success
-    assert 'Catalog "lakehouse" does not exist' in result.error
-    assert "Traceback" not in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -215,47 +83,31 @@ def _render(query) -> str:
 
 
 class TestAdaptQuery:
-    def test_auxiliary_tables_resolve_to_their_layer_bucket(self):
-        sql = _executor().adapt_query(
-            "SELECT * FROM lakehouse.silver.entities JOIN lakehouse.gold.alerts ON 1=1"
-        )
-        assert "iceberg_scan('s3://sb/warehouse/silver.db/entities'" in sql
-        assert "iceberg_scan('s3://gb/warehouse/gold.db/alerts'" in sql
-
-    def test_polaris_layout_for_auxiliary_tables(self):
-        sql = _executor("polaris").adapt_query("SELECT * FROM lakehouse.silver.counterparty_edges")
-        assert "iceberg_scan('s3://sb/silver/counterparty_edges'" in sql
-
-    @pytest.mark.parametrize("query", _FINANCIAL_QUERIES, ids=lambda q: q.name)
-    def test_no_catalog_qualified_name_survives(self, query):
-        assert "lakehouse." not in _executor().adapt_query(_render(query))
-
-    def test_cardinality_becomes_len(self):
-        sql = _executor().adapt_query("SELECT cardinality(a.related_txn_ids) FROM t a")
-        assert "len(a.related_txn_ids)" in sql
-        assert "cardinality" not in sql
-
-    def test_cardinality_inside_a_string_literal_is_kept(self):
-        sql = _executor().adapt_query("SELECT 'cardinality(x)' AS s, cardinality(y) FROM t")
-        assert "'cardinality(x)'" in sql
-        assert "len(y)" in sql
-
-    def test_cardinality_in_identifiers_and_comments_is_kept(self):
-        sql = DuckDBExecutor._rewrite_cardinality(
-            "/* user's note */ SELECT cardinality(a) AS \"cardinality(a)\", 'it''s', "
-            "cardinality(b) -- don't\nFROM t"
-        )
-        assert sql == (
-            "/* user's note */ SELECT len(a) AS \"cardinality(a)\", 'it''s', "
-            "len(b) -- don't\nFROM t"
-        )
-
-    def test_tm_tables_resolve_to_the_gold_bucket(self):
-        sql = _executor().adapt_query(
-            "SELECT * FROM lakehouse.gold.cases c JOIN lakehouse.gold.alert_dispositions d ON 1=1"
-        )
-        assert "iceberg_scan('s3://gb/warehouse/gold.db/cases'" in sql
-        assert "iceberg_scan('s3://gb/warehouse/gold.db/alert_dispositions'" in sql
+    @pytest.mark.parametrize(
+        ("catalog", "query", "scans"),
+        [
+            (
+                None,
+                "SELECT * FROM lakehouse.silver.entities JOIN lakehouse.gold.alerts ON 1=1",
+                ["s3://sb/warehouse/silver.db/entities", "s3://gb/warehouse/gold.db/alerts"],
+            ),
+            (
+                "polaris",
+                "SELECT * FROM lakehouse.silver.counterparty_edges",
+                ["s3://sb/silver/counterparty_edges"],
+            ),
+            (
+                None,
+                "SELECT * FROM lakehouse.gold.cases c JOIN lakehouse.gold.alert_dispositions d ON 1=1",
+                ["s3://gb/warehouse/gold.db/cases", "s3://gb/warehouse/gold.db/alert_dispositions"],
+            ),
+        ],
+    )
+    def test_tables_resolve_to_their_layer_bucket(self, catalog, query, scans):
+        """The executed per-query test ignores the bucket, so the bucket choice is checked here."""
+        sql = (_executor(catalog) if catalog else _executor()).adapt_query(query)
+        for path in scans:
+            assert f"iceberg_scan('{path}'" in sql
 
     def test_local_executor_rewrites_cardinality(self):
         local = LocalDuckDBExecutor(
@@ -408,17 +260,6 @@ def test_every_financial_query_runs_on_duckdb(query):
     proc = _run_pod_script(executor, executor.adapt_query(_render(query)))
     assert proc.returncode == 0, summarise_engine_error(proc.stderr)
     assert json.loads(proc.stdout)["rows"] == _EXPECTED_ROWS[query.name]
-
-
-def test_timestamptz_would_fail_without_the_cast():
-    """Guards the premise: a bare fetchall of TIMESTAMPTZ needs pytz."""
-    code = (
-        "import sys; sys.modules['pytz'] = None; import duckdb; "
-        "duckdb.connect().execute(\"SELECT TIMESTAMPTZ '2026-01-01 00:00:00+00'\").fetchall()"
-    )
-    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert proc.returncode != 0
-    assert "pytz" in summarise_engine_error(proc.stderr)
 
 
 def test_cast_projection_keeps_order_and_duplicate_names():

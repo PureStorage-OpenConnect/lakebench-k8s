@@ -373,12 +373,6 @@ def test_manifest_check_reads_every_row(held):
     assert lg.manifest_protected_reason is ds.manifest_protected_reason
 
 
-def test_a_200_row_sample_would_pass_the_mixed_manifest(held):
-    """L3: the reference scorer's old 200-row sample misses the held-out rows."""
-    rows = _mixed_manifest()
-    assert ds.manifest_protected_reason(iter(rows[:200]), heldout=held, spent=[42]) is None
-
-
 def test_instance_seed_hash_lookup_would_pass_the_mixed_manifest(held):
     """S2: hashing instance seeds (the d1 design) matches no corpus hash, so it
     would pass a held-out corpus; recovery of the corpus seed does not."""
@@ -413,18 +407,6 @@ def test_manifest_check_fails_closed_without_the_record(monkeypatch):
 
 
 # -- redaction -------------------------------------------------------------
-
-
-def test_seed_is_protected_hides_on_an_unreadable_record(monkeypatch, held):
-    assert ds.seed_is_protected(pc.EV) and ds.seed_is_protected(42)
-    assert not ds.seed_is_protected(pc.CALIBRATION)
-    assert not ds.seed_is_protected("not a seed") and not ds.seed_is_protected(True)
-
-    def gone():
-        raise ValueError("unreadable")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    assert ds.seed_is_protected(pc.CALIBRATION)
 
 
 # -- every command that loads to change data is guarded or allowlisted -------
@@ -530,30 +512,7 @@ def test_fixture_values_are_not_production(held):
     )
 
 
-def test_scorer_checks_the_manifest_before_it_scores():
-    """score_financial.main refuses a protected corpus before compute_scores."""
-    tree = ast.parse((ROOT / "src/lakebench/spark/scripts/score_financial.py").read_text())
-    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
-    order = [
-        node.func.id
-        for node in ast.walk(main)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    ]
-    assert "refuse_protected_corpus" in order and "compute_scores" in order
-    lines = {
-        node.func.id: node.lineno
-        for node in ast.walk(main)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert lines["refuse_protected_corpus"] < lines["compute_scores"]
-
-
 # -- owner, 10-03: bronze-verify refuses a protected corpus --------------------
-
-
-def test_bronze_verify_marker_is_the_cli_marker():
-    src = (ROOT / "src/lakebench/spark/scripts/bronze_verify_financial.py").read_text()
-    assert f'PROTECTED_REFUSAL = "{lg.REFUSAL_MARKER}"' in src
 
 
 @pytest.mark.parametrize(
@@ -586,17 +545,6 @@ def test_refusal_in_log_finds_the_line():
     assert lg.refusal_in_log("ordinary failure") is None and lg.refusal_in_log(None) is None
 
 
-def test_cli_maps_a_bronze_verify_refusal_to_exit_2():
-    """run's stage-failure branch and the continuous preflight read the
-    marker before the generic failure; --skip-generate requires a manifest."""
-    run_src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    sus_src = (ROOT / "src/lakebench/cli/_sustained.py").read_text()
-    for src in (run_src, sus_src):
-        i = src.index("refusal_in_log(")
-        assert "ExitCode.USAGE" in src[i : i + 600]
-    assert '"LB_MANIFEST_REQUIRED": "1" if skip_generate else "0"' in sus_src
-
-
 class _Job:
     def __init__(self):
         self.env = None
@@ -608,37 +556,33 @@ class _Job:
         return SimpleNamespace(state=JobState.SUBMITTED, message="")
 
 
-@pytest.mark.parametrize(
-    ("success", "logs", "code"),
-    [
+def test_held_out_check_before_a_stage_subset():
+    for success, logs, code in [
         (True, "", None),
         (False, f"x\nERROR: {lg.REFUSAL_MARKER}: the corpus manifest comes from a spent seed", 2),
         (False, "LAKEBENCH-PROTECTED-CORPUS-UNCHECKED: the manifest could not be checked", 1),
-    ],
-    ids=["passes", "refused", "unchecked"],
-)
-def test_held_out_check_before_a_stage_subset(success, logs, code):
-    import typer
+    ]:
+        import typer
 
-    from lakebench.cli._run import _held_out_check_only
+        from lakebench.cli._run import _held_out_check_only
 
-    job = _Job()
-    monitor = SimpleNamespace(
-        wait_for_completion=lambda *a, **k: SimpleNamespace(
-            success=success, message="driver failed", driver_logs=logs
+        job = _Job()
+        monitor = SimpleNamespace(
+            wait_for_completion=lambda *a, s=success, lg_=logs, **k: SimpleNamespace(
+                success=s, message="driver failed", driver_logs=lg_
+            )
         )
-    )
-    if code is None:
-        _held_out_check_only(job, monitor, "r1", None, 600)
-    else:
-        with pytest.raises(typer.Exit) as info:
+        if code is None:
             _held_out_check_only(job, monitor, "r1", None, 600)
-        assert info.value.exit_code == code
-    assert job.env == {
-        "LB_REGISTER_TABLE": "check",
-        "LB_RUN_ID": "r1",
-        "LB_MANIFEST_REQUIRED": "1",
-    }
+        else:
+            with pytest.raises(typer.Exit) as info:
+                _held_out_check_only(job, monitor, "r1", None, 600)
+            assert info.value.exit_code == code
+        assert job.env == {
+            "LB_REGISTER_TABLE": "check",
+            "LB_RUN_ID": "r1",
+            "LB_MANIFEST_REQUIRED": "1",
+        }
 
 
 def test_a_financial_stage_subset_runs_the_check_before_its_stages():

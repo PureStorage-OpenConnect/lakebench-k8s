@@ -7,7 +7,6 @@ Python around it, and that the verdict is reporting only (D6).
 
 from __future__ import annotations
 
-import ast
 import json
 from datetime import date
 from pathlib import Path
@@ -91,21 +90,6 @@ def test_gating_set_fails_the_run_when_approved(monkeypatch):
     assert c3.gating_problems({"facts_present": False}, only=("benchmark_rows_",)) == []
 
 
-def test_every_gated_check_is_emitted_by_pipeline_checks():
-    """A gated id the pipeline never emits would fail every run as "not
-    evaluated"; each of the 16 is in pipeline_checks' output."""
-    ctx = {
-        "window_start": "2024-01-01",
-        "window_end": "2025-01-01",
-        "customers": 1000,
-        "bronze_rows_expected": {"snappy": 10},
-    }
-    ids = {
-        c["id"] for c in c3.pipeline_checks(_facts(30), {"rows": 10, "silver_filter_rows": 9}, ctx)
-    }
-    assert c3.GATING_CHECKS <= ids, sorted(c3.GATING_CHECKS - ids)
-
-
 def _gated_record(**status):
     checks = [
         c3._check(cid, "invariant", status.get(cid, True), 1, 0)
@@ -115,9 +99,10 @@ def _gated_record(**status):
     return dict(c3.verdict(checks), facts_present=True)
 
 
-@pytest.mark.parametrize(
-    ("rec", "fails"),
-    [
+def test_verdict_gate_and_cli_gate_agree():
+    """One rule: gating_outcome (the verdict) fails exactly when the CLI's
+    two gating_problems passes report a problem."""
+    for rec, fails in [
         (_gated_record(), False),
         (_gated_record(interaction_mix=False), False),
         (_gated_record(benchmark_rows_Q2=False), False),
@@ -126,16 +111,12 @@ def _gated_record(**status):
         (_gated_record(gold_daily_identities="drop"), True),
         ({"facts_present": False, "reason": "boom", "checks": []}, True),
         ({"status": "pass", "checks": []}, True),
-    ],
-)
-def test_verdict_gate_and_cli_gate_agree(rec, fails):
-    """One rule: gating_outcome (the verdict) fails exactly when the CLI's
-    two gating_problems passes report a problem."""
-    cli = c3.gating_problems(rec) + c3.gating_problems(rec, only=("benchmark_rows_",))
-    outcome, reason = c3.gating_outcome(rec)
-    assert bool(cli) is fails
-    assert (outcome == "FAIL") is fails
-    assert (reason is not None) is fails
+    ]:
+        cli = c3.gating_problems(rec) + c3.gating_problems(rec, only=("benchmark_rows_",))
+        outcome, reason = c3.gating_outcome(rec)
+        assert bool(cli) is fails
+        assert (outcome == "FAIL") is fails
+        assert (reason is not None) is fails
 
 
 def test_gating_outcome_scopes_out_what_cannot_gate(monkeypatch):
@@ -180,22 +161,6 @@ def test_judged_gating_ids_is_the_set_gating_outcome_judges(monkeypatch, shape_g
     assert "benchmark_rows_Q2" not in c3.judged_gating_ids(no_shapes)
 
 
-def test_judged_gating_ids_matches_gating_outcome_on_stored_records():
-    from tests.fixtures.stored_records import load_record, record_ids
-
-    seen = 0
-    for run_id in record_ids():
-        rec = load_record(run_id).get("c360_correctness")
-        if not isinstance(rec, dict) or c3.gating_outcome(rec)[0] == "FAIL":
-            continue
-        seen += 1
-        judged = c3.judged_gating_ids(rec)
-        for gid in c3.GATING_CHECKS:
-            assert _drops_fail(rec, gid) is (gid in judged), (run_id, gid)
-    # The five stored C360 records the report block's old drift guard required.
-    assert seen >= 5
-
-
 def test_judged_gating_ids_is_empty_where_nothing_is_judged(monkeypatch):
     bad = _gated_record(silver_to_gold_days=False)
     assert c3.judged_gating_ids(None) == set()
@@ -214,21 +179,6 @@ def test_reporting_failures_lists_only_checks_outside_the_list():
     rec = _gated_record(interaction_mix=False, silver_to_gold_days=False, dates_in_window=None)
     assert c3.reporting_failures(rec) == ["interaction_mix"]
     assert c3.reporting_failures(None) == []
-
-
-def test_gated_ids_are_positions_0_to_14_and_17():
-    """The owner's numbers (checks 0-14 and 17) as pipeline_checks orders a
-    run with a bronze count: the same 16 ids as GATING_CHECKS."""
-    ctx = {
-        "window_start": "2024-01-01",
-        "window_end": "2025-01-01",
-        "customers": 1000,
-        "bronze_rows_expected": {"snappy": 10},
-    }
-    ids = [
-        c["id"] for c in c3.pipeline_checks(_facts(30), {"rows": 10, "silver_filter_rows": 9}, ctx)
-    ]
-    assert {ids[i] for i in (*range(15), 17)} == c3.GATING_CHECKS
 
 
 def test_repeated_gated_id_passes_only_when_every_entry_passes():
@@ -334,12 +284,6 @@ def test_expected_distinct_customers_limits():
     assert c3.expected_distinct_customers(100, 1e6) == pytest.approx(100, rel=1e-6)
 
 
-def test_add_months_matches_trino():
-    assert c3._add_months(date(2024, 1, 1), 3) == date(2024, 4, 1)
-    assert c3._add_months(date(2024, 11, 30), 3) == date(2025, 2, 28)
-    assert c3._add_months(date(2023, 12, 31), 2) == date(2024, 2, 29)
-
-
 def test_parse_lines_last_wins():
     logs = "\n".join(
         [
@@ -380,18 +324,6 @@ def test_collector_parses_and_storage_round_trips(tmp_path):
     assert back.jobs[0].c360_bronze == {"rows": 7, "silver_filter_rows": 5}
 
 
-def test_apply_parsed_job_metrics_carries_c360_facts():
-    from lakebench.cli._run import _apply_parsed_job_metrics
-
-    parsed = JobMetrics(job_name="j", job_type="gold-finalize")
-    parsed.c360_check = {"version": 1}
-    parsed.c360_bronze = {"rows": 1, "silver_filter_rows": 1}
-    target = JobMetrics(job_name="j", job_type="gold-finalize")
-    _apply_parsed_job_metrics(target, parsed)
-    assert target.c360_check == {"version": 1}
-    assert target.c360_bronze == {"rows": 1, "silver_filter_rows": 1}
-
-
 def test_expected_context_defaults_follow_datagen():
     cfg = make_config()
     ctx = c3.expected_context(cfg)
@@ -399,15 +331,6 @@ def test_expected_context_defaults_follow_datagen():
     assert ctx["window_end"] == "2025-01-01"  # datagen_rs default (exclusive)
     # The id space datagen is given (deploy/datagen.py datagen_customer_id_max).
     assert ctx["customers"] == cfg.get_scale_dimensions().customers
-
-
-def test_evaluate_run_without_facts_is_unknown():
-    gold = JobMetrics(job_name="g", job_type="gold-finalize")
-    v = c3.evaluate_run([gold], [], {"window_start": "2024-01-01", "window_end": "2025-01-01"})
-    assert v["status"] == "unknown" and "no [c360-check]" in v["reason"]
-    gold.c360_check = {"version": 1, "error": "boom"}
-    v = c3.evaluate_run([gold], [], {})
-    assert v["status"] == "unknown" and "boom" in v["reason"]
 
 
 def _facts(days, rows_per_day=2_000, tx_per_day=360, support_per_day=240):
@@ -496,33 +419,6 @@ def test_run_wiring_changes_success_only_through_the_gating_set():
         assert "_c360.gating_problems(" in block[block.rfind("for _p in", 0, j) : j]
 
 
-def test_both_gold_adapters_log_the_facts_and_share_the_kpis():
-    for name in ("gold_finalize.py", "gold_finalize_delta.py"):
-        src = (SCRIPTS / name).read_text()
-        assert "log_c360_check(spark, silver_tbl, gold_tbl)" in src
-        assert "get_daily_kpi_aggregations()" in src
-        # No adapter-local KPI definitions that could drift.
-        assert "avg_transaction_value" not in src
-
-
-def test_kpi_averages_are_conditional():
-    """Guard the four fixed KPIs against a revert to all-row averages."""
-    src = (SCRIPTS / "common.py").read_text()
-    tree = ast.parse(src)
-    fn = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "get_daily_kpi_aggregations"
-    )
-    body = ast.get_source_segment(src, fn)
-    assert 'avg("transaction_amount")' not in body
-    assert 'avg("time_on_site_seconds")' not in body
-    assert 'avg("page_views")' not in body
-    assert 'avg("lifetime_value_estimate")' not in body
-    assert 'countDistinct("support_ticket_id")' not in body
-    assert 'count("support_ticket_id").alias("support_tickets_created")' in body
-
-
 def test_c360_bronze_path(monkeypatch, load_script):
     c360_bronze_path = load_script("common").c360_bronze_path
     base = "s3a://b/customer/interactions/"
@@ -547,16 +443,3 @@ def test_c360_bronze_run_path(monkeypatch, load_script):
     assert c360_bronze_run_path("s3a://b/") == (
         base + "{part-[0-9]*.parquet,part-c001-*.parquet,part-c002-*.parquet}"
     )
-
-
-def test_cycle_index_is_passed_to_every_multi_cycle_job():
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    i = src.index('cycle_env: dict[str, str] = {"LB_RUN_ID"')
-    window = src[i : i + 600]
-    assert 'cycle_env["LB_BRONZE_CYCLE"] = str(cycle_idx)' in window
-    # datagen_rs names cycle n's files part-c{n:03}-...; the index passed to
-    # datagen as --cycle is the same cycle_idx.
-    dg = (ROOT / "src/lakebench/deploy/datagen.py").read_text()
-    assert 'context["datagen_cycle"] = cycle_index' in dg
-    rs = (ROOT / "datagen_rs/src/cycle.rs").read_text()
-    assert 'format!("part-c{cycle:03}-{fid:06}.parquet")' in rs

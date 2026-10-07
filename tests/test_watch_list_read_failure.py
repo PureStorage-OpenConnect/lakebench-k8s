@@ -31,23 +31,28 @@ def _helm(returncode: int, stdout: str = "", stderr: str = ""):
     )
 
 
-def test_read_failure_raises():
-    with patch(
-        "subprocess.run", return_value=_helm(1, stderr="Error: Kubernetes cluster unreachable")
-    ):
-        with pytest.raises(_WatchListReadError):
-            _mgr()._get_watched_namespaces()
+_NOT_FOUND = _helm(1, stderr="Error: release: not found")
 
 
-def test_helm_missing_raises():
-    with patch("subprocess.run", side_effect=FileNotFoundError("helm")):
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [_helm(1, stderr="Error: Kubernetes cluster unreachable")],
+        FileNotFoundError("helm"),
+        [_NOT_FOUND, _helm(0, stdout="deployment exists")],  # release gone, controller present
+        [_NOT_FOUND, _helm(1, stderr="Unable to connect to the server")],  # probe fails
+    ],
+)
+def test_unreadable_watch_list_raises(runs):
+    """Fail closed: a watch list that cannot be read is never an empty one."""
+    with patch("subprocess.run", side_effect=runs):
         with pytest.raises(_WatchListReadError):
             _mgr()._get_watched_namespaces()
 
 
 def test_release_not_found_and_no_controller_means_nothing_watched():
     runs = [
-        _helm(1, stderr="Error: release: not found"),
+        _NOT_FOUND,
         _helm(
             1,
             stderr='Error from server (NotFound): deployments.apps "spark-operator-controller" not found',
@@ -55,23 +60,6 @@ def test_release_not_found_and_no_controller_means_nothing_watched():
     ]
     with patch("subprocess.run", side_effect=runs):
         assert _mgr()._get_watched_namespaces() == []
-
-
-def test_release_not_found_but_controller_present_raises():
-    runs = [_helm(1, stderr="Error: release: not found"), _helm(0, stdout="deployment exists")]
-    with patch("subprocess.run", side_effect=runs):
-        with pytest.raises(_WatchListReadError):
-            _mgr()._get_watched_namespaces()
-
-
-def test_release_not_found_and_probe_fails_raises():
-    runs = [
-        _helm(1, stderr="Error: release: not found"),
-        _helm(1, stderr="Unable to connect to the server"),
-    ]
-    with patch("subprocess.run", side_effect=runs):
-        with pytest.raises(_WatchListReadError):
-            _mgr()._get_watched_namespaces()
 
 
 def test_kube_context_is_passed_to_helm_and_kubectl():

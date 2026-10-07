@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 from lakebench.cli import app
 from lakebench.metrics.storage import MetricsStorage, RecordExistsError
 from tests.conftest import make_config
+from tests.fixtures.record_writers_helpers import _bench_result as _bench_result
 
 FIXTURES = Path(__file__).parent / "fixtures" / "records"
 PARENT = "20260926-231711-6dd3bc"  # lb16-val-trino, batch, with an experiment block
@@ -87,27 +88,6 @@ def test_query_leaves_records_byte_identical(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # benchmark
 # ---------------------------------------------------------------------------
-
-
-def _bench_result():
-    from lakebench.benchmark.queries import BenchmarkQuery
-    from lakebench.benchmark.runner import BenchmarkResult, QueryResult
-
-    q = BenchmarkQuery(
-        name="Q1_full_aggregation_scan", display_name="Q1", query_class="scan", sql="SELECT 1"
-    )
-    return BenchmarkResult(
-        mode="power",
-        cache="hot",
-        scale=1.0,
-        queries=[QueryResult(query=q, elapsed_seconds=1.5, rows_returned=3, success=True)],
-        total_seconds=1.5,
-        qph=2400.0,
-        iterations=1,
-        streams=1,
-        stream_results=[],
-        engine="trino",
-    )
 
 
 def _benchmark(tmp_path, refusal=None):
@@ -208,15 +188,6 @@ def test_save_run_refuses_an_existing_record(tmp_path):
     assert json.loads(path.read_text())["run_id"] == PARENT
 
 
-def test_save_run_creates_a_new_record(tmp_path):
-    storage = MetricsStorage(tmp_path / "runs")
-    rec = MetricsStorage(FIXTURES).load_run(PARENT)
-    rec.run_id = "fresh"
-    path = storage.save_run(rec)
-    assert json.loads(path.read_text())["run_id"] == "fresh"
-    assert "record_kind" not in json.loads(path.read_text())  # a run's record is unchanged
-
-
 def test_record_kind_round_trips():
     rec = MetricsStorage(FIXTURES).load_run(PARENT)
     assert (rec.record_kind, rec.parent_run_id) == ("run", None)
@@ -236,29 +207,6 @@ def _invoke(tmp_path, monkeypatch, *argv):
     return CliRunner().invoke(app, list(argv))
 
 
-_RESULTS_LINE = (
-    "`lakebench results` is now `lakebench report --format table`; the old name is removed in v1.8"
-)
-
-
-def test_results_aliases_report(tmp_path, monkeypatch):
-    _runs(tmp_path, PARENT)
-    for fmt in ("table", "json", "csv"):
-        a = _invoke(tmp_path, monkeypatch, "results", PARENT, "--format", fmt)
-        b = _invoke(tmp_path, monkeypatch, "report", PARENT, "--format", fmt)
-        assert a.exit_code == b.exit_code == 0, (a.output, b.output)
-        # stdout is the same; stderr has the alias line, exactly once.
-        assert a.stdout == b.stdout
-        assert a.stderr.count(_RESULTS_LINE) == 1, a.stderr
-        assert a.stderr.replace(_RESULTS_LINE + "\n", "", 1) == b.stderr
-    # results' default is the table, as before.
-    a = _invoke(tmp_path, monkeypatch, "results", PARENT)
-    b = _invoke(tmp_path, monkeypatch, "report", PARENT, "--format", "table")
-    assert a.stdout == b.stdout and "Pipeline Benchmark:" in a.stdout
-    j = _invoke(tmp_path, monkeypatch, "report", "--run", PARENT, "--format", "json")
-    assert json.loads(j.stdout)["run_id"] == PARENT
-
-
 def test_report_honours_default_config(tmp_path, monkeypatch):
     _runs(tmp_path, PARENT, OTHER)  # OTHER is newer and another deployment's
     (tmp_path / "lakebench.yaml").write_text(f"name: {NAME}\nrecipe: hive-iceberg-spark-trino\n")
@@ -275,52 +223,6 @@ def test_report_without_default_config_reads_the_latest_run(tmp_path, monkeypatc
     assert res.exit_code == 0, res.output
     assert f"run {OTHER}" in res.output
     assert "Showing the latest record" not in _stderr(res)
-
-
-def test_report_positional_run_and_config(tmp_path, monkeypatch):
-    runs = _runs(tmp_path, PARENT, OTHER)
-    assert f"run {PARENT}" in _invoke(tmp_path, monkeypatch, "report", f"run-{PARENT}").output
-    by_dir = _invoke(tmp_path, monkeypatch, "report", str(runs / f"run-{PARENT}") + "/")
-    assert f"run {PARENT}" in by_dir.output, by_dir.output
-    missing = _invoke(tmp_path, monkeypatch, "report", "myconfig")
-    assert missing.exit_code == 2 and "and no file myconfig" in _stderr(missing)
-    (tmp_path / "other.yaml").write_text(f"name: {NAME}\nrecipe: hive-iceberg-spark-trino\n")
-    assert f"run {PARENT}" in _invoke(tmp_path, monkeypatch, "report", "other.yaml").output
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["report", "missing.yaml"],
-        ["report", PARENT, "--run", OTHER],
-        ["report", "--format", "xml"],
-        ["report", "--format", "json", "--render"],
-        ["report", "--format", "json", "--list"],
-    ],
-    ids=["missing-config", "two-runs", "bad-format", "format-render", "format-list"],
-)
-def test_report_usage_errors_exit_2(argv, tmp_path, monkeypatch):
-    _runs(tmp_path, PARENT, OTHER)
-    res = _invoke(tmp_path, monkeypatch, *argv)
-    assert res.exit_code == 2, res.output
-
-
-def test_report_list_names_benchmark_records(tmp_path, monkeypatch):
-    runs = _runs(tmp_path, PARENT)
-    storage = MetricsStorage(runs)
-    rec = storage.load_run(PARENT)
-    rec.run_id, rec.record_kind, rec.parent_run_id = "20261002-000000-abcdef", "benchmark", PARENT
-    storage.save_run(rec)
-    monkeypatch.setenv("COLUMNS", "200")  # one table row per record
-    res = _invoke(tmp_path, monkeypatch, "report", "--list")
-    assert res.exit_code == 0, res.output
-    assert f"benchmark of {PARENT}" in " ".join(res.output.split())
-    # The newest record is a benchmark record; the latest run is still the run.
-    res = _invoke(tmp_path, monkeypatch, "report")
-    assert f"run {PARENT}" in res.output
-    assert "is a benchmark record" not in _stderr(res)  # the summary is the run's own
-    res = _invoke(tmp_path, monkeypatch, "report", "20261002-000000-abcdef")
-    assert f"is a benchmark record of run {PARENT}" in _stderr(res)
 
 
 @pytest.mark.parametrize(

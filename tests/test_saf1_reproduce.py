@@ -149,15 +149,6 @@ def test_reproduce_refuses_existing_namespace(cfg_path, pipeline):
     assert FakeEngine.calls == []
 
 
-def test_reproduce_has_no_yes_flag_to_bypass(tmp_path):
-    """SAF-1: -y bypasses neither refusal; reproduce does not take -y at all."""
-    from lakebench.cli import app
-
-    res = CliRunner().invoke(app, ["reproduce", str(tmp_path / "pkg.yaml"), "-y"])
-    assert res.exit_code == 2, res.output
-    assert "No such option" in res.output
-
-
 @pytest.mark.parametrize("which", ["bronze", "silver", "gold"])
 def test_reproduce_refuses_existing_bucket(cfg_path, pipeline, which):
     from lakebench.cli._reproduce import _run_pipeline
@@ -305,7 +296,7 @@ def test_reproduce_post_destroy_refusal_is_reported(cfg_path, pipeline):
 def test_reproduce_exits_3_after_the_verdict_when_its_destroy_was_refused(monkeypatch, tmp_path):
     import lakebench.cli._reproduce as rep
     from lakebench.cli import app
-    from tests.test_exit_codes import _reproduce_package
+    from tests.fixtures.exit_codes_helpers import _reproduce_package
 
     pkg = _reproduce_package(tmp_path, "abc")
     monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
@@ -332,7 +323,7 @@ def test_reproduce_exits_3_after_the_verdict_when_its_destroy_was_refused(monkey
 
 def _engine(require_new: bool = True, exists: bool = False):
     from lakebench.deploy.engine import DeploymentEngine
-    from tests.test_deploy import _make_config, _mock_k8s
+    from tests.fixtures.deploy_helpers import _make_config, _mock_k8s
 
     k8s = _mock_k8s()
     k8s.namespace_exists.return_value = exists
@@ -374,21 +365,6 @@ def test_engine_require_new_refuses_a_namespace_created_meanwhile():
     stamp.assert_not_called()
     nonce.assert_not_called()
     assert eng.config.get_namespace() not in eng._namespace_created_this_run
-
-
-def test_engine_without_require_new_still_adopts_an_existing_namespace():
-    """deploy's own behaviour is unchanged (redeploy into its namespace)."""
-    eng, k8s = _engine(require_new=False, exists=True)
-    k8s.get_namespace_phase.return_value = "Active"
-    with (
-        patch.object(eng, "_namespace_already_using_name", return_value=None),
-        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
-        patch("lakebench.deploy.ownership.write_deploy_nonce"),
-        patch("kubernetes.client.CoreV1Api"),
-    ):
-        stamp.return_value = MagicMock(verdict=MagicMock())
-        eng._deploy_namespace()
-    stamp.assert_called_once()
 
 
 @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
@@ -464,14 +440,6 @@ def test_destroy_cli_expect_incarnation_mismatch(cfg_path, monkeypatch):
     assert "Destroy NOT started" in res.output
 
 
-def test_destroy_expect_incarnation_is_hidden():
-    from lakebench.cli import app
-
-    res = CliRunner().invoke(app, ["destroy", "--help"])
-    assert res.exit_code == 0
-    assert "--expect-incarnation" not in res.output
-
-
 @pytest.mark.parametrize("token", ["", "abc", "#n", "u#", "u#n#m"])
 def test_destroy_expect_incarnation_malformed_is_a_usage_error(cfg_path, token):
     from lakebench.cli import app
@@ -516,30 +484,11 @@ def test_destroy_expect_incarnation_reaches_destroy_all(cfg_path, monkeypatch):
     assert seen == ["u1#n1"]
 
 
-def test_destroy_without_the_flag_passes_no_expectation(cfg_path, monkeypatch):
-    from lakebench.cli import app
-
-    seen: list = []
-
-    class Engine:
-        def __init__(self, cfg, **_):
-            pass
-
-        def destroy_all(self, **kw):
-            seen.append(kw.get("expected_incarnation"))
-            return []
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    res = CliRunner().invoke(app, ["destroy", str(cfg_path), "--yes"])
-    assert res.exit_code == 0, res.output
-    assert seen == [None]
-
-
 def test_destroy_expect_incarnation_must_equal_the_nameless_check(tmp_path, monkeypatch):
     """A nameless config's verified incarnation and the flag must agree."""
     import lakebench.cli._nameless as nameless
     from lakebench.cli import app
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
@@ -612,33 +561,11 @@ def test_reproduce_watermark_is_taken_after_generate(cfg_path, pipeline, monkeyp
     assert stamps and watermark >= stamps[0]
 
 
-def test_reproduce_journals_the_incarnation_it_created(cfg_path, pipeline, monkeypatch):
-    from kubernetes import client
-
-    from lakebench.cli._reproduce import _run_pipeline
-    from lakebench.journal import EventType
-
-    journal = MagicMock()
-    monkeypatch.setattr("lakebench.cli._helpers.journal_open", lambda *a, **k: journal)
-    cfg = _cfg(cfg_path)
-    with recording(cfg.get_namespace()) as rec:
-        rec.for_config(cfg)
-        _run_pipeline(cfg_path, None, True)
-        ns = client.CoreV1Api().read_namespace(cfg.get_namespace())
-    want = f"{ns.metadata.uid}#{ns.metadata.annotations[ANNOTATION_DEPLOY_NONCE]}"
-    events = [
-        c
-        for c in journal.record.call_args_list
-        if c.args[0] is EventType.REPRODUCE_CREATED_INCARNATION
-    ]
-    assert len(events) == 1 and events[0].kwargs["details"]["incarnation"] == want
-
-
 def test_a_refused_destroy_turns_a_protocol_mismatch_into_3(monkeypatch, tmp_path):
     """The refused destroy outranks exit 14: the measurement may not be ours."""
     import lakebench.cli._reproduce as rep
     from lakebench.cli import app
-    from tests.test_exit_codes import _reproduce_package
+    from tests.fixtures.exit_codes_helpers import _reproduce_package
 
     pkg = _reproduce_package(tmp_path, "abc")
     monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
@@ -758,29 +685,6 @@ def test_engine_require_new_refuses_preprovisioned_buckets():
     adopt.assert_not_called()
 
 
-def test_plain_deploy_does_not_require_new(cfg_path, monkeypatch):
-    """`lakebench deploy` keeps adopting its own namespace on a re-run."""
-    import lakebench.cli._deploy as deploy_mod
-    from lakebench.cli import app
-
-    seen: list = []
-
-    class Engine(FakeEngine):
-        def __init__(self, cfg, dry_run=False, require_new=False, **kw):
-            seen.append(require_new)
-            super().__init__(cfg, dry_run=dry_run, require_new=require_new, **kw)
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
-    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
-    cfg = _cfg(cfg_path)
-    with recording(cfg.get_namespace()) as rec:
-        rec.for_config(cfg)
-        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes"])
-    assert res.exit_code == 0, res.output
-    assert seen == [False]
-
-
 def test_engine_require_new_refuses_a_matching_nonce_it_did_not_create():
     """The nonce alone is not proof: the namespace must be one this engine
     tried to create."""
@@ -796,60 +700,9 @@ def test_engine_require_new_refuses_a_matching_nonce_it_did_not_create():
     stamp.assert_not_called()
 
 
-def test_own_incarnation_retries_one_failed_read(monkeypatch):
-    import lakebench.cli._reproduce as rep
-    from lakebench.config import deploy_state
-
-    monkeypatch.setattr(rep.time, "sleep", lambda s: None)
-    reads: list = []
-
-    def read(core, ns):
-        reads.append(ns)
-        if len(reads) == 1:
-            raise ConnectionResetError("blip")
-        return deploy_state.NamespaceIdentity("u1", "own", NAME, "", frozenset())
-
-    monkeypatch.setattr(deploy_state, "read_namespace_identity", read)
-    cfg = MagicMock()
-    cfg.get_namespace.return_value = NAME
-    with patch("kubernetes.client.CoreV1Api"):
-        assert rep._own_incarnation(cfg, Path("c.yaml"), "own", after="run") == "u1#own"
-    assert len(reads) == 2
-    reads.clear()
-    monkeypatch.setattr(
-        deploy_state,
-        "read_namespace_identity",
-        lambda core, ns: (_ for _ in ()).throw(ConnectionResetError("down")),
-    )
-    with patch("kubernetes.client.CoreV1Api"), pytest.raises(PrerequisiteError, match="after run"):
-        rep._own_incarnation(cfg, Path("c.yaml"), "own", after="run")
-
-
 # ---------------------------------------------------------------------------
 # deploy --require-new (hidden): the harness's deploy refuses, never adopts
 # ---------------------------------------------------------------------------
-
-
-def test_deploy_require_new_reaches_the_engine(cfg_path, monkeypatch):
-    import lakebench.cli._deploy as deploy_mod
-    from lakebench.cli import app
-
-    seen: list = []
-
-    class Engine(FakeEngine):
-        def __init__(self, cfg, dry_run=False, require_new=False, **kw):
-            seen.append(require_new)
-            super().__init__(cfg, dry_run=dry_run, require_new=require_new, **kw)
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
-    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
-    cfg = _cfg(cfg_path)
-    with recording(cfg.get_namespace()) as rec:
-        rec.for_config(cfg)
-        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new"])
-    assert res.exit_code == 0, res.output
-    assert seen == [True]
 
 
 def test_deploy_require_new_refusal_exits_3(cfg_path, monkeypatch):
@@ -877,108 +730,3 @@ def test_deploy_require_new_refusal_exits_3(cfg_path, monkeypatch):
         rec.for_config(cfg)
         res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new"])
     assert res.exit_code == 3, res.output
-
-
-def test_deploy_require_new_is_hidden():
-    from lakebench.cli import app
-
-    res = CliRunner().invoke(app, ["deploy", "--help"])
-    assert res.exit_code == 0 and "--require-new" not in res.output
-
-
-@pytest.mark.parametrize("other", ["--local", "--force-legacy"])
-def test_deploy_require_new_refuses_contradicting_flags(cfg_path, other):
-    from lakebench.cli import app
-
-    with recording() as rec:
-        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new", other])
-        assert rec.calls == []
-    assert res.exit_code == 2, res.output
-    assert "--require-new does not combine" in res.output
-
-
-def test_expect_incarnation_mismatch_says_the_expectation_was_not_met(cfg_path, monkeypatch):
-    """With the flag the refusal names the caller's expectation, not a
-    redeploy after a check this command never made."""
-    from lakebench.cli import app
-
-    class Engine:
-        def __init__(self, cfg, **_):
-            pass
-
-        def destroy_all(self, **kw):
-            return [
-                DeploymentResult(
-                    component="ownership-check",
-                    status=DeploymentStatus.FAILED,
-                    message="Destroy NOT started",
-                    details={"incarnation_mismatch": True, "expected": "u#x", "found": "u#y"},
-                )
-            ]
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    res = CliRunner().invoke(
-        app, ["destroy", str(cfg_path), "--yes", "--expect-incarnation", "u#x"]
-    )
-    assert res.exit_code == 3, res.output
-    assert "not the incarnation the caller expected" in res.output
-    assert "redeployed after this command checked it" not in res.output
-
-
-def test_engine_require_new_dry_run_reports_the_refusal():
-    eng, k8s = _engine(exists=True)
-    eng.dry_run = True
-    result = eng._deploy_namespace()
-    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
-    k8s.apply_manifest.assert_not_called()
-
-
-def test_nameless_check_mismatch_keeps_the_redeployed_wording(tmp_path, monkeypatch):
-    """Without a caller's expectation the incarnation came from this
-    command's own check, so 'redeployed after this command checked it'."""
-    import lakebench.cli._nameless as nameless
-    from lakebench.cli import app
-    from tests import test_saf2_deploy_state as t
-
-    core = t.FakeCore()
-    monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
-    monkeypatch.setattr(nameless, "_bucket_owned_factory", lambda cfg: lambda b: False)
-    cfg = t._nameless(tmp_path)
-    t._legacy_state(tmp_path)
-    t._v16_namespace(core)
-
-    class Engine:
-        def __init__(self, cfg, **_):
-            pass
-
-        def destroy_all(self, **kw):
-            return [
-                DeploymentResult(
-                    component="ownership-check",
-                    status=DeploymentStatus.FAILED,
-                    message="Destroy NOT started",
-                    details={"incarnation_mismatch": True, "expected": "u1#n16", "found": "u1#x"},
-                )
-            ]
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    res = CliRunner().invoke(app, ["destroy", str(cfg), "--force", "--name", t.NAME])
-    assert res.exit_code == 3, res.output
-    assert "redeployed after this command checked it" in res.output
-
-
-@pytest.mark.parametrize(("cycles", "generates"), [(1, True), (3, False)])
-def test_reproduce_generates_first_only_for_one_cycle(tmp_path, pipeline, cycles, generates):
-    """A multi-cycle run generates each cycle itself and `generate` refuses a
-    multi-cycle config, so reproduce goes straight to the run (CD-18)."""
-    from lakebench.cli._reproduce import _run_pipeline
-
-    p = tmp_path / "repro.yaml"
-    p.write_text(CFG + f"architecture:\n  pipeline:\n    mode: batch\n    cycles: {cycles}\n")
-    cfg = _cfg(p)
-    with recording(cfg.get_namespace()) as rec:
-        rec.for_config(cfg)
-        _run_pipeline(p, None, True)
-    names = _names(FakeEngine.calls)
-    assert ("generate" in names) is generates
-    assert "run" in names

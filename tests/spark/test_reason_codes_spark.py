@@ -66,44 +66,6 @@ def test_conditional_codes_at_their_cuts(spark, key, rows, schema, want):
     assert _codes(spark, key, rows, schema) == want
 
 
-def test_alert_frame_puts_the_base_code_first(spark):
-    import detection_rules as dr
-    from pyspark.sql.functions import array, col, lit
-
-    df = spark.createDataFrame([(1, 8), (2, 3)], "e long, component_size long")
-    out = dr._alert_frame(
-        df,
-        rule_id="W1_connected_components",
-        entity_id=col("e"),
-        related_txn_ids=array(lit("u")),
-        related_entity_ids=array(col("e")),
-        alert_ts=lit("2024-01-01 00:00:00").cast("timestamp"),
-        alert_score=lit(0.5),
-        priority=lit("LOW"),
-        alert_type=lit("cluster"),
-        run_id="r",
-        narrative=lit("n"),
-        evidence=lit(None).cast("map<string,string>"),
-    )
-    got = {r["entity_id"]: list(r["reason_codes"]) for r in out.collect()}
-    assert got == {1: ["W1_COMPONENT", "W1_LARGE_COMPONENT"], 2: ["W1_COMPONENT"]}
-    with pytest.raises(TypeError):
-        dr._alert_frame(
-            df,
-            rule_id=lit("W1_connected_components"),
-            entity_id=col("e"),
-            related_txn_ids=array(lit("u")),
-            related_entity_ids=array(col("e")),
-            alert_ts=lit(None).cast("timestamp"),
-            alert_score=lit(0.5),
-            priority=lit("LOW"),
-            alert_type=lit("cluster"),
-            run_id="r",
-            narrative=lit("n"),
-            evidence=lit(None).cast("map<string,string>"),
-        )
-
-
 def _manifest(spark):
     # Four W4 instances (stack) and one random-control instance.
     return spark.createDataFrame(

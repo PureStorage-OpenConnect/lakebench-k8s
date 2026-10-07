@@ -195,25 +195,25 @@ def script_ddls():
     return _load_str_assignments(_SCRIPT)
 
 
-@pytest.mark.parametrize("label,deploy_name,script_name", _TABLES)
-def test_column_names_match(label, deploy_name, script_name, deploy_ddls, script_ddls):
-    deploy = _parse_columns(deploy_ddls[deploy_name])
-    script = _parse_columns(script_ddls[script_name])
-    missing_in_script = set(deploy) - set(script)
-    missing_in_deploy = set(script) - set(deploy)
-    assert not missing_in_script and not missing_in_deploy, (
-        f"{label}: column-name drift. "
-        f"deploy only={sorted(missing_in_script)}, script only={sorted(missing_in_deploy)}"
-    )
+def test_column_names_match(deploy_ddls, script_ddls):
+    for label, deploy_name, script_name in _TABLES:
+        deploy = _parse_columns(deploy_ddls[deploy_name])
+        script = _parse_columns(script_ddls[script_name])
+        missing_in_script = set(deploy) - set(script)
+        missing_in_deploy = set(script) - set(deploy)
+        assert not missing_in_script and not missing_in_deploy, (
+            f"{label}: column-name drift. "
+            f"deploy only={sorted(missing_in_script)}, script only={sorted(missing_in_deploy)}"
+        )
 
 
-@pytest.mark.parametrize("label,deploy_name,script_name", _TABLES)
-def test_column_types_match(label, deploy_name, script_name, deploy_ddls, script_ddls):
-    deploy = _parse_columns(deploy_ddls[deploy_name])
-    script = _parse_columns(script_ddls[script_name])
-    diffs = {
-        name: (deploy[name], script[name])
-        for name in deploy
-        if name in script and deploy[name] != script[name]
-    }
-    assert not diffs, f"{label}: type drift per column: {diffs}"
+def test_column_types_match(deploy_ddls, script_ddls):
+    for label, deploy_name, script_name in _TABLES:
+        deploy = _parse_columns(deploy_ddls[deploy_name])
+        script = _parse_columns(script_ddls[script_name])
+        diffs = {
+            name: (deploy[name], script[name])
+            for name in deploy
+            if name in script and deploy[name] != script[name]
+        }
+        assert not diffs, f"{label}: type drift per column: {diffs}"

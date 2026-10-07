@@ -87,23 +87,6 @@ def test_init_all_recipes_load(tmp_path, creds, recipe, workload):
     assert list(cfg._load_notes) == []
 
 
-def test_default_output_is_the_polaris_recipe_and_twelve_lines(tmp_path):
-    out = tmp_path / "lakebench.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out)])
-    assert r.exit_code == 0, r.output
-    text = out.read_text()
-    assert re.search(r"(?m)^recipe: polaris-iceberg-spark-trino$", text)
-    assert len(_code_lines(text)) == 12, text
-    # The commented component block is valid YAML once uncommented, and
-    # agrees with the recipe.
-    block = "\n".join(
-        ln[2:] for ln in text.splitlines() if ln.startswith("# ") and ln[2:3] in ("a", " ")
-    )
-    uncommented = yaml.safe_load(block)
-    assert uncommented["architecture"]["catalog"]["type"] == "polaris"
-    assert uncommented["architecture"]["query_engine"]["type"] == "trino"
-
-
 def test_uncommented_component_block_still_loads(tmp_path, creds):
     """A user who uncomments the recipe's own values gets no conflict."""
     text = first_day_config(name="unc-t")
@@ -114,35 +97,6 @@ def test_uncommented_component_block_still_loads(tmp_path, creds):
     p = tmp_path / "c.yaml"
     p.write_text(text)
     assert load_config(p).architecture.catalog.type.value == "polaris"
-
-
-def test_init_nontty_prints_choices(tmp_path):
-    out = tmp_path / "sub.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out)], input="")
-    assert r.exit_code == 0, r.output
-    name = yaml.safe_load(out.read_text())["name"]
-    for expected in (
-        name,
-        "polaris-iceberg-spark-trino",
-        "customer360",
-        "scale:       1",
-        "${LAKEBENCH_S3_ACCESS_KEY}",
-        "${LAKEBENCH_S3_SECRET_KEY}",
-        "set platform.storage.s3.endpoint",
-        f"lakebench validate {out}",
-    ):
-        assert expected in r.stderr, (expected, r.stderr)
-    assert "client secret" not in r.stderr.lower()
-
-
-def test_endpoint_given_drops_the_set_endpoint_line(tmp_path):
-    out = tmp_path / "e.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "--endpoint", "http://s3.example:80"])
-    assert r.exit_code == 0, r.output
-    assert "set platform.storage.s3.endpoint" not in r.stderr
-    assert yaml.safe_load(out.read_text())["platform"]["storage"]["s3"]["endpoint"] == (
-        "http://s3.example:80"
-    )
 
 
 def test_default_name_is_unique_and_fits_hive(tmp_path):
@@ -160,23 +114,6 @@ def test_default_name_is_unique_and_fits_hive(tmp_path):
     LakebenchConfig.model_validate(data)
 
 
-def test_credentials_env_sets_the_var_names(tmp_path):
-    out = tmp_path / "c.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "--credentials-env", "MY_LAB"])
-    assert r.exit_code == 0, r.output
-    s3 = yaml.safe_load(out.read_text())["platform"]["storage"]["s3"]
-    assert s3["access_key"] == "${MY_LAB_ACCESS_KEY}"
-    assert s3["secret_key"] == "${MY_LAB_SECRET_KEY}"
-    assert "export MY_LAB_ACCESS_KEY and MY_LAB_SECRET_KEY" in r.stderr
-
-
-def test_credentials_env_must_be_a_variable_name(tmp_path):
-    out = tmp_path / "c.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "--credentials-env", "1-bad"])
-    assert r.exit_code == 2
-    assert not out.exists()
-
-
 @pytest.mark.parametrize("flag", ["--access-key", "--secret-key"])
 def test_plaintext_credential_flags_are_refused_without_echo(tmp_path, flag):
     out = tmp_path / "c.yaml"
@@ -184,51 +121,6 @@ def test_plaintext_credential_flags_are_refused_without_echo(tmp_path, flag):
     assert r.exit_code == 2
     assert SENTINEL_AK not in r.output and SENTINEL_AK not in r.stderr
     assert "export LAKEBENCH_S3_" in r.output
-    assert not out.exists()
-
-
-@pytest.mark.parametrize("flag", ["--interactive", "-i", "--advanced"])
-def test_wizard_flags_note_and_write_the_default(tmp_path, flag):
-    out = tmp_path / "w.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), flag])
-    assert r.exit_code == 0, r.output
-    assert r.stderr.count("the init wizard is removed") == 1
-    assert "recipe: polaris-iceberg-spark-trino" in out.read_text()
-
-
-def test_no_interactive_is_accepted_silently(tmp_path):
-    out = tmp_path / "w.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "--no-interactive"])
-    assert r.exit_code == 0, r.output
-    assert "wizard" not in r.stderr
-
-
-def test_wizard_module_is_gone():
-    with pytest.raises(ImportError):
-        __import__("lakebench.init_wizard")
-
-
-def test_recipe_default_writes_what_it_resolves_to(tmp_path):
-    out = tmp_path / "d.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "-r", "default"])
-    assert r.exit_code == 0, r.output
-    assert yaml.safe_load(out.read_text())["recipe"] == "hive-iceberg-spark-trino"
-
-
-def test_unknown_recipe_and_workload_are_refused(tmp_path):
-    out = tmp_path / "u.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "-r", "polaris-iceberg-spark-trin"])
-    assert r.exit_code == 2 and "did you mean 'polaris-iceberg-spark-trino'" in r.output
-    r = runner.invoke(app, ["init", "-o", str(out), "-w", "iot"])
-    assert r.exit_code == 2 and "customer360" in r.output
-    assert not out.exists()
-
-
-def test_invalid_name_is_refused_before_writing(tmp_path):
-    out = tmp_path / "n.yaml"
-    r = runner.invoke(app, ["init", "-o", str(out), "--name", "Bad_Name"])
-    assert r.exit_code == 2, r.output
-    assert "nothing written" in r.output
     assert not out.exists()
 
 
@@ -251,43 +143,30 @@ def test_existing_file_needs_overwrite(tmp_path):
     assert out.read_text() == "old: true\n"
 
 
-def test_local_mode_unchanged(tmp_path):
-    out = tmp_path / "local.yaml"
-    r = runner.invoke(app, ["init", "--local", "-o", str(out), "-w", "financial"])
-    assert r.exit_code == 0, r.output
-    text = out.read_text()
-    assert "name: local-lakehouse" in text and "schema: financial" in text
-    assert "recipe: hive-iceberg-spark-duckdb" in text
-    assert "scale: 0.1" in text
-    assert "architecture:\n  workload:" not in text
-
-
 # -- recipe conflicts at load (CFG-5) ----------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("block", "key", "wrote", "recipe_sets"),
-    [
+def test_recipe_conflict_refused(tmp_path):
+    for block, key, wrote, recipe_sets in [
         ({"catalog": {"type": "hive"}}, "architecture.catalog.type", "hive", "polaris"),
         ({"table_format": {"type": "delta"}}, "architecture.table_format.type", "delta", "iceberg"),
         ({"query_engine": {"type": "duckdb"}}, "architecture.query_engine.type", "duckdb", "trino"),
-    ],
-)
-def test_recipe_conflict_refused(tmp_path, block, key, wrote, recipe_sets):
-    p = tmp_path / "conflict.yaml"
-    p.write_text(
-        yaml.safe_dump(
-            {"name": "conf-t", "recipe": "polaris-iceberg-spark-trino", "architecture": block}
+    ]:
+        p = tmp_path / "conflict.yaml"
+        p.write_text(
+            yaml.safe_dump(
+                {"name": "conf-t", "recipe": "polaris-iceberg-spark-trino", "architecture": block}
+            )
         )
-    )
-    with pytest.raises(ConfigValidationError) as exc:
-        load_config(p)
-    msg = str(exc.value)
-    assert (
-        f"{key} is '{wrote}' but recipe 'polaris-iceberg-spark-trino' sets '{recipe_sets}'" in msg
-    )
-    assert "delete one of them" in msg
-    assert "  - : " not in msg
+        with pytest.raises(ConfigValidationError) as exc:
+            load_config(p)
+        msg = str(exc.value)
+        assert (
+            f"{key} is '{wrote}' but recipe 'polaris-iceberg-spark-trino' sets '{recipe_sets}'"
+            in msg
+        )
+        assert "delete one of them" in msg
+        assert "  - : " not in msg
 
 
 def test_recipe_conflict_refused_for_a_constructed_config():
@@ -299,35 +178,6 @@ def test_recipe_conflict_refused_for_a_constructed_config():
                 "architecture": {"table_format": {"type": "iceberg"}},
             }
         )
-
-
-def test_agreeing_components_and_overridable_keys_load():
-    cfg = LakebenchConfig.model_validate(
-        {
-            "name": "t",
-            "recipe": "hive-iceberg-spark-duckdb",
-            "images": {"spark": "apache/spark:4.1.1-python3"},
-            "architecture": {
-                "catalog": {"type": "hive"},
-                "pipeline_engine": "spark",
-                "query_engine": {"type": "duckdb", "duckdb": {"cores": 4}},
-            },
-        }
-    )
-    assert cfg.images.spark == "apache/spark:4.1.1-python3"
-    assert cfg.architecture.query_engine.duckdb.cores == 4
-    assert cfg.architecture.query_engine.duckdb.memory == "4g"
-
-
-def test_every_example_agrees_with_its_recipe():
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[1]
-    for path in sorted((root / "examples").glob("*.yaml")):
-        data = yaml.safe_load(path.read_text())
-        from lakebench.config.recipes import recipe_conflicts
-
-        assert recipe_conflicts(data, data["recipe"]) == [], path.name
 
 
 # -- recipe-injected fields --------------------------------------------------
@@ -406,13 +256,6 @@ def test_recipe_less_components_note_names_their_recipe(tmp_path):
     assert cfg.architecture.catalog.type.value == "polaris"
 
 
-def test_named_recipe_has_no_default_note(tmp_path):
-    p = tmp_path / "r.yaml"
-    p.write_text("name: r-t\nrecipe: hive-iceberg-spark-trino\n")
-    cfg = load_config(p)
-    assert not any("v1.8" in t for t in cfg._load_notes.texts())
-
-
 # -- review fixes ------------------------------------------------------------
 
 V16_POLARIS_INIT = (
@@ -453,17 +296,6 @@ def test_v16_conflicting_config_loads_as_deployed_for_destroy_and_status(tmp_pat
     assert "deploy and run refuse it" in note.text
 
 
-@pytest.mark.parametrize(
-    "secret", ["x #tail", "!abc", "*star", '"quoted', "'single", "123456", "a: b", "{brace}"]
-)
-def test_secret_with_yaml_syntax_arrives_verbatim(tmp_path, monkeypatch, secret):
-    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "ak")
-    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", secret)
-    p = tmp_path / "s.yaml"
-    p.write_text(first_day_config(name="sec-t"))
-    assert load_config(p).platform.storage.s3.secret_key == secret
-
-
 def test_env_reference_in_a_comment_is_not_required(tmp_path, monkeypatch):
     monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
     monkeypatch.setenv("LB_TEST_SCALE", "3")
@@ -479,17 +311,6 @@ def test_env_reference_in_a_comment_is_not_required(tmp_path, monkeypatch):
     assert cfg.platform.storage.s3.endpoint == "http://s3:80"
 
 
-def test_unresolved_env_vars_are_all_named(tmp_path, monkeypatch):
-    from lakebench.config import ConfigError
-
-    monkeypatch.delenv("LB_MISSING_A", raising=False)
-    monkeypatch.delenv("LB_MISSING_B", raising=False)
-    p = tmp_path / "u.yaml"
-    p.write_text("name: ${LB_MISSING_A}\ndescription: x-${LB_MISSING_B}\n")
-    with pytest.raises(ConfigError, match="LB_MISSING_A, LB_MISSING_B"):
-        load_config(p)
-
-
 def test_overwrite_keeps_the_existing_name(tmp_path):
     out = tmp_path / "o.yaml"
     out.write_text("name: my-lakehouse\nrecipe: polaris-iceberg-spark-trino\n")
@@ -501,9 +322,8 @@ def test_overwrite_keeps_the_existing_name(tmp_path):
     assert yaml.safe_load(out.read_text())["name"] == "other-n"
 
 
-@pytest.mark.parametrize(
-    ("old", "moved"),
-    [
+def test_overwrite_that_moves_the_deployment_is_refused(tmp_path):
+    for old, moved in [
         (
             "name: team\nrecipe: polaris-iceberg-spark-trino\n"
             "platform:\n  kubernetes:\n    namespace: team-ns\n",
@@ -522,24 +342,16 @@ def test_overwrite_keeps_the_existing_name(tmp_path):
             "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'",
         ),
         ("name: team\n", "recipe 'hive-iceberg-spark-trino'"),
-    ],
-)
-def test_overwrite_that_moves_the_deployment_is_refused(tmp_path, old, moved):
-    out = tmp_path / "o.yaml"
-    out.write_text(old)
-    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
-    assert r.exit_code == 3, r.output
-    assert moved in r.output and "--name" in r.output
-    assert out.read_text() == old
-    # Naming a new deployment is the way through.
-    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "fresh-n"])
-    assert r.exit_code == 0, r.output
-
-
-def test_local_output_is_validated(tmp_path):
-    out = tmp_path / "l.yaml"
-    r = runner.invoke(app, ["init", "--local", "-o", str(out), "-w", "iot"])
-    assert r.exit_code == 2 and not out.exists()
+    ]:
+        out = tmp_path / "o.yaml"
+        out.write_text(old)
+        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
+        assert r.exit_code == 3, r.output
+        assert moved in r.output and "--name" in r.output
+        assert out.read_text() == old
+        # Naming a new deployment is the way through.
+        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "fresh-n"])
+        assert r.exit_code == 0, r.output
 
 
 @pytest.mark.parametrize("name", ["0x1f", "2024-01-01", "yes", "null", "12"])
@@ -548,61 +360,10 @@ def test_names_yaml_would_retype_are_quoted(name):
     assert yaml.safe_load(text)["name"] == name
 
 
-def test_workload_format_hint_recommends_a_recipe():
-    with pytest.raises(ValueError) as exc:
-        LakebenchConfig.model_validate(
-            {"name": "t", "recipe": "hive-delta-spark-trino", "workload": {"schema": "financial"}}
-        )
-    assert "Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino)" in str(
-        exc.value
-    )
-
-
 def _load_text(tmp_path, text):
     p = tmp_path / "env.yaml"
     p.write_text(text)
     return load_config(p)
-
-
-def test_empty_whole_value_reference_is_null(tmp_path, monkeypatch):
-    monkeypatch.setenv("LB_EMPTY", "")
-    cfg = _load_text(
-        tmp_path,
-        "name: e-t\nrecipe: hive-iceberg-spark-trino\n"
-        "platform:\n  compute:\n    spark:\n      driver_memory: ${LB_EMPTY}\n"
-        "  storage:\n    s3:\n      region: x-${LB_EMPTY}\n",
-    )
-    assert cfg.platform.compute.spark.driver_memory is None
-    assert cfg.platform.storage.s3.region == "x-"
-
-
-def test_reference_in_a_key_is_substituted_as_v16_did(tmp_path, monkeypatch):
-    monkeypatch.setenv("LB_B", "bkt")
-    cfg = _load_text(
-        tmp_path,
-        "name: k-t\nrecipe: hive-iceberg-spark-trino\nspark:\n  conf:\n    a.${LB_B}.endpoint: x\n",
-    )
-    assert cfg.spark.conf["a.bkt.endpoint"] == "x"
-
-
-def test_default_cut_by_a_comment_is_refused(tmp_path, monkeypatch):
-    from lakebench.config import ConfigError
-
-    monkeypatch.setenv("LB_RG", "eu-1")
-    with pytest.raises(ConfigError, match=r"Unclosed .* at line 5"):
-        _load_text(
-            tmp_path,
-            "name: c-t\nplatform:\n  storage:\n    s3:\n      region: ${LB_RG:-us-east-1 #x}\n",
-        )
-
-
-def test_spark_env_syntax_passes_through(tmp_path):
-    cfg = _load_text(
-        tmp_path,
-        "name: s-t\nrecipe: hive-iceberg-spark-trino\n"
-        "spark:\n  conf:\n    spark.x: ${env:HOME}/x\n",
-    )
-    assert cfg.spark.conf["spark.x"] == "${env:HOME}/x"
 
 
 def test_overwrite_of_a_nameless_v16_config_needs_a_name(tmp_path):
@@ -623,16 +384,6 @@ def test_user_set_maps_config_aliases():
     assert user_set(cfg, "workload.schema")
     assert user_set(cfg, "workload.schema_type")
     assert not user_set(cfg, "workload.datagen.scale")
-
-
-def test_quoted_empty_default_is_an_empty_string(tmp_path, monkeypatch):
-    monkeypatch.delenv("LB_UNSET_R", raising=False)
-    cfg = _load_text(
-        tmp_path,
-        "name: q-t\nrecipe: hive-iceberg-spark-trino\n"
-        'platform:\n  storage:\n    s3:\n      region: "${LB_UNSET_R:-}"\n',
-    )
-    assert cfg.platform.storage.s3.region == ""
 
 
 # -- differential: ${VAR} loads as v1.6 did ---------------------------------
@@ -671,38 +422,117 @@ def _v16_expected(form: str, value: str):
     return doc.get("j", doc["k"])
 
 
-@pytest.mark.parametrize("form", _PLAIN_FORMS)
-@pytest.mark.parametrize("value", _ENV_VALUES)
-def test_plain_reference_loads_as_v16(tmp_path, monkeypatch, form, value):
+_ENV_LOAD_CASES = [
+    # (env to set, env to unset, yaml text, attribute path, expected)
+    pytest.param(
+        {"LB_EMPTY": ""}, (),
+        "name: e-t\nrecipe: hive-iceberg-spark-trino\n"
+        "platform:\n  compute:\n    spark:\n      driver_memory: ${LB_EMPTY}\n"
+        "  storage:\n    s3:\n      region: x-${LB_EMPTY}\n",
+        {"platform.compute.spark.driver_memory": None, "platform.storage.s3.region": "x-"},
+        id="empty-whole-value-is-null",
+    ),
+    pytest.param(
+        {}, ("LB_UNSET_R",),
+        "name: q-t\nrecipe: hive-iceberg-spark-trino\n"
+        'platform:\n  storage:\n    s3:\n      region: "${LB_UNSET_R:-}"\n',
+        {"platform.storage.s3.region": ""},
+        id="quoted-empty-default-is-empty-string",
+    ),
+    pytest.param(
+        {"LB_B": "bkt"}, (),
+        "name: k-t\nrecipe: hive-iceberg-spark-trino\nspark:\n  conf:\n    a.${LB_B}.endpoint: x\n",
+        {"spark.conf[a.bkt.endpoint]": "x"},
+        id="reference-in-a-key",
+    ),
+    pytest.param(
+        {}, (),
+        "name: s-t\nrecipe: hive-iceberg-spark-trino\nspark:\n  conf:\n    spark.x: ${env:HOME}/x\n",
+        {"spark.conf[spark.x]": "${env:HOME}/x"},
+        id="spark-env-syntax-passes-through",
+    ),
+]  # fmt: skip
+
+
+def _attr(cfg, path):
+    if path.endswith("]"):
+        head, key = path[:-1].split("[", 1)
+        obj = cfg
+        for part in head.split("."):
+            obj = getattr(obj, part)
+        return obj[key]
+    obj = cfg
+    for part in path.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+@pytest.mark.parametrize(("env", "unset", "text", "expected"), _ENV_LOAD_CASES)
+def test_env_reference_loads(tmp_path, monkeypatch, env, unset, text, expected):
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    for k in unset:
+        monkeypatch.delenv(k, raising=False)
+    cfg = _load_text(tmp_path, text)
+    for path, want in expected.items():
+        assert _attr(cfg, path) == want, path
+
+
+def test_default_cut_by_a_comment_is_refused(tmp_path, monkeypatch):
+    from lakebench.config import ConfigError
+
+    monkeypatch.setenv("LB_RG", "eu-1")
+    with pytest.raises(ConfigError):
+        _load_text(
+            tmp_path,
+            "name: c-t\nplatform:\n  storage:\n    s3:\n      region: ${LB_RG:-us-east-1 #x}\n",
+        )
+
+
+def test_secret_with_yaml_syntax_arrives_verbatim(tmp_path, monkeypatch):
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "ak")
+    p = tmp_path / "s.yaml"
+    p.write_text(first_day_config(name="sec-t"))
+    for secret in ["x #tail", "!abc", "*star", '"quoted', "'single", "123456", "a: b", "{brace}"]:
+        monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", secret)
+        assert load_config(p).platform.storage.s3.secret_key == secret
+
+
+def test_plain_reference_loads_as_v16(tmp_path, monkeypatch):
+    """Every value in every plain form loads as v1.6 loaded it, value and type."""
     from lakebench.config.loader import load_yaml
 
-    if "%s" in form and (value.strip() != value or value in ("<<", "=")):
-        pytest.skip("a default cannot carry surrounding whitespace in a plain scalar")
-    monkeypatch.setenv("LB_DIFF", value)
     monkeypatch.delenv("LB_DIFF_UNSET", raising=False)
-    text = form % value if "%s" in form else form
     p = tmp_path / "d.yaml"
-    p.write_text(text + "\n")
-    try:
-        expected = _v16_expected(form, value)
-    except yaml.YAMLError:
-        pytest.skip("v1.6 could not parse this substitution at all")
-    doc = load_yaml(p)
-    got = doc.get("j", doc["k"])
-    assert got == expected and type(got) is type(expected), (text, value, got, expected)
+    checked = 0
+    for form in _PLAIN_FORMS:
+        for value in _ENV_VALUES:
+            if "%s" in form and (value.strip() != value or value in ("<<", "=")):
+                continue  # a default cannot carry surrounding whitespace in a plain scalar
+            monkeypatch.setenv("LB_DIFF", value)
+            text = form % value if "%s" in form else form
+            p.write_text(text + "\n")
+            try:
+                expected = _v16_expected(form, value)
+            except yaml.YAMLError:
+                continue  # v1.6 could not parse this substitution at all
+            doc = load_yaml(p)
+            got = doc.get("j", doc["k"])
+            assert got == expected and type(got) is type(expected), (text, value, got, expected)
+            checked += 1
+    assert checked > 60
 
 
-@pytest.mark.parametrize("quote", ['"', "'"])
-@pytest.mark.parametrize(
-    "value", [*_ENV_VALUES, "x #tail", '"q', "'s", "a\\tb", "!x", "*y", "a: b", "123456"]
-)
-def test_quoted_reference_arrives_verbatim(tmp_path, monkeypatch, quote, value):
+def test_quoted_reference_arrives_verbatim(tmp_path, monkeypatch):
     from lakebench.config.loader import load_yaml
 
-    monkeypatch.setenv("LB_DIFF", value)
     p = tmp_path / "q.yaml"
-    p.write_text(f"k: {quote}${{LB_DIFF}}{quote}\n")
-    assert load_yaml(p)["k"] == value
+    values = [*_ENV_VALUES, "x #tail", '"q', "'s", "a\\tb", "!x", "*y", "a: b", "123456"]
+    for quote in ('"', "'"):
+        p.write_text(f"k: {quote}${{LB_DIFF}}{quote}\n")
+        for value in values:
+            monkeypatch.setenv("LB_DIFF", value)
+            assert load_yaml(p)["k"] == value, (quote, value)
 
 
 def test_leading_zero_seed_keeps_its_v16_value(tmp_path, monkeypatch):

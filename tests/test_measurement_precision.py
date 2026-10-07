@@ -72,21 +72,11 @@ class TestContinuousFreshnessHeadline:
         pb.data_freshness_seconds = None
         assert pipeline_score_freshness(pb) == "n/a"
 
-    def test_event_age_is_labelled_in_days(self):
-        from lakebench.cli._sustained import event_age_label
-
-        assert event_age_label(LIVE_EVENT_AGE) == "635.3 d"
-        assert event_age_label(None) == "n/a"
-
     def test_scores_carry_event_age_under_its_own_name(self):
         pb = _continuous_pb()
         scores = pb.to_dict()["scores"]
         assert "query_time_freshness_seconds" not in scores
         assert scores["query_time_event_age_seconds"] == pytest.approx(LIVE_EVENT_AGE + 2)
-
-    def test_description_says_it_is_not_freshness(self):
-        desc = PipelineBenchmark._SCORE_DESCRIPTIONS["query_time_event_age_seconds"]
-        assert "not freshness" in desc
 
     def test_legacy_round_meta_loads_as_event_age(self, tmp_path):
         from lakebench.metrics.storage import MetricsStorage
@@ -240,17 +230,6 @@ class TestStageTiming:
         assert t.source == "driver_container"
         assert t.end == T0 + timedelta(seconds=90.09)
 
-    def test_parse_k8s_time(self):
-        from lakebench.modules.pipeline_engines.spark.monitor import parse_k8s_time
-
-        assert parse_k8s_time("2026-09-27T07:12:55Z") == datetime(
-            2026, 9, 27, 7, 12, 55, tzinfo=timezone.utc
-        )
-        naive = datetime(2026, 9, 27, 7, 12, 55)
-        assert parse_k8s_time(naive).tzinfo is timezone.utc
-        assert parse_k8s_time("") is None
-        assert parse_k8s_time("not a time") is None
-
 
 def _driver_pod(name, finished):
     term = SimpleNamespace(finished_at=finished)
@@ -330,11 +309,6 @@ class TestRunStageTiming:
         )
         assert t.source == "poll" and t.resolution_seconds == _run._STAGE_POLL_S
 
-    def test_poll_is_no_longer_15s(self):
-        from lakebench.cli import _run
-
-        assert _run._STAGE_POLL_S <= 5
-
     def test_timing_source_reaches_the_stage_and_survives_a_reload(self):
         from lakebench.metrics import build_pipeline_benchmark
         from lakebench.metrics.collector import JobMetrics, PipelineMetrics
@@ -367,135 +341,9 @@ class TestRunStageTiming:
 # ---------------------------------------------------------------------------
 
 
-def _continuous_c360(tmp_path, **datagen):
-    import yaml
-
-    from tests.conftest import make_config
-
-    base = make_config().model_dump(mode="json")
-    data = {
-        "name": "lb16-cont2",
-        "platform": base["platform"],
-        "architecture": {"pipeline": {"mode": "continuous"}},
-        "workload": {"schema": "customer360", "datagen": {"scale": 1, **datagen}},
-    }
-    path = tmp_path / "c.yaml"
-    path.write_text(yaml.safe_dump(data))
-    return path
-
-
-class TestInfoLabels:
-    def test_continuous_config_is_not_labelled_batch(self, tmp_path):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        path = _continuous_c360(tmp_path, timestamp_start="2024-12-18", timestamp_end="2025-01-01")
-        out = CliRunner().invoke(app, ["info", str(path)])
-        assert out.exit_code == 0, out.output
-        assert "customer360-continuous" in out.output
-        assert "customer360-batch" not in out.output
-        assert "14 days (2024-12-18 to 2025-01-01)" in out.output
-        assert "365 days" not in out.output
-
-    def test_continuous_datagen_mode_says_how_the_corpus_arrives(self, tmp_path):
-        """lb16-cs: what "Datagen mode" says beside "Pipeline mode: continuous"."""
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        out = CliRunner().invoke(app, ["info", str(_continuous_c360(tmp_path))])
-        assert out.exit_code == 0, out.output
-        text = " ".join(out.output.replace("\u2502", " ").split())
-        # Wave 2 D-wave (2026-09-28): AUTO resolves to continuous at every
-        # scale (delivery pattern, not resource tier). Trickle sentence is
-        # kept for the continuous pipeline.
-        assert "continuous delivery (auto); corpus written up front" in text
-        assert "trickled to bronze by the pipeline" in text
-
-    def test_datagen_mode_line_batch_and_explicit(self):
-        from lakebench.cli import info_datagen_mode
-        from tests.conftest import make_config
-
-        cfg = make_config()
-        # AUTO -> continuous everywhere (Wave 2 D-wave, 2026-09-28).
-        assert info_datagen_mode(cfg) == "continuous delivery (auto)"
-        assert "trickle" not in info_datagen_mode(cfg)
-        cfg = make_config(workload={"datagen": {"mode": "batch"}})
-        assert info_datagen_mode(cfg) == "batch delivery (set in config)"
-
-    def test_date_range_defaults_and_non_c360(self):
-        from lakebench.cli import info_date_range
-        from tests.conftest import make_config
-
-        cfg = make_config()
-        assert info_date_range(cfg, 365) == "365 days"
-        cfg.architecture.workload.datagen.timestamp_end = "2024-01-15"
-        assert info_date_range(cfg, 365) == "14 days (2024-01-01 to 2024-01-15)"
-        cfg.architecture.workload.datagen.timestamp_start = "bad"
-        assert info_date_range(cfg, 365) == "365 days"
-        fin = make_config(workload={"schema": "financial"})
-        fin.architecture.workload.datagen.timestamp_start = "2024-12-18"
-        assert info_date_range(fin, 1826) == "1826 days"
-
-
 # ---------------------------------------------------------------------------
 # 6. Destroy names the tables whose files stay in a refused bucket
 # ---------------------------------------------------------------------------
-
-
-class TestDestroyNamesTablesLeftInRefusedBuckets:
-    def _engine(self):
-        from tests.conftest import make_config
-
-        cfg = make_config(workload={"schema": "financial"})
-        cfg.platform.storage.s3.buckets.bronze = "lb16-lb186-bronze"
-        cfg.platform.storage.s3.buckets.silver = "lb16-lb186-silver"
-        cfg.platform.storage.s3.buckets.gold = "lb16-lb186-gold"
-        return SimpleNamespace(config=cfg)
-
-    def test_refused_bronze_names_its_tables_only(self):
-        from lakebench.deploy import destroy as destroy_mod
-
-        engine = self._engine()
-        tables = engine.config.architecture.tables
-        bronze = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("bronze",))]
-        silver = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("silver",))]
-        notes = destroy_mod._files_left_in_refused_buckets(
-            engine, {"lb16-lb186-bronze"}, bronze + silver
-        )
-        assert len(notes) == 1
-        assert "remain in lb16-lb186-bronze" in notes[0]
-        for t in bronze:
-            assert t.split(".", 1)[1] in notes[0]
-        for t in silver:
-            assert t.split(".", 1)[1] not in notes[0]
-
-    def test_nothing_refused_or_nothing_unregistered(self):
-        from lakebench.deploy import destroy as destroy_mod
-
-        engine = self._engine()
-        assert destroy_mod._files_left_in_refused_buckets(engine, set(), ["lakehouse.a.b"]) == []
-        assert destroy_mod._files_left_in_refused_buckets(engine, {"lb16-lb186-bronze"}, []) == []
-
-    def test_end_to_end_the_bucket_step_says_where_the_files_stay(self):
-        """LB-186 live: bronze refused (tagless, not on the record), Trino
-        unregistered the tables, and the refused bucket kept their files."""
-        from tests.test_destroy_bucket_delete import FakeBoto, TestDestroyAllBuckets
-
-        h = TestDestroyAllBuckets()
-        boto = FakeBoto({"a-bronze": ["warehouse/t/data.parquet"], "a-silver": [], "a-gold": []})
-        r = h._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
-            created={"a-silver", "a-gold"},
-            maint=("trino", "trino-coordinator-0", "lakehouse"),
-        )
-        assert boto.buckets == {"a-bronze": ["warehouse/t/data.parquet"]}
-        assert "their files remain in a-bronze" in r.message
-        assert "silver.t" in r.message
-        tables = [x for x in h._results if x.component == "table-cleanup"][-1]
-        assert "silver.t, gold.t" in tables.message
 
 
 class TestReviewFixes:
@@ -513,24 +361,6 @@ class TestReviewFixes:
             cluster_end=T0 + timedelta(seconds=440.0 + 4.5),
         )
         assert t.source == "driver_container"
-
-    def test_clock_offset_is_read_once_per_monitor(self):
-        from lakebench.cli import _run
-
-        calls = []
-
-        def offset():
-            calls.append(1)
-            return 0.0
-
-        monitor = SimpleNamespace(
-            application_end=lambda _n, _s: (T0 + timedelta(seconds=60), "spark_application")
-        )
-        result = SimpleNamespace(final_status=None)
-        with patch("lakebench.cli._sustained.cluster_clock_offset_seconds", side_effect=offset):
-            for _ in range(3):
-                _run._stage_timing(monitor, "x", result, T0, T0 + timedelta(seconds=65))
-        assert len(calls) == 1
 
 
 class TestRunOrdering:

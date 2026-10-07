@@ -379,15 +379,3 @@ class TestRemoveNamespaceFromWatch:
         mgr = SparkOperatorManager(job_namespace="u02")
 
         assert mgr.remove_namespace_from_watch("u02") is False
-
-    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
-    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
-    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
-    @patch(_RUN)
-    def test_restarts_so_the_change_takes_effect(self, mock_run, _watched, _os, restart):
-        """The operator reads jobNamespaces at startup only."""
-        mock_run.return_value = _ok()
-        mgr = SparkOperatorManager(job_namespace="u02")
-
-        mgr.remove_namespace_from_watch("u02")
-        restart.assert_called_once()

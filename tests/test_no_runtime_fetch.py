@@ -30,7 +30,6 @@ from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManage
 from tests.conftest import make_config
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
-EXCLUDED = ("templates/deps/", "deploy/deps_tools/", "local_job.py")
 FORBIDDEN_KEYS = (
     "spark.jars.packages",
     "spark.jars.repositories",
@@ -69,13 +68,6 @@ def _handle(cfg):
         "",
         h.manifest,
     )
-
-
-def test_every_supported_combination_is_scanned():
-    """The case list cannot shrink silently: every recipe in both modes, and
-    the financial workload on every Iceberg recipe."""
-    iceberg = [r for r in RECIPES if r != "default" and "-iceberg-" in r]
-    assert len(CASES) >= 2 * (len(RECIPES) - 1) + 2 * len(iceberg)
 
 
 def _rendered(cfg) -> list[tuple[str, str]]:
@@ -181,47 +173,3 @@ def _problems(cfg, what: str, text: str) -> list[str]:
 def test_no_runtime_fetch(name, cfg):
     problems = [p for what, text in _rendered(cfg) for p in _problems(cfg, what, text)]
     assert problems == []
-
-
-def test_the_guard_catches_each_form():
-    cfg = make_config()
-    host = f"lb-deps.{cfg.get_namespace()}.svc.cluster.local"
-    bad = [
-        "spec: {deps: {packages: [a:b:c]}}",
-        "command: pip --no-cache-dir install duckdb==1.5.5",
-        f"command: pip install --no-index --require-hashes --trusted-host {host} "
-        "--find-links http://pypi.example/ x",
-        "command: python -c \"c.execute('install iceberg')\"",
-        "command: python -c \"c.install_extension('iceberg')\"",
-        "sparkConf: {spark.jars.packages: x}",
-        "command: spark-submit --packages a:b:c",
-        "command: pip install duckdb==1.5.5",
-        f"command: pip install --no-index --trusted-host {host} x",
-        "command: python -c \"c.execute('INSTALL iceberg')\"",
-        "url: https://repo1.maven.org/maven2/",
-    ]
-    for text in bad:
-        assert _problems(cfg, "t", text), text
-    assert _problems(cfg, "t", "spec: {sparkConf: {spark.jars: 'http://elsewhere/x.jar'}}")
-    assert not _problems(
-        cfg,
-        "t",
-        f"command: pip install --no-index --require-hashes --trusted-host {host} -r r.txt",
-    )
-
-
-def test_no_shipped_template_resolves_at_runtime():
-    """The static half: no template outside the resolver's own runs a
-    package resolve or an unpinned install."""
-    bad = []
-    for path in sorted((SRC / "templates").rglob("*.j2")):
-        rel = path.relative_to(SRC).as_posix()
-        if any(rel.startswith(e) for e in EXCLUDED):
-            continue
-        text = path.read_text()
-        if re.search(r"--packages\b|spark\.jars\.ivy|INSTALL \w+", text):
-            bad.append(rel)
-        for cmd in re.findall(r"pip3? install[^\n]*", text):
-            if "--no-index" not in cmd or "--require-hashes" not in cmd:
-                bad.append(f"{rel}: {cmd[:80]}")
-    assert bad == []

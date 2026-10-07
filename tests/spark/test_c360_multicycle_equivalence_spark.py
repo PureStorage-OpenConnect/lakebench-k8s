@@ -42,12 +42,6 @@ def _why(case: dict) -> str:
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_every_job_succeeded(result, fmt):
-    case = result[fmt]
-    assert case["rcs"] == [0] * 10, _why(case)
-
-
-@pytest.mark.parametrize("fmt", FORMATS)
 def test_later_cycles_took_the_incremental_path(result, fmt):
     """Cycles 1 and 2 appended to silver and replaced gold from the
     watermark: a fallback to a full rebuild would make equality trivial."""

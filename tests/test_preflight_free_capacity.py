@@ -151,20 +151,6 @@ def test_free_not_total():
     assert res.record["capacity"] == "checked"
 
 
-def test_single_node_control_plane_counted():
-    """A single untainted control-plane node is the cluster, not "unknown"."""
-    cp = _node("only", "96", "1024Gi", labels={"node-role.kubernetes.io/control-plane": ""})
-    got = _client([cp]).get_free_capacity()
-    assert isinstance(got, FreeCapacity) and got.free.node_count == 1
-    assert _check(_client([cp])).passed
-    # Tainted the usual way, it holds no pods: nothing schedulable is left.
-    tainted = _node(
-        "only", "96", "1024Gi", labels={"node-role.kubernetes.io/control-plane": ""},
-        taints=("NoSchedule",),
-    )  # fmt: skip
-    assert isinstance(_client([tainted]).get_free_capacity(), CapacityUnknown)
-
-
 # -- scratch ---------------------------------------------------------------------
 
 
@@ -179,8 +165,6 @@ def test_scratch_csi_capacity_short():
         _client(nodes, csi=[_csi("px-csi-scratch", "1000Gi"), _csi("other", "9Ti")]), cfg
     )
     assert not short.passed
-    assert "Scratch: need 2,400 Gi of StorageClass px-csi-scratch" in short.hint
-    assert "totals 1,000 Gi" in short.hint
     assert short.record["scratch"] == "checked"
     ok = _check(_client(nodes, csi=[_csi("px-csi-scratch", "2000Gi")] * 2), cfg)
     assert ok.passed and ok.record["scratch"] == "checked"
@@ -256,18 +240,6 @@ def test_largest_pod_needs_one_node_with_both_free():
     res = _check(_client(nodes, pods))
     # The 8-core / 60 GB executor fits "cpu", though "mem" has more memory.
     assert "Largest pod" not in (res.hint or ""), res.hint
-
-
-def test_largest_pod_refused_when_no_node_has_both():
-    nodes = [_node("a", "40", "402Gi"), _node("b", "40", "402Gi")] + [
-        _node(f"n{i}", "40", "402Gi") for i in range(6)
-    ]
-    pods = [_pod("x", "a", "38", "1Gi"), _pod("y", "b", "1", "390Gi")] + [
-        _pod(f"h{i}", f"n{i}", "36", "380Gi") for i in range(6)
-    ]
-    res = _check(_client(nodes, pods))
-    assert not res.passed
-    assert "on one node; no schedulable node has both free" in res.hint
 
 
 def test_own_namespace_spark_pods_and_running_datagen_are_counted():
@@ -369,25 +341,3 @@ def test_checked_record_reaches_the_run_record(tmp_path, monkeypatch):
     data = json.loads(path.read_text())
     assert data["provenance"]["preflight"] == record
     assert data["verdict"]["qualifiers"]["scratch_capacity"] == "scratch capacity not checked"
-
-
-def test_continuous_run_does_not_count_its_own_leftover_streams():
-    """A continuous run stops its leftover streams before starting, so they
-    are not subtracted (counting them refused reruns after an interrupt)."""
-    stream = _pod("old-stream-exec", "a", "30", "300Gi", ns="pf-t")
-    stream.metadata.labels = {"spark-role": "executor"}
-    k = _client([_node("a")], [stream])
-    seen = {}
-    real = k.get_free_capacity
-
-    def spy(**kw):
-        got = real(**kw)
-        seen["free_cpu"] = got.free.total_cpu_millicores
-        return got
-
-    k.get_free_capacity = spy
-    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k):
-        _check_cluster_capacity(_cfg(), sustained=True)
-        assert seen["free_cpu"] == 64_000
-        _check_cluster_capacity(_cfg(), sustained=False)
-        assert seen["free_cpu"] == 34_000

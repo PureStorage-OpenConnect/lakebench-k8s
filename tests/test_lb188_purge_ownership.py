@@ -82,55 +82,33 @@ def _wire_reset(common, monkeypatch, *, location, provider):
     monkeypatch.setattr(common, "_hadoop_fs", lambda spark, uri: (_FakeFS(), object()))
 
 
-def test_reset_purges_an_owned_iceberg_table(common, monkeypatch):
-    _wire_reset(
-        common,
-        monkeypatch,
-        location="s3://lb-c360/silver/customer_interactions_enriched",
-        provider="iceberg",
-    )
+@pytest.mark.parametrize(
+    ("location", "fq", "purged"),
+    [
+        (
+            "s3://lb-c360/silver/customer_interactions_enriched",
+            "ice.silver.customer_interactions_enriched",
+            True,
+        ),
+        # outside the deployment's owned roots: PURGE would delete foreign files
+        (
+            "s3://someone-else/silver/customer_interactions_enriched",
+            "ice.silver.customer_interactions_enriched",
+            False,
+        ),
+        # the raw landing zone (keep_uris) inside the table's directory
+        ("s3://lb-c360/raw", "ice.silver.raw", False),
+    ],
+)
+def test_reset_purges_only_an_owned_iceberg_table(common, monkeypatch, location, fq, purged):
+    _wire_reset(common, monkeypatch, location=location, provider="iceberg")
     spark = _FakeSpark()
-    fq = "ice.silver.customer_interactions_enriched"
     common.reset_stream_tables(
         spark, [fq], owned_uris=["s3://lb-c360/"], keep_uris=["s3://lb-c360/raw/"]
     )
-    assert spark.purged(fq)
-
-
-def test_reset_never_purges_a_not_owned_iceberg_table(common, monkeypatch):
-    # Location outside the deployment's owned roots. PURGE would delete the
-    # foreign files (LB-188); the reset must drop catalog-only.
-    _wire_reset(
-        common,
-        monkeypatch,
-        location="s3://someone-else/silver/customer_interactions_enriched",
-        provider="iceberg",
-    )
-    spark = _FakeSpark()
-    fq = "ice.silver.customer_interactions_enriched"
-    common.reset_stream_tables(
-        spark, [fq], owned_uris=["s3://lb-c360/"], keep_uris=["s3://lb-c360/raw/"]
-    )
-    assert not spark.purged(fq), "PURGE ran on a table outside this deployment"
-    assert spark.plain_dropped(fq)
-
-
-def test_reset_never_purges_when_location_overlaps_the_datagen_zone(common, monkeypatch):
-    # keep_uris (raw landing zone) inside the table's own directory: owned_table_dir
-    # refuses it, so no PURGE.
-    _wire_reset(
-        common,
-        monkeypatch,
-        location="s3://lb-c360/raw",
-        provider="iceberg",
-    )
-    spark = _FakeSpark()
-    fq = "ice.silver.raw"
-    common.reset_stream_tables(
-        spark, [fq], owned_uris=["s3://lb-c360/"], keep_uris=["s3://lb-c360/raw/"]
-    )
-    assert not spark.purged(fq)
-    assert spark.plain_dropped(fq)
+    assert spark.purged(fq) is purged
+    if not purged:
+        assert spark.plain_dropped(fq)
 
 
 # --- financial: bronze_verify_financial._drop_owned_table -------------------
@@ -145,58 +123,28 @@ def _wire_financial(financial, monkeypatch, *, location):
     return calls
 
 
-def test_financial_purges_an_owned_table(financial, monkeypatch):
-    _wire_financial(
-        financial, monkeypatch, location="s3://lb-bronze/warehouse/silver.db/transactions"
-    )
-    spark = _FakeSpark()
-    financial._drop_owned_table(spark, "silver.transactions")
-    assert spark.purged("lakehouse.silver.transactions")
-
-
-def test_financial_purges_iceberg_unique_location_form(financial, monkeypatch):
-    _wire_financial(
-        financial,
-        monkeypatch,
-        location="s3://lb-bronze/warehouse/silver.db/transactions-9c1f2a",
-    )
-    spark = _FakeSpark()
-    financial._drop_owned_table(spark, "silver.transactions")
-    assert spark.purged("lakehouse.silver.transactions")
-
-
-def test_financial_never_purges_when_location_overlaps_datagen(financial, monkeypatch):
-    # Under the raw datagen path (BRONZE_URI + PACS_PREFIX): PURGE would delete
-    # the corpus. Catalog-only DROP.
-    _wire_financial(
-        financial,
-        monkeypatch,
-        location=financial.BRONZE_URI + financial.PACS_PREFIX + "sub/transactions",
-    )
+@pytest.mark.parametrize(
+    ("location", "purged"),
+    [
+        ("s3://lb-bronze/warehouse/silver.db/transactions", True),
+        ("s3://lb-bronze/warehouse/silver.db/transactions-9c1f2a", True),  # Iceberg unique form
+        ("<raw-corpus>sub/transactions", False),  # under the datagen path: PURGE deletes the corpus
+        ("s3://lb-bronze/warehouse/silver.db", False),  # a namespace root
+        (None, False),
+    ],
+)
+def test_financial_purges_only_an_owned_table_location(financial, monkeypatch, location, purged):
+    if location and location.startswith("<raw-corpus>"):
+        location = (
+            financial.BRONZE_URI + financial.PACS_PREFIX + location.removeprefix("<raw-corpus>")
+        )
+    _wire_financial(financial, monkeypatch, location=location)
     spark = _FakeSpark()
     fq = "lakehouse.silver.transactions"
     financial._drop_owned_table(spark, "silver.transactions")
-    assert not spark.purged(fq)
-    assert spark.plain_dropped(fq)
-
-
-def test_financial_never_purges_a_namespace_root(financial, monkeypatch):
-    # Location is a namespace/warehouse root, not named after the table.
-    _wire_financial(financial, monkeypatch, location="s3://lb-bronze/warehouse/silver.db")
-    spark = _FakeSpark()
-    fq = "lakehouse.silver.transactions"
-    financial._drop_owned_table(spark, "silver.transactions")
-    assert not spark.purged(fq)
-    assert spark.plain_dropped(fq)
-
-
-def test_financial_no_location_is_catalog_only(financial, monkeypatch):
-    _wire_financial(financial, monkeypatch, location=None)
-    spark = _FakeSpark()
-    fq = "lakehouse.silver.transactions"
-    financial._drop_owned_table(spark, "silver.transactions")
-    assert not spark.purged(fq)
-    assert spark.plain_dropped(fq)
+    assert spark.purged(fq) is purged
+    if not purged:
+        assert spark.plain_dropped(fq)
 
 
 def test_financial_purge_refused_falls_back_to_drop_and_dir_delete(financial, monkeypatch):

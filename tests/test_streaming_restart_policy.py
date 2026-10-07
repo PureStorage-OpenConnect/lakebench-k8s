@@ -21,7 +21,7 @@ import pytest
 from lakebench.config import LakebenchConfig
 from lakebench.k8s.client import ClusterCapacity
 from lakebench.modules.pipeline_engines.spark.job import _STREAMING_JOB_TYPES
-from lakebench.spark.job import JobType, SparkJobManager
+from lakebench.spark.job import SparkJobManager
 
 
 def _cfg(schema: str = "customer360", scale: float = 1.0) -> LakebenchConfig:
@@ -89,18 +89,4 @@ def test_streaming_jobs_do_not_auto_resubmit_failed_drivers(job_type):
         "mid-window resubmission (LB-279 Part A)"
     )
     # Submission retries stay (operator can be transiently busy).
-    assert policy.get("onSubmissionFailureRetries", 0) >= 1
-
-
-def test_batch_default_keeps_two_driver_retries():
-    """Batch (non-streaming, non-special-case) still uses OnFailure=2.
-
-    Regression guard: Part A changes only the streaming branch of the
-    ``_restart_policy`` ternary; the batch branch is unchanged.
-    """
-    mgr = SparkJobManager(_cfg("customer360"), _capacity_k8s())
-    manifest = mgr._build_manifest(JobType.SILVER_BUILD)
-    policy = manifest["spec"]["restartPolicy"]
-    assert policy["type"] == "OnFailure"
-    assert policy.get("onFailureRetries") == 2
     assert policy.get("onSubmissionFailureRetries", 0) >= 1

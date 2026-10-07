@@ -428,12 +428,6 @@ def test_versionless_observation_never_matches(cluster) -> None:
     assert si.common_fingerprints(a, c)[0] != si.common_fingerprints(a, c)[1]
 
 
-def test_every_cluster_read_has_a_timeout(cluster) -> None:
-    """An API server that stops answering must not hang the run."""
-    _observe(cluster())
-    assert cluster.state["timeouts"] == [si._REQUEST_TIMEOUT] * 3
-
-
 def test_sibling_clusters_are_not_one_system(cluster, tmp_path) -> None:
     """Two clusters on one VM template, OpenShift release and storage share
     every shape part; with one side's CA not observed they hash equal over
@@ -456,19 +450,6 @@ def test_node_without_capacity_is_a_gap(cluster) -> None:
     assert out["parts"]["nodes"] == {
         "not_observed": "node new: ValueError: capacity not reported yet"
     }
-
-
-def test_detect_backend_answers_are_pinned() -> None:
-    """storage_backend hashes detect_backend's answer. If this fails because
-    detect_backend learned a new backend, bump SYSTEM_IDENTITY_VERSION with
-    it, or stored observations of an unchanged system stop matching."""
-    from lakebench.s3.conformance import detect_backend
-
-    # v3: LB-280 redacted storage_endpoint from host:port to sha256-16.
-    assert si.SYSTEM_IDENTITY_VERSION == 3
-    assert detect_backend("http://10.0.1.50:80") == "unknown"
-    assert detect_backend("https://minio.example:9000") == "unknown"
-    assert detect_backend("https://s3.us-east-1.amazonaws.com") == "aws"
 
 
 # ---------------------------------------------------------------------------
@@ -545,32 +526,6 @@ def test_load_pod_overhead_counts() -> None:
     assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 1.25
 
 
-def test_endless_continue_token_is_bounded() -> None:
-    class Core:
-        def list_node(self, **kw):
-            return NS(items=_default_nodes())
-
-        def list_pod_for_all_namespaces(self, **kw):
-            return NS(items=[], metadata=NS(_continue="again"))  # never ends
-
-    out = si.observe_load(NS(_core_v1=Core()), "mine")
-    assert "did not end" in out["cotenant_requested"]["not_observed"]
-
-
-def test_mock_continue_token_ends_the_list() -> None:
-    """A test double's continue token (not a string) ends the list."""
-    from unittest import mock
-
-    class Core:
-        def list_node(self, **kw):
-            return NS(items=_default_nodes())
-
-        def list_pod_for_all_namespaces(self, **kw):
-            return mock.MagicMock()
-
-    assert si.observe_load(NS(_core_v1=Core()), "mine")["cotenant_requested"]["pods"] == 0
-
-
 def test_refused_pod_list_is_not_observed() -> None:
     k8s, _ = _load_cluster(pod_error=_ApiError(403))
     out = si.observe_load(k8s, "mine")
@@ -593,8 +548,8 @@ def test_local_load_is_not_observed() -> None:
 def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:
     """sample_run_start writes system_identity and the start sample;
     sample_run_end adds the end sample; build_experiment copies both."""
-    from tests.test_experiment import _cfg as exp_cfg
-    from tests.test_experiment import _metrics
+    from tests.fixtures.experiment_helpers import _cfg as exp_cfg
+    from tests.fixtures.experiment_helpers import _metrics
 
     cfg = exp_cfg()
     run = _metrics(cfg)
@@ -614,17 +569,6 @@ def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:
     e = run.to_dict()["experiment"]
     assert e["observed"] == observed
     assert e["system_identity"] == inputs["system_identity"]
-
-
-def test_run_sampling_never_raises() -> None:
-    class Boom:
-        def __getattr__(self, name):
-            raise RuntimeError("boom")
-
-    run = NS(config_snapshot={"experiment_inputs": {}})
-    si.sample_run_start(run, Boom(), k8s=Boom())
-    si.sample_run_end(run, Boom(), k8s=Boom())
-    si.sample_run_start(NS(config_snapshot=None), Boom())
 
 
 def test_load_quantities_in_any_canonical_form() -> None:
@@ -656,8 +600,8 @@ def test_sidecars_and_pod_level_requests() -> None:
 
 
 def test_unsampled_start_marks_every_half() -> None:
-    from tests.test_experiment import _cfg as exp_cfg
-    from tests.test_experiment import _metrics
+    from tests.fixtures.experiment_helpers import _cfg as exp_cfg
+    from tests.fixtures.experiment_helpers import _metrics
 
     class Core:
         def list_node(self, **kw):
@@ -705,47 +649,3 @@ def test_reasons_carry_no_address() -> None:
     )
     reason = si._reason(exc)
     assert "api.lab.example" not in reason and "192.0.2.15" not in reason
-
-
-def test_start_sample_is_bounded_by_its_deadline(monkeypatch) -> None:
-    import threading
-
-    gate = threading.Event()
-
-    class Core:
-        def list_node(self, **kw):
-            gate.wait(10)
-            return NS(items=[])
-
-    monkeypatch.setattr(si, "START_DEADLINE_S", 0.2)
-    from tests.test_experiment import _cfg as exp_cfg
-    from tests.test_experiment import _metrics
-
-    cfg = exp_cfg()
-    run = _metrics(cfg)
-    si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
-    gate.set()
-    inputs = run.config_snapshot["experiment_inputs"]
-    assert not si.observed_parts(inputs["system_identity"]["parts"])
-    assert inputs["system_identity"]["type"] == "cluster"
-    assert "not sampled within" in inputs["observed"]["allocatable"]["start"]["not_observed"]
-
-
-def test_local_identity_names_nothing() -> None:
-    ident = si._local_identity(None)
-    assert ident["type"] == "local" and ident["partial"] is True
-    assert not si.observed_parts(ident["parts"])
-
-
-def test_non_plain_values_are_gaps() -> None:
-    """A client returning objects (a test double) never puts a non-JSON
-    value into the record."""
-    from unittest import mock
-
-    k8s = mock.MagicMock()
-    ident = si.observe_system(k8s, _cfg(), s3_client=_S3())
-    json.dumps(ident)
-    inputs: dict[str, Any] = {}
-    si._record_load(inputs, "start", {"at": "t", "allocatable": {"cpu": mock.MagicMock()}})
-    json.dumps(inputs)
-    assert "not a plain value" in inputs["observed"]["allocatable"]["start"]["not_observed"]

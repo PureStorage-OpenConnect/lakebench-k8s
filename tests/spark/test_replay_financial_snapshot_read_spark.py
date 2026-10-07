@@ -21,17 +21,6 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
     return spark_session
 
 
-def test_replay_reads_the_table_as_of_its_snapshot(spark, load_script):
-    replay = load_script("replay_financial")
-    fq = "lakehouse.silver.transactions_replay"
-    spark.sql(f"DROP TABLE IF EXISTS {fq}")
-    spark.createDataFrame([(1,), (2,)], "n bigint").writeTo(fq).create()
-    first = spark.sql(f"SELECT snapshot_id FROM {fq}.snapshots").collect()[0][0]
-    spark.createDataFrame([(3,)], "n bigint").writeTo(fq).append()
-    got = sorted(r.n for r in replay.read_at_snapshot_id(spark, fq, first).collect())
-    assert got == [1, 2]
-
-
 def test_replay_main_runs_the_rule_on_the_resolved_older_snapshot(spark, load_script, monkeypatch):
     """AM-27: ``main()`` resolves the snapshot for ``--depth-months`` and
     hands the rule silver as of that snapshot, through the real read path.

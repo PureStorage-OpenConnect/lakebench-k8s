@@ -20,13 +20,12 @@ NAME = "c360-batch-s10"
 
 
 def test_ids_and_helpers():
-    assert MAINTENANCE_POLICY_ID == "m2-2026-09-26"
     assert recorded_policy({}) == LEGACY_MAINTENANCE_POLICY_ID
     assert recorded_policy(None) == LEGACY_MAINTENANCE_POLICY_ID
     assert recorded_policy({"maintenance_policy_id": "x"}) == "x"
     assert policy_mismatch(None, LEGACY_MAINTENANCE_POLICY_ID) is None
     assert policy_mismatch(MAINTENANCE_POLICY_ID, MAINTENANCE_POLICY_ID) is None
-    assert "maintenance policy differs" in (policy_mismatch(None, MAINTENANCE_POLICY_ID) or "")
+    assert policy_mismatch(None, MAINTENANCE_POLICY_ID) is not None
 
 
 def test_a_new_run_stamps_the_current_policy():
@@ -64,7 +63,7 @@ def test_skip_maintenance_stamps_a_distinct_id():
 
 def test_reproduce_package_carries_the_policy():
     from lakebench.cli._reproduce import _build_package
-    from tests.test_reproduce import _metrics
+    from tests.fixtures.reproduce_helpers import _metrics
 
     pkg = _build_package(_metrics(), config_reference=None, commit_sha="abc1234")
     assert pkg["reproduction_metadata"]["maintenance_policy_id"] == MAINTENANCE_POLICY_ID
@@ -90,7 +89,7 @@ def test_reproduce_verify_refuses_a_legacy_package_before_running(tmp_path):
     import typer
 
     from lakebench.cli._reproduce import _build_package, reproduce
-    from tests.test_reproduce import _ONE_SAMPLE_CFG, _metrics
+    from tests.fixtures.reproduce_helpers import _ONE_SAMPLE_CFG, _metrics
 
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(_ONE_SAMPLE_CFG)

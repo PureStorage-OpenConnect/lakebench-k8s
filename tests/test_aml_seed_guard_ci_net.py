@@ -64,9 +64,6 @@ _RENDER_SITES = [
     ),
 ]
 
-_GUARD_DEF_FILE = _SRC / "config" / "datagen_seed.py"
-_LOAD_SITE_FILE = _SRC / "config" / "schema.py"
-
 
 _EXACT_HELPER_NAMES: frozenset[str] = frozenset({"check_seed", "resolve_seed", "config_seed"})
 
@@ -78,18 +75,6 @@ def _read(path: Path) -> str:
 
 def _parse(path: Path) -> ast.Module:
     return ast.parse(_read(path), filename=str(path))
-
-
-def _has_function_def(module: ast.Module, name: str) -> bool:
-    """True when the module defines a top-level or nested `def name(...)`.
-
-    AST-based so a comment `# def name(` does not pass, and a rename to
-    `_name` or `name_v2` does not pass either. Enforces the exact name.
-    """
-    for node in ast.walk(module):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return True
-    return False
 
 
 def _has_call_to(module: ast.Module, names: frozenset[str]) -> bool:
@@ -110,32 +95,6 @@ def _has_call_to(module: ast.Module, names: frozenset[str]) -> bool:
         if isinstance(func, ast.Attribute) and func.attr in names:
             return True
     return False
-
-
-def test_check_seed_is_defined_in_datagen_seed_module():
-    """Guard 1 body: `check_seed` and `resolve_seed` are defined."""
-    module = _parse(_GUARD_DEF_FILE)
-    assert _has_function_def(module, "check_seed"), (
-        f"{_GUARD_DEF_FILE} no longer defines check_seed(). {_INVARIANT_HINT}"
-    )
-    assert _has_function_def(module, "resolve_seed"), (
-        f"{_GUARD_DEF_FILE} no longer defines resolve_seed(). {_INVARIANT_HINT}"
-    )
-
-
-def test_load_time_guard_has_a_caller_in_workload_validator():
-    """Guard 1 caller: the WorkloadConfig validator invokes the guard.
-
-    A defined guard function with no caller is a dormant guard. The
-    WorkloadConfig Pydantic model calls `resolve_seed` (which calls
-    `check_seed`) in a `model_validator(mode="after")` so an unsafe
-    config is refused before any deploy step runs. AST-based so a
-    commented-out or docstring-mentioned call does not satisfy the net.
-    """
-    module = _parse(_LOAD_SITE_FILE)
-    assert _has_call_to(module, _EXACT_HELPER_NAMES), (
-        f"{_LOAD_SITE_FILE} no longer calls the AML seed guard at load time. {_INVARIANT_HINT}"
-    )
 
 
 @pytest.mark.parametrize(

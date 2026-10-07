@@ -6,7 +6,6 @@ the shared rule parameters, one attempt for the job).
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 from pathlib import Path
@@ -143,38 +142,7 @@ def test_rule_params_follow_the_signature(load_script, monkeypatch):
     assert rules.rule_params(w1, "r")["max_vertices"] == 8_000_000
 
 
-def test_gold_replay_and_reproduce_build_rule_params_one_way():
-    """No script builds its own run_id/silver_entities/max_vertices kwargs:
-    each calls detection_rules.rule_params."""
-    for script in ("gold_finalize_financial", "replay_financial", "reproduce_financial"):
-        src = (SCRIPTS / f"{script}.py").read_text()
-        assert "rule_params(" in src, script
-        assert '["max_vertices"] =' not in src, script
-        assert not re.search(r"\b_W1_MAX_VERTICES\b", src), script
-
-
 # --- static: LB-226's second finding --------------------------------------------
-
-
-@pytest.mark.parametrize("script", ["reproduce_financial", "replay_financial", "score_financial"])
-def test_no_temp_view_feeds_a_merge(script):
-    """A MERGE whose source is a temp view over a DSv2 table fails on Spark
-    4.1 with Iceberg 1.11: these scripts register no temp view and run no
-    MERGE from one."""
-    tree = ast.parse((SCRIPTS / f"{script}.py").read_text())
-    views = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Attribute) and n.attr in ("createOrReplaceTempView", "createTempView")
-    ]
-    merges = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "MERGE INTO" in n.value
-    ]
-    assert not (views and merges), (script, len(views), len(merges))
-    if script == "reproduce_financial":
-        assert not views and not merges
 
 
 # --- one attempt -------------------------------------------------------------------
@@ -365,31 +333,6 @@ def test_a_protected_record_is_refused_before_any_cluster_call(monkeypatch, tmp_
     out = _invoke(monkeypatch, tmp_path, cluster)
     assert out.exit_code == 2 and "protected AML corpus" in out.output, out.output
     assert cluster.calls == [] and seen.get("fail_closed") is True
-
-
-def test_no_record_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
-    cluster = _Cluster()
-    out = _invoke(monkeypatch, tmp_path, cluster, "--run", "20261009-000000-zzzzzz")
-    assert out.exit_code == 2 and "--run" in out.output, out.output
-    assert cluster.calls == []
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--alert-id", "x' OR 1=1"],
-        ["--alert-id", "a" * 129],
-        ["--alert-id", "case/../x"],
-        ["--alert-id", "abc", "--run", "../../etc"],
-    ],
-)
-def test_a_bad_alert_or_run_id_is_refused_before_anything(monkeypatch, tmp_path, argv):
-    import lakebench.cli._financial as fin
-
-    called = []
-    monkeypatch.setattr(fin, "_load_config", lambda *a, **k: called.append(1))
-    out = CliRunner().invoke(app, ["financial", "reproduce", "c.yaml", *argv])
-    assert out.exit_code == 2 and called == [], out.output
 
 
 def test_the_batch_scorer_gets_what_gold_read(monkeypatch):

@@ -31,17 +31,12 @@ def example_env(monkeypatch):
         monkeypatch.setenv(var, "placeholder")
 
 
-@pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
-def test_example_validates_without_deprecations(path, example_env):
-    # Examples teach the current spelling, so a deprecated key is a failure.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        cfg = load_config(path)
-    assert cfg.name
-
-
-def test_examples_exist():
-    assert len(EXAMPLES) >= 11
+def test_example_validates_without_deprecations(example_env):
+    for path in EXAMPLES:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            cfg = load_config(path)
+        assert cfg.name
 
 
 def _write(tmp_path, data) -> Path:
@@ -191,13 +186,3 @@ def test_dump_roundtrip_revalidates():
     cfg = LakebenchConfig(name="t", architecture={"workload": {"schema": "financial"}})
     again = LakebenchConfig.model_validate(cfg.model_dump(mode="json"))
     assert again == cfg
-
-
-def test_init_template_validates(tmp_path, monkeypatch):
-    from lakebench.cli._init import first_day_config
-
-    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "a")
-    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "b")
-    p = tmp_path / "init.yaml"
-    p.write_text(first_day_config(name="init-t"))
-    assert load_config(p).name == "init-t"

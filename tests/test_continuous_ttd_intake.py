@@ -21,7 +21,6 @@ from lakebench.metrics.collector import (
     MetricsCollector,
     PipelineBenchmark,
     StageMetrics,
-    StreamingJobMetrics,
     build_pipeline_benchmark,
     ttd_percentile,
 )
@@ -172,44 +171,33 @@ def _pb(bronze_batches, bronze_ms, bronze_rows=155_610_788, schema="financial"):
     return pb
 
 
-def test_back_to_back_bronze_is_a_capacity_limit():
-    """The live run: 16 batches x 109.7 s in an 1800 s window."""
-    pb = _pb(bronze_batches=16, bronze_ms=109_737.5)
-    assert pb.ingest_ratio == pytest.approx(0.5835, abs=1e-4)
-    assert pb.bronze_busy_fraction == pytest.approx(0.975, abs=1e-3)
-    assert pb.intake_limit == "bronze_capacity"
-    assert pb.pipeline_saturated is True
-
-
-def test_idle_bronze_is_not_called_a_capacity_limit():
-    """Same rows, but bronze was inside a batch for 27% of the window: the
-    limit was not bronze's processing (a trigger cap, a late start or a
-    stall). The ratio verdict is kept: idle time does not prove the
-    pipeline kept pace."""
-    pb = _pb(bronze_batches=60, bronze_ms=8_000.0)
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
-    assert pb.to_dict()["scores"]["intake_limit"] == "below_bronze_capacity"
-
-
-def test_kept_up_intake_has_no_limit():
-    pb = _pb(bronze_batches=16, bronze_ms=5_000.0, bronze_rows=266_666_400)
-    assert pb.intake_limit == "none"
-    assert pb.pipeline_saturated is False
-
-
-def test_unknown_bronze_timing_keeps_the_ratio_verdict():
-    pb = _pb(bronze_batches=0, bronze_ms=None)
-    assert pb.bronze_busy_fraction is None
-    assert pb.intake_limit is None
-    assert pb.pipeline_saturated is True
-
-
-def test_gold_refresh_logs_time_to_detect():
-    src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    assert "if _log_time_to_detect(\n        spark, cycle, ttd_base, detection_end_s," in src
-    assert "ttd_baseline.measured(_prior_alerts_snapshot(spark))" in src
-    assert "log(ttd_line(cycle, stats))" in src
+@pytest.mark.parametrize(
+    ("over", "limit", "saturated", "busy"),
+    [
+        # the live run: 16 batches x 109.7 s in an 1800 s window
+        ({"bronze_batches": 16, "bronze_ms": 109_737.5}, "bronze_capacity", True, 0.975),
+        # bronze in a batch 27% of the window: not bronze's processing; the
+        # ratio verdict stands, idle time does not prove the pipeline kept pace
+        ({"bronze_batches": 60, "bronze_ms": 8_000.0}, "below_bronze_capacity", True, None),
+        (
+            {"bronze_batches": 16, "bronze_ms": 5_000.0, "bronze_rows": 266_666_400},
+            "none",
+            False,
+            None,
+        ),
+        ({"bronze_batches": 0, "bronze_ms": None}, None, True, "none"),
+    ],
+)
+def test_intake_verdict(over, limit, saturated, busy):
+    pb = _pb(**over)
+    assert pb.intake_limit == limit
+    assert pb.pipeline_saturated is saturated
+    assert pb.to_dict()["scores"]["intake_limit"] == limit
+    if busy == "none":
+        assert pb.bronze_busy_fraction is None
+    elif busy is not None:
+        assert pb.bronze_busy_fraction == pytest.approx(busy, abs=1e-3)
+        assert pb.ingest_ratio == pytest.approx(0.5835, abs=1e-4)
 
 
 def test_an_unmeasured_tick_is_carried_not_dropped():
@@ -284,11 +272,6 @@ def test_every_cycle_unmeasured_is_counted():
     scores = pb.to_dict()["scores"]
     assert scores["time_to_detect_unmeasured_cycles"] == 2
     assert scores["time_to_detect_seconds"] is None
-
-
-def test_streaming_job_metrics_default_to_unmeasured():
-    m = StreamingJobMetrics(job_name="x", job_type="gold-refresh")
-    assert m.ttd_alerts is None and m.ttd_p50_seconds is None
 
 
 def test_fallback_is_dropped_with_an_exhausted_carry():

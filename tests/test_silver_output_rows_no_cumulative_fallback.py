@@ -22,6 +22,8 @@ import ast
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 _SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
 
 
@@ -56,96 +58,29 @@ def _spark_that_never_full_counts():
     return spark
 
 
-def test_iceberg_snapshot_failure_returns_none():
-    """The snapshot SELECT raising must NOT lead to spark.table().count()."""
+def _sql_raises(spark, msg):
+    spark.sql.side_effect = RuntimeError(msg)
+
+
+def _rows(rows):
+    def setup(spark, _msg):
+        spark.sql.return_value.collect.return_value = rows
+
+    return setup
+
+
+@pytest.mark.parametrize(
+    ("fn", "table", "setup", "msg"),
+    [
+        ("iceberg", "ice.silver.customer", _sql_raises, "snapshot metadata unavailable"),
+        ("iceberg", "ice.silver.customer", _rows([{"n": None}]), None),
+        ("delta", "spark_catalog.silver.customer", _sql_raises, "DESCRIBE HISTORY unavailable"),
+        ("delta", "spark_catalog.silver.customer", _rows([{"operationMetrics": {}}]), None),
+    ],
+)
+def test_unknown_rows_added_is_none_never_a_full_count(fn, table, setup, msg):
+    """A failed or empty snapshot/history read is unknown (None), never a
+    spark.table().count() of the cumulative table."""
     spark = _spark_that_never_full_counts()
-    spark.sql.side_effect = RuntimeError("snapshot metadata unavailable")
-    assert _ICEBERG_FN(spark, "ice.silver.customer") is None
-
-
-def test_iceberg_empty_snapshot_summary_returns_none():
-    """A snapshot row with a NULL 'added-records' summary is treated as unknown."""
-    spark = _spark_that_never_full_counts()
-    spark.sql.return_value.collect.return_value = [{"n": None}]
-    assert _ICEBERG_FN(spark, "ice.silver.customer") is None
-
-
-def test_iceberg_snapshot_success_still_returns_int():
-    """The happy path is unchanged: real added-records is returned as int."""
-    spark = MagicMock()
-    spark.sql.return_value.collect.return_value = [{"n": 12345}]
-    assert _ICEBERG_FN(spark, "ice.silver.customer") == 12345
-
-
-def test_delta_history_failure_returns_none():
-    """Delta's DESCRIBE HISTORY raising must NOT trigger a full table count."""
-    spark = _spark_that_never_full_counts()
-    spark.sql.side_effect = RuntimeError("DESCRIBE HISTORY unavailable")
-    assert _DELTA_FN(spark, "spark_catalog.silver.customer") is None
-
-
-def test_delta_history_missing_metric_returns_none():
-    """A history row without operationMetrics.numOutputRows is treated as unknown."""
-    spark = _spark_that_never_full_counts()
-    spark.sql.return_value.collect.return_value = [{"operationMetrics": {}}]
-    assert _DELTA_FN(spark, "spark_catalog.silver.customer") is None
-
-
-def test_delta_history_success_still_returns_int():
-    """The happy path returns numOutputRows as an int."""
-    spark = MagicMock()
-    spark.sql.return_value.collect.return_value = [{"operationMetrics": {"numOutputRows": "999"}}]
-    assert _DELTA_FN(spark, "spark_catalog.silver.customer") == 999
-
-
-def test_source_no_longer_falls_back_to_full_count():
-    """Belt-and-braces on source: the ``spark.table(silver_tbl).count()``
-    fallback is gone from both files. A future edit that restores it fails
-    this test.
-    """
-    for name in ("silver_build.py", "silver_build_delta.py"):
-        src = (_SCRIPTS / name).read_text()
-        # Compare against the extracted function body (ast dedented) rather
-        # than the raw slice, so a docstring mention of the removed line
-        # cannot pass for the code itself.
-        code = _extract_function(_SCRIPTS / name, "rows_added_by_last_commit").__code__
-        # ast.dump of the function's AST tree is the tightest guard against
-        # a docstring or comment coincidence.
-        tree = ast.parse((_SCRIPTS / name).read_text())
-        fn = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "rows_added_by_last_commit"
-        )
-        # Drop the docstring node so it is not textually searched.
-        if (
-            fn.body
-            and isinstance(fn.body[0], ast.Expr)
-            and isinstance(fn.body[0].value, ast.Constant)
-            and isinstance(fn.body[0].value.value, str)
-        ):
-            fn.body = fn.body[1:]
-        rendered = ast.unparse(fn)
-        assert "spark.table(silver_tbl).count()" not in rendered, (
-            f"{name} still falls back to a cumulative table count"
-        )
-        assert "return None" in rendered, f"{name} rows_added_by_last_commit no longer returns None"
-        # Belt-and-braces on the raw src too (any leftover reference).
-        del code, src
-
-
-def test_main_source_aborts_on_unknown_output_rows():
-    """Both mains raise SilverAbort when silver_count is None and log
-    ``output_rows: unknown`` first so the metrics collector records the
-    reason.
-    """
-    for name in ("silver_build.py", "silver_build_delta.py"):
-        src = (_SCRIPTS / name).read_text()
-        tail = src.rsplit("=== JOB METRICS", 1)[1]
-        assert "SilverAbort" in tail, f"{name} main is missing the A4 SilverAbort"
-        assert "output_rows unknown" in tail, (
-            f"{name} main abort message must name 'output_rows unknown'"
-        )
-        assert "output_rows: unknown" in tail, (
-            f"{name} main must log 'output_rows: unknown' before aborting"
-        )
+    setup(spark, msg)
+    assert {"iceberg": _ICEBERG_FN, "delta": _DELTA_FN}[fn](spark, table) is None

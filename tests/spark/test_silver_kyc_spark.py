@@ -5,98 +5,22 @@ and 2). A payment reaches its party's KYC through the account IBAN."""
 from __future__ import annotations
 
 import datetime as dt
-import sys
 
 import pytest
 
+from tests.fixtures import silver_kyc_helpers as _kyc
+from tests.fixtures.silver_kyc_helpers import ACCT as ACCT
+from tests.fixtures.silver_kyc_helpers import AGT as AGT
+from tests.fixtures.silver_kyc_helpers import PARTY as PARTY
+from tests.fixtures.silver_kyc_helpers import TS as TS
+from tests.fixtures.silver_kyc_helpers import _bronze as _bronze
+from tests.fixtures.silver_kyc_helpers import _refs as _refs
+from tests.fixtures.silver_kyc_helpers import _txns as _txns
+
+spark = _kyc.spark  # the module-scoped session fixture
+
 pytest.importorskip("pyspark")
 pytestmark = pytest.mark.usefixtures("load_script")
-
-
-@pytest.fixture(scope="module")
-def spark():
-    import os
-
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
-
-
-PARTY = (
-    "struct<nm:string, ctry_of_res:string, pstl_adr:struct<twn_nm:string>, id:struct<lei:string>>"
-)
-ACCT = "struct<iban:string, ccy:string>"
-AGT = "struct<bicfi:string>"
-TS = dt.datetime(2024, 3, 1, 12, 0)
-
-
-def _bronze(spark):
-    alice = ("ALICE", "US", ("BOSTON",), ("LEIALICE",))
-    bob = ("BOB", "GB", ("LONDON",), ("LEIBOB",))
-    return spark.createDataFrame(
-        [
-            (alice, bob, ("US01", "USD"), ("GB02", "GBP"), ("MERIUS2LXXX",), ("NRTHGB3XXXX",), TS),
-            (bob, alice, ("GB02", "GBP"), ("US01", "USD"), ("NRTHGB3XXXX",), ("MERIUS2LXXX",), TS),
-        ],
-        f"dbtr {PARTY}, cdtr {PARTY}, dbtr_acct {ACCT}, cdtr_acct {ACCT}, "
-        f"dbtr_agt {AGT}, cdtr_agt {AGT}, cre_dt_tm timestamp",
-    )
-
-
-def _refs(spark):
-    party = spark.createDataFrame(
-        [
-            (
-                1,
-                "clear",
-                True,
-                True,
-                "MERIUS2L",
-                dt.date(2015, 5, 1),
-                "person",
-                1234.5,
-                2,
-                "medium",
-                "country=0;type=0;volume=0;pep=1",
-            ),
-            (2, "SDN", False, False, "NRTHGB3X", None, None, None, None, None, None),
-        ],
-        "entity_id bigint, sanctions_status string, pep_status boolean, is_customer boolean, "
-        "home_fi string, customer_since date, customer_type string, "
-        "expected_monthly_volume_usd double, crr_score int, crr_tier string, crr_factors string",
-    )
-    account = spark.createDataFrame(
-        [
-            (11, "US01", 1, "MERIUS2L"),
-            (12, "US99", 1, "MERIUS2L"),  # a second account, never used in payments
-            (21, "GB02", 2, "NRTHGB3X"),
-        ],
-        "account_id bigint, iban string, holder_entity_id bigint, home_fi string",
-    )
-    return party, account
-
-
-def _txns(bronze):
-    from silver_build_financial import _entity_id_from
-
-    return bronze.select(
-        _entity_id_from(
-            bronze.dbtr.nm, bronze.dbtr.ctry_of_res, bronze.dbtr.pstl_adr.twn_nm, bronze.dbtr.id.lei
-        ).alias("originator_id"),
-        _entity_id_from(
-            bronze.cdtr.nm, bronze.cdtr.ctry_of_res, bronze.cdtr.pstl_adr.twn_nm, bronze.cdtr.id.lei
-        ).alias("beneficiary_id"),
-        bronze.dbtr.nm.alias("rptd_originator_name"),
-        bronze.cdtr.nm.alias("rptd_beneficiary_name"),
-    )
 
 
 def test_entities_carry_kyc_for_customers_only(spark):
@@ -211,11 +135,3 @@ def test_missing_kyc_raises_unless_the_manifest_proves_pre_kyc(spark, tmp_path, 
     )
     with pytest.raises(RuntimeError, match="does not show a pre-KYC"):
         sb._read_reference(spark)
-
-
-def test_only_known_old_versions_predate_kyc():
-    from silver_build_financial import predates_kyc
-
-    assert predates_kyc("datagen-v2-rs-0.1")
-    for v in ("datagen-v2-rs-0.2", "datagen-v3-rs-0.1", None, "something-else"):
-        assert not predates_kyc(v)

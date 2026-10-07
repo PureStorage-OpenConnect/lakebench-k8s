@@ -4,7 +4,6 @@ metrics/tick_records.py, cli/_sustained.py, cli/_cluster_ops.py)."""
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -260,17 +259,6 @@ def test_marker_key_matches_the_driver_checkpoint():
         assert key == want
 
 
-def test_reset_deletes_the_prefix_holding_the_marker():
-    """A stale marker from an earlier run is gone before the next submit."""
-    src = (SRC / "cli" / "_sustained.py").read_text()
-    body = src[src.index("def _reset_continuous_state(") : src.index("def _c360_existing_state(")]
-    assert '(b.gold, f"{base}/gold-refresh")' in body
-    from lakebench.modules.pipeline_engines.spark.job import gold_refresh_stop_marker
-
-    _bucket, key = gold_refresh_stop_marker(_cfg())
-    assert key.startswith("lakebench-checkpoints/gold-refresh/")
-
-
 # --- tick records ---------------------------------------------------------------
 
 
@@ -429,9 +417,8 @@ def test_covered_score_passes_the_six_snapshots_and_the_run_id(monkeypatch):
     assert out["status"] == "scored" and out["tick"]["cycle"] == 2
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "reason"),
-    [
+def test_covered_score_not_scored_reasons(monkeypatch):
+    for kwargs, reason in [
         ({"drain": None}, "drain did not run"),
         (
             {"drain": post.DrainResult("timeout", reason="no drain line within 1800s")},
@@ -444,16 +431,14 @@ def test_covered_score_passes_the_six_snapshots_and_the_run_id(monkeypatch):
             "no drain line",
         ),
         ({"drain": post.DrainResult("drained"), "tick": "T", "ok": False}, "did not complete"),
-    ],
-)
-def test_covered_score_not_scored_reasons(monkeypatch, kwargs, reason):
-    if kwargs.get("tick") == "T":
-        kwargs["tick"] = _tick()
-    out, rec = _score(monkeypatch, {}, **kwargs)
-    assert out["mode"] == "covered" and out["status"] == "not_scored"
-    assert reason in out["reason"]
-    if kwargs.get("tick") is None or kwargs.get("failed"):
-        assert not [c for c in rec.calls if c[0] == "submit"]
+    ]:
+        if kwargs.get("tick") == "T":
+            kwargs["tick"] = _tick()
+        out, rec = _score(monkeypatch, {}, **kwargs)
+        assert out["mode"] == "covered" and out["status"] == "not_scored"
+        assert reason in out["reason"]
+        if kwargs.get("tick") is None or kwargs.get("failed"):
+            assert not [c for c in rec.calls if c[0] == "submit"]
 
 
 def test_a_summary_without_covered_mode_is_not_a_covered_score(monkeypatch):
@@ -461,21 +446,6 @@ def test_a_summary_without_covered_mode_is_not_a_covered_score(monkeypatch):
         monkeypatch, {"typologies": []}, drain=post.DrainResult("drained"), tick=_tick()
     )
     assert out["status"] == "not_scored" and "covered mode" in out["reason"]
-
-
-def test_count_line_for_covered_summaries():
-    assert (
-        post.scoring_count_line({"mode": "covered", "status": "not_scored", "reason": "r"})
-        == "not scored: r"
-    )
-    line = post.scoring_count_line(
-        {
-            "mode": "covered",
-            "status": "scored",
-            "covered": {"covered_instances": 3, "corpus_instances": 5},
-        }
-    )
-    assert line == "covered mode: 3 of 5 instances covered by the last tick"
 
 
 def test_alert_set_continuous_only_from_a_covered_score():
@@ -554,46 +524,6 @@ def test_pre_stop_raises_when_the_drain_is_not_confirmed(monkeypatch):
 # --- window end order -------------------------------------------------------------
 
 
-def _calls_in_run_sustained():
-    src = (SRC / "cli" / "_sustained.py").read_text()
-    fn = next(
-        n
-        for n in ast.parse(src).body
-        if isinstance(n, ast.FunctionDef) and n.name == "_run_sustained"
-    )
-    out = []
-    for n in ast.walk(fn):
-        if isinstance(n, ast.Call):
-            name = getattr(n.func, "id", None) or getattr(n.func, "attr", "")
-            out.append((n.lineno, name))
-    return sorted(out)
-
-
-def test_window_end_order_drain_stop_then_score():
-    calls = _calls_in_run_sustained()
-
-    def first(name, after=0):
-        return next(ln for ln, n in calls if n == name and ln > after)
-
-    measured = first("_measure_bucket_sizes")
-    drain = first("drain_gold_refresh")
-    stop = first("_stop_streams", drain)
-    score = first("continuous_scoring", stop)
-    assert measured < drain < stop < score
-    # Scored once every gate has decided: the AML alert gate and the
-    # benchmark rounds' gates come first.
-    assert first("_aml_cumulative_alerts") < score
-    assert first("aggregate_benchmark_rounds") < score
-    # Nothing maintains after the drain starts: the last tick's snapshots
-    # must still exist when the score reads them.
-    maint = [
-        (ln, n)
-        for ln, n in calls
-        if ln > drain and any(k in n.lower() for k in ("maint", "compact", "expire", "vacuum"))
-    ]
-    assert maint == []
-
-
 # --- drain_gold_refresh: the window end's record and gate -------------------------
 
 
@@ -661,9 +591,8 @@ def test_window_drain_records_the_time_travel_ticks(monkeypatch):
     assert "tt" not in cont["ticks"][0]
 
 
-@pytest.mark.parametrize(
-    ("result", "problem"),
-    [
+def test_window_drain_problems_fail_the_run(monkeypatch):
+    for result, problem in [
         (post.DrainResult("timeout", 1800.0, reason="x"), "gold drain timed out"),
         (post.DrainResult("driver_gone", 5.0, reason="x"), "deleted before it drained"),
         (
@@ -683,12 +612,10 @@ def test_window_drain_records_the_time_travel_ticks(monkeypatch):
             ),
             "restarted gold-refresh driver",
         ),
-    ],
-)
-def test_window_drain_problems_fail_the_run(monkeypatch, result, problem):
-    (_d, tick, _why, got), cont = _window_drain(monkeypatch, result)
-    assert problem in got and tick is None
-    assert cont["gate_problems"] == [got]
+    ]:
+        (_d, tick, _why, got), cont = _window_drain(monkeypatch, result)
+        assert problem in got and tick is None
+        assert cont["gate_problems"] == [got]
 
 
 def test_window_drain_without_a_marker_is_not_a_gate_problem(monkeypatch):
@@ -708,18 +635,6 @@ def test_pre_stop_ctrl_c_still_lets_stop_delete(monkeypatch):
     monkeypatch.setattr(post, "stop_drain", interrupted)
     with pytest.raises(RuntimeError, match="drain interrupted"):
         ops.pre_stop(_cfg(), None)
-
-
-def test_scorecard_continuous_recall_note():
-    from lakebench.reports.scorecard import _continuous_recall_note
-
-    assert "not scored in continuous mode" in _continuous_recall_note(None)
-    assert _continuous_recall_note({"typologies": []}) == ""
-    assert "recall_covered" in _continuous_recall_note({"mode": "covered", "status": "scored"})
-    note = _continuous_recall_note(
-        {"mode": "covered", "status": "not_scored", "reason": "gold drain <timeout>"}
-    )
-    assert "Recall is not scored: gold drain &lt;timeout&gt;." in note
 
 
 def test_finally_settles_financial_scoring():

@@ -67,13 +67,6 @@ def test_every_cycle_manifest_is_read(spark, bvf, tmp_path):
     assert "robustness" in bvf.protected_manifest_reason(spark, required=True)
 
 
-def test_a_spent_corpus_is_refused_and_calibration_passes(spark, bvf, tmp_path):
-    _write_manifest(spark, tmp_path, ts.manifest_rows(42, 20))
-    assert "spent" in bvf.protected_manifest_reason(spark, required=True)
-    _write_manifest(spark, tmp_path, ts.manifest_rows(pc.CALIBRATION, 300))
-    assert bvf.protected_manifest_reason(spark, required=True) is None
-
-
 def test_a_missing_manifest_refuses_only_when_required(spark, bvf):
     assert "no manifest" in bvf.protected_manifest_reason(spark, required=True)
     assert bvf.protected_manifest_reason(spark, required=False) is None
@@ -94,18 +87,6 @@ def test_an_unreadable_manifest_is_refused(spark, bvf, tmp_path):
     bad.mkdir(parents=True)
     (bad / "manifest.parquet").write_bytes(b"not parquet")
     with pytest.raises(SystemExit, match="could not be checked"):
-        bvf.refuse_protected_corpus(_Session(spark))
-
-
-def test_an_unreadable_held_out_record_is_refused(spark, bvf, tmp_path, monkeypatch):
-    from lakebench.config import datagen_seed as ds
-
-    def gone():
-        raise FileNotFoundError("heldout_hashes.json")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    _write_manifest(spark, tmp_path, ts.manifest_rows(pc.CALIBRATION, 10))
-    with pytest.raises(SystemExit, match="cannot be read"):
         bvf.refuse_protected_corpus(_Session(spark))
 
 

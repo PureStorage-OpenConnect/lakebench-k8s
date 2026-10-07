@@ -36,29 +36,28 @@ def _parse(log, job="gold-refresh"):
     return MetricsCollector().parse_streaming_logs(log, job)
 
 
-def test_trailing_idle_run_is_split_off():
-    m = _parse(_gold([(40, False), (55, False), (355, True), (655, True)]))
-    assert m.freshness_seconds == pytest.approx(655.0)
-    assert m.freshness_active_seconds == pytest.approx(55.0)
-    assert m.trailing_idle_cycles == 2
-
-
-def test_mid_run_idle_stretch_stays_in_active_freshness():
-    # Silver stalls for three cycles, then recovers: the stall is real.
-    m = _parse(_gold([(40, False), (350, True), (650, True), (950, True), (50, False), (60, True)]))
-    assert m.freshness_active_seconds == pytest.approx(950.0)
-    assert m.trailing_idle_cycles == 1
-
-
-def test_untagged_log_is_unchanged():
-    m = _parse(_gold([(40, False), (655, False)]))
-    assert m.freshness_active_seconds == pytest.approx(655.0)
-    assert m.trailing_idle_cycles == 0
-
-
-def test_all_idle_after_first_falls_back_to_first_cycle():
-    m = _parse(_gold([(40, False), (400, True)]))
-    assert m.freshness_active_seconds == pytest.approx(40.0)
+@pytest.mark.parametrize(
+    ("cycles", "freshness", "active", "idle"),
+    [
+        ([(40, False), (55, False), (355, True), (655, True)], 655.0, 55.0, 2),
+        # a mid-run stall that recovers is real and stays in active freshness
+        (
+            [(40, False), (350, True), (650, True), (950, True), (50, False), (60, True)],
+            None,
+            950.0,
+            1,
+        ),
+        ([(40, False), (655, False)], None, 655.0, 0),  # untagged log unchanged
+        ([(40, False), (400, True)], None, 40.0, None),  # all idle after the first
+    ],
+)
+def test_trailing_idle_cycles_are_split_off(cycles, freshness, active, idle):
+    m = _parse(_gold(cycles))
+    if freshness is not None:
+        assert m.freshness_seconds == pytest.approx(freshness)
+    assert m.freshness_active_seconds == pytest.approx(active)
+    if idle is not None:
+        assert m.trailing_idle_cycles == idle
 
 
 SILVER_LOG = """\
@@ -116,56 +115,29 @@ def _pb(bronze_rows, silver_committed, datagen_rows, trailing_idle=2):
     return pb
 
 
-def test_drained_corpus_scores_active_cycles_only():
-    pb = _pb(1_000_000, 1_000_000, 1_000_000)
-    assert pb.corpus_drained is True
-    assert pb.data_freshness_seconds == pytest.approx(55.0)
-    assert pb.to_dict()["scores"]["corpus_drained"] is True
-
-
-def test_missing_rows_is_a_stall():
-    pb = _pb(600_000, 600_000, 1_000_000)
-    assert pb.corpus_drained is False
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
-
-
-def test_bronze_short_by_under_one_percent_is_a_stall():
-    pb = _pb(995_000, 995_000, 1_000_000)
-    assert pb.corpus_drained is False
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
-
-
-def test_drained_does_not_depend_on_idle_gold_cycles():
-    # Every datagen row in bronze and committed by silver leaves nothing to
-    # arrive; the discovery run read ingest_ratio 1.0 next to drained false
-    # because gold had not idled twice yet.
-    pb = _pb(1_000_000, 1_000_000, 1_000_000, trailing_idle=1)
-    assert pb.corpus_drained is True
-
-
-def test_uncommitted_silver_is_a_stall():
-    pb = _pb(1_000_000, 700_000, 1_000_000)
-    assert pb.corpus_drained is False
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
-
-
-def test_unknown_silver_commits_is_not_drained():
-    pb = _pb(1_000_000, None, 1_000_000)
-    assert pb.corpus_drained is False
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
-
-
-def test_no_trailing_idle_is_drained_and_keeps_every_cycle():
-    # Drained with no idle cycle: the active set is every cycle.
-    pb = _pb(1_000_000, 1_000_000, 1_000_000, trailing_idle=0)
-    assert pb.corpus_drained is True
-    assert pb.data_freshness_seconds == pytest.approx(55.0)
-
-
-def test_unknown_denominator_is_unknown():
-    pb = _pb(1_000_000, 1_000_000, 0)
-    assert pb.corpus_drained is None
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
+@pytest.mark.parametrize(
+    ("bronze", "silver", "datagen", "idle", "drained", "freshness"),
+    [
+        # drained: every datagen row in bronze and committed by silver
+        (1_000_000, 1_000_000, 1_000_000, None, True, 55.0),
+        (1_000_000, 1_000_000, 1_000_000, 1, True, None),  # does not wait on idle gold
+        (1_000_000, 1_000_000, 1_000_000, 0, True, 55.0),  # no idle cycle: every cycle
+        (600_000, 600_000, 1_000_000, None, False, 655.0),  # rows missing
+        (995_000, 995_000, 1_000_000, None, False, 655.0),  # short by under 1%
+        (1_000_000, 700_000, 1_000_000, None, False, 655.0),  # silver uncommitted
+        (1_000_000, None, 1_000_000, None, False, 655.0),  # silver commits unknown
+        (1_000_000, 1_000_000, 0, None, None, 655.0),  # denominator unknown
+    ],
+)
+def test_corpus_drained_and_freshness(bronze, silver, datagen, idle, drained, freshness):
+    """A drained corpus scores freshness over its active cycles only; a stall
+    or an unknown is never called drained."""
+    pb = _pb(bronze, silver, datagen, **({} if idle is None else {"trailing_idle": idle}))
+    assert pb.corpus_drained is drained
+    if freshness is not None:
+        assert pb.data_freshness_seconds == pytest.approx(freshness)
+    if drained:
+        assert pb.to_dict()["scores"]["corpus_drained"] is True
 
 
 def test_drained_flag_and_stage_fields_survive_save_and_load(tmp_path):

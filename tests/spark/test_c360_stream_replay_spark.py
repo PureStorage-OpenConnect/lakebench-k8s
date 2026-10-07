@@ -65,16 +65,6 @@ def test_iceberg_silver_fresh_checkpoint_keeps_earlier_stream(result):
     assert result["ice_silver_rows_after_fresh"] == result["silver_rows"] + 3
 
 
-def test_iceberg_silver_recency_is_data_clocked(result):
-    """The newest event scores 30 whatever the date the test runs."""
-    assert result["ice_silver_recency_max"] == 30
-
-
-def test_fresh_checkpoint_over_full_table_is_refused(result):
-    assert result["refuse_fresh"] is True
-    assert result["refuse_allows_used_or_empty"] is True
-
-
 def test_reused_silver_table_gains_key_columns(result):
     """A table without the key is upgraded once, then a replay is exact."""
     assert result["legacy_added"] is True

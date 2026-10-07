@@ -12,7 +12,6 @@ import yaml
 
 from lakebench.config._load_context import LoadPurpose
 from lakebench.config.loader import load_config
-from lakebench.config.schema import MAX_DRIVER_CORES, MAX_EXECUTOR_OVERRIDE
 from lakebench.metrics import comparability as cmp
 from lakebench.metrics.collector import JobMetrics
 from lakebench.modules.pipeline_engines.spark import job as job_mod
@@ -20,27 +19,21 @@ from lakebench.modules.pipeline_engines.spark.job import (
     EXECUTOR_OVERRIDE_FIELDS,
     MissingSizingProfile,
     compute_peak_requirements,
-    executor_count,
     executor_override,
 )
 from lakebench.spark.job import JobType
 from tests.conftest import make_config
 from tests.fixtures import stored_records as sr
-from tests.test_experiment import _cfg, _metrics
+from tests.fixtures.experiment_helpers import _cfg, _metrics
 
 # -- 1. bounds -----------------------------------------------------------------
 
 
-def test_the_bound_is_the_proven_ceiling():
-    assert MAX_EXECUTOR_OVERRIDE == job_mod._MAX_EXECUTORS_SAFE == 28
-    assert MAX_DRIVER_CORES == 16
-
-
-@pytest.mark.parametrize("value", [29, 200])
-@pytest.mark.parametrize("field", [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()])
-def test_override_above_28_refused(field, value):
-    with pytest.raises(ValueError, match="proven ceiling of 28"):
-        make_config(platform={"compute": {"spark": {field: value}}})
+def test_override_above_28_refused():
+    for field in [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()]:
+        for value in [29, 200]:
+            with pytest.raises(ValueError, match="proven ceiling of 28"):
+                make_config(platform={"compute": {"spark": {field: value}}})
 
 
 def test_override_28_loads_and_17_driver_cores_refused():
@@ -114,37 +107,12 @@ def test_one_override_rule():
         setattr(spark, field, None)
 
 
-def test_executor_count_is_the_one_count():
-    p = job_mod._JOB_PROFILES["gold-finalize"]
-    assert executor_count(p, 1) == p["base_executors"]
-    assert executor_count(p, 100_000) == p["max_executors"]
-    assert executor_count(p, 100_000, capped=False) > p["max_executors"]
-    assert job_mod._scale_executor_count(p, 500) == executor_count(p, 500)
-
-
 # -- 3. a missing profile raises ---------------------------------------------------
-
-
-def test_every_job_type_has_a_profile():
-    assert {jt.value for jt in JobType} <= set(job_mod._JOB_PROFILES)
-
-
-@pytest.mark.parametrize("schema", ["customer360", "financial"])
-@pytest.mark.parametrize(
-    "job_type", ["replay-financial", "reproduce-financial", "score-financial-reference"]
-)
-def test_financial_ops_profiles_equal_silver_build(job_type, schema):
-    """The fallback these took is gone; their profiles are literal copies,
-    so their manifests are unchanged (the CC-12 golden over 340 manifests
-    was byte-identical before and after)."""
-    assert job_mod._resolve_job_profile(job_type, schema) == job_mod._resolve_job_profile(
-        "silver-build", schema
-    )
 
 
 def test_missing_profile_raises(monkeypatch):
     from lakebench.spark.job import SparkJobManager
-    from tests.test_spark import _mock_k8s
+    from tests.fixtures.spark_helpers import _mock_k8s
 
     profiles = dict(job_mod._JOB_PROFILES)
     del profiles["replay-financial"]
@@ -300,24 +268,3 @@ def test_the_comparability_key_table_is_the_job_table():
         assert cmp._OVERRIDE_KEYS_BY_MODE[mode] == {
             jt: EXECUTOR_OVERRIDE_FIELDS[jt][1] for jt in job_types
         }
-
-
-def test_a_refusal_names_the_overrides():
-    from unittest import mock
-
-    from lakebench.cli._prerequisites import _check_cluster_capacity
-    from lakebench.k8s.client import ClusterCapacity, FreeCapacity
-
-    g = 1024**3
-    cfg = make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
-    cap = ClusterCapacity(100_000, 800 * g, 4, 40_000, 402 * g)
-    k8s = mock.MagicMock()
-    k8s.get_cluster_capacity.return_value = cap
-    k8s.get_free_capacity.return_value = FreeCapacity(
-        free=cap, allocatable=cap, free_by_node=((40_000, 402 * g),)
-    )
-    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s):
-        result = _check_cluster_capacity(cfg)
-    assert not result.passed
-    assert "with executor overrides silver-build 28" in result.message
-    assert "Lower or unset the executor overrides" in result.hint

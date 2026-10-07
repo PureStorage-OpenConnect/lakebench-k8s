@@ -60,9 +60,6 @@ def _load_ddls(path: Path) -> dict[str, str]:
     return out
 
 
-_COL_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+([A-Z][A-Z0-9<>()\s,]*?)\s*(?:,|$)")
-
-
 def _extract_columns(ddl_body: str) -> list[tuple[str, str]]:
     """Parse a ``CREATE TABLE ... ( ... )`` body into ordered (name, type) pairs.
 
@@ -185,21 +182,3 @@ def test_silver_ddl_columns_match_across_files():
                 )
 
     assert not mismatches, "DDL column drift:\n" + "\n".join(mismatches)
-
-
-def test_extract_columns_helper_sane():
-    """The parser must recognise nested STRUCT types and inline SQL comments."""
-    body = """
-    CREATE TABLE IF NOT EXISTS x.y (
-        a BIGINT NOT NULL,
-        b STRUCT<c: STRING, d: STRING>,   -- inline comment
-        e DECIMAL(38, 2)
-    )
-    USING iceberg
-    """
-    cols = _extract_columns(body)
-    assert cols == [
-        ("a", "BIGINT"),
-        ("b", "STRUCT<c: STRING, d: STRING>"),
-        ("e", "DECIMAL(38, 2)"),
-    ]

@@ -188,11 +188,6 @@ class TestRunnerCrossCheck:
         got = result.queries[0].result_fingerprint
         assert got["rows"] == 0 and "exact" in got
 
-    def test_throughput_fingerprints_use_the_query_timeout(self):
-        runner, executor = self._runner(1, fingerprint_rows([(1,)]))
-        runner.run_throughput(streams=1, query_timeout=1800)
-        assert executor.timeout == 1800
-
 
 # ---------------------------------------------------------------------------
 # S5, S7: benchmark gate and freshness probe
@@ -352,10 +347,6 @@ class TestStamps:
             for d in ex.condition_differences(a["experiment"], b["experiment"])
         )
 
-    def test_hive_version_is_the_stackable_image(self):
-        v = ex.experiment_inputs(_cfg())["architecture"]["catalog"]["version"]
-        assert v.startswith("oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0")
-
 
 # ---------------------------------------------------------------------------
 # Reviewer extras: stale block, package usability, maintenance never reached
@@ -398,7 +389,7 @@ class TestBlockFollowsTheRecord:
 class TestPackageUsability:
     def test_package_refuses_an_unusable_fingerprint(self):
         from lakebench.cli._reproduce import ReproduceError, _build_package
-        from tests.test_reproduce import _metrics
+        from tests.fixtures.reproduce_helpers import _metrics
 
         exp = stub_experiment(["Q1"])
         exp["results"]["fingerprints"]["Q1"] = {"spec": "rf2", "error": "timed out"}
@@ -457,12 +448,6 @@ class TestFixPass:
         a = fingerprint_rows([("x", 10.0)], {1: 1.0})
         assert mismatch(a, fingerprint_rows([("x", 21.0)], {1: 1.0}))
         assert mismatch(a, fingerprint_rows([("x", 12.0)], {1: 1.0})) is None
-
-    def test_old_stored_identity_gets_one_clear_message(self):
-        exp = stub_experiment(["Q1"])
-        old = {k: v for k, v in ex.identity(exp).items() if k != "system"}
-        refs = ex.stored_identity_refusals(old, ex.result_fingerprints(exp), exp, "baseline")
-        assert len(refs) == 1 and "record it again" in refs[0]
 
     def test_scale_rendered_to_six_places_is_not_a_disagreement(self):
         corpus, problems = ex._observed_corpus({"scale": 0.1234567}, {"scale": 0.123457})

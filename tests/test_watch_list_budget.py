@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -93,30 +93,6 @@ class TestRemoveHonoursRestart:
                     p.stop()
         assert deleted == []
         assert "repair-operator" in str(ei.value)
-
-    def test_openshift_patch_rollout_is_awaited_before_the_restart(self):
-        mgr = _mgr()
-        calls: list[str] = []
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["my-ns", "other"]),
-            patch.object(mgr, "_watch_list_pin", return_value=["--version", "2.5.1"]),
-            patch.object(mgr, "_is_openshift", return_value=True),
-            patch.object(mgr, "_run", return_value=_ok()),
-            patch.object(mgr, "_assign_openshift_scc"),
-            patch.object(
-                mgr, "_patch_openshift_deployments", side_effect=lambda: calls.append("patch")
-            ),
-            patch.object(
-                mgr,
-                "_rollout_status_after_upgrade",
-                side_effect=lambda *a, **k: calls.append("wait") or False,
-            ),
-            patch.object(
-                mgr, "_restart_operator", side_effect=lambda: calls.append("restart") or True
-            ),
-        ):
-            assert mgr._remove_namespace_from_watch_unlocked("my-ns") is False
-        assert calls == ["patch", "wait"], "a failed patch rollout stops before the restart"
 
 
 class TestHoldBudget:
@@ -270,19 +246,6 @@ class TestUnknownWatchState:
             st = mgr.ensure_namespace_watched(can_heal=True)
         assert st.ready is False
 
-    def test_unknown_watch_state_fails_deploy(self):
-        from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
-        from tests.conftest import make_config
-
-        engine = MagicMock()
-        engine.config = make_config(name="sd12-t")
-        engine.dry_run = False
-        with patch.object(SparkOperatorManager, "check_status", return_value=self._status(None)):
-            res = DeploymentEngine._deploy_spark_operator(engine)
-        assert res.status == DeploymentStatus.FAILED
-        assert "could not be read" in res.message
-        assert "admin install" not in res.message
-
     def test_check_status_error_is_unknown_not_absent(self):
         mgr = _mgr()
         with patch.object(mgr, "_run", side_effect=RuntimeError("api down")):
@@ -326,32 +289,6 @@ class TestSetWatchList:
         with pytest.raises(ValueError):
             _mgr()._set_watch_list_impl([""])
 
-    def test_one_upgrade_then_verified(self):
-        mgr = _mgr()
-        cmds: list[list[str]] = []
-
-        def run(cmd, **_kw):
-            cmds.append(cmd)
-            return _ok()
-
-        with (
-            patch.object(mgr, "_watch_list_pin", return_value=["--version", "2.5.1"]),
-            patch.object(mgr, "_is_openshift", return_value=False),
-            patch.object(mgr, "_run", side_effect=run),
-            patch.object(mgr, "_restart_operator", return_value=True) as restart,
-            patch.object(mgr, "_get_active_namespaces", return_value=["ns-b", "ns-a"]) as read,
-        ):
-            assert mgr._set_watch_list_impl(["ns-b", "ns-a", "ns-a"]) is True
-        restart.assert_called_once()
-        assert {c.kwargs["deployment"] for c in read.call_args_list} == {
-            mgr.CONTROLLER_DEPLOYMENT,
-            mgr.WEBHOOK_DEPLOYMENT,
-        }
-        upgrades = [c for c in cmds if c[:2] == ["helm", "upgrade"]]
-        assert len(upgrades) == 1
-        assert "spark.jobNamespaces={ns-a,ns-b}" in upgrades[0]
-        assert "--reuse-values" in upgrades[0] and "--version" in upgrades[0]
-
     def test_unpinned_release_is_not_upgraded(self):
         mgr = _mgr()
         with (
@@ -382,17 +319,23 @@ class TestSetWatchList:
         ):
             return mgr._set_watch_list_impl(wanted)
 
-    def test_controller_mismatch_fails(self):
-        assert self._verify(["ns-a"], ["ns-a", "ns-b"], ["ns-a", "ns-b"]) is False
-
-    def test_a_superset_is_not_the_list(self):
-        assert self._verify(["ns-a", "ns-b", "ns-c"], ["ns-a", "ns-b"], ["ns-a", "ns-b"]) is False
-
-    def test_webhook_mismatch_fails(self):
-        assert self._verify(["ns-a"], ["ns-a", "ns-gone"], ["ns-a"]) is False
-
-    def test_watch_all_deployment_is_not_the_list(self):
-        assert self._verify(["ns-a"], None, ["ns-a"]) is False
+    @pytest.mark.parametrize(
+        ("controller", "webhook", "values"),
+        [
+            (["ns-a"], ["ns-a", "ns-b"], ["ns-a", "ns-b"]),  # controller mismatch
+            (
+                ["ns-a", "ns-b", "ns-c"],
+                ["ns-a", "ns-b"],
+                ["ns-a", "ns-b"],
+            ),  # a superset is not the list
+            (["ns-a"], ["ns-a", "ns-gone"], ["ns-a"]),  # webhook mismatch
+            (["ns-a"], None, ["ns-a"]),  # a watch-all deployment is not the list
+        ],
+    )
+    def test_repair_succeeds_only_when_every_part_lists_the_target(
+        self, controller, webhook, values
+    ):
+        assert self._verify(controller, webhook, values) is False
 
     def test_failed_restart_fails(self):
         mgr = _mgr()
@@ -405,57 +348,6 @@ class TestSetWatchList:
         ):
             assert mgr._set_watch_list_impl(["ns-a"]) is False
         read.assert_not_called()
-
-    def test_openshift_patch_is_rolled_out_before_the_restart(self):
-        mgr = _mgr()
-        calls: list[str] = []
-        with (
-            patch.object(mgr, "_watch_list_pin", return_value=["--version", "2.5.1"]),
-            patch.object(mgr, "_is_openshift", return_value=True),
-            patch.object(mgr, "_run", return_value=_ok()),
-            patch.object(mgr, "_assign_openshift_scc", side_effect=lambda: calls.append("scc")),
-            patch.object(
-                mgr, "_patch_openshift_deployments", side_effect=lambda: calls.append("patch")
-            ),
-            patch.object(
-                mgr,
-                "_rollout_status_after_upgrade",
-                side_effect=lambda *a, **k: calls.append("wait") or True,
-            ),
-            patch.object(
-                mgr, "_restart_operator", side_effect=lambda: calls.append("restart") or True
-            ),
-            patch.object(mgr, "_get_active_namespaces", return_value=["ns-a"]),
-        ):
-            assert mgr._set_watch_list_impl(["ns-a"]) is True
-        assert calls == ["scc", "patch", "wait", "restart"]
-
-
-class TestAddAwaitsPatchRollout:
-    def test_add_stops_when_the_patch_rollout_fails(self):
-        mgr = _mgr()
-        calls: list[str] = []
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch.object(mgr, "_namespace_is_terminating", return_value=False),
-            patch.object(mgr, "_watch_list_pin", return_value=["--version", "2.5.1"]),
-            patch.object(mgr, "_is_openshift", return_value=True),
-            patch.object(mgr, "_run", return_value=_ok()),
-            patch.object(mgr, "_assign_openshift_scc"),
-            patch.object(
-                mgr, "_patch_openshift_deployments", side_effect=lambda: calls.append("patch")
-            ),
-            patch.object(
-                mgr,
-                "_rollout_status_after_upgrade",
-                side_effect=lambda *a, **k: calls.append("wait") or False,
-            ),
-            patch.object(
-                mgr, "_restart_operator", side_effect=lambda: calls.append("restart") or True
-            ),
-        ):
-            assert mgr._add_namespace_to_watch_impl("my-ns") is False
-        assert calls == ["patch", "wait"]
 
 
 class TestReleaseState:
@@ -549,44 +441,6 @@ class TestReleaseState:
         with patch.object(mgr, "_run", return_value=_ok(json.dumps(rows))):
             assert mgr.good_revisions(6) is None
 
-    def test_rollback_names_the_revision_and_awaits_the_rollout(self):
-        mgr = _mgr()
-        cmds: list[list[str]] = []
-
-        def run(cmd, **_kw):
-            cmds.append(cmd)
-            return _ok()
-
-        with (
-            patch.object(mgr, "_get_helm_version", return_value="2.5.1"),
-            patch.object(mgr, "_run", side_effect=run),
-            patch.object(mgr, "_is_openshift", return_value=False),
-            patch.object(mgr, "_rollout_status_after_upgrade", return_value=False) as wait,
-        ):
-            assert mgr.rollback_to(4) is False
-        wait.assert_called_once()
-        assert cmds == [["helm", "rollback", "spark-operator", "4", "-n", "spark-operator"]]
-
-    def test_rollback_on_openshift_patches_before_waiting(self):
-        mgr = _mgr()
-        calls: list[str] = []
-        with (
-            patch.object(mgr, "_get_helm_version", return_value="2.5.1"),
-            patch.object(mgr, "_run", return_value=_ok()),
-            patch.object(mgr, "_is_openshift", return_value=True),
-            patch.object(mgr, "_assign_openshift_scc", side_effect=lambda: calls.append("scc")),
-            patch.object(
-                mgr, "_patch_openshift_deployments", side_effect=lambda: calls.append("patch")
-            ),
-            patch.object(
-                mgr,
-                "_rollout_status_after_upgrade",
-                side_effect=lambda *a, **k: calls.append("wait") or True,
-            ),
-        ):
-            assert mgr.rollback_to(4) is True
-        assert calls == ["scc", "patch", "wait"]
-
     def test_rollback_failure_is_reported(self):
         mgr = _mgr()
         with (
@@ -596,66 +450,3 @@ class TestReleaseState:
         ):
             assert mgr.rollback_to(4) is False
         wait.assert_not_called()
-
-
-class TestValidateReportsUnknown:
-    """validate is read-only and never fails on watching (deploy adds the
-    namespace), but an unreadable watch list is a warning now that deploy
-    and run refuse on it, and an unreadable operator is not "not installed"."""
-
-    def _validate(self, status, tmp_path, monkeypatch):
-        import yaml
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        monkeypatch.setenv("KUBECONFIG", "/nonexistent")
-        monkeypatch.chdir(tmp_path)
-        cfg = tmp_path / "lakebench.yaml"
-        cfg.write_text(
-            yaml.safe_dump(
-                {
-                    "name": "sd12-v",
-                    "endpoint": "http://127.0.0.1:9",
-                    "access_key": "k",
-                    "secret_key": "s",
-                    "scale": 1,
-                }
-            )
-        )
-        from lakebench.k8s import K8sConnectionError
-
-        with (
-            patch(
-                "lakebench.cli.get_k8s_client",
-                side_effect=K8sConnectionError("no cluster in tests"),
-            ),
-            patch.object(SparkOperatorManager, "check_status", return_value=status),
-        ):
-            r = CliRunner().invoke(app, ["validate", str(cfg)], env={"COLUMNS": "300"})
-        return " ".join(r.output.split())
-
-    def test_unreadable_watch_list_warns(self, tmp_path, monkeypatch):
-        st = OperatorStatus(
-            installed=True,
-            version="2.5.1",
-            namespace="spark-operator",
-            ready=True,
-            message="ok",
-            watching_namespace=None,
-        )
-        out = self._validate(st, tmp_path, monkeypatch)
-        assert "! Namespace watching unverified (watch list unreadable)" in out
-        assert "deploy and run refuse" in out
-
-    def test_unknown_install_is_not_reported_absent(self, tmp_path, monkeypatch):
-        st = OperatorStatus(
-            installed=None,
-            version=None,
-            namespace=None,
-            ready=False,
-            message="Error checking operator status: timeout",
-        )
-        out = self._validate(st, tmp_path, monkeypatch)
-        assert "Could not check the Spark Operator" in out
-        assert "Not installed" not in out

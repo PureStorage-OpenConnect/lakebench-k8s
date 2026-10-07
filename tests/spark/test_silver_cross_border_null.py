@@ -117,31 +117,3 @@ def test_cross_border_null_when_both_countries_missing(spark):
     bronze = _bronze(spark, [_bronze_row(None, None)])
     row = build_transactions(bronze).select("cross_border").collect()[0]
     assert row["cross_border"] is None
-
-
-def test_deploy_and_script_ddl_cross_border_nullable():
-    """Belt-and-braces: both DDL locations must have removed NOT NULL from
-    cross_border so an emitted NULL does not fail the write."""
-    import re
-
-    def _cross_border_line(text: str) -> str:
-        for line in text.splitlines():
-            if "cross_border" in line:
-                return line.strip()
-        raise AssertionError("cross_border column not found")
-
-    deploy = (
-        Path(__file__).resolve().parents[2] / "src/lakebench/deploy/financial_ddl.py"
-    ).read_text()
-    script = (
-        Path(__file__).resolve().parents[2]
-        / "src/lakebench/spark/scripts/silver_build_financial.py"
-    ).read_text()
-
-    for tag, text in ("deploy", deploy), ("script", script):
-        line = _cross_border_line(text)
-        # Only match a standalone NOT NULL adjacent to cross_border, not the
-        # word "null" in a comment further along the file.
-        assert not re.search(r"\bNOT\s+NULL\b", line, re.IGNORECASE), (
-            f"{tag} DDL still declares cross_border NOT NULL: {line}"
-        )

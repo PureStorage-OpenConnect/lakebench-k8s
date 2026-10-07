@@ -313,10 +313,7 @@ installs it per run, at the versions pinned in `REFERENCE_PY_DEPS`. To run
 the detector or the local gate yourself, install
 `pip install "lakebench-k8s[aml]"`, which pins the same versions.
 
-The older `train_reference_gbt` in `src/lakebench/aml/reference_score.py`
-(a `GradientBoostingClassifier` on five amount and hour features) is no
-longer called by any driver; that module now supplies the band leakage
-gate.
+`src/lakebench/aml/reference_score.py` supplies the band leakage gate.
 
 The report verdicts:
 

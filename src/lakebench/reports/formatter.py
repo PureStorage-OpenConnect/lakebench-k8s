@@ -20,7 +20,7 @@ formatter and paint a capped or single-run figure as headline evidence.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from html import escape as _html_escape
 
 _SUPPORT_STATE_LABEL = {
@@ -285,51 +285,3 @@ def support_state_of(metrics: object) -> str | None:
     if isinstance(state, str) and state and state != "unknown":
         return state
     return None
-
-
-# ---------------------------------------------------------------------------
-# WCAG 1.4.1: text tokens for compare deltas, so pass/fail and winner/loser
-# are not encoded by colour alone. A screen-reader or a copy-paste of the
-# text carries the token; the colour is redundant.
-# ---------------------------------------------------------------------------
-
-DELTA_TOKEN_A_FASTER = "A_faster"
-DELTA_TOKEN_B_FASTER = "B_faster"
-DELTA_TOKEN_OVERLAP = "overlap"
-DELTA_TOKEN_CAPPED = "capped"
-DELTA_TOKEN_WITHHELD = "withheld"
-
-
-def delta_token(
-    *,
-    higher_is_better: bool,
-    pct: float | None,
-    within_noise: bool,
-    capped: bool = False,
-    withheld: bool = False,
-) -> str:
-    """The WCAG-safe text token for a delta between two runs.
-
-    ``A_faster`` / ``B_faster`` for a decisive win (B relative to A);
-    ``overlap`` when the difference is inside the noise floor; ``capped``
-    when a Lakebench cap held one side, so the comparison is not clean;
-    ``withheld`` when the pair is not comparable and no delta is shown.
-    """
-    if withheld:
-        return DELTA_TOKEN_WITHHELD
-    if capped:
-        return DELTA_TOKEN_CAPPED
-    if pct is None or within_noise:
-        return DELTA_TOKEN_OVERLAP
-    if (pct > 0) == higher_is_better:
-        return DELTA_TOKEN_B_FASTER
-    return DELTA_TOKEN_A_FASTER
-
-
-ALL_DELTA_TOKENS: Iterable[str] = (
-    DELTA_TOKEN_A_FASTER,
-    DELTA_TOKEN_B_FASTER,
-    DELTA_TOKEN_OVERLAP,
-    DELTA_TOKEN_CAPPED,
-    DELTA_TOKEN_WITHHELD,
-)

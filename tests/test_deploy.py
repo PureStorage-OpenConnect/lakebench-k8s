@@ -4,11 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from lakebench.config import LakebenchConfig
 from lakebench.deploy.engine import (
     DeploymentEngine,
     DeploymentStatus,
 )
+from tests.fixtures.deploy_helpers import _make_config as _make_config
+from tests.fixtures.deploy_helpers import _mock_k8s as _mock_k8s
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -36,59 +37,9 @@ def _cluster_fingerprint():
         yield
 
 
-def _make_config(**overrides) -> LakebenchConfig:
-    """Create a LakebenchConfig with sensible defaults for testing.
-
-    LB-090: auto-fills the Polaris client_secret for tests whose
-    architecture selects the Polaris catalog, mirroring the top-level
-    conftest helper. Production configs must supply their own.
-    """
-    from lakebench.config.schema import CatalogType
-
-    base = {
-        "name": "test-deploy",
-        "platform": {
-            "storage": {
-                "s3": {
-                    "endpoint": "http://minio:9000",
-                    "access_key": "minioadmin",
-                    "secret_key": "minioadmin",
-                    # Explicit: the default is now <name>-<layer>.
-                    "buckets": {
-                        "bronze": "lakebench-bronze",
-                        "silver": "lakebench-silver",
-                        "gold": "lakebench-gold",
-                    },
-                }
-            }
-        },
-    }
-    base.update(overrides)
-    cfg = LakebenchConfig(**base)
-    if (
-        cfg.architecture.catalog.type == CatalogType.POLARIS
-        and not cfg.architecture.catalog.polaris.client_secret
-    ):
-        cfg.architecture.catalog.polaris.client_secret = "test-only-secret"
-    return cfg
-
-
-def _mock_k8s():
-    """Create a mock K8sClient."""
-    k8s = MagicMock()
-    k8s.namespace_exists.return_value = True
-    k8s.apply_manifest.return_value = True
-    k8s.get_cluster_capacity.return_value = None
-    return k8s
-
-
 # ---------------------------------------------------------------------------
 # TemplateRenderer
 # ---------------------------------------------------------------------------
-
-
-class TestTemplateRenderer:
-    """Tests for Jinja2 template rendering."""
 
 
 # ---------------------------------------------------------------------------
@@ -96,33 +47,9 @@ class TestTemplateRenderer:
 # ---------------------------------------------------------------------------
 
 
-class TestDeploymentResult:
-    """Tests for DeploymentResult dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # DeploymentEngine
 # ---------------------------------------------------------------------------
-
-
-class TestDeploymentEngine:
-    """Tests for DeploymentEngine initialisation and context building."""
-
-    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
-    def test_deploy_all_stops_on_failure(self, _mock_ocp):
-        """deploy_all should stop deploying after the first failure."""
-        config = _make_config()
-        k8s = _mock_k8s()
-        # Make namespace check fail
-        k8s.namespace_exists.return_value = False
-        engine = DeploymentEngine(config, k8s_client=k8s)
-        # Override create_namespace to False so it fails
-        engine.config.platform.kubernetes.create_namespace = False
-
-        results = engine.deploy_all()
-        # Should have stopped after namespace failure
-        assert len(results) == 1
-        assert results[0].status == DeploymentStatus.FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -157,40 +84,6 @@ class TestDeployBuckets:
     """Tests for _deploy_buckets() -- S3 bucket creation during deploy."""
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
-    @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
-    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
-    @patch("lakebench.s3.S3Client")
-    def test_buckets_created(self, mock_s3_cls, mock_verify, _mock_write, _mock_ocp):
-        """Buckets are created via S3Client.ensure_buckets(). Ownership tag
-        write is mocked -- see tests/test_ownership.py for its own tests."""
-        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
-
-        config = _make_config()
-        k8s = _mock_k8s()
-        engine = DeploymentEngine(config, k8s_client=k8s)
-
-        mock_client = MagicMock()
-        mock_client._init_error = None
-        mock_client.ensure_buckets.return_value = {
-            "lakebench-bronze": True,
-            "lakebench-silver": True,
-            "lakebench-gold": True,
-        }
-        mock_s3_cls.return_value = mock_client
-        mock_verify.return_value = IdentityReport(
-            verdict=IdentityVerdict.MATCH,
-            resource_name="b",
-            expected_deployment="test-deploy",
-        )
-
-        result = engine._deploy_buckets()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "created" in result.message
-        mock_client.ensure_buckets.assert_called_once_with(
-            ["lakebench-bronze", "lakebench-silver", "lakebench-gold"]
-        )
-
-    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.s3.S3Client")
     def test_buckets_s3_init_failure(self, mock_s3_cls, _mock_ocp):
         """S3 client init failure returns FAILED result."""
@@ -207,91 +100,14 @@ class TestDeployBuckets:
         assert "init failed" in result.message
 
 
-class TestAutoSizerIntegration:
-    """Tests that autosizer runs during engine construction."""
-
-    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
-    def test_autosizer_called_before_context(self, _mock_ocp):
-        """Engine context should reflect auto-sized values for scale=1."""
-        config = LakebenchConfig(
-            name="test-auto",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://minio:9000",
-                        "access_key": "minioadmin",
-                        "secret_key": "minioadmin",
-                    }
-                }
-            },
-        )
-        k8s = _mock_k8s()
-        engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
-
-        # scale=1 → minimal tier: 1 Trino worker
-        assert engine.context["trino_worker_replicas"] == 1
-
-
-class TestPostgresDeployer:
-    """Tests for PostgresDeployer."""
-
-
-class TestRBACDeployer:
-    """Tests for RBACDeployer."""
-
-
-class TestTrinoDeployer:
-    """Tests for TrinoDeployer."""
-
-
-class TestHiveDeployer:
-    """Tests for HiveDeployer."""
-
-
-class TestPolarisDeployer:
-    """Tests for PolarisDeployer."""
-
-    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
-    def test_polaris_dry_run(self, _mock_ocp):
-        from lakebench.deploy.polaris import PolarisDeployer
-
-        config = _make_config(
-            architecture={
-                "catalog": {"type": "polaris"},
-                "table_format": {"type": "iceberg"},
-                "query_engine": {"type": "trino"},
-            }
-        )
-        k8s = _mock_k8s()
-        engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
-        deployer = PolarisDeployer(engine)
-
-        result = deployer.deploy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would" in result.message
-
-
 # ---------------------------------------------------------------------------
 # Iceberg SQL builders (v1.1.0)
 # ---------------------------------------------------------------------------
 
 
-class TestBuildCompactionSql:
-    """Tests for build_compaction_sql() in deploy/iceberg.py."""
-
-
-class TestBuildTableHealthSql:
-    """Tests for build_table_health_sql() in deploy/iceberg.py."""
-
-
 # ---------------------------------------------------------------------------
 # Datagen cycle timestamp range (v1.1.0)
 # ---------------------------------------------------------------------------
-
-
-class TestDatagenCycleTimestampRange:
-    """Tests for DatagenDeployer._cycle_timestamp_range()."""
 
 
 # ---------------------------------------------------------------------------

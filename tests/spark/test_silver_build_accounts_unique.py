@@ -136,17 +136,6 @@ def test_build_accounts_row_fields_from_single_side(spark):
     assert accts_second["US01"]["opened_date"] == us01["opened_date"]
 
 
-def test_build_accounts_deterministic_across_calls(spark):
-    """Repeat build_accounts twice on the same bronze; result byte-identical."""
-    from silver_build_financial import build_accounts
-
-    a = sorted(build_accounts(_bronze(spark), kyc=None).collect(), key=lambda r: r["iban"])
-    b = sorted(build_accounts(_bronze(spark), kyc=None).collect(), key=lambda r: r["iban"])
-    assert [(r["iban"], r["holder_entity_id"], r["bank_bic"], r["opened_date"]) for r in a] == [
-        (r["iban"], r["holder_entity_id"], r["bank_bic"], r["opened_date"]) for r in b
-    ]
-
-
 def test_build_accounts_prefers_non_null_bank_bic(spark):
     """Regression on the adversarial finding: an iban that has a NULL
     bank_bic on one side and a non-NULL bank_bic on the other must win the

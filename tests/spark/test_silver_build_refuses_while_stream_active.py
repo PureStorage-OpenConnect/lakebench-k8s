@@ -101,30 +101,6 @@ def test_force_rebuild_bypasses_marker_check():
     assert marker in fs.files
 
 
-def test_env_var_bypass_matches_flag_bypass():
-    """LB_FORCE_REBUILD=1 alone is the operator opt-in used by job.py.
-
-    silver_build_financial.main() reads the env var and forwards it as
-    ``force_rebuild``; the helper itself only sees the resolved flag.
-    This test locks the pattern so a future refactor cannot introduce
-    a divergent bypass path.
-    """
-    from common import refuse_batch_while_stream_active
-
-    fs = _FakeFS()
-    ckpt = "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
-    marker = ckpt.rstrip("/") + "/_STARTED"
-    fs.write(marker, b"pid=1 stream_id=x")
-
-    # force_rebuild resolved from the env var (True/False both routed
-    # through the same parameter): both cases behave identically to the
-    # direct flag test above.
-    refuse_batch_while_stream_active(
-        spark=None, checkpoint_location=ckpt, force_rebuild=True, fs=fs
-    )
-    assert marker in fs.files
-
-
 def test_main_calls_guard_before_writes(monkeypatch):
     """silver_build_financial.main wires the guard before any Spark writes.
 

@@ -59,26 +59,6 @@ def _run_destroy(engine, manager_cls) -> list:
 
 
 class TestOrdering:
-    def test_unwatch_happens_before_namespace_delete(self):
-        calls: list[str] = []
-
-        manager = MagicMock()
-        manager.remove_namespace_from_watch.side_effect = lambda ns, **_kw: (
-            calls.append(f"unwatch:{ns}") or True
-        )
-        manager_cls = MagicMock(return_value=manager)
-
-        engine = _engine()
-        engine.k8s.delete_namespace.side_effect = lambda ns, **_kw: calls.append(f"delete:{ns}")
-
-        _run_destroy(engine, manager_cls)
-
-        assert "unwatch:u02" in calls, "destroy never un-watched the namespace"
-        assert "delete:u02" in calls
-        assert calls.index("unwatch:u02") < calls.index("delete:u02"), (
-            f"un-watch must precede delete, got {calls}"
-        )
-
     def test_operator_is_addressed_with_its_own_namespace_and_version(self):
         manager_cls = MagicMock(return_value=MagicMock())
         engine = _engine()

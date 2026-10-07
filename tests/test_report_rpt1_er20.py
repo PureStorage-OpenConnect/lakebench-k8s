@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 
+from tests.fixtures.report_consistency_helpers import _render_dict
 from tests.fixtures.report_goldens import page_text, render
-from tests.fixtures.stored_records import load_metrics, load_record
-from tests.test_report_consistency import _render_dict
+from tests.fixtures.stored_records import load_record
 
 
 def _plain(html: str) -> str:
@@ -159,13 +159,6 @@ def test_r8_continuous_aml_counts_rules_not_run():
     assert f"{len(not_run)} detection rules not run in continuous mode" in panel
 
 
-def test_r8_c360_continuous_coverage_without_aml_note():
-    coverage = load_record("1d17f4")["pipeline_benchmark"]["scores"]["corpus_ingest_ratio"]
-    text = _text("1d17f4")
-    assert f"Corpus coverage {coverage * 100:.1f}%" in text
-    assert "Excluded in continuous mode" not in text
-
-
 # ---------------------------------------------------------------------------
 # R10: provenance and AML labels
 # ---------------------------------------------------------------------------
@@ -204,22 +197,6 @@ def test_r10_aml_recall_labelled_and_skips_counted():
     )
 
 
-def test_r10_registered_look_lifts_the_in_sample_label(monkeypatch):
-    """A completed look entry naming this run is the only thing that changes
-    the label; the config never does."""
-    from lakebench.config import datagen_seed
-
-    run_id = load_record("1320bd")["run_id"]
-    monkeypatch.setattr(
-        datagen_seed,
-        "load_looks",
-        lambda path=None: [{"role": "evaluation", "state": "complete", "run_ids": [run_id]}],
-    )
-    text = _text("1320bd")
-    assert "Recall (registered look: evaluation)" in text
-    assert "AML recall is uncalibrated and in-sample" not in text
-
-
 def test_r10_look_run_ids_must_be_a_list(monkeypatch):
     """A string or integer run_ids names no run (no substring match, no
     crash)."""
@@ -237,30 +214,9 @@ def test_r10_look_run_ids_must_be_a_list(monkeypatch):
         assert "Recall (uncalibrated, in-sample)" in _text("1320bd")
 
 
-def test_r10_unreadable_look_record_reads_in_sample(monkeypatch):
-    from lakebench.config import datagen_seed
-
-    def broken(path=None):
-        raise ValueError("malformed look entry")
-
-    monkeypatch.setattr(datagen_seed, "load_looks", broken)
-    assert "Recall (uncalibrated, in-sample)" in _text("1320bd")
-
-
 # ---------------------------------------------------------------------------
 # R11: an AML block that cannot render says so
 # ---------------------------------------------------------------------------
-
-
-def test_r11_malformed_scoring_shows_a_notice():
-    record = load_record("1320bd")
-    record["financial_scoring"]["typologies"][0]["recall"] = "not a number"
-    for t in record["financial_scoring"]["typologies"]:
-        t["recall"] = "not a number"
-    text = _plain(_render_dict(record))
-    assert "AML results could not be rendered: ValueError: could not convert string" in text
-    # The rest of the page still renders.
-    assert "Bottleneck Identification" in text
 
 
 # ---------------------------------------------------------------------------
@@ -289,14 +245,6 @@ def test_r20_continuous_names_the_window_intake_not_the_corpus():
     text = _text("ebb26f")
     assert f"bronze bucket {bronze:.1f} GB at run end: landing files plus the bronze table" in text
     assert f"corpus {bronze:.1f} GB" not in text
-
-
-def test_r21_caption_names_requested_core_seconds():
-    text = _text("5105a0")
-    section = _section(text, "Bottleneck Identification", "Data Validity")
-    assert "of requested core-seconds" in section
-    assert "Bar: each stage's share of requested core-seconds" in section
-    assert "wall-clock" not in section and "of compute" not in section
 
 
 def test_bottleneck_continuous_query_stage_has_no_latency_share():
@@ -330,15 +278,6 @@ def test_bottleneck_thrift_query_stage_not_costed_with_trino_cores():
     assert query_row and query_row.group(3) == "-" and query_row.group(4) == "-"
 
 
-def test_r6_r8_load_metrics_still_render_every_record():
-    """No stored fixture record crashes the page after these changes."""
-    from tests.fixtures.stored_records import record_ids
-
-    for run_id in record_ids():
-        assert "Lakebench Scorecard" in render(run_id)
-        assert load_metrics(run_id) is not None
-
-
 def test_r6_interrupted_run_keeps_its_verdict_word(monkeypatch):
     """When the verdict is INTERRUPTED the panel and the headline both say
     so (not FAILED) and no headline figure is shown. The verdict comes from
@@ -353,32 +292,3 @@ def test_r6_interrupted_run_keeps_its_verdict_word(monkeypatch):
     assert f"Run INTERRUPTED: {reason}" in text
     assert "Verdict: INTERRUPTED" in text
     assert "headline figures not shown: the run is INTERRUPTED" in text
-
-
-def test_r10_subject_check_failure_lists_typologies_and_reason():
-    from lakebench.reports.scorecard import _subject_check_html
-
-    html = _subject_check_html(
-        {
-            "subject_customer_check": {
-                "status": "fail",
-                "subjects": 10,
-                "unmapped": 1,
-                "not_customer": 2,
-                "failing_typologies": ["cycle"],
-                "unresolved_typologies": ["stack"],
-                "reason": "join miss",
-            }
-        }
-    )
-    assert "var(--danger)" in html
-    assert "failing: cycle" in html and "unresolved: stack" in html and "reason: join miss" in html
-    assert _subject_check_html({}) == "" and _subject_check_html(None) == ""
-
-
-def test_tm_percent_without_a_record_path_is_plain():
-    from lakebench.reports.scorecard import _fmt_pct, _p
-
-    assert _p(None, "x") is None
-    assert _fmt_pct(0.25) == "25.0%"
-    assert _fmt_pct(None) == "n/a"

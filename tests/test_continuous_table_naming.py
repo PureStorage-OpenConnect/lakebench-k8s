@@ -30,15 +30,6 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
 # not change the Spark side).
 _RECIPES = sorted(r for r in RECIPES if r != "default")
 _STREAM_JOBS = (JobType.BRONZE_VERIFY, JobType.BRONZE_INGEST, JobType.SILVER_STREAM)
-_CONTINUOUS_SCRIPTS = (
-    "bronze_ingest.py",
-    "bronze_ingest_delta.py",
-    "silver_stream.py",
-    "silver_stream_delta.py",
-    "gold_refresh.py",
-    "gold_refresh_delta.py",
-    "bronze_verify.py",
-)
 
 
 def _config(recipe: str) -> LakebenchConfig:
@@ -124,22 +115,22 @@ def test_reset_names_every_table_in_a_defined_catalog(recipe, scripts, monkeypat
         assert t.count(".") == 2, t  # catalog.namespace.table, one-part namespace
 
 
-@pytest.mark.parametrize("recipe", [r for r in _RECIPES if "-delta-" in r])
-def test_delta_bronze_ingest_target_is_the_table_silver_stream_reads(recipe, scripts, monkeypatch):
-    manifest = _manifest(recipe, JobType.BRONZE_INGEST)
-    _use_env(monkeypatch, manifest)
-    import bronze_ingest_delta
+def test_delta_bronze_ingest_target_is_the_table_silver_stream_reads(scripts, monkeypatch):
+    for recipe in [r for r in _RECIPES if "-delta-" in r]:
+        manifest = _manifest(recipe, JobType.BRONZE_INGEST)
+        _use_env(monkeypatch, manifest)
+        import bronze_ingest_delta
 
-    name, location = bronze_ingest_delta.bronze_target()
-    assert name == "spark_catalog.default.bronze_raw"
-    assert name.split(".")[0] in _spark_catalogs(manifest)
-    # Explicit S3 path: HMS's default database sits on pod-local disk.
-    assert location == "s3a://b/warehouse/default.db/bronze_raw"
+        name, location = bronze_ingest_delta.bronze_target()
+        assert name == "spark_catalog.default.bronze_raw"
+        assert name.split(".")[0] in _spark_catalogs(manifest)
+        # Explicit S3 path: HMS's default database sits on pod-local disk.
+        assert location == "s3a://b/warehouse/default.db/bronze_raw"
 
-    # silver-stream (another SparkApplication) reads bronze under this name.
-    silver_env = _env(_manifest(recipe, JobType.SILVER_STREAM))
-    silver_reads = f"{silver_env['LB_ICEBERG_CATALOG']}.{silver_env['LB_BRONZE_TABLE']}"
-    assert silver_reads == name
+        # silver-stream (another SparkApplication) reads bronze under this name.
+        silver_env = _env(_manifest(recipe, JobType.SILVER_STREAM))
+        silver_reads = f"{silver_env['LB_ICEBERG_CATALOG']}.{silver_env['LB_BRONZE_TABLE']}"
+        assert silver_reads == name
 
 
 @pytest.mark.parametrize("recipe", _RECIPES)
@@ -149,22 +140,14 @@ def test_every_stream_job_env_names_a_defined_catalog(recipe):
         assert _env(manifest)["LB_ICEBERG_CATALOG"] in _spark_catalogs(manifest), (recipe, job)
 
 
-@pytest.mark.parametrize("script", _CONTINUOUS_SCRIPTS)
-def test_continuous_scripts_never_name_tables_through_catalog_name(script):
-    """CATALOG_NAME is the Trino catalog. A Spark script that builds a table
-    name from it breaks Delta + Hive (it names no Spark catalog there)."""
-    src = (SCRIPTS / script).read_text()
-    assert not re.search(r"env\(\s*[\"']CATALOG_NAME[\"']", src), script
-
-
-@pytest.mark.parametrize("recipe", _RECIPES)
-def test_reset_clears_the_path_bronze_ingest_creates(recipe, scripts, monkeypatch):
+def test_reset_clears_the_path_bronze_ingest_creates(scripts, monkeypatch):
     """The reset's explicit-location list is the Delta bronze target, and
     empty for Iceberg (whose DROP ... PURGE removes the files)."""
-    manifest = _manifest(recipe, JobType.BRONZE_VERIFY)
-    _use_env(monkeypatch, manifest)
-    import bronze_ingest_delta
-    import bronze_verify
+    for recipe in _RECIPES:
+        manifest = _manifest(recipe, JobType.BRONZE_VERIFY)
+        _use_env(monkeypatch, manifest)
+        import bronze_ingest_delta
+        import bronze_verify
 
-    got = bronze_verify.continuous_reset_explicit_locations()
-    assert got == ([bronze_ingest_delta.bronze_target()] if "-delta-" in recipe else [])
+        got = bronze_verify.continuous_reset_explicit_locations()
+        assert got == ([bronze_ingest_delta.bronze_target()] if "-delta-" in recipe else [])

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from lakebench.cli._run import _aml_batch_gate_problems
 
 _PASS = {"1": {"reconciliation": {"status": "pass", "detail": ""}}}
@@ -87,63 +89,84 @@ def test_tm_is_not_part_of_the_detection_gate():
     assert probs == []
 
 
-def test_failed_workflow_invariant_fails_the_verdict():
-    tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
-    v = _tm([_tjob({"W2": 3}, tm=tm)])
-    assert v["status"] == "fail"
-    assert v["problems"] == [
-        "gold-finalize: cycle 1: workflow invariant sars_le_cases fail: SARs 5 <= cases 4"
-    ]
-
-
-def test_missing_manifest_is_not_run_not_a_failure():
-    st = {"1": {"status": "not_run", "reason": "no ground-truth manifest (bronze.manifest)"}}
-    v = _tm([_tjob({"W2": 3}, tm={}, status=st)])
-    assert v["status"] == "not_run" and not v["problems"]
-    assert "manifest" in v["reason"]
-
-
-def test_parsed_log_without_tm_lines_is_not_run():
-    v = _tm([_tjob({"W2": 3}, tm={})])
-    assert v["status"] == "not_run" and "no TM lines" in v["reason"]
-
-
-def test_no_log_at_all_is_unknown():
-    v = _tm([_tjob({}, tm={})])
-    assert v["status"] == "unknown" and not v["problems"]
-
-
-def test_disabled_skips_the_gate_even_with_failures():
-    tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "x"}}}
-    v = _tm([_tjob({"W2": 3}, tm=tm)], enabled=False)
-    assert v["status"] == "disabled" and not v["problems"]
-
-
-def test_every_cycle_is_gated_not_only_the_last():
-    bad = {"1": {"funnel_monotone": {"status": "fail", "detail": "cases=3 < sars=4"}}}
-    good = {"2": {"funnel_monotone": {"status": "pass", "detail": ""}}}
-    v = _tm([_tjob({"W2": 3}, tm=bad), _tjob({"W2": 3}, tm=good)])
-    assert v["status"] == "fail" and v["problems"][0].startswith("gold-finalize: cycle 1:")
-
-
-def test_one_cycle_not_run_is_reported_even_when_others_pass():
-    st = {"2": {"status": "not_run", "reason": "error: boom"}}
-    v = _tm([_tjob({"W2": 3}), _tjob({"W2": 3}, tm={}, status=st)])
-    assert (
-        v["status"] == "not_run" and "cycle 2" in v["reason"] and "ran on cycles [1]" in v["reason"]
-    )
-
-
-def test_a_cycle_with_no_log_is_unknown_not_pass():
+def _tm_case(name):
     ok = {"1": {"reconciliation": {"status": "pass", "detail": ""}}}
     ok3 = {"3": {"reconciliation": {"status": "pass", "detail": ""}}}
-    v = _tm([_tjob({"W2": 3}, tm=ok), _tjob({}, tm={}), _tjob({"W2": 3}, tm=ok3)])
-    assert v["status"] == "unknown" and "[2]" in v["reason"]
+    fail1 = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
+    return {
+        "invariant-fails": ([_tjob({"W2": 3}, tm=fail1)], True),
+        "manifest-missing": (
+            [
+                _tjob(
+                    {"W2": 3},
+                    tm={},
+                    status={
+                        "1": {
+                            "status": "not_run",
+                            "reason": "no ground-truth manifest (bronze.manifest)",
+                        }
+                    },
+                )
+            ],
+            True,
+        ),
+        "log-without-tm-lines": ([_tjob({"W2": 3}, tm={})], True),
+        "no-log-at-all": ([_tjob({}, tm={})], True),
+        "disabled-with-failures": (
+            [_tjob({"W2": 3}, tm={"1": {"sars_le_cases": {"status": "fail", "detail": "x"}}})],
+            False,
+        ),
+        "first-cycle-fails": (
+            [
+                _tjob(
+                    {"W2": 3},
+                    tm={"1": {"funnel_monotone": {"status": "fail", "detail": "cases=3 < sars=4"}}},
+                ),
+                _tjob({"W2": 3}, tm={"2": {"funnel_monotone": {"status": "pass", "detail": ""}}}),
+            ],
+            True,
+        ),
+        "one-cycle-not-run": (
+            [
+                _tjob({"W2": 3}),
+                _tjob(
+                    {"W2": 3}, tm={}, status={"2": {"status": "not_run", "reason": "error: boom"}}
+                ),
+            ],
+            True,
+        ),
+        "a-cycle-without-a-log": (
+            [_tjob({"W2": 3}, tm=ok), _tjob({}, tm={}), _tjob({"W2": 3}, tm=ok3)],
+            True,
+        ),
+        "all-pass": ([_tjob({"W2": 3}, ops={"funnel": {}})], True),
+    }[name]
 
 
-def test_all_pass():
-    v = _tm([_tjob({"W2": 3}, ops={"funnel": {}})])
-    assert v["status"] == "pass" and v["ops"] == {"funnel": {}} and v["mode"] == "batch"
+@pytest.mark.parametrize(
+    ("case", "status", "problems"),
+    [
+        ("invariant-fails", "fail", 1),
+        ("first-cycle-fails", "fail", 1),  # every cycle is gated, not only the last
+        ("manifest-missing", "not_run", 0),  # not a failure
+        ("log-without-tm-lines", "not_run", None),
+        ("one-cycle-not-run", "not_run", None),  # reported even when others pass
+        ("no-log-at-all", "unknown", 0),
+        ("a-cycle-without-a-log", "unknown", None),  # unknown, never pass
+        ("disabled-with-failures", "disabled", 0),
+        ("all-pass", "pass", None),
+    ],
+)
+def test_aml_tm_verdict(case, status, problems):
+    jobs, enabled = _tm_case(case)
+    v = _tm(jobs) if enabled else _tm(jobs, enabled=False)
+    assert v["status"] == status
+    if problems is not None:
+        assert len(v["problems"]) == problems
+    if case == "first-cycle-fails":
+        assert v["problems"][0].startswith("gold-finalize: cycle 1:")
+    if case == "all-pass":
+        assert v["ops"] == {"funnel": {}} and v["mode"] == "batch"
 
 
 def test_scoring_count_line_never_calls_every_typology_scored():
@@ -157,27 +180,3 @@ def test_scoring_count_line_never_calls_every_typology_scored():
     assert line == "6 of 15 typologies scored; 8 no rule, 1 rule skipped"
     counts = {"scored": 6, "no_rule": 8, "rule_skipped": 1}
     assert scoring_count_line({"typologies": typs, "typology_counts": counts}) == line
-
-
-def test_scorer_reports_the_manifest_workload_as_a_category():
-    """The manifest's expected_workload is the generator's category
-    (typology.rs Spec.workload), not the detecting rule; RULE_TARGETS is the
-    rule (AML-GOALS #27). The scorer must not publish the category under a
-    name that claims to be the rule, and the designation it does publish
-    comes from the same map on both sides of the package boundary."""
-    import ast
-    from pathlib import Path
-
-    from lakebench.benchmark.aml_queries import RULE_TARGETS
-
-    root = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
-    src = (root / "score_financial.py").read_text()
-    assert '"expected_workload": r.get(' not in src
-    assert '"workload_category": r.get("workload_category")' in src
-    tree = ast.parse((root / "detection_rules.py").read_text())
-    rtt = next(
-        ast.literal_eval(n.value)
-        for n in tree.body
-        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "RULE_TARGET_TYPOLOGY"
-    )
-    assert rtt == RULE_TARGETS

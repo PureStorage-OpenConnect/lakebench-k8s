@@ -131,15 +131,21 @@ class TestGate:
             }
             assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0", f"{PREFIX}/part-1"]
 
-    def test_unowned_empty_proceeds(self):
+    @pytest.mark.parametrize(
+        ("owned", "objects"),
+        [
+            (False, ["other/x"]),
+            (False, [OWNER_MARKER_KEY]),
+            # a series marker with no part file beside it is no corpus
+            (True, [SERIES_KEY]),
+            (False, [SERIES_KEY]),
+        ],
+    )
+    def test_a_prefix_without_corpus_data_proceeds(self, owned, objects):
         with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=["other/x"])
-            assert _gate(cfg).proceed
-
-    def test_marker_alone_is_empty(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[OWNER_MARKER_KEY])
-            assert _gate(cfg).proceed
+            cfg = _seed(rec, owned=owned, objects=objects)
+            got = _gate(cfg)
+            assert got.proceed and not got.stale_allowed
 
     def test_regenerate_empty_prefix_refused(self):
         with recording() as rec:
@@ -364,16 +370,6 @@ class TestMultiCycleGate:
             assert sorted(rec.buckets_store[BRONZE]) == sorted(
                 [OWNER_MARKER_KEY, f"{PREFIX}/part-0"]
             )
-
-    def test_a_prefix_holding_only_the_series_marker_is_empty(self):
-        """A marker with no part file beside it (a clear or a generate that
-        stopped before writing data) is no corpus: the gate proceeds, on an
-        owned or unowned bucket, and records nothing stale."""
-        for owned in (True, False):
-            with recording() as rec:
-                cfg = _seed(rec, owned=owned, objects=[SERIES_KEY])
-                got = _gate(cfg)
-                assert got.proceed and not got.stale_allowed, owned
 
     def test_series_marker_beside_part_files_is_a_corpus(self):
         with recording() as rec:

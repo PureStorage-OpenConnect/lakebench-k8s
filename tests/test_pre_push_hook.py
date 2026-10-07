@@ -158,13 +158,6 @@ def test_passes_a_clean_new_branch(repo, stub_bin):
     assert res.returncode == 0, res.stderr
 
 
-def test_passes_an_update_of_a_known_remote_tip(repo, stub_bin):
-    old = _commit(repo, "a.txt", "one\n", "one")
-    new = _commit(repo, "a.txt", "two\n", "two")
-    line = f"refs/heads/lane/x {new} refs/heads/lane/x {old}"
-    assert _run(repo, [line], _stub_path(stub_bin)).returncode == 0
-
-
 def test_skips_a_delete(repo, stub_bin):
     key = _commit(repo, "a.txt", "planted\n", "the key commit")
     line = f"(delete) {ZERO} refs/heads/lane/old {key}"

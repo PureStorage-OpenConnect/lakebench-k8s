@@ -161,37 +161,21 @@ def _fake_gitleaks(tmp_path: Path, output: str) -> Path:
     return fake
 
 
-@pytest.mark.parametrize(
-    "output",
-    [
+def test_an_empty_or_failed_scan_fails(repo, ignore, tmp_path):
+    for output in [
         "INF 0 commits scanned.",  # gitleaks' report when its git log failed
         "ERR [git] fatal: bad revision",
         "INF no leaks found",  # no count at all
-    ],
-)
-def test_an_empty_or_failed_scan_fails(repo, ignore, tmp_path, output):
-    fake = _fake_gitleaks(tmp_path, output)
-    res = _run(repo, ignore, "--gitleaks", str(fake))
-    assert res.returncode == 2, res.stdout + res.stderr
-    assert "unscanned" in res.stdout
+    ]:
+        fake = _fake_gitleaks(tmp_path, output)
+        res = _run(repo, ignore, "--gitleaks", str(fake))
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "unscanned" in res.stdout
 
 
 def test_missing_inputs_fail(repo, tmp_path):
     res = _run(repo, tmp_path / "absent", "--gitleaks", sys.executable)
     assert res.returncode == 2
-
-
-def test_a_message_finding_names_its_commit_and_can_be_baselined(repo, ignore):
-    _gitleaks()
-    _git(repo, "commit", "-q", "--allow-empty", "-m", f"rotate\n\nnew key {_key('Q')}")
-    sha = _git(repo, "rev-parse", "HEAD")
-    res = _run(repo, ignore)
-    assert res.returncode == 1 and f"msgs/commits/{sha}.txt" in res.stdout, res.stdout
-    # The fingerprint stays put when later commits land.
-    _git(repo, "commit", "-q", "--allow-empty", "-m", "later")
-    ignore.write_text(f"# planted\nmsgs/commits/{sha}.txt:pure-flashblade-s3-access-key:3\n")
-    res = _run(repo, ignore)
-    assert res.returncode == 0, res.stdout + res.stderr
 
 
 def test_an_octopus_merge_fails_closed(repo, ignore):

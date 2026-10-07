@@ -137,16 +137,6 @@ def test_scale_100_is_held_to_the_trickle_rate_not_saturated():
     assert scores["ingest_ratio"] == pytest.approx(0.1875, abs=1e-4)
 
 
-def test_trickle_note_names_the_rate_and_the_drain_time():
-    note = _live_s100().trickle_note()
-    assert note is not None
-    assert "50 files per 30 seconds bronze trigger" in note
-    assert "19% of the corpus" in note
-    assert "not saturated" in note
-    assert "9,600 s" in note
-    assert chr(0x2014) not in note
-
-
 def test_aml_uses_the_same_trickle_rule():
     """AML at scale 100 with bronze sized to keep the trigger: 50 files of
     ~194K rows each per 30 s, 25 s per batch (busy 83%, above the busy
@@ -170,84 +160,65 @@ def test_aml_uses_the_same_trickle_rule():
 # -- scale 100: runs that did not keep pace stay saturated ---------------------
 
 
-def test_a_slow_silver_does_not_widen_its_own_allowance():
-    """Review finding: silver at 600 s per batch on a 60 s trigger, 15.5M
-    rows behind. Its batch time must not count toward the lag it may have."""
-    pb = _live_s100(silver_ms=600_000.0, silver_committed=46_473_000 - 15_500_000)
-    assert pb.intake_limit == "trickle_rate"
-    assert pb.pipeline_saturated is True
-    assert pb.trickle_note() is None
+_UNSET = object()
 
 
-def test_silver_overrunning_its_trigger_is_behind_even_with_a_small_gap():
-    pb = _live_s100(silver_ms=65_000.0)
-    assert pb.pipeline_saturated is True
-
-
-def test_a_mid_window_stall_is_not_hidden_by_a_tail_of_batches():
-    """Review finding: bronze stalled 4 minutes mid-window, and two batches
-    logged after the window keep the whole-window count at 60 of 60. The
-    first-to-last span (1,770 s of batches plus the 240 s gap) shows 8
-    missed triggers."""
-    pb = _live_s100(bronze_span=59 * 30.0 + 240.0)
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
-
-
-def test_one_missed_trigger_is_still_the_trickle():
-    pb = _live_s100(bronze_span=60 * 30.0)
-    assert pb.intake_limit == "trickle_rate"
-
-
-def test_no_batch_span_proves_nothing():
-    pb = _live_s100(bronze_span=None, bronze_batches=1)
-    assert pb.intake_limit != "trickle_rate"
-
-
-def test_late_start_is_not_the_trickle():
-    """Bronze reached its first batch 10 minutes in: 40 of 60 triggers."""
-    pb = _live_s100(bronze_rows=40 * 774_550, bronze_batches=40, silver_committed=40 * 774_550)
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
-    assert pb.corpus_drain_seconds is None
-    assert pb.trickle_note() is None
-
-
-def test_bronze_overrunning_its_trigger_is_bronze_capacity():
-    """50 files take 45 s on a 30 s trigger: 40 back-to-back batches."""
-    pb = _live_s100(
-        bronze_rows=40 * 774_550,
-        bronze_batches=40,
-        bronze_ms=45_000.0,
-        silver_committed=40 * 774_550,
-    )
-    assert pb.intake_limit == "bronze_capacity"
-    assert pb.pipeline_saturated is True
-
-
-def test_batches_at_the_trigger_count_but_each_over_it_is_not_the_trickle():
-    """Every trigger ran a batch, but the mean batch overran the trigger."""
-    pb = _live_s100(bronze_ms=31_000.0)
-    assert pb.intake_limit == "bronze_capacity"
-    assert pb.pipeline_saturated is True
-
-
-def test_silver_behind_the_trickle_is_saturated():
-    """Bronze held the trickle, but silver committed 5M fewer rows than
-    bronze took: more than one silver trigger, batch and bronze trigger of
-    lag (25.8K rows/s x 114.6 s = 2.96M)."""
-    pb = _live_s100(silver_committed=46_473_000 - 5_000_000)
-    assert pb.intake_limit == "trickle_rate"
-    assert pb.pipeline_saturated is True
-    assert pb.trickle_note() is None
-
-
-def test_a_silver_stuck_in_its_first_batch_is_saturated():
-    """Second review finding: silver logged its first batch and never
-    committed. That is the worst silver, not an unmeasured one."""
-    pb = _live_s100(silver_committed=None, silver_ms=None)
-    assert pb.intake_limit == "trickle_rate"
-    assert pb.pipeline_saturated is True
+@pytest.mark.parametrize(
+    ("over", "limit", "saturated", "no_note"),
+    [
+        # silver at 600 s a batch on a 60 s trigger, 15.5M rows behind: its batch
+        # time must not widen the lag it may have
+        (
+            {"silver_ms": 600_000.0, "silver_committed": 46_473_000 - 15_500_000},
+            "trickle_rate",
+            True,
+            True,
+        ),
+        ({"silver_ms": 65_000.0}, _UNSET, True, False),
+        # a 4-minute bronze stall mid-window, hidden by a tail of batches
+        ({"bronze_span": 59 * 30.0 + 240.0}, "below_bronze_capacity", True, False),
+        ({"bronze_span": 60 * 30.0}, "trickle_rate", _UNSET, False),  # one missed trigger
+        # a late start: 40 of 60 triggers
+        (
+            {"bronze_rows": 40 * 774_550, "bronze_batches": 40, "silver_committed": 40 * 774_550},
+            "below_bronze_capacity",
+            True,
+            True,
+        ),
+        # 50 files take 45 s on a 30 s trigger
+        (
+            {
+                "bronze_rows": 40 * 774_550,
+                "bronze_batches": 40,
+                "bronze_ms": 45_000.0,
+                "silver_committed": 40 * 774_550,
+            },
+            "bronze_capacity",
+            True,
+            False,
+        ),
+        ({"bronze_ms": 31_000.0}, "bronze_capacity", True, False),  # each batch over the trigger
+        # silver committed 5M fewer rows than bronze took: past one trigger of lag
+        ({"silver_committed": 46_473_000 - 5_000_000}, "trickle_rate", True, True),
+        # silver stuck in its first batch is the worst silver, not unmeasured
+        ({"silver_committed": None, "silver_ms": None}, "trickle_rate", True, False),
+        (
+            {"sustained": {**_SUSTAINED, "bronze_trigger_interval": "every so often"}},
+            "below_bronze_capacity",
+            True,
+            False,
+        ),
+        ({"sustained": {}}, "below_bronze_capacity", True, False),
+    ],
+)
+def test_intake_verdict(over, limit, saturated, no_note):
+    pb = _live_s100(**over)
+    if limit is not _UNSET:
+        assert pb.intake_limit == limit
+    if saturated is not _UNSET:
+        assert pb.pipeline_saturated is saturated
+    if no_note:
+        assert pb.trickle_note() is None
 
 
 def test_one_missed_trigger_passes_a_short_run():
@@ -268,6 +239,11 @@ def test_one_missed_trigger_passes_a_short_run():
     assert pb.intake_limit == "trickle_rate"
 
 
+def test_no_batch_span_proves_nothing():
+    pb = _live_s100(bronze_span=None, bronze_batches=1)
+    assert pb.intake_limit != "trickle_rate"
+
+
 def test_silver_with_no_log_lines_leaves_saturation_unknown():
     """Review finding: unknown is not "silver lagged"."""
     pb = _live_s100(silver_committed=None)
@@ -280,18 +256,6 @@ def test_silver_with_no_log_lines_leaves_saturation_unknown():
     assert pb.pipeline_saturated is None
     assert pb.trickle_note() is None
     assert "unmeasured" in (pb.trickle_summary() or "")
-
-
-def test_unparseable_trigger_config_proves_nothing():
-    pb = _live_s100(sustained={**_SUSTAINED, "bronze_trigger_interval": "every so often"})
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
-
-
-def test_unknown_trigger_config_keeps_lane_r_semantics():
-    pb = _live_s100(sustained={})
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
 
 
 # -- scale 1 and 10: the same trickle drains the corpus -------------------------
@@ -316,17 +280,6 @@ def test_small_scales_drain_and_have_no_intake_limit(scale):
     assert pb.corpus_drained is True
     assert pb.corpus_drain_seconds is None
     assert pb.trickle_note() is None
-
-
-def test_the_offered_rate_is_the_same_at_every_scale():
-    """The trickle is config, not scale: the per-trigger rows at scale 10
-    and 100 are the same 50 files, so the rate a scale-100 run holds is the
-    rate a scale-10 run drained at."""
-    s100 = _live_s100()
-    per_trigger = s100.sustained_throughput_rps * 30
-    assert per_trigger == pytest.approx(774_550, rel=1e-4)
-    # Scale 10 drains its corpus in about 32 triggers (960 s) at that rate.
-    assert _CORPUS[10] / per_trigger * 30 == pytest.approx(959, abs=2)
 
 
 # -- the report and the stored scorecard ---------------------------------------

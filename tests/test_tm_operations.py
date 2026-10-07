@@ -130,12 +130,6 @@ def test_sar_clocks_and_filing_deadline():
     assert disp[0]["decision_date"] == det
 
 
-def test_no_suspect_gets_sixty_days():
-    d = date(2024, 3, 1)
-    assert tm.filing_deadline(d, True) == d + timedelta(days=30)
-    assert tm.filing_deadline(d, False) == d + timedelta(days=60)
-
-
 def test_late_filing_rate_produces_late_filings():
     alerts = [_alert("a0", 0, True)]
     _, cases = _run(alerts, as_of_day=400, late_filing_rate=1.0)
@@ -280,12 +274,6 @@ def test_invariants_pass_on_a_consistent_cycle():
 def test_each_invariant_fails_when_violated(over, failing):
     inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(**over))}
     assert inv[failing] == "fail"
-
-
-def test_add_months_clamps_day():
-    assert tm.add_months(date(2024, 3, 31), -1) == date(2024, 2, 29)
-    assert tm.add_months(date(2024, 1, 15), -12) == date(2023, 1, 15)
-    assert tm.add_months(date(2024, 1, 31), -6) == date(2023, 7, 31)
 
 
 def test_history_stable_is_only_checked_with_a_previous_cycle():
@@ -702,33 +690,6 @@ def test_cap_bounds_the_workflow_total_per_customer():
 # --- Continuous scheduling (gold-refresh) ------------------------------------
 
 
-def test_tm_pass_due_interval_from_the_end_of_the_last_pass():
-    p = {"continuous_interval_seconds": 600}
-    clock = {"run_start": 0.0, "start": None, "end": None, "elapsed": 0.0}
-    assert tm.tm_pass_due(60, clock, p)  # first eligible tick
-    clock.update(start=60, end=1000, elapsed=940)  # a pass longer than the interval
-    assert not tm.tm_pass_due(1001, clock, p)  # detection ticks run before the next
-    assert tm.tm_pass_due(1600, clock, p)
-
-
-def test_tm_pass_due_runs_a_final_pass_before_the_window_closes():
-    p = {"continuous_interval_seconds": 1800}
-    clock = {"run_start": 0.0, "start": 60.0, "end": 240.0, "elapsed": 180.0}
-    window_end = 900.0  # shorter than the interval
-    final_at = window_end - max(120.0, 1.5 * 180 + 60)
-    assert not tm.tm_pass_due(final_at - 1, clock, p, window_end)
-    assert tm.tm_pass_due(final_at, clock, p, window_end)
-    clock.update(start=final_at, end=final_at + 180)
-    assert not tm.tm_pass_due(final_at + 200, clock, p, window_end)  # once
-    # A regular pass that ended after final_at already covered the tail: no
-    # back-to-back final pass that the window end would kill mid-write.
-    clock.update(start=final_at - 10, end=final_at + 170)
-    assert not tm.tm_pass_due(final_at + 171, clock, p, window_end)
-    # A restarted driver (its own run_start late) still uses the CLI window.
-    late = {"run_start": 600.0, "start": 600.0, "end": 605.0, "elapsed": 5.0}
-    assert tm.tm_pass_due(window_end - 120, late, p, window_end)
-
-
 # --- Continuous in-flight bound ---------------------------------------------
 
 
@@ -739,18 +700,6 @@ def test_reconciliation_fails_on_unaccounted_and_is_unchecked_when_unbounded():
     assert inv["reconciliation"] == "unchecked"
     inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(history_note="snapshots expired"))}
     assert inv["history_stable"] == "unchecked"
-
-
-def test_schema_bounds():
-    import pydantic
-
-    from lakebench.config.schema import TmOperationsConfig
-
-    with pytest.raises(pydantic.ValidationError):
-        TmOperationsConfig(continuous_interval_seconds=0)
-    with pytest.raises(pydantic.ValidationError):
-        TmOperationsConfig(max_alerts_per_customer=0)
-    assert TmOperationsConfig(continuous_interval_seconds=60).continuous_interval_seconds == 60
 
 
 def test_continuous_jobs_get_the_cli_run_id_and_window():

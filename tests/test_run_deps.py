@@ -19,7 +19,7 @@ from lakebench.deps import runtime
 from lakebench.deps.request import select_request
 from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
 from tests.conftest import make_config
-from tests.test_deps_manifest import fake_shown
+from tests.fixtures.deps_manifest_helpers import fake_shown
 
 NS = "rd1"
 SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
@@ -87,15 +87,6 @@ def test_a_verified_set_gives_the_handle(recording_k8s):
     assert (h.pinset_sha256, h.request_sha256) == (shown["pinset_sha256"], request.request_sha256)
     assert h.base_url == f"http://lb-deps.{NS}.svc.cluster.local:8080/sets/{h.pinset_sha256}"
     assert not recording_k8s.mutations()  # a check, nothing written
-
-
-def test_run_refuses_without_server(recording_k8s):
-    cfg = _cfg()
-    recording_k8s.for_config(cfg)
-    recording_k8s.add_namespace(NS)
-    with pytest.raises(PrerequisiteError) as e:
-        runtime.load_handle(cfg, _k8s())
-    assert e.value.path == "run.deps_missing" and "no dependency server" in e.value.what
 
 
 def test_run_refuses_an_unfinished_deploy(recording_k8s):

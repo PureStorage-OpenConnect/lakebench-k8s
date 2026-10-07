@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import itertools
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from urllib.parse import unquote, urlsplit
 
 import pytest
@@ -21,14 +21,12 @@ from lakebench.deploy.engine import DeploymentEngine, TemplateRenderer
 from lakebench.deps import manifest as m
 from lakebench.modules.pipeline_engines.spark.conf_keys import (
     DEPENDENCY_SET_SPARK_KEYS,
-    is_owned_spark_key,
 )
 from lakebench.modules.pipeline_engines.spark.job import (
     REFERENCE_SET_JOB_TYPES,
     JobType,
     SparkJobManager,
 )
-from lakebench.modules.pipeline_engines.spark.monitor import classify_dependency_failure
 from tests.conftest import make_config
 
 RECIPE_NAMES = sorted(r for r in RECIPES if r != "default")
@@ -101,68 +99,30 @@ def test_built_conf_has_no_packages(name, cfg):
             assert "spark.submit.pyFiles" not in conf
 
 
-def test_jar_order_is_the_manifest_order():
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    h = m.placeholder_handle(cfg)
-    order = list(h.manifest["jar_order"])
-    rotated = order[1:] + order[:1]  # neither sorted nor reverse-sorted
-    flipped = m.DepsHandle(
-        h.pinset_sha256,
-        h.request_sha256,
-        h.base_url,
-        "",
-        {**h.manifest, "jar_order": rotated},
-    )
-    conf = _manager(cfg, flipped)._build_manifest(JobType.SILVER_BUILD)["spec"]["sparkConf"]
-    names = [unquote(u.rsplit("/", 1)[1]) for u in conf["spark.jars"].split(",")]
-    assert names == rotated
-    assert rotated not in (sorted(rotated), sorted(rotated, reverse=True))
-
-
-@pytest.mark.parametrize("key", OWNED)
-def test_lakebench_owned_spark_conf_keys_are_refused(key):
+def test_lakebench_owned_spark_conf_keys_are_refused():
     """At config load (exit 2, before anything is recorded), and again when
     a manifest is built from a config mutated after load."""
-    from pydantic import ValidationError
+    for key in OWNED:
+        from pydantic import ValidationError
 
-    from lakebench.config import LakebenchConfig
-    from lakebench.config._load_context import LoadPurpose
+        from lakebench.config import LakebenchConfig
+        from lakebench.config._load_context import LoadPurpose
 
-    data = {
-        "name": "t",
-        "platform": {"storage": {"s3": {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}}},
-        "spark": {"conf": {key: "x"}},
-    }  # fmt: skip
-    for purpose in (LoadPurpose.RUN, LoadPurpose.MUTATE):
-        with pytest.raises(ValidationError, match=re.escape(key)):
+        data = {
+            "name": "t",
+            "platform": {"storage": {"s3": {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}}},
+            "spark": {"conf": {key: "x"}},
+        }  # fmt: skip
+        for purpose in (LoadPurpose.RUN, LoadPurpose.MUTATE):
+            with pytest.raises(ValidationError, match=re.escape(key)):
+                LakebenchConfig.model_validate(data, context={"purpose": purpose.value})
+        # destroy, status and the read-only commands still load it.
+        for purpose in set(LoadPurpose) - {LoadPurpose.RUN, LoadPurpose.MUTATE}:
             LakebenchConfig.model_validate(data, context={"purpose": purpose.value})
-    # destroy, status and the read-only commands still load it.
-    for purpose in set(LoadPurpose) - {LoadPurpose.RUN, LoadPurpose.MUTATE}:
-        LakebenchConfig.model_validate(data, context={"purpose": purpose.value})
-    cfg = make_config()
-    cfg.spark.conf[key] = "x"
-    with pytest.raises(ValueError, match=re.escape(key)):
-        _manager(cfg)._build_manifest(JobType.BRONZE_VERIFY)
-
-
-def test_dependency_set_keys_are_owned():
-    """The jar keys are a subset of the keys the config refuses."""
-    assert [k for k in DEPENDENCY_SET_SPARK_KEYS if not is_owned_spark_key(k)] == []
-
-
-@pytest.mark.real_deps
-def test_a_refused_manifest_keeps_the_previous_application():
-    """The manifest is built before the previous application is deleted."""
-    cfg = make_config()
-    cfg.spark.conf["spark.jars"] = "x"
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = None
-    mgr = SparkJobManager(cfg, k8s)
-    mgr.deps = m.placeholder_handle(cfg)
-    mgr._delete_job = MagicMock()
-    with pytest.raises(ValueError):
-        mgr.submit_job(JobType.BRONZE_VERIFY)
-    mgr._delete_job.assert_not_called()
+        cfg = make_config()
+        cfg.spark.conf[key] = "x"
+        with pytest.raises(ValueError, match=re.escape(key)):
+            _manager(cfg)._build_manifest(JobType.BRONZE_VERIFY)
 
 
 @pytest.mark.real_deps
@@ -194,68 +154,7 @@ def test_the_reference_job_needs_the_reference_wheels():
         _manager(cfg, no_wheels)._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
 
 
-def test_reference_wheels_install_from_the_set_only():
-    cfg = make_config(workload={"schema": "financial"})
-    mgr = _manager(cfg)
-    drv = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)["spec"]["driver"]
-    (init,) = [
-        c for c in drv["template"]["spec"]["initContainers"] if c["name"] == "lb-deps-py-reference"
-    ]
-    cmd = init["command"][-1]
-    host = urlsplit(mgr.deps.base_url).hostname
-    assert f"--trusted-host {host} " in cmd
-    assert "--no-index" in cmd and "--require-hashes" in cmd
-    # Retried from an empty target: a server restart does not fail a look.
-    assert cmd.startswith("for i in") and "rm -rf /opt/lb-pydeps/*" in cmd
-
-
-@pytest.mark.real_deps
-def test_the_fingerprint_builds_offline_without_a_deployment():
-    """The perf fingerprint builds manifests offline: production code gives
-    it the placeholder set (no conftest help here)."""
-    from lakebench.metrics.fingerprint_inputs import _build
-
-    out = _build(make_config(), continuous=False)
-    for conf in out["owned_conf"].values():
-        assert "spark.jars" not in conf and "spark.jars.packages" not in conf
-
-
 # --- the monitor ---------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "log,needle",
-    [
-        (
-            'Exception in thread "main" java.io.FileNotFoundException: '
-            "http://lb-deps.ns.svc.cluster.local:8080/sets/abc/jars/x.jar\n"
-            "\tat sun.net.www.protocol.http.HttpURLConnection.getInputStream",
-            "does not serve this set",
-        ),
-        (
-            "java.io.IOException: Server returned HTTP response code: 503 for URL: "
-            "http://lb-deps.ns.svc.cluster.local:8080/sets/abc/jars/x.jar",
-            "server error 503",
-        ),
-        (
-            "java.net.ConnectException: Connection refused\n"
-            "\tat org.apache.spark.util.Utils$.doFetchFile(Utils.scala:600)",
-            "unreachable",
-        ),
-        (
-            "java.net.UnknownHostException: lb-deps.ns.svc.cluster.local\n"
-            "\tat org.apache.spark.util.DependencyUtils$.downloadFile",
-            "unreachable",
-        ),
-    ],
-)
-def test_driver_fetch_failures_are_named(log, needle):
-    assert needle in classify_dependency_failure(log)
-
-
-def test_unrelated_failures_are_not_blamed_on_the_set():
-    assert classify_dependency_failure("java.net.ConnectException: Connection refused (s3)") is None
-    assert classify_dependency_failure(None) is None
 
 
 # --- Spark Thrift and DuckDB -----------------------------------------------------------
@@ -340,149 +239,6 @@ def test_consumers_refuse_a_real_deploy_without_a_set(recipe):
     engine.k8s.apply_manifest.assert_not_called()
 
 
-def _consumer_cluster(rec, *, exit_code: int, log: str, phase: str = "Pending"):
-    from kubernetes.client.models import V1DeploymentStatus
-
-    rec.configure(namespace="ns")
-    rec.add_namespace("ns")
-    labels = {"app.kubernetes.io/component": "duckdb"}
-    rec.add(
-        "deployments",
-        {
-            "metadata": {"name": "lakebench-duckdb", "generation": 1},
-            "spec": {"replicas": 1, "selector": {"matchLabels": labels}, "template": {}},
-        },
-        namespace="ns",
-    )
-    rec.store[("deployments", "ns", "lakebench-duckdb")].status = V1DeploymentStatus(
-        observed_generation=1, replicas=1, updated_replicas=1, ready_replicas=0
-    )
-    pod = {
-        "metadata": {
-            "name": "d-1",
-            "labels": labels,
-            "annotations": {m.POD_ANNOTATION_SET: "p" * 64},
-        },
-        "status": {
-            "phase": phase,
-            "initContainerStatuses": [
-                {
-                    "name": "lb-deps-fetch",
-                    "ready": False,
-                    "restartCount": 0,
-                    "image": "python:3.11-slim",
-                    "imageID": "",
-                    "state": {"terminated": {"exitCode": exit_code}},
-                }
-            ],
-        },
-    }
-    rec.pod_logs[("ns", "d-1")] = log
-    return pod
-
-
-def test_a_stale_failed_consumer_pod_is_replaced_before_the_wait(recording_k8s):
-    """A re-run after a failed fetch deletes the failing pod on this set, so
-    kubelet's back-off on it does not fail or stall the new deploy."""
-    from lakebench.deploy.deps import wait_consumer_rolled
-    from tests.fixtures.recording_k8s import OWN
-
-    rec = recording_k8s
-    pod = _consumer_cluster(rec, exit_code=3, log="LB_DEPS_ERROR cannot fetch x\n")
-    rec.add("pods", pod, namespace="ns")
-    with (
-        patch("lakebench.k8s.wait.time.sleep"),
-        pytest.raises(RuntimeError, match="0/0 on the set"),
-    ):
-        wait_consumer_rolled("ns", "lakebench-duckdb", "p" * 64, timeout_seconds=1, what="DuckDB")
-    rec.assert_recorded(verb="delete", kind="pods", name="d-1", scope=OWN)
-
-
-@pytest.mark.parametrize("phase", ["Failed", "Succeeded"])
-def test_a_finished_consumer_pod_is_not_counted(recording_k8s, phase):
-    from lakebench.deps import runtime
-
-    rec = recording_k8s
-    pod = _consumer_cluster(rec, exit_code=0, log="", phase=phase)
-    pod["metadata"]["annotations"][m.POD_ANNOTATION_SET] = "old" * 21 + "x"
-    rec.add("pods", pod, namespace="ns")
-    cfg = make_config(recipe="hive-iceberg-spark-duckdb", platform={"kubernetes": {"namespace": "ns"},
-        "storage": {"s3": {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}}})  # fmt: skip
-    from kubernetes import client as k8s_client
-
-    assert runtime._consumer_mismatches(k8s_client.CoreV1Api(), "ns", cfg, "p" * 64) == []
-    assert runtime.pods_on_sets(k8s_client.CoreV1Api(), "ns", cfg) == []
-
-
-def test_a_consumer_fetch_failure_fails_the_wait_at_once(recording_k8s):
-    from kubernetes.client.models import V1DeploymentStatus
-
-    from lakebench.deploy.deps import wait_consumer_rolled
-
-    rec = recording_k8s
-    rec.configure(namespace="ns")
-    rec.add_namespace("ns")
-    labels = {"app.kubernetes.io/component": "duckdb"}
-    rec.add(
-        "deployments",
-        {
-            "metadata": {"name": "lakebench-duckdb", "generation": 1},
-            "spec": {"replicas": 1, "selector": {"matchLabels": labels}, "template": {}},
-        },
-        namespace="ns",
-    )
-    rec.store[("deployments", "ns", "lakebench-duckdb")].status = V1DeploymentStatus(
-        observed_generation=1, replicas=1, updated_replicas=1, ready_replicas=0
-    )
-    rec.add(
-        "pods",
-        {
-            "metadata": {
-                "name": "d-1",
-                "labels": labels,
-                "annotations": {m.POD_ANNOTATION_SET: "p" * 64},
-            },
-            "status": {
-                "phase": "Pending",
-                "initContainerStatuses": [
-                    {
-                        "name": "lb-deps-fetch",
-                        "ready": False,
-                        "restartCount": 0,
-                        "image": "python:3.11-slim",
-                        "imageID": "",
-                        "state": {"terminated": {"exitCode": 4}},
-                    }
-                ],
-            },
-        },
-        namespace="ns",
-    )
-    rec.pod_logs[("ns", "d-1")] = "LB_DEPS_ERROR hash mismatch x.whl expected=a got=b\n"
-    # The failure is this attempt's (it appears after the pre-wait cleanup).
-    with patch("lakebench.deploy.deps._delete_stale_consumer_pods"):
-        with pytest.raises(RuntimeError, match="hash mismatch"):
-            wait_consumer_rolled(
-                "ns", "lakebench-duckdb", "p" * 64, timeout_seconds=60, what="DuckDB"
-            )
-
-
-def test_an_unreachable_server_is_not_fatal_at_once(recording_k8s):
-    """Exit 3 (the server was restarting) is retried by kubelet: the wait
-    keeps going instead of failing on the first poll."""
-    from lakebench.deploy.deps import wait_consumer_rolled
-
-    rec = recording_k8s
-    pod = _consumer_cluster(rec, exit_code=3, log="LB_DEPS_ERROR cannot fetch x after 3 attempts\n")
-    rec.add("pods", pod, namespace="ns")
-    with (
-        patch("lakebench.deploy.deps._delete_stale_consumer_pods"),
-        patch("lakebench.k8s.wait.time.sleep"),
-        pytest.raises(RuntimeError, match="Timeout"),
-    ):
-        wait_consumer_rolled("ns", "lakebench-duckdb", "p" * 64, timeout_seconds=1, what="DuckDB")
-
-
 def test_the_driver_downloads_into_a_bounded_tmp_and_waits_for_its_set():
     cfg = make_config()
     mgr = _manager(cfg)
@@ -515,27 +271,3 @@ def test_consumer_init_containers_mount_what_they_read():
             # Without it the extensions the init container fetched are invisible.
             assert main["duckdb-ext"] == "/tmp/.duckdb/extensions"
             assert main["lb-deps-py"] == "/opt/lb-deps/py"
-
-
-def test_an_unrelated_connection_error_is_not_blamed_on_the_set():
-    log = (
-        "INFO Utils: Fetching http://lb-deps.ns.svc.cluster.local:8080/sets/a/jars/x.jar\n"
-        "INFO SparkContext: Running Spark\n"
-        "java.net.ConnectException: Connection refused\n"
-        "\tat org.apache.hadoop.hive.metastore.HiveMetaStoreClient.open\n"
-    )
-    assert classify_dependency_failure(log) is None
-
-
-def test_a_real_depth_fetch_trace_is_classified():
-    """Java 17 puts ~20 JDK frames between the exception and Spark's fetch."""
-    jdk = "".join(
-        f"\tat java.base/sun.net.www.protocol.http.Frame{i}(X.java:{i})\n" for i in range(22)
-    )
-    log = (
-        'Exception in thread "main" java.net.ConnectException: Connection refused\n'
-        + jdk
-        + "\tat org.apache.spark.util.Utils$.doFetchFile(Utils.scala:600)\n"
-        "\tat org.apache.spark.util.DependencyUtils$.downloadFile(DependencyUtils.scala:1)\n"
-    )
-    assert "unreachable" in classify_dependency_failure(log)

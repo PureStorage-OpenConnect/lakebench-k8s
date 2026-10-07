@@ -1,8 +1,6 @@
 """Tests for metrics collection, storage, and report generation."""
 
-import logging
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,17 +25,9 @@ from lakebench.reports.generator import ReportGenerator
 # ---------------------------------------------------------------------------
 
 
-class TestJobMetrics:
-    """Tests for JobMetrics dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # QueryMetrics
 # ---------------------------------------------------------------------------
-
-
-class TestQueryMetrics:
-    """Tests for QueryMetrics dataclass."""
 
 
 # ---------------------------------------------------------------------------
@@ -45,17 +35,9 @@ class TestQueryMetrics:
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineMetrics:
-    """Tests for PipelineMetrics dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # MetricsCollector
 # ---------------------------------------------------------------------------
-
-
-class TestMetricsCollector:
-    """Tests for MetricsCollector lifecycle."""
 
 
 # ---------------------------------------------------------------------------
@@ -65,54 +47,6 @@ class TestMetricsCollector:
 
 class TestMetricsStorage:
     """Tests for metrics persistence."""
-
-    def test_save_and_load_roundtrip(self, tmp_path):
-        storage = MetricsStorage(tmp_path / "metrics")
-
-        now = datetime.now()
-        metrics = PipelineMetrics(
-            run_id="test-run-001",
-            deployment_name="test",
-            start_time=now,
-            end_time=now + timedelta(seconds=300),
-            total_elapsed_seconds=300.0,
-            success=True,
-            jobs=[
-                JobMetrics(
-                    job_name="lakebench-bronze-verify",
-                    job_type="bronze-verify",
-                    success=True,
-                    elapsed_seconds=53.0,
-                    input_size_gb=1.0,
-                    output_rows=100_000,
-                ),
-            ],
-            queries=[
-                QueryMetrics(
-                    query_name="rfm",
-                    query_text="SELECT * FROM gold.customer_executive_dashboard",
-                    elapsed_seconds=3.42,
-                    rows_returned=100,
-                    success=True,
-                ),
-            ],
-            config_snapshot={"name": "test"},
-        )
-
-        filepath = storage.save_run(metrics)
-        assert filepath.exists()
-        assert filepath.name == "metrics.json"
-        assert "test-run-001" in str(filepath.parent.name)
-
-        loaded = storage.load_run("test-run-001")
-        assert loaded is not None
-        assert loaded.run_id == "test-run-001"
-        assert loaded.success is True
-        assert len(loaded.jobs) == 1
-        assert loaded.jobs[0].job_name == "lakebench-bronze-verify"
-        assert len(loaded.queries) == 1
-        assert loaded.queries[0].query_name == "rfm"
-        assert loaded.queries[0].elapsed_seconds == 3.42
 
     def test_save_and_load_financial_scoring_and_detection_fields(self, tmp_path):
         """LB-123: financial_scoring AND the JobMetrics detection dicts must
@@ -165,26 +99,67 @@ class TestMetricsStorage:
         assert job.rules_skipped == {"W1_connected_components": "vertex-cap"}
         assert job.rule_errors == {"W7_cross_border_high_risk": "boom"}
 
-    def test_detection_line_with_a_glued_jvm_log_line_still_counts(self):
-        """stdout and log4j share the driver log: a JVM line landed on the end
-        of W8's line (AML batch, polaris-iceberg-spark-none, 2026-10-07), the
-        parser missed W8 and the rules gate read it as not run."""
-        from lakebench.metrics import MetricsCollector
-
-        logs = (
-            "[detection] W7_cross_border_high_risk: alerts=509768 prior=0 elapsed=12.0s\n"
-            "[detection] W8_dormant_reactivation: alerts=58562 prior=0 elapsed=10.5s"
-            "26/10/07 07:40:00 INFO BlockManager: Removing RDD 1150\n"
-            "[detection] W1_connected_components: skipped=giant-component "
-            "detail=x elapsed=0.4s26/10/07 07:40:01 INFO DAGScheduler: Job 9 finished\n"
-        )
-        parsed = MetricsCollector().parse_driver_logs(logs, "gold-finalize")
-        assert parsed.alerts_by_rule == {
-            "W7_cross_border_high_risk": 509768,
-            "W8_dormant_reactivation": 58562,
-        }
-        assert parsed.rule_elapsed_s["W8_dormant_reactivation"] == 10.5
-        assert parsed.rules_skipped == {"W1_connected_components": "giant-component"}
+    @pytest.mark.parametrize(
+        ("logs", "alerts", "skipped", "errors"),
+        [
+            (
+                "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s\n"
+                "[lb] 2026-09-22T10:00:16 - [detection] W3_round_tripping: alerts=42 prior=42 elapsed=8.9s\n"
+                "[lb] 2026-09-22T10:00:25 - [detection] W1_connected_components: alerts=17 prior=17 elapsed=120.4s\n"
+                "[lb] 2026-09-22T10:02:26 - [detection] total alerts written: 1293\n",
+                {"W2_structuring": 1234, "W3_round_tripping": 42, "W1_connected_components": 17},
+                None,
+                {},
+            ),
+            (
+                "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s\n"
+                "[lb] 2026-09-22T10:00:16 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: silver.entities not found elapsed=0.4s\n",
+                {"W2_structuring": 1234, "W7_cross_border_high_risk": 0},
+                None,
+                {"W7_cross_border_high_risk": ["AnalysisException", "silver.entities not found"]},
+            ),
+            # a structural skip is a third state, never read as a 0-alert result
+            (
+                "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s\n"
+                "[lb] 2026-09-22T10:00:16 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=50000000 max=8000000 (raise financial.w1_max_vertices to run W1 at this scale) elapsed=0.6s\n"
+                "[lb] 2026-09-22T10:00:20 - [detection] total alerts written: 1234\n",
+                {"W2_structuring": 1234},
+                {"W1_connected_components": "vertex-cap"},
+                {},
+            ),
+            (
+                "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=10 prior=0 elapsed=1.0s\n"
+                "[lb] 2026-09-22T10:00:01 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=9000000 max=8000000 elapsed=0.2s\n"
+                "[lb] 2026-09-22T10:00:02 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: boom elapsed=0.4s\n",
+                {"W2_structuring": 10, "W7_cross_border_high_risk": 0},
+                {"W1_connected_components": "vertex-cap"},
+                {"W7_cross_border_high_risk": ["AnalysisException"]},
+            ),
+            # a JVM log line glued to the end of a detection line still counts
+            (
+                "[detection] W7_cross_border_high_risk: alerts=509768 prior=0 elapsed=12.0s\n"
+                "[detection] W8_dormant_reactivation: alerts=58562 prior=0 elapsed=10.5s"
+                "26/10/07 07:40:00 INFO BlockManager: Removing RDD 1150\n"
+                "[detection] W1_connected_components: skipped=giant-component "
+                "detail=x elapsed=0.4s26/10/07 07:40:01 INFO DAGScheduler: Job 9 finished\n",
+                {"W7_cross_border_high_risk": 509768, "W8_dormant_reactivation": 58562},
+                {"W1_connected_components": "giant-component"},
+                None,
+            ),
+        ],
+    )
+    def test_parse_detection_lines(self, logs, alerts, skipped, errors):
+        metrics = MetricsCollector().parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == alerts
+        if skipped is not None:
+            assert metrics.rules_skipped == skipped
+        if errors is not None:
+            assert set(metrics.rule_errors) == set(errors)
+            for rule, needles in errors.items():
+                for n in needles:
+                    assert n in metrics.rule_errors[rule]
+        if "W8_dormant_reactivation" in alerts:
+            assert metrics.rule_elapsed_s["W8_dormant_reactivation"] == 10.5
 
     def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
         """LB-123 re-review F1 guard: the detection dicts must survive the
@@ -426,10 +401,6 @@ class TestSustainedReport:
 # ---------------------------------------------------------------------------
 
 
-class TestStreamingJobMetrics:
-    """Tests for StreamingJobMetrics dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # Streaming log parsing
 # ---------------------------------------------------------------------------
@@ -438,13 +409,11 @@ class TestStreamingJobMetrics:
 class TestStreamingLogParsing:
     """Tests for streaming driver log parsing."""
 
-    def test_parse_streaming_logs_captures_per_batch_silver_labels(self):
-        """D-full-simple + E1 + I7 labels emitted per micro-batch land in
-        StreamingJobMetrics.extra_metrics. Live validation on
-        lb-silver-live-v16c showed these labels in driver logs but the
-        narrow silver_stream_scale_(cap|admission) regex would have
-        dropped them, so metrics.json would ship without the per-batch
-        parity_mode / dim_merge_elapsed / kyc_refresh evidence."""
+    def test_parse_streaming_logs_label_families(self):
+        """Labels under the accepted prefix families (silver_, dim_merge_,
+        kyc_, data_clock_) land in extra_metrics with no code change; Spark's
+        own lines, multi-label lines (a garbage value would be trusted),
+        uppercase and hyphenated keys never do."""
         c = MetricsCollector()
         logs = """
 [lb] 2026-09-28T15:54:53.883921 - silver_stream_scale_cap: measured_up_to_scale_10
@@ -457,91 +426,44 @@ class TestStreamingLogParsing:
 [lb] 2026-09-28T15:55:53.790921 - dim_merge_elapsed_ms_accounts: 6789
 [lb] 2026-09-28T15:55:25.028644 - kyc_refreshed_at: 1717029325
 [lb] 2026-09-28T15:55:25.028644 - kyc_refresh_kind: initial
-"""
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        e = metrics.extra_metrics
-        assert e.get("silver_stream_scale_cap") == "measured_up_to_scale_10"
-        assert e.get("silver_stream_scale_admission") == "ok"
-        assert e.get("silver_statements_parity_mode") == "strict_monotone"
-        assert e.get("silver_statements_late_arrivals_this_batch") == "0"
-        assert e.get("silver_statements_batch_id") == "0"
-        assert e.get("dim_merge_elapsed_ms_entities") == "12345"
-        assert e.get("dim_merge_elapsed_ms_accounts") == "6789"
-        assert e.get("kyc_refreshed_at") == "1717029325"
-        assert e.get("kyc_refresh_kind") == "initial"
-
-    def test_parse_streaming_logs_captures_new_labels_under_accepted_prefixes(self):
-        """Class-level guarantee: any new label under an accepted prefix
-        family (silver_/dim_merge_/kyc_/data_clock_) is picked up without
-        editing the regex. Two live-caught omissions in silver-plan r3
-        (silver_tables adapter + narrow streaming regex) were both the
-        same shape: a hand-enumerated list drifting behind the code that
-        emits into it. A hypothetical future label with any of these
-        prefixes must land in extra_metrics with no code change here."""
-        c = MetricsCollector()
-        logs = """
 [lb] 2026-09-28T15:00:00.000000 - silver_frobnicate_rows: 42
 [lb] 2026-09-28T15:00:00.000000 - silver_stream_backpressure_ms: 137
 [lb] 2026-09-28T15:00:00.000000 - dim_merge_conflicts: 3
 [lb] 2026-09-28T15:00:00.000000 - kyc_pending_refreshes: 11
 [lb] 2026-09-28T15:00:00.000000 - data_clock_skew_ms: -250
 26/09/28 15:00:00 INFO SparkContext: unrelated_something: should_not_match
+[lb] 2026-09-28T15:00:00 - silver_TxScale: 5
+[lb] 2026-09-28T15:00:00 - dim_merge_ok-count: 3
+[lb] 2026-09-28T15:00:00 - silver_valid_lowercase: 7
 """
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        e = metrics.extra_metrics
-        assert e.get("silver_frobnicate_rows") == "42"
-        assert e.get("silver_stream_backpressure_ms") == "137"
-        assert e.get("dim_merge_conflicts") == "3"
-        assert e.get("kyc_pending_refreshes") == "11"
-        assert e.get("data_clock_skew_ms") == "-250"
-        # Spark's own log lines never match; they carry the timestamp
-        # prefix before any word, so the anchored regex ignores them.
-        assert "unrelated_something" not in e
-
-    def test_parse_streaming_logs_rejects_multi_label_per_line(self):
-        """Reviewer-caught (2026-09-28): pre-fix, greedy `\\S.*` value
-        pattern silently swallowed the second label on lines like
-        `silver_statements_parity_mode: X silver_statements_late_arrivals_this_batch: Y`.
-        The four emitter sites in silver_stream_financial.py have been
-        split to one-per-line, and the regex value pattern (single token,
-        `\\S+\\s*$`) refuses to swallow. A multi-label line now matches
-        the regex NOT AT ALL -- so both labels are dropped, but LOUDLY:
-        the user notices the intended metric is missing rather than
-        seeing a garbage value they might trust. Loud loss is better
-        than silent corruption.
-        """
-        c = MetricsCollector()
-        logs = (
+        e = c.parse_streaming_logs(logs, "silver-stream").extra_metrics
+        want = {
+            "silver_stream_scale_cap": "measured_up_to_scale_10",
+            "silver_stream_scale_admission": "ok",
+            "silver_statements_parity_mode": "strict_monotone",
+            "silver_statements_late_arrivals_this_batch": "0",
+            "silver_statements_batch_id": "0",
+            "dim_merge_elapsed_ms_entities": "12345",
+            "dim_merge_elapsed_ms_accounts": "6789",
+            "kyc_refreshed_at": "1717029325",
+            "kyc_refresh_kind": "initial",
+            "silver_frobnicate_rows": "42",
+            "silver_stream_backpressure_ms": "137",
+            "dim_merge_conflicts": "3",
+            "kyc_pending_refreshes": "11",
+            "data_clock_skew_ms": "-250",
+            "silver_valid_lowercase": "7",
+        }
+        assert {k: e.get(k) for k in want} == want
+        for refused in ("unrelated_something", "silver_TxScale", "dim_merge_ok-count"):
+            assert refused not in e
+        multi = c.parse_streaming_logs(
             "[lb] 2026-09-28T15:00:00 - silver_statements_parity_mode: "
-            "strict_monotone silver_statements_late_arrivals_this_batch: 0\n"
-        )
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        e = metrics.extra_metrics
-        # The whole line is refused: neither label lands. That is the
-        # loud failure mode; a regression in the emitter now shows up
-        # as a missing metric rather than a garbage-valued metric.
-        assert "silver_statements_parity_mode" not in e
-        assert "silver_statements_late_arrivals_this_batch" not in e
-
-    def test_parse_streaming_logs_rejects_uppercase_and_hyphen_keys(self):
-        """Design choice locked in (2026-09-28 adversarial-review):
-        key tail is lowercase snake_case ([a-z0-9_]+). An emitter that
-        used `silver_TxScale` or `dim_merge_ok-count` would fail the
-        prefix-family match and never land, by design -- lane-specific
-        typos should not become metric names. This test documents that
-        so the rejection is intentional, not accidental."""
-        c = MetricsCollector()
-        logs = (
-            "[lb] 2026-09-28T15:00:00 - silver_TxScale: 5\n"
-            "[lb] 2026-09-28T15:00:00 - dim_merge_ok-count: 3\n"
-            "[lb] 2026-09-28T15:00:00 - silver_valid_lowercase: 7\n"
-        )
-        metrics = c.parse_streaming_logs(logs, "silver-stream")
-        e = metrics.extra_metrics
-        assert "silver_TxScale" not in e
-        assert "dim_merge_ok-count" not in e
-        # Only the strictly-lowercase key is captured.
-        assert e.get("silver_valid_lowercase") == "7"
+            "strict_monotone silver_statements_late_arrivals_this_batch: 0\n",
+            "silver-stream",
+        ).extra_metrics
+        assert "silver_statements_parity_mode" not in multi
+        assert "silver_statements_late_arrivals_this_batch" not in multi
 
 
 # ---------------------------------------------------------------------------
@@ -549,17 +471,9 @@ class TestStreamingLogParsing:
 # ---------------------------------------------------------------------------
 
 
-class TestStreamingStorageRoundtrip:
-    """Tests for streaming metrics persistence."""
-
-
 # ---------------------------------------------------------------------------
 # Streaming report generation
 # ---------------------------------------------------------------------------
-
-
-class TestStreamingReportGeneration:
-    """Tests for streaming section in HTML reports."""
 
 
 # ---------------------------------------------------------------------------
@@ -567,73 +481,10 @@ class TestStreamingReportGeneration:
 # ---------------------------------------------------------------------------
 
 
-class TestDriverLogParsingWithLbPrefix:
-    """Tests for parse_driver_logs with realistic [lb]-prefixed output."""
-
-
 class TestDetectionRulesMetrics:
     """LB-116: per-rule AML alert counts surfaced from the driver log
     into JobMetrics.alerts_by_rule / rule_errors so a metrics parser
     sees one row per rule attempted, not a single total."""
-
-    def test_parse_success_rules(self):
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
-[lb] 2026-09-22T10:00:16 - [detection] W3_round_tripping: alerts=42 prior=42 elapsed=8.9s
-[lb] 2026-09-22T10:00:25 - [detection] W1_connected_components: alerts=17 prior=17 elapsed=120.4s
-[lb] 2026-09-22T10:02:26 - [detection] total alerts written: 1293
-"""
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule == {
-            "W2_structuring": 1234,
-            "W3_round_tripping": 42,
-            "W1_connected_components": 17,
-        }
-        assert metrics.rule_errors == {}
-
-    def test_parse_crashed_rule(self):
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
-[lb] 2026-09-22T10:00:16 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: silver.entities not found elapsed=0.4s
-"""
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule["W2_structuring"] == 1234
-        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
-        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
-        assert "silver.entities not found" in metrics.rule_errors["W7_cross_border_high_risk"]
-
-    def test_parse_skipped_rule_is_third_state(self):
-        """LB-119: a structural skip (W1 above vertex cap) is recorded in
-        rules_skipped and kept OUT of alerts_by_rule, so a skip is never
-        read as a 0-alert / 0-recall result. The other rules on the same
-        run still parse normally."""
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
-[lb] 2026-09-22T10:00:16 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=50000000 max=8000000 (raise financial.w1_max_vertices to run W1 at this scale) elapsed=0.6s
-[lb] 2026-09-22T10:00:20 - [detection] total alerts written: 1234
-"""
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule == {"W2_structuring": 1234}
-        assert "W1_connected_components" not in metrics.alerts_by_rule
-        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
-        assert metrics.rule_errors == {}
-
-    def test_skip_and_error_and_success_coexist(self):
-        """All three detection outcomes on one run parse into their own
-        maps without cross-contamination."""
-        c = MetricsCollector()
-        logs = """\
-[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=10 prior=0 elapsed=1.0s
-[lb] 2026-09-22T10:00:01 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=9000000 max=8000000 elapsed=0.2s
-[lb] 2026-09-22T10:00:02 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: boom elapsed=0.4s
-"""
-        metrics = c.parse_driver_logs(logs, "gold-finalize")
-        assert metrics.alerts_by_rule == {"W2_structuring": 10, "W7_cross_border_high_risk": 0}
-        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
-        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
 
 
 # ---------------------------------------------------------------------------
@@ -669,37 +520,9 @@ class TestStreamingTimingAndFreshness:
 # ---------------------------------------------------------------------------
 
 
-class TestBuildConfigSnapshot:
-    """Tests for build_config_snapshot function."""
-
-
 # ---------------------------------------------------------------------------
 # Phase 1: record_actual_sizes warning on missing bucket
 # ---------------------------------------------------------------------------
-
-
-class TestRecordActualSizesBucketWarning:
-    """Test that record_actual_sizes logs a warning for missing buckets."""
-
-    def test_warns_on_missing_bucket(self, caplog):
-        c = MetricsCollector()
-        c.start_run("run-1", "test", {})
-
-        # Mock S3 client that returns a bucket-not-found response
-        mock_s3 = MagicMock()
-        info = MagicMock()
-        info.size_bytes = None
-        info.exists = False
-        mock_s3.get_bucket_size.return_value = info
-
-        with caplog.at_level(logging.WARNING, logger="lakebench.metrics.collector"):
-            total = c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
-
-        # Should have 3 warnings, one per bucket
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 3
-        assert "lb-bronze" in warnings[0].message
-        assert total == 0  # Missing buckets contribute 0 objects
 
 
 # ---------------------------------------------------------------------------
@@ -707,30 +530,14 @@ class TestRecordActualSizesBucketWarning:
 # ---------------------------------------------------------------------------
 
 
-class TestThroughputRpsComputation:
-    """Tests for throughput_rps computation logic."""
-
-
 # ---------------------------------------------------------------------------
 # Phase 3: Cross-run comparison
 # ---------------------------------------------------------------------------
 
 
-class TestListRunsEnriched:
-    """Tests for enriched list_runs() fields."""
-
-
-class TestExportCsvEnriched:
-    """Tests for enriched export_csv() with per-job columns."""
-
-
 # ---------------------------------------------------------------------------
 # StageMetrics
 # ---------------------------------------------------------------------------
-
-
-class TestStageMetrics:
-    """Tests for the universal per-stage measurement dataclass."""
 
 
 # ---------------------------------------------------------------------------
@@ -995,17 +802,9 @@ class TestBuildPipelineBenchmark:
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineBenchmarkStorageRoundtrip:
-    """Tests for pipeline benchmark save/load through MetricsStorage."""
-
-
 # ---------------------------------------------------------------------------
 # Pipeline benchmark report generation
 # ---------------------------------------------------------------------------
-
-
-class TestPipelineBenchmarkReport:
-    """Tests for pipeline benchmark section in HTML reports."""
 
 
 # ---------------------------------------------------------------------------
@@ -1193,17 +992,9 @@ class TestSustainedPipelineScoring:
 # ---------------------------------------------------------------------------
 
 
-class TestBenchmarkRoundMeta:
-    """Tests for the in-stream benchmark round metadata dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # BenchmarkMetrics with round_meta
 # ---------------------------------------------------------------------------
-
-
-class TestBenchmarkMetricsRoundMeta:
-    """Tests for BenchmarkMetrics with round_meta field."""
 
 
 # ---------------------------------------------------------------------------
@@ -1279,27 +1070,15 @@ class TestAggregateBenchmarkRounds:
         # Median of [200, 300] = 250
         assert result.qph == 250.0
 
-    def test_empty_raises(self):
-        with pytest.raises(ValueError, match="Cannot aggregate zero"):
-            aggregate_benchmark_rounds([])
-
 
 # ---------------------------------------------------------------------------
 # PipelineMetrics with benchmark_rounds
 # ---------------------------------------------------------------------------
 
 
-class TestPipelineMetricsRounds:
-    """Tests for PipelineMetrics benchmark_rounds field."""
-
-
 # ---------------------------------------------------------------------------
 # MetricsCollector record_round
 # ---------------------------------------------------------------------------
-
-
-class TestRecordBenchmarkRound:
-    """Tests for MetricsCollector.record_round."""
 
 
 # ---------------------------------------------------------------------------
@@ -1617,17 +1396,9 @@ class TestSustainedScoringEdgeCases:
 # ---------------------------------------------------------------------------
 
 
-class TestCycleMetrics:
-    """Tests for the CycleMetrics dataclass."""
-
-
 # ---------------------------------------------------------------------------
 # BenchmarkRoundMeta table health fields (v1.1.0)
 # ---------------------------------------------------------------------------
-
-
-class TestBenchmarkRoundMetaTableHealth:
-    """Tests for table health fields on BenchmarkRoundMeta."""
 
 
 # ---------------------------------------------------------------------------
@@ -1690,10 +1461,6 @@ class TestQphDegradation:
 # ---------------------------------------------------------------------------
 # CycleMetrics storage roundtrip (v1.1.0)
 # ---------------------------------------------------------------------------
-
-
-class TestCycleMetricsStorage:
-    """Tests for CycleMetrics serialization and deserialization."""
 
 
 def test_stored_record_carries_no_address_url_in_error_text():

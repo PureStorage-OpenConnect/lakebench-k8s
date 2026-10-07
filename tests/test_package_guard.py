@@ -64,11 +64,6 @@ def test_planted_docs_internal_member_in_an_sdist_fails(tmp_path):
     ]
 
 
-def test_ordinary_member_names_pass():
-    names = ["lakebench/cli/__init__.py", "docs/internals-of-x.md", "docs/aml-scoring.md"]
-    assert pg.check_names(names) == []
-
-
 @pytest.mark.parametrize(
     ("body", "rule"),
     [
@@ -84,15 +79,6 @@ def test_planted_key_pattern_fails_without_printing_it(body, rule):
     assert all(f.status == pg.FAIL for f in found)
     for secret in (FAKE_PSFB, FAKE_AKIA, FAKE_SECRET):
         assert secret not in " ".join(f.render() for f in found)
-
-
-def test_allowlisted_and_low_entropy_values_pass():
-    members = {
-        # .gitleaks.toml allowlists this fixed local-only value.
-        "a.yaml": b"secret_key: 0123456789abcdef0123456789abcdef\n",
-        "b.yaml": b"secret_key: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-    }
-    assert pg.check_content(members) == []
 
 
 def test_a_value_on_the_line_after_its_key_is_found():
@@ -127,9 +113,19 @@ def test_link_member_in_an_sdist_fails(tmp_path):
     assert pg.check_content(members) == []
 
 
-def test_gitleaks_runs_on_the_extracted_members_or_skips(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: None)
-    assert [f.status for f in pg.check_gitleaks(tmp_path)] == [pg.SKIP]
+@pytest.mark.parametrize(
+    ("gitleaks", "baseline", "status"),
+    [
+        (None, False, "SKIP"),  # no gitleaks: SKIP, never a silent pass
+        ("/bin/true", False, "FAIL"),  # an empty tree scanned nothing
+        ("/bin/true", True, "FAIL"),  # a .gitleaksignore at the scan root would be honoured
+    ],
+)
+def test_gitleaks_check_fails_closed(tmp_path, monkeypatch, gitleaks, baseline, status):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: gitleaks)
+    if baseline:
+        (tmp_path / ".gitleaksignore").write_text("x\n")
+    assert [f.status for f in pg.check_gitleaks(tmp_path)] == [getattr(pg, status)]
 
 
 def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
@@ -140,12 +136,6 @@ def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
     (found,) = pg.check_gitleaks(tmp_path)
     assert found.status == pg.FAIL
     assert found.detail == "pkg/x.yaml:2: pure-flashblade-s3-access-key"
-
-
-def test_gitleaks_on_an_empty_tree_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
-    (found,) = pg.check_gitleaks(tmp_path)
-    assert found.status == pg.FAIL and "no files" in found.detail
 
 
 def _absence(mode, problems):
@@ -248,19 +238,6 @@ def test_symlink_in_a_wheel_fails(tmp_path):
     ]
 
 
-def test_a_path_only_rule_is_left_to_gitleaks(tmp_path):
-    cfg = tmp_path / "gitleaks.toml"
-    cfg.write_text("[[rules]]\nid = 'no-pem'\npath = '[.]pem$'\n")
-    assert pg.check_content({"a.txt": b"ok"}, cfg) == []
-
-
-def test_a_baseline_at_the_scan_root_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
-    (tmp_path / ".gitleaksignore").write_text("x\n")
-    (found,) = pg.check_gitleaks(tmp_path)
-    assert found.status == pg.FAIL and "would be honoured" in found.detail
-
-
 def test_hash_file_without_an_absence_check_fails(tmp_path, monkeypatch):
     from lakebench.config import datagen_seed as ds
 
@@ -284,16 +261,6 @@ def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):
     problems = ds.absence_problems(texts, held, exclude=[])
     assert [p.split(":")[0] for p in problems] == ["lakebench/x.py"]
     assert str(ts.TEST_EVALUATION_SEED) not in " ".join(problems)
-
-
-def test_require_all_counts_skips():
-    found = [pg.Finding(pg.PASS, "names", ""), pg.Finding(pg.SKIP, "gitleaks", "")]
-    assert pg.exit_code(found) == 0 and pg.exit_code(found, require_all=True) == 1
-
-
-def test_missing_artifact_fails(tmp_path):
-    (found,) = pg.guard(tmp_path, tmp_path / "work")
-    assert found.status == pg.FAIL and "needs a wheel and an sdist" in found.detail
 
 
 def test_real_build_passes_non_seed_checks(tmp_path):

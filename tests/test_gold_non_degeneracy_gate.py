@@ -18,18 +18,13 @@ def common(load_script):
     return load_script("common")
 
 
-def test_match_returns_none(common):
-    assert common.gold_date_coverage_problem(366, 366) is None
-
-
-def test_gold_short_of_silver_dates_is_a_problem(common):
-    msg = common.gold_date_coverage_problem(300, 366)
-    assert msg and "300" in msg and "366" in msg
-
-
-def test_gold_exceeds_silver_dates_is_a_problem(common):
-    # Duplicated dates: more gold rows than distinct silver dates.
-    assert common.gold_date_coverage_problem(400, 366) is not None
+@pytest.mark.parametrize(
+    ("gold", "silver", "problem"),
+    [(366, 366, False), (300, 366, True), (400, 366, True)],
+)
+def test_gold_date_coverage(common, gold, silver, problem):
+    """Gold must cover every silver date once: short or duplicated is a problem."""
+    assert (common.gold_date_coverage_problem(gold, silver) is not None) is problem
 
 
 @pytest.mark.parametrize("script", ["gold_finalize.py", "gold_finalize_delta.py"])

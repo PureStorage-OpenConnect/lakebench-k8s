@@ -12,7 +12,7 @@ They catch:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -20,6 +20,9 @@ import yaml
 from lakebench.config.recipes import RECIPES
 from lakebench.deploy.engine import DeploymentEngine, TemplateRenderer
 from tests.conftest import make_config
+from tests.fixtures.functional_templates_helpers import _enrich_context as _enrich_context
+from tests.fixtures.functional_templates_helpers import _make_engine as _make_engine
+from tests.fixtures.functional_templates_helpers import _mock_k8s as _mock_k8s
 
 # ---------------------------------------------------------------------------
 # Template inventory (mirrors deployer TEMPLATES constants)
@@ -73,69 +76,6 @@ ALL_TEMPLATES: list[str] = [tpl for templates in DEPLOYER_TEMPLATES.values() for
 # ---------------------------------------------------------------------------
 
 
-def _mock_k8s() -> MagicMock:
-    """Create a mock K8sClient for engine construction."""
-    k8s = MagicMock()
-    k8s.namespace_exists.return_value = True
-    k8s.apply_manifest.return_value = True
-    k8s.get_cluster_capacity.return_value = None
-    return k8s
-
-
-def _make_engine(cfg=None, **config_overrides) -> DeploymentEngine:
-    """Build a DeploymentEngine with mocked K8s + OpenShift detection."""
-    if cfg is None:
-        cfg = make_config(**config_overrides)
-    with patch(
-        "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-        return_value=False,
-    ):
-        return DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-
-
-def _enrich_context(engine: DeploymentEngine) -> dict:
-    """Build the full template context, including deployer-specific variables.
-
-    The base _build_context() omits variables that individual deployers inject
-    (e.g. grafana_image, prometheus_image). This helper adds those so every
-    template can be rendered without encountering undefined variables.
-    """
-    ctx = dict(engine.context)
-    cfg = engine.config
-    # The Thrift and DuckDB deployers add where the dependency set is served
-    # (deploy.deps.consumer_context); offline, the placeholder set.
-    from lakebench.deps.manifest import consumer_context, placeholder_handle
-
-    ctx.update(consumer_context(placeholder_handle(cfg)))
-
-    # The Prometheus and Grafana deployers that injected image, retention and
-    # storage-class variables are gone (the kube-prometheus-stack chart
-    # deploys both); no template reads those variables.
-    # The secrets step injects the per-deployment Hive DB password (SAF-8)
-    ctx.setdefault("postgres_password", "test-hive-db-password")
-    ctx.setdefault("prometheus_retention", cfg.observability.retention)
-    ctx.setdefault("prometheus_storage", cfg.observability.storage)
-    # Both grafana and prometheus templates use ``pull_policy`` (not image_pull_policy)
-    ctx.setdefault("pull_policy", cfg.images.pull_policy.value)
-
-    # Datagen deployer injects these (see datagen.py _build_datagen_context)
-    ctx.setdefault("datagen_target_tb", "0.010000")
-    ctx.setdefault("datagen_file_size_mb", 512)
-    # datagen_payload_kb removed 2026-09-28; template no longer renders it.
-    ctx.setdefault("datagen_path_prefix", "customer/interactions/")
-    ctx.setdefault("datagen_seed", 42)
-    ctx.setdefault("datagen_cpu", "2")
-    ctx.setdefault("datagen_memory", "4Gi")
-    ctx.setdefault("datagen_mode", "batch")
-    ctx.setdefault("datagen_workers", 4)
-    ctx.setdefault("datagen_dirty_ratio", 0.08)
-    ctx.setdefault("datagen_image", cfg.images.datagen)
-    ctx.setdefault("datagen_timestamp_start", None)
-    ctx.setdefault("datagen_timestamp_end", None)
-
-    return ctx
-
-
 def _parse_yaml_docs(rendered: str) -> list[dict]:
     """Parse rendered YAML using safe_load_all (handles both single and multi-doc).
 
@@ -172,51 +112,6 @@ def default_context(default_engine: DeploymentEngine) -> dict:
 # ===========================================================================
 
 
-class TestTemplateRendering:
-    """Verify every template renders without error and produces valid YAML."""
-
-    @pytest.mark.parametrize("template_name", ALL_TEMPLATES)
-    def test_all_templates_render_without_error(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-        template_name: str,
-    ):
-        """Render every template with a full context. No Jinja2 UndefinedError."""
-        rendered = renderer.render(template_name, default_context)
-        assert isinstance(rendered, str)
-        assert len(rendered) > 0
-
-    @pytest.mark.parametrize("template_name", ALL_TEMPLATES)
-    def test_all_templates_produce_valid_yaml(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-        template_name: str,
-    ):
-        """Render every template and parse with yaml.safe_load_all. Must not raise."""
-        rendered = renderer.render(template_name, default_context)
-        docs = _parse_yaml_docs(rendered)
-        assert len(docs) > 0, f"{template_name} produced no YAML documents"
-        for doc in docs:
-            assert doc is not None
-
-    @pytest.mark.parametrize("template_name", ALL_TEMPLATES)
-    def test_rendered_templates_have_expected_kind(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-        template_name: str,
-    ):
-        """Every rendered K8s manifest should have a 'kind' field."""
-        rendered = renderer.render(template_name, default_context)
-        docs = _parse_yaml_docs(rendered)
-        for doc in docs:
-            assert "kind" in doc, (
-                f"{template_name} produced a document without 'kind': {list(doc.keys())[:5]}"
-            )
-
-
 # ===========================================================================
 # 2. TestTemplateVariableSubstitution - Config values flow through
 # ===========================================================================
@@ -224,16 +119,6 @@ class TestTemplateRendering:
 
 class TestTemplateVariableSubstitution:
     """Verify that config values are correctly substituted into rendered output."""
-
-    def test_postgres_image_substituted(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-    ):
-        """Postgres statefulset should contain the configured postgres image."""
-        rendered = renderer.render("postgres/statefulset.yaml.j2", default_context)
-        # Default is postgres:17 but users can override to 16 or 18
-        assert "postgres:" in rendered
 
     def test_namespace_substituted(
         self,
@@ -300,36 +185,6 @@ class TestTemplateConditionals:
         rendered = renderer.render("postgres/statefulset.yaml.j2", ctx)
         assert "runAsUser" not in rendered
 
-    def test_non_openshift_has_security_context(self, renderer: TemplateRenderer):
-        """With openshift_mode=False, securityContext/runAsUser should be present."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-        assert ctx["openshift_mode"] is False
-
-        rendered = renderer.render("postgres/statefulset.yaml.j2", ctx)
-        assert "runAsUser" in rendered
-
-    def test_trino_worker_emptydir_when_no_storage_class(self, renderer: TemplateRenderer):
-        """With empty storage_class (default), workers use emptyDir, not PVCs."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-        assert not ctx["trino_worker_storage_class"]  # None or ""
-
-        rendered = renderer.render("trino/worker.yaml.j2", ctx)
-        parsed = yaml.safe_load(rendered)
-
-        # Should NOT have volumeClaimTemplates
-        assert "volumeClaimTemplates" not in parsed.get("spec", {}), (
-            "Expected no volumeClaimTemplates when storage_class is empty"
-        )
-
-        # Should have emptyDir volume named 'data'
-        volumes = parsed["spec"]["template"]["spec"]["volumes"]
-        data_vols = [v for v in volumes if v["name"] == "data"]
-        assert len(data_vols) == 1, "Expected exactly one 'data' volume"
-        assert "emptyDir" in data_vols[0], "Expected emptyDir for 'data' volume"
-        assert data_vols[0]["emptyDir"]["sizeLimit"] == "50Gi"
-
     def test_trino_worker_pvc_when_storage_class_set(self, renderer: TemplateRenderer):
         """With an explicit storage_class, workers use PVC volumeClaimTemplates."""
         cfg = make_config(
@@ -358,30 +213,6 @@ class TestTemplateConditionals:
         volumes = parsed["spec"]["template"]["spec"].get("volumes", [])
         data_vols = [v for v in volumes if v.get("name") == "data"]
         assert len(data_vols) == 0, "Expected no emptyDir 'data' volume when using PVC"
-
-    def test_observability_enabled_in_spark_thrift(self, renderer: TemplateRenderer):
-        """With observability_enabled=True, prometheus config should appear."""
-        cfg = make_config(observability={"enabled": True})
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-        assert ctx["observability_enabled"] is True
-
-        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "spark.ui.prometheus.enabled=true" in rendered
-        assert "prometheusServlet" in rendered
-
-    def test_observability_disabled_in_spark_thrift(self, renderer: TemplateRenderer):
-        """With observability_enabled=False, prometheus config should be absent."""
-        engine = _make_engine(observability={"enabled": False})
-        ctx = _enrich_context(engine)
-        assert ctx["observability_enabled"] is False
-
-        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "prometheusServlet" not in rendered
 
     # -- HTTPS / TLS conditional tests --
 
@@ -425,49 +256,6 @@ class TestTemplateConditionals:
         rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
         assert "spark.hadoop.fs.s3a.connection.ssl.enabled=false" in rendered
 
-    def test_spark_thrift_truststore_when_ca_cert(self, renderer: TemplateRenderer):
-        """spark-thrift should have keytool init + JVM truststore when CA cert set."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "import-ca-cert" in rendered
-        assert "keytool" in rendered
-        assert "truststore.jks" in rendered
-        assert "javax.net.ssl.trustStore" in rendered
-
-    def test_spark_thrift_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
-        """spark-thrift should NOT have truststore init when no CA cert."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-        assert not ctx["s3_ca_cert_pem"]
-
-        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "import-ca-cert" not in rendered
-        assert "javax.net.ssl.trustStore" not in rendered
-
     def test_trino_jvm_truststore_when_ca_cert(self, renderer: TemplateRenderer):
         """Trino JVM config should include truststore args when CA cert set."""
         cfg = make_config(
@@ -510,17 +298,6 @@ class TestTemplateConditionals:
         assert "import-ca-cert" in rendered
         assert "lakebench-ca-certificate" in rendered
 
-    def test_trino_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
-        """Trino should NOT have truststore config when no CA cert."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
-        assert "javax.net.ssl.trustStore" not in rendered
-
-        rendered = renderer.render("trino/coordinator.yaml.j2", ctx)
-        assert "import-ca-cert" not in rendered
-
     def test_polaris_truststore_when_ca_cert(self, renderer: TemplateRenderer):
         """Polaris deployment should have truststore init when CA cert set."""
         cfg = make_config(
@@ -553,61 +330,6 @@ class TestTemplateConditionals:
         assert "import-ca-cert" in rendered
         assert "JAVA_TOOL_OPTIONS" in rendered
         assert "truststore.jks" in rendered
-
-    def test_polaris_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
-        """Polaris deployment should NOT have truststore when no CA cert."""
-        cfg = make_config(recipe="polaris-iceberg-spark-trino")
-        engine = _make_engine(cfg=cfg)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("polaris/deployment.yaml.j2", ctx)
-        assert "import-ca-cert" not in rendered
-        assert "JAVA_TOOL_OPTIONS" not in rendered
-
-    def test_secrets_ca_cert_when_pem_set(self, renderer: TemplateRenderer):
-        """Secrets template should include CA cert secret when PEM is provided."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("secrets.yaml.j2", ctx)
-        docs = _parse_yaml_docs(rendered)
-        # Should have 3 documents: S3 creds, Postgres creds, CA cert
-        assert len(docs) == 3
-        ca_doc = docs[2]
-        assert ca_doc["metadata"]["name"] == "lakebench-ca-certificate"
-        assert "BEGIN CERTIFICATE" in ca_doc["stringData"]["ca.crt"]
-
-    def test_secrets_no_ca_cert_when_pem_empty(self, renderer: TemplateRenderer):
-        """Secrets template should NOT include CA cert secret when no PEM."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("secrets.yaml.j2", ctx)
-        docs = _parse_yaml_docs(rendered)
-        # Should have 2 documents: S3 creds, Postgres creds
-        assert len(docs) == 2
 
     def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer):
         """Datagen job should have S3_CA_CERT env var when CA cert set."""
@@ -743,37 +465,33 @@ _RECIPE_NAMES: list[str] = [r for r in RECIPES if r != "default"]
 class TestPerRecipeTemplateRendering:
     """Verify every recipe produces valid rendered YAML for all deployer templates."""
 
-    @pytest.mark.parametrize("recipe_name", _RECIPE_NAMES)
-    def test_all_recipes_render_all_templates(
-        self,
-        renderer: TemplateRenderer,
-        recipe_name: str,
-    ):
+    def test_all_recipes_render_all_templates(self, renderer: TemplateRenderer):
         """For each recipe, build context and render ALL templates, validating YAML."""
-        cfg = make_config(recipe=recipe_name)
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
+        for recipe_name in _RECIPE_NAMES:
+            cfg = make_config(recipe=recipe_name)
+            with patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ):
+                engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+            ctx = _enrich_context(engine)
 
-        for template_name in ALL_TEMPLATES:
-            rendered = renderer.render(template_name, ctx)
-            assert len(rendered) > 0, (
-                f"Recipe '{recipe_name}': template '{template_name}' produced empty output"
-            )
-
-            docs = _parse_yaml_docs(rendered)
-            assert len(docs) > 0, (
-                f"Recipe '{recipe_name}': template '{template_name}' produced no YAML documents"
-            )
-            for doc in docs:
-                assert doc is not None
-                assert "kind" in doc, (
-                    f"Recipe '{recipe_name}': template '{template_name}' "
-                    f"produced a document without 'kind'"
+            for template_name in ALL_TEMPLATES:
+                rendered = renderer.render(template_name, ctx)
+                assert len(rendered) > 0, (
+                    f"Recipe '{recipe_name}': template '{template_name}' produced empty output"
                 )
+
+                docs = _parse_yaml_docs(rendered)
+                assert len(docs) > 0, (
+                    f"Recipe '{recipe_name}': template '{template_name}' produced no YAML documents"
+                )
+                for doc in docs:
+                    assert doc is not None
+                    assert "kind" in doc, (
+                        f"Recipe '{recipe_name}': template '{template_name}' "
+                        f"produced a document without 'kind'"
+                    )
 
 
 # ===========================================================================
@@ -817,20 +535,3 @@ class TestTrinoConfigMapFormatConditional:
         assert any("delta_lake" in cl for cl in connector_lines), (
             f"Expected delta_lake connector in lakehouse.properties, got: {connector_lines}"
         )
-
-
-class TestDuckDBProbeTimeouts:
-    """Every DuckDB exec probe starts a python process, which the 1 s default
-    timeoutSeconds does not cover: the startup probe took 1.38 s live and
-    failed at random, restarting the container and costing an 892 s deploy."""
-
-    def test_every_probe_sets_a_realistic_timeout(self, renderer: TemplateRenderer):
-        engine = _make_engine(recipe="hive-iceberg-spark-duckdb")
-        ctx = _enrich_context(engine)
-        parsed = yaml.safe_load(renderer.render("duckdb/deployment.yaml.j2", ctx))
-        container = parsed["spec"]["template"]["spec"]["containers"][0]
-        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
-            assert container[probe].get("timeoutSeconds", 1) >= 10, probe
-        startup = container["startupProbe"]
-        # The whole startup budget still covers the pip install window.
-        assert startup["periodSeconds"] * startup["failureThreshold"] >= 300

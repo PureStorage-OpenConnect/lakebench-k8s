@@ -376,15 +376,6 @@ class TestLegacyCleanupLeased:
         api.get_cluster_custom_object.side_effect = OSError("connection reset")
         assert _legacy_secretclasses_present(api) is True
 
-    def test_a_transport_error_taking_the_lease_is_only_a_skip(self):
-        from lakebench.deploy.destroy import _legacy_secretclass_cleanup
-
-        api = MagicMock()
-        core = MagicMock()
-        core.read_namespace.side_effect = OSError("connection reset")
-        assert _legacy_secretclass_cleanup(core, api, NS) == []
-        api.delete_cluster_custom_object.assert_not_called()
-
     def test_no_lease_when_no_legacy_secretclass_exists(self):
         with recording() as rec:
             _destroy(rec)

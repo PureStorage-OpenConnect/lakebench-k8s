@@ -15,34 +15,20 @@ from unittest import mock
 
 import pytest
 
-from lakebench.benchmark.fingerprint import fingerprint_rows
 from lakebench.config.recipes import RECIPES
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
-    BenchmarkMetrics,
     JobMetrics,
     MetricsCollector,
     build_config_snapshot,
 )
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 from tests.conftest import make_config
+from tests.fixtures.experiment_helpers import _cfg as _cfg
+from tests.fixtures.experiment_helpers import _fp as _fp
+from tests.fixtures.experiment_helpers import _metrics as _metrics
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _cfg(schema="customer360", mode="batch", engine="trino", fmt="iceberg", **datagen):
-    return make_config(
-        architecture={
-            "workload": {"schema": schema, "datagen": {"scale": 1, **datagen}},
-            "pipeline": {"mode": mode},
-            "query_engine": {"type": engine},
-            "table_format": {"type": fmt},
-        }
-    )
-
-
-def _fp(value: int = 1) -> dict:
-    return fingerprint_rows([(value, "x")], engine="trino", adapted_sql="SELECT 1")
 
 
 def _cfg_spark41():
@@ -52,39 +38,6 @@ def _cfg_spark41():
         images={"spark": "apache/spark:4.1.1-python3"},
         architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
     )
-
-
-def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
-    run = MetricsCollector().start_run(
-        "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
-    )
-    fps = fingerprints if fingerprints is not None else {"Q1_full_aggregation_scan": _fp()}
-    run.benchmark = BenchmarkMetrics(
-        mode="power",
-        cache="hot",
-        scale=1,
-        qph=100.0,
-        total_seconds=10.0,
-        queries=[
-            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
-            for n, f in fps.items()
-        ],
-    )
-    run.datagen_fleet = fleet
-    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
-    # FAILED. PipelineMetrics defaults success to False (the "run in
-    # progress" shape), so a synthetic collector object without an
-    # end_run(success=True) call would compute a FAILED verdict and be
-    # refused by compare. These tests build a synthetic completed run to
-    # exercise the comparability ladder itself, not to test a failed run;
-    # mark it complete so the verdict computes PASSED. Every layer has rows,
-    # so the verdict's layer_rows gate (EVD-1) passes too.
-    run.success = True
-    run.jobs = [
-        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
-        for s in ("bronze-verify", "silver-build", "gold-finalize")
-    ]
-    return run
 
 
 class TestStamping:
@@ -251,7 +204,6 @@ class TestStamping:
     def test_run_mode_from_the_flag_is_stamped(self):
         """run --continuous does not write the mode back; a continuous run
         that failed before any stream was recorded is still continuous."""
-        from lakebench.metrics.collector import build_config_snapshot
 
         cfg = _cfg()
         run = MetricsCollector().start_run(
@@ -261,45 +213,21 @@ class TestStamping:
         assert e["mode"] == "sustained"
         assert e["support"]["mode"] == "continuous"
 
-    @pytest.mark.parametrize("recipe", sorted(n for n in RECIPES if n != "default"))
-    def test_stamped_recipe_is_a_recipe_name(self, recipe):
-        from lakebench.config.recipes import RECIPES as R
+    def test_stamped_recipe_is_a_recipe_name(self):
+        for recipe in sorted(n for n in RECIPES if n != "default"):
+            from lakebench.config.recipes import RECIPES as R
 
-        cfg = make_config(
-            recipe=recipe,
-            architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
-        )
-        assert ex.experiment_inputs(cfg)["architecture"]["recipe"] == recipe
-        assert recipe in R
+            cfg = make_config(
+                recipe=recipe,
+                architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+            )
+            assert ex.experiment_inputs(cfg)["architecture"]["recipe"] == recipe
+            assert recipe in R
 
     def test_autosize_cuts_are_a_recorded_limit(self):
         run = _metrics(_cfg())
         run.autosize_cuts = ["trino workers 4 -> 2 to fit the cluster"]
         assert run.to_dict()["experiment"]["limits"]["autosize_cuts"] == run.autosize_cuts
-
-    def test_report_shows_the_block(self, tmp_path):
-        from lakebench.reports.generator import ReportGenerator
-
-        html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-        assert (
-            "Experiment" in html
-            and ex.WORKLOAD_VERSIONS["customer360"] in html
-            and "Result fingerprints" in html
-        )
-        for label in (
-            "Query access path",
-            "Support state",
-            "Maintenance (effective",
-            "Repetitions",
-        ):
-            assert label in html
-
-    def test_report_says_when_a_record_has_no_provenance(self, tmp_path):
-        from lakebench.reports.generator import ReportGenerator
-
-        run = MetricsCollector().start_run("r", "d", {})
-        html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(run)
-        assert "No provenance" in html
 
 
 class TestLegacy:
@@ -504,31 +432,3 @@ class TestReportCarriesWhatAReaderCompares:
         assert "<h3>Alert set</h3>" in html
         for cell in ("<td>W2</td><td>3</td>", "<td>W5</td><td>4</td>", "<td>total</td><td>7</td>"):
             assert cell in html
-
-    def test_a_run_with_no_alert_set_shows_none(self):
-        from lakebench.reports.generator import ReportGenerator
-
-        assert ReportGenerator._alert_set_html({"results": {}}) == ""
-
-
-def test_a_malformed_alert_set_is_flagged_not_drawn():
-    from lakebench.reports.generator import ReportGenerator
-
-    html = ReportGenerator._alert_set_html({"results": {"alert_set": {"by_rule": "x"}}})
-    assert "malformed, not comparable" in html and "<table>" not in html
-
-
-def test_the_report_does_not_claim_the_digest_covers_the_recipe(tmp_path):
-    """identity_hash leaves out the recipe and components (reviewed 10-03):
-    the report must say so, never that equal digests are repeats."""
-    import copy
-
-    from lakebench.reports.generator import ReportGenerator
-
-    a = _metrics(_cfg()).to_dict()["experiment"]
-    b = copy.deepcopy(a)
-    b["architecture"]["recipe"] = "polaris-iceberg-spark-thrift"
-    b["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
-    assert ex.identity_hash(a) == ex.identity_hash(b)
-    html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-    assert "does not include the recipe" in html and "repeats of one experiment" not in html

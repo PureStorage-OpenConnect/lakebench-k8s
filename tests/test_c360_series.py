@@ -37,20 +37,18 @@ def _legacy_range(i, n, s=None, e=None):
     return lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d")
 
 
-@pytest.mark.parametrize("n", range(1, 7))
-@pytest.mark.parametrize(
-    "window", [(None, None), ("2024-01-01", "2024-12-31"), ("2023-03-05", None)]
-)
-def test_windows_match_legacy(n, window):
+def test_windows_match_legacy():
     """cycle_windows is today's arithmetic: every window of every cycle count
     the old function served (it ran only for cycles > 1 with no window; one
     cycle with no window is the generator's own default end, 2025-01-01)."""
-    s, e = window
-    got = cycle_windows(n, s, e)
-    if n == 1 and e is None:
-        assert got == [(s or "2024-01-01", "2025-01-01")]
-        return
-    assert got == [_legacy_range(i, n, s, e) for i in range(n)]
+    for window in [(None, None), ("2024-01-01", "2024-12-31"), ("2023-03-05", None)]:
+        for n in range(1, 7):
+            s, e = window
+            got = cycle_windows(n, s, e)
+            if n == 1 and e is None:
+                assert got == [(s or "2024-01-01", "2025-01-01")]
+                continue
+            assert got == [_legacy_range(i, n, s, e) for i in range(n)]
 
 
 def test_window_bounds_read_their_first_ten_characters():
@@ -379,76 +377,13 @@ def test_unowned_stale_generate_labels_the_marker(monkeypatch):
     assert _marker(s3)["stale_bronze"] == {"allowed": True}
 
 
-def test_begin_marker_write_failure_fails_the_generate(monkeypatch):
-    class NoWrite(PrefixS3):
-        @property
-        def raw_client(self):
-            boto = MemoryBoto(self.store)
-
-            def refuse(**kw):
-                raise RuntimeError("AccessDenied")
-
-            boto.put_object = refuse  # type: ignore[method-assign]
-            return boto
-
-    result = _deployer(monkeypatch, NoWrite()).deploy()
-    assert result.status.value == "failed"
-    assert "series marker" in result.message
-
-
-def test_generate_begins_and_finishes_its_series(tmp_path, monkeypatch):
-    """`lakebench generate` (single cycle): the real deployer writes the
-    unfinished marker after its clear, and the finished Job adds cycle 0 under
-    the same run id, so a later `run` reuses the corpus. Without the record
-    every generate-then-run would be refused as unfinished."""
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from lakebench.deploy import datagen as dg
-    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
-    from tests import test_datagen_timeout_and_regenerate as t
-
-    t._stub_run_deps(monkeypatch)
-    monkeypatch.setattr("lakebench.s3.S3Client", t._FakeS3)
-    monkeypatch.setattr(t._FakeS3, "store", {})
-    monkeypatch.setattr(dg, "deployment_may_empty", lambda *a, **k: True)
-    monkeypatch.setattr(
-        "lakebench.deploy.DeploymentEngine",
-        lambda cfg, **kw: SimpleNamespace(
-            config=cfg,
-            k8s=SimpleNamespace(apply_manifest=lambda *a, **k: None),
-            renderer=SimpleNamespace(render=lambda *a, **k: "kind: Job\n"),
-            context={},
-            dry_run=False,
-        ),
-    )
-    done = {"running": False, "completions": 2, "succeeded": 2}
-    monkeypatch.setattr(dg.DatagenDeployer, "get_progress", lambda self: done)
-    monkeypatch.setattr(
-        dg.DatagenDeployer,
-        "wait_for_completion",
-        lambda self, **k: DeploymentResult(
-            component="datagen", status=DeploymentStatus.SUCCESS, message="", details=done
-        ),
-    )
-    monkeypatch.setattr(corpus, "pod_image_digest", lambda ns: (D1, None))
-    monkeypatch.delenv("LB_RUN_ID", raising=False)
-    monkeypatch.chdir(tmp_path)
-    res = CliRunner().invoke(app, ["generate", str(t._write_cfg(tmp_path)), "--yes"])
-    assert res.exit_code == 0, res.output
-    (key,) = [k for k in t._FakeS3.store if k[1].endswith("_corpus/series.json")]
-    body = json.loads(t._FakeS3.store[key])
-    assert body["cycles_complete"] == [0] and body["generation"]["image_digest"] == D1
-    assert "clearing" not in body
-
-
 def test_continuous_reset_keeps_the_clearing_marker(monkeypatch):
     """The continuous reset clears the datagen prefix too: the marker that
     says a clear is under way is written first and kept by the clear."""
     from unittest.mock import MagicMock
 
     from lakebench.cli import _sustained
-    from tests.test_c360_continuous_reset import _c360_cfg
+    from tests.fixtures.c360_reset_helpers import _c360_cfg
 
     cfg = _c360_cfg()
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)

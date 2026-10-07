@@ -47,6 +47,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         'requires_jars(*kinds): skip when a named jar kind ("iceberg", "delta") is not provided',
     )
+    config.addinivalue_line(
+        "markers",
+        "spark_static_conf(conf): module-level Spark settings applied when its session starts",
+    )
     if JARS:
         os.environ.setdefault(
             "PYSPARK_SUBMIT_ARGS",
@@ -101,6 +105,10 @@ def spark_session(
         conf["spark.sql.catalog.spark_catalog"] = DELTA_CATALOG
     if extensions:
         conf["spark.sql.extensions"] = ",".join(extensions)
+    # Settings a module needs at session start (static confs such as
+    # spark.ui.retainedJobs cannot change on a running session).
+    for mark in request.node.iter_markers("spark_static_conf"):
+        conf.update(mark.args[0])
 
     builder = SparkSession.builder
     for k, v in conf.items():
@@ -157,7 +165,8 @@ def spark_subprocess() -> Callable[..., subprocess.CompletedProcess[str]]:
             **os.environ,
             "PYSPARK_PYTHON": sys.executable,
             "PYTHONPATH": os.pathsep.join(
-                [str(SCRIPTS), str(HERE), str(ROOT / "src")]
+                # ROOT: the shared helpers under tests/fixtures.
+                [str(SCRIPTS), str(HERE), str(ROOT / "src"), str(ROOT)]
                 + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
             ),
         }

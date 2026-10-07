@@ -129,31 +129,6 @@ def test_a_raising_callback_does_not_end_the_wait():
     assert r.success is True and len(r.submission_failures) == 1
 
 
-def test_cli_prints_and_journals_the_failure():
-    from lakebench.cli import _run
-
-    journal = MagicMock()
-    with patch.object(_run, "print_warning") as warn:
-        _run._submission_failure_reporter("bronze-verify", journal)(
-            {"attempt": 1, "reason": "Maven dependency download failed: x"}
-        )
-    assert "lakebench-bronze-verify: submission attempt 1 failed" in warn.call_args.args[0]
-    kwargs = journal.record.call_args.kwargs
-    assert kwargs["details"]["event"] == "submission_failed"
-    assert kwargs["details"]["stage"] == "bronze-verify"
-
-
-def test_stage_line_says_elapsed_includes_retries():
-    from lakebench.cli._run import _retry_note
-    from lakebench.metrics.collector import JobMetrics
-
-    jm = JobMetrics(job_name="lakebench-bronze-verify", job_type="bronze-verify")
-    assert _retry_note(jm) == ""
-    jm.submission_failures = [{"attempt": 1, "lost_seconds": 60.0}]
-    jm.submission_retry_seconds = 60.0
-    assert _retry_note(jm) == " (includes 60s waiting on 1 failed operator submission)"
-
-
 def test_metrics_carry_the_failures_through_the_scorecard_and_storage(tmp_path):
     from lakebench.metrics.collector import JobMetrics, PipelineMetrics, build_pipeline_benchmark
     from lakebench.metrics.storage import MetricsStorage

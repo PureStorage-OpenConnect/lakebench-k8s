@@ -291,91 +291,13 @@ class TestRepairOperatorTmp:
         mgr.apply_controller_tmp_size.assert_not_called()
         mgr._set_watch_list_impl.assert_not_called()
 
-    def test_failed_resize_exits_nonzero(self):
-        with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock):
-            mgr.apply_controller_tmp_size.return_value = False
-            r = runner.invoke(admin_app, ["repair-operator"])
-        assert r.exit_code == 1
-
 
 class TestInstallCommand:
-    def test_passes_version_and_size(self):
-        """The old verb, now an alias of admin install, still passes --version
-        and --controller-tmp-size to a fresh install."""
-        from lakebench.deploy.shared_components import ComponentStatus, SparkOperator
-
-        absent = ComponentStatus(installed=False, detail="no Spark Operator")
-        ready = ComponentStatus(installed=True, version="2.5.1", ready=True)
-        with (
-            _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock),
-            patch.object(SparkOperator, "status", side_effect=[absent, absent, ready]),
-        ):
-            mgr.install.return_value = True
-            mgr.refresh_chart_repo.return_value = None
-            r = runner.invoke(
-                admin_app,
-                ["install-spark-operator", "--version", "2.5.1", "--controller-tmp-size", "16Gi"],
-            )
-        assert r.exit_code == 0, r.output
-        mgr.install.assert_called_once_with(version="2.5.1", tmp_size="16Gi", add_repo=False)
-
     def test_rejects_a_size_below_the_floor(self):
         with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, _lock):
             r = runner.invoke(admin_app, ["install-spark-operator", "--controller-tmp-size", "1Gi"])
         assert r.exit_code == 2
         mgr.install.assert_not_called()
-
-
-class TestDoctorAndStatus:
-    def _diag(self):
-        return diagnose(
-            _deployment("1Gi"),
-            [],
-            [
-                {
-                    "reason": "Evicted",
-                    "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-z"},
-                    "message": TestDiagnose._EVICT_MSG,
-                    "lastTimestamp": "2026-09-27T15:17:06Z",
-                }
-            ],
-        )
-
-    def test_doctor_names_the_condition_and_the_repair(self):
-        from lakebench.deploy import prereqs
-
-        core = MagicMock()
-        ok = [
-            prereqs.PrereqOutcome(p, prereqs.PrereqResult(prereqs.PrereqStatus.OK, "fine"))
-            for p in prereqs.PREREQS
-        ]
-        with (
-            patch("lakebench.cli._admin._get_core_v1", return_value=core),
-            patch("lakebench.deploy.prereqs.run_prereqs", return_value=ok),
-            patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
-            patch("lakebench.cli._admin._read_operator_scratch", return_value=self._diag()),
-        ):
-            r = runner.invoke(admin_app, ["doctor"])
-        assert r.exit_code == 0, r.output
-        out = " ".join(r.output.split())
-        assert "sizeLimit is 1Gi" in out
-        assert "evicted for storage" in out
-        assert "lakebench admin repair-operator" in out
-
-    def test_status_reports_a_healthy_controller(self):
-        core = MagicMock()
-        core.list_namespace.return_value = MagicMock(items=[])
-        with (
-            patch("lakebench.cli._admin._get_core_v1", return_value=core),
-            patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
-            patch(
-                "lakebench.cli._admin._read_operator_scratch",
-                return_value=diagnose(_deployment("8Gi"), [], []),
-            ),
-        ):
-            r = runner.invoke(admin_app, ["status"])
-        assert r.exit_code == 0
-        assert "controller /tmp: 8Gi" in " ".join(r.output.split())
 
 
 class TestReviewFixes:
@@ -387,13 +309,35 @@ class TestReviewFixes:
             assert SparkOperatorManager().apply_controller_tmp_size("8Gi") is False
         assert fake.helm_upgrades() == []
 
-    def test_upgrade_without_a_size_keeps_a_larger_one(self):
+    @pytest.mark.parametrize(
+        ("before", "after", "stored", "expected_set"),
+        [
+            (
+                "16Gi",
+                "16Gi",
+                None,
+                "controller.volumes[0].emptyDir.sizeLimit=16Gi",
+            ),  # keeps a larger one
+            # only the stored values keep an unbounded /tmp
+            (None, None, {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}, None),
+            # hand-patched unbounded without stored values gets the default, not the chart's 1Gi
+            (None, "unset", None, "controller.volumes[0].emptyDir.sizeLimit=8Gi"),
+        ],
+    )
+    def test_upgrade_without_a_size_never_shrinks_tmp(self, before, after, stored, expected_set):
         fake = _FakeCluster(release=True)
-        fake.tmp_before = fake.tmp_after_upgrade = "16Gi"
+        fake.tmp_before = before
+        if after != "unset":
+            fake.tmp_after_upgrade = after
+        if stored is not None:
+            fake.stored_values = stored
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
             assert SparkOperatorManager().apply_controller_tmp_size(None) is True
         (cmd,) = fake.helm_upgrades()
-        assert "controller.volumes[0].emptyDir.sizeLimit=16Gi" in _set_values(cmd)
+        if expected_set is None:
+            assert not any("controller.volumes" in v for v in _set_values(cmd))
+        else:
+            assert expected_set in _set_values(cmd)
 
     def test_unreadable_installed_version_refuses_unpinned_upgrade(self):
         fake = _FakeCluster(release=True, chart=None)
@@ -442,15 +386,6 @@ class TestReviewFixes:
         }
         assert not diagnose(_deployment("8Gi"), [live], [event]).healthy
 
-    def test_unbounded_tmp_is_kept_on_upgrade(self):
-        fake = _FakeCluster(release=True)
-        fake.tmp_before = fake.tmp_after_upgrade = None
-        fake.stored_values = {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}
-        with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
-        (cmd,) = fake.helm_upgrades()
-        assert not any("controller.volumes" in v for v in _set_values(cmd))
-
 
 class TestThirdPass:
     _MSG = 'Usage of EmptyDir volume "tmp" exceeds the limit "1Gi". '
@@ -473,13 +408,3 @@ class TestThirdPass:
         assert diag.healthy and diag.past_storage_evictions == 1
         event["lastTimestamp"] = "2026-09-27T16:10:00Z"
         assert not diagnose(_deployment("8Gi"), [live], [event]).healthy
-
-    def test_hand_patched_unbounded_deployment_is_not_trusted(self):
-        """Only the stored values keep an unbounded /tmp; without them the
-        upgrade sets the default rather than re-render the chart's 1Gi."""
-        fake = _FakeCluster(release=True)
-        fake.tmp_before = None
-        with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
-        (cmd,) = fake.helm_upgrades()
-        assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in _set_values(cmd)

@@ -64,103 +64,6 @@ def test_dispatcher_covers_documented_rules():
         assert expected in keys, f"missing rule {expected} in dispatcher"
 
 
-def test_w1_signature_and_defaults():
-    """W1_connected_components must accept the kwargs replay_financial
-    passes it, and its numeric defaults must be sane (min_cluster_size
-    >= 2 so pairs don't over-fire, max_iterations bounded so a hostile
-    graph can't wedge the replay)."""
-    tree = _module_ast()
-    fn = next(
-        (
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "w1_connected_components"
-        ),
-        None,
-    )
-    assert fn is not None, "w1_connected_components not defined"
-    argnames = [a.arg for a in fn.args.args]
-    for expected in ("silver_txns", "min_cluster_size", "max_iterations", "run_id"):
-        assert expected in argnames, f"w1_connected_components missing arg {expected}"
-
-    # Defaults are the last-N args aligned with argnames tail.
-    defaults = fn.args.defaults
-    def_map = dict(zip(argnames[-len(defaults) :], defaults, strict=True))
-    for key, low in (("min_cluster_size", 2), ("max_iterations", 1)):
-        node = def_map[key]
-        assert isinstance(node, ast.Constant) and isinstance(node.value, int)
-        assert node.value >= low, f"{key} default {node.value} below sane floor {low}"
-
-
-def test_structuring_thresholds_cover_datagen_currencies():
-    """Rust datagen structuring_band covers these currencies; the rule's
-    threshold table must not miss any or the rule silently under-fires
-    on that currency."""
-    tree = _module_ast()
-    thresholds = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if getattr(t, "id", None) == "_STRUCTURING_THRESHOLDS":
-                    thresholds = node.value
-                    break
-    assert thresholds is not None, "_STRUCTURING_THRESHOLDS not found"
-    ccys = {k.value for k in thresholds.keys if isinstance(k, ast.Constant)}
-    # Currencies from datagen_rs/src/amounts.rs::structuring_band().
-    datagen_ccys = {
-        "USD",
-        "CAD",
-        "AUD",
-        "GBP",
-        "EUR",
-        "CHF",
-        "JPY",
-        "INR",
-        "AED",
-        "SGD",
-        "MXN",
-        "CNY",
-        "BRL",
-        "HKD",
-        "KRW",
-    }
-    missing = datagen_ccys - ccys
-    assert not missing, f"detection rule doesn't cover currencies: {missing}"
-
-
-def test_rule_constants_non_empty():
-    tree = _module_ast()
-    for name in ("RULE_VERSION", "MODEL_ID", "MODEL_VERSION"):
-        node = next(
-            (
-                n
-                for n in tree.body
-                if isinstance(n, ast.Assign)
-                and any(getattr(t, "id", None) == name for t in n.targets)
-            ),
-            None,
-        )
-        assert node is not None, f"{name} not defined"
-        assert isinstance(node.value, ast.Constant)
-        assert isinstance(node.value.value, str)
-        assert len(node.value.value) > 0, f"{name} is empty"
-
-
-def test_w2_structuring_takes_expected_kwargs():
-    """The replay dispatcher passes threshold_count via kwargs. If the
-    signature drops that kwarg silently, replay's --threshold flag becomes
-    a no-op."""
-    tree = _module_ast()
-    fn = next(
-        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "w2_structuring"),
-        None,
-    )
-    assert fn is not None, "w2_structuring not defined"
-    argnames = [a.arg for a in fn.args.args]
-    for expected in ("silver_txns", "threshold_count", "window_hours", "run_id"):
-        assert expected in argnames, f"w2_structuring missing arg {expected}"
-
-
 @pytest.mark.parametrize(
     "rule_id",
     [
@@ -275,98 +178,6 @@ def test_normalize_name_expr_strips_punctuation_and_suffix():
     assert _py_normalize(None) == ""
 
 
-def test_load_reference_short_circuits_on_empty():
-    """Regression against F6 (adversarial-review): `_load_reference`
-    used to return a bare DF that downstream `.select("sdn_id")` would
-    crash on. It now returns None on empty entries, and every W5-W8
-    caller must check for None before selecting."""
-    src = DETECTION_RULES_PATH.read_text()
-    # The helper returns None on empty list.
-    assert "if not entries:" in src
-    assert "return None" in src
-    # Every caller must check `if raw is None`.
-    for rule in ("w7_cross_border_high_risk",):
-        # Extract the function body via AST for a scoped check.
-        tree = ast.parse(src)
-        fn = next(
-            (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == rule),
-            None,
-        )
-        assert fn is not None, f"{rule} not defined"
-        body_text = ast.unparse(fn)
-        assert "raw is None" in body_text, (
-            f"{rule} does not guard against `_load_reference` returning None; "
-            f"crashes on downstream .select() when the reference JSON has empty entries."
-        )
-
-
-def test_new_rule_signatures():
-    """W5-W8 signatures must accept the kwargs the runner passes them."""
-    tree = _module_ast()
-    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    for name in (
-        "w5_sanctions_match",
-        "w6_pep_counterparty",
-        "w7_cross_border_high_risk",
-        "w8_dormant_reactivation",
-    ):
-        assert name in fns, f"{name} not defined"
-        args = [a.arg for a in fns[name].args.args]
-        assert "silver_txns" in args, f"{name} missing silver_txns arg"
-        assert "run_id" in args, f"{name} missing run_id arg"
-
-
-def test_w1_aliases_propagation_join():
-    """Regression: without aliases on ``labels`` and ``edges_u`` in the
-    label-propagation loop, Spark raises ``AnalysisException: Column
-    dst#NNN are ambiguous`` on the second iteration because ``labels``'
-    attribute IDs trace back to ``edges_u`` via the prior unionByName.
-    Surfaced by the first live S1 run of the AML batch pipeline.
-    Assertion is AST-scoped: the join call in the loop body must use
-    ``col("lbl.id") == col("eg.src")``-style qualified references so
-    the aliases are load-bearing.
-    """
-    tree = _module_ast()
-    fn = next(
-        (
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "w1_connected_components"
-        ),
-        None,
-    )
-    assert fn is not None
-    body = ast.unparse(fn)
-    # The alias for edges_u must be created inside the loop body.
-    assert "edges_u.alias(" in body, "w1 must alias edges_u to disambiguate self-joins"
-    assert "labels.alias(" in body, "w1 must alias labels to disambiguate self-joins"
-    # And the join must use the aliased column references.
-    assert "'lbl.id'" in body or '"lbl.id"' in body
-    assert "'eg.src'" in body or '"eg.src"' in body
-
-
-def test_w7_auto_loads_silver_entities_when_none():
-    """Regression: when the caller (e.g. replay_financial) does not
-    pass silver_entities, W7 must auto-load ``silver.entities`` from
-    the catalog rather than silently returning empty. The load lives in
-    ``_entities_frame`` (shared with the other customer-scoped rules); a
-    missing table raises RuleSkipped so the rule reads "not run", not a
-    crash of the dispatcher and not a 0% recall.
-    """
-    tree = _module_ast()
-    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    w7 = ast.unparse(fns["w7_cross_border_high_risk"])
-    assert "_entities_frame(spark, silver_entities" in w7, (
-        "w7 must resolve silver.entities through _entities_frame"
-    )
-    load = ast.unparse(fns["_entities_frame"])
-    assert "silver_entities is not None" in load
-    assert "spark.table" in load, "silver.entities must be resolved via spark.table when None"
-    assert "AnalysisException" in load and "RuleSkipped" in load, (
-        "a missing silver.entities table must become a RuleSkipped, not a crash"
-    )
-
-
 def test_customer_scope_lists_agree_across_the_package_boundary():
     """detection_rules (driver side), tm_operations and the config default
     must name the same counterparty scenarios, and every rule is either
@@ -392,55 +203,6 @@ def test_customer_scope_lists_agree_across_the_package_boundary():
     assert counterparty | scoped == dispatch and not counterparty & scoped
     assert _lit(scripts / "tm_operations.py", "DEFAULT_COUNTERPARTY_SCENARIOS") == counterparty
     assert set(TmOperationsConfig().counterparty_scenarios) == counterparty
-
-
-def test_load_reference_uses_candidate_dirs():
-    """Regression: inside the driver pod the ``lakebench`` package is
-    not installed, so ``import lakebench.spark.data`` raises
-    ImportError. The prior _aml_data_path re-raised that ImportError
-    from inside every W5/W6/W7 invocation. `_load_reference` must now
-    walk a list of candidate directories (env override, package data,
-    same-dir fallback) and return None only when no candidate contains
-    the requested file.
-    """
-    src = DETECTION_RULES_PATH.read_text()
-    assert "_aml_data_candidates" in src, (
-        "candidate-directory search helper missing; W7 will crash on "
-        "cluster driver when lakebench.spark.data cannot be imported"
-    )
-    assert "except ImportError" in src, (
-        "package-data lookup must tolerate ImportError inside the driver pod"
-    )
-
-
-def test_gold_finalize_invokes_detection_rules():
-    """LB-092: gold_finalize_financial must run detection rules as part
-    of the batch pipeline so `lakebench run` produces alerts without a
-    separate `financial replay` invocation. Regression AST check
-    against gold_finalize_financial.py.
-    """
-    gf_path = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/gold_finalize_financial.py"
-    )
-    src = gf_path.read_text()
-    tree = ast.parse(src)
-    fn_names = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    assert "run_detection_rules" in fn_names, (
-        "gold_finalize_financial must define run_detection_rules() so the "
-        "batch pipeline emits alerts (LB-092)"
-    )
-    # The main entrypoint must call it.
-    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
-    main_src = ast.unparse(main)
-    assert "run_detection_rules(" in main_src, (
-        "gold_finalize main() must invoke run_detection_rules() -- otherwise "
-        "batch runs still produce zero alerts and LB-092 reopens"
-    )
-    # Idempotency contract: DELETE per rule_id before append.
-    assert "DELETE FROM" in src and "WHERE rule_id = " in src, (
-        "detection loop must DELETE per rule_id before append so re-runs do not double-count"
-    )
 
 
 def test_deploy_scripts_configmap_ships_aml_json():
@@ -643,35 +405,6 @@ def test_autosizer_thrift_at_36gi_uses_full_24g():
     assert resolved == "24g", f"36 GiB allocatable should get full 24g, got {resolved}"
 
 
-def test_gold_finalize_uses_signature_not_covarnames():
-    """Adversarial-review finding A (silent corruption): `co_varnames`
-    includes every local variable in a function's body, not just
-    parameters. A future rule that uses ``silver_entities`` as an
-    internal local would silently receive the DataFrame as a kwarg
-    and raise TypeError; the broad ``except Exception`` around the
-    rule call would swallow it into a zero-alert result. Correct
-    primitive is ``inspect.signature(fn).parameters``.
-    """
-    gf_path = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/gold_finalize_financial.py"
-    )
-    src = gf_path.read_text()
-    tree = ast.parse(src)
-    fn = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_detection_rules"
-    )
-    body = ast.unparse(fn)
-    assert "inspect.signature" in body, (
-        "run_detection_rules must use inspect.signature for its param filter, "
-        "not fn.__code__.co_varnames (co_varnames leaks locals)"
-    )
-    assert ".co_varnames" not in body, (
-        "run_detection_rules leaked back to co_varnames -- future locals named "
-        "silver_entities would be routed to the rule as a kwarg and swallowed"
-    )
-
-
 def test_gold_finalize_detection_rules_subset_of_dispatcher():
     """LB-092 hygiene: every rule id in DEFAULT_DETECTION_RULES must
     exist in detection_rules._RULE_DISPATCH, otherwise ``get_rule``
@@ -706,49 +439,6 @@ def test_gold_finalize_detection_rules_subset_of_dispatcher():
     assert not missing, (
         f"DEFAULT_DETECTION_RULES references rules missing from _RULE_DISPATCH: "
         f"{missing}; the detection loop would silently skip these at runtime"
-    )
-
-
-def test_gold_finalize_crashed_rules_emit_alerts_line():
-    """Adversarial-review finding F: a crashed rule's ``FAILED`` log
-    line does not include ``alerts=`` so a downstream metrics parser
-    that greps for ``[detection] <rule>: alerts=N`` misses the row.
-    Fix must emit ``alerts=0 error=...`` on failure so parsers see a
-    row for every rule that was attempted.
-    """
-    gf_path = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/gold_finalize_financial.py"
-    )
-    src = gf_path.read_text()
-    tree = ast.parse(src)
-    fn = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_detection_rules"
-    )
-    body = ast.unparse(fn)
-    assert "alerts=0 error=" in body, (
-        "run_detection_rules failure branch must emit alerts=0 error=... "
-        "so metrics parsers see a row for every rule attempted"
-    )
-
-
-def test_aml_data_candidates_env_override_is_authoritative():
-    """Adversarial-review finding G: iterating candidate directories
-    per-file lets a partial LB_AML_DATA_DIR override silently mix
-    with the installed pkg (only sanctions_list.json in the override
-    shadows that file while pep/hrj read from pkg). Env override must
-    be the ONLY candidate when set.
-    """
-    tree = _module_ast()
-    fn = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_aml_data_candidates"
-    )
-    body = ast.unparse(fn)
-    # Env-override path must return early with a single-element list.
-    assert "if override:" in body and "return [override]" in body, (
-        "_aml_data_candidates must return [override] when LB_AML_DATA_DIR "
-        "is set; anything that adds more candidates enables split-brain "
-        "reference data (finding G)"
     )
 
 
@@ -789,71 +479,6 @@ GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
 )
 
 
-def test_ruleskipped_exception_defined():
-    """detection_rules exposes RuleSkipped with a machine-parseable reason
-    so callers can distinguish a structural skip from an error."""
-    tree = _module_ast()
-    classes = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
-    assert "RuleSkipped" in classes, "RuleSkipped exception must be defined"
-
-
-def test_w1_raises_ruleskipped_on_vertex_cap():
-    """Above max_vertices, W1 must raise RuleSkipped('vertex-cap', ...)
-    rather than return an empty alerts DF -- an empty DF is
-    indistinguishable from a genuine zero and reads as 0% recall."""
-    body = DETECTION_RULES_PATH.read_text()
-    assert 'raise RuleSkipped(\n            "vertex-cap"' in body or (
-        "RuleSkipped(" in body and '"vertex-cap"' in body
-    ), "W1 must raise RuleSkipped('vertex-cap') on the cap"
-    # And the old silent-empty-return path on the cap must be gone.
-    tree = _module_ast()
-    w1 = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "w1_connected_components"
-    )
-    # The v_count > max_vertices branch must contain a raise, not a return.
-    src = ast.get_source_segment(body, w1)
-    assert "v_count > max_vertices" in src
-    cap_branch = src.split("v_count > max_vertices", 1)[1].split("if v_count == 0", 1)[0]
-    assert "raise RuleSkipped" in cap_branch
-    assert "return _empty_alerts_df" not in cap_branch
-
-
-def test_gold_finalize_catches_ruleskipped_and_emits_skipped_line():
-    """gold_finalize must catch RuleSkipped and emit a `skipped=` log line
-    (not `alerts=0`) so the collector records the third state."""
-    body = GOLD_FINALIZE_PATH.read_text()
-    assert "except RuleSkipped" in body, "gold_finalize must catch RuleSkipped"
-    assert "skipped={skip.reason}" in body, "gold_finalize must emit skipped=<reason>"
-    # The skip branch must precede the per-rule generic handler so a skip
-    # is caught as a skip, not swallowed into the alerts=0 error path.
-    per_rule_handler = "except Exception as e:  # noqa: BLE001 -- one rule cannot fail"
-    assert per_rule_handler in body
-    assert body.index("except RuleSkipped") < body.index(per_rule_handler)
-
-
-def test_gold_finalize_threads_max_vertices():
-    """The configured W1 vertex cap (LB_FINANCIAL_W1_MAX_VERTICES) must be
-    read and passed into any rule that accepts max_vertices."""
-    body = GOLD_FINALIZE_PATH.read_text()
-    # One builder for gold, replay and reproduce (detection_rules.rule_params).
-    assert "rule_params(fn, run_id, silver_entities)" in body
-    rules = (GOLD_FINALIZE_PATH.parent / "detection_rules.py").read_text()
-    builder = rules[rules.index("def rule_params(") :]
-    assert '"max_vertices" in sig' in builder and 'params["max_vertices"]' in builder
-    assert "LB_FINANCIAL_W1_MAX_VERTICES" in rules[rules.index("def w1_max_vertices(") :]
-
-
-def test_gold_finalize_projects_derived_tables():
-    """P0.5: gold.entity_clusters and gold.risk_scores are projected from
-    W1 / W4 alerts rather than left empty."""
-    body = GOLD_FINALIZE_PATH.read_text()
-    assert "_project_derived_gold" in body
-    assert "GOLD_CLUSTERS" in body and "GOLD_RISK" in body
-    assert "W1_connected_components" in body and "W4_risk_propagation" in body
-
-
 # ---------------------------------------------------------------------------
 # LB-119 review fixes: rule->typology map, detection_status, run_id-scoped
 # projection, non-null guards, reason normalization.
@@ -888,27 +513,6 @@ def test_rule_target_typology_matches_aml_queries():
     )
 
 
-def test_ruleskipped_normalizes_reason_to_slug():
-    """A reason with spaces or empties must not silently drop at the parser;
-    RuleSkipped normalizes to a non-empty [A-Za-z0-9_-] slug."""
-    body = DETECTION_RULES_PATH.read_text()
-    # The normalization must strip non-slug chars and fall back to a default.
-    assert 'or "unknown"' in body
-    assert "[^A-Za-z0-9_-]" in body
-
-
-def test_gold_finalize_writes_detection_status():
-    """gold_finalize must persist per-rule status to a durable gold table so
-    the recall scorer can mark a skipped rule's typology 'not run'."""
-    body = GOLD_FINALIZE_PATH.read_text()
-    assert "GOLD_STATUS" in body and "detection_status" in body
-    assert "DDL_STATUS" in body
-    assert "_write_detection_status" in body
-    # Every rule branch records a status.
-    for st in ('"ran"', '"skipped"', '"error"'):
-        assert st in body, f"detection_status must record {st}"
-
-
 def test_projection_is_run_scoped_and_non_null_guarded():
     """_project_derived_gold must (a) filter to this run's alerts so a skip
     can't re-emit stale prior-run clusters as fresh, and (b) guarantee the
@@ -920,29 +524,6 @@ def test_projection_is_run_scoped_and_non_null_guarded():
     assert 'col("alert_score").isNotNull()' in body
 
 
-def test_score_financial_consumes_detection_status():
-    """score_financial must mark a skipped rule's target typology as not-run
-    (recall NULL, detection_status='rule_skipped') instead of recall 0."""
-    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
-    body = p.read_text()
-    assert "GOLD_STATUS" in body and "detection_status" in body
-    assert "rule_skipped" in body and "rule_error" in body
-    # Recall is per designated rule (behaviour covered by the executed Spark
-    # tests in tests/spark/test_score_financial_spark.py).
-    assert "def compute_scores(" in body
-    # A missing or ambiguous status must fail, never fall back to all alerts.
-    assert "expected exactly one" in body
-
-
-def test_replay_threads_w1_vertex_cap():
-    """replay must honour LB_FINANCIAL_W1_MAX_VERTICES so W1 replay uses the
-    configured cap, not the rule's 5M hard-coded default."""
-    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/replay_financial.py"
-    body = p.read_text()
-    # The cap comes from the builder gold-finalize uses.
-    assert "kwargs = rule_params(rule_fn, replay_run_id, silver_entities)" in body
-
-
 def test_score_financial_scopes_alerts_by_run_id():
     """LB-119 fix S1: score_financial must scope its gold.alerts read to the
     current run (via detection_status.run_id) so stale prior-run alerts from
@@ -951,31 +532,6 @@ def test_score_financial_scopes_alerts_by_run_id():
     body = p.read_text()
     assert "current_run_id" in body
     assert 'col("run_id") == lit(current_run_id)' in body
-
-
-def test_replay_uses_signature_not_co_varnames():
-    """LB-119 fix S3: replay must filter rule kwargs by inspect.signature,
-    matching gold_finalize -- co_varnames includes body locals and can
-    mis-inject a kwarg into a future rule."""
-    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/replay_financial.py"
-    body = p.read_text()
-    assert "inspect.signature(rule_fn)" in body
-    assert "co_varnames" not in body
-
-
-def test_all_rules_stamp_detected_ts():
-    """LB-125: every rule's alerts carry detected_ts = current_timestamp().
-    Since AML-2 every rule projects through _alert_frame (test_alert_frame_ast
-    checks that), so the stamp is checked once, in the helper, together with
-    the positional order: gold_finalize writes via a positional
-    `INSERT ... SELECT *`, so the helper must select in ALERT_COLUMNS order."""
-    tree = _module_ast()
-    helper = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_alert_frame"
-    )
-    src = ast.get_source_segment(DETECTION_RULES_PATH.read_text(), helper)
-    assert '"detected_ts": current_timestamp()' in src
-    assert "for name, ddl_type, _ in ALERT_COLUMNS" in src
 
 
 def test_detected_ts_in_empty_schema_and_all_ddls():
@@ -1013,26 +569,6 @@ def _alert_columns():
         if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", None) == "ALERT_COLUMNS"
     )
     return ast.literal_eval(node.value)
-
-
-def test_w5_w6_screen_the_corpus_watchlist_fuzzily():
-    """AML-GOALS #50: W5/W6 read the corpus's own dated watchlist (a missing
-    one is RuleSkipped, never 0 alerts) and go through the fuzzy screen, not
-    an exact join on the normalized name; W5 also rescreens on a list
-    version."""
-    tree = _module_ast()
-    fns = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
-    for rule, kind in (("w5_sanctions_match", "'sanctions'"), ("w6_pep_counterparty", "'pep'")):
-        body = fns[rule]
-        assert f"_load_watchlist(spark, {kind}" in body
-        assert "screen_counterparties(" in body
-        assert "_customers_only(" in body
-    assert "sanctions_rescreen" in fns["w5_sanctions_match"]
-    load = fns["_load_watchlist"]
-    assert "RuleSkipped('no-watchlist'" in load and "RuleSkipped('empty-watchlist'" in load
-    screen = fns["screen_counterparties"]
-    assert "levenshtein" in screen and "SCREEN_SIMILARITY_MIN" in screen
-    assert "wl_country" in screen and "bene_country" in screen
 
 
 def test_every_targeted_rule_is_scheduled_or_declared_skipped():

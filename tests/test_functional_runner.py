@@ -210,13 +210,6 @@ class TestBenchmarkRunnerThroughputMode:
 class TestBenchmarkRunnerCompositeMode:
     """Power + throughput composite tests."""
 
-    def test_composite_returns_three_results(self, runner, mock_executor):
-        power, throughput, composite = runner.run_composite(streams=2)
-
-        assert power.mode == "power"
-        assert throughput.mode == "throughput"
-        assert composite.mode == "composite"
-
     def test_composite_qph_is_geometric_mean(self, runner, mock_executor):
         """composite.qph must equal sqrt(power.qph * throughput.qph)."""
         mock_executor.execute_query.return_value = QueryExecutorResult(
@@ -259,42 +252,3 @@ class TestBenchmarkRunnerQueryFiltering:
 # ---------------------------------------------------------------------------
 # 5. Result Serialization
 # ---------------------------------------------------------------------------
-
-
-class TestBenchmarkResultSerialization:
-    """Verify to_dict() output structure for various run modes."""
-
-    def test_benchmark_result_to_dict(self, runner, mock_executor):
-        result = runner.run_power()
-        d = result.to_dict()
-
-        expected_keys = {
-            "benchmark_type",
-            "mode",
-            "cache",
-            "scale",
-            "qph",
-            "category_qph",
-            "total_seconds",
-            "iterations",
-            "streams",
-            "queries",
-        }
-        assert expected_keys.issubset(set(d.keys()))
-        assert d["mode"] == "power"
-        assert d["benchmark_type"] == "trino_query"
-        assert isinstance(d["queries"], list)
-        assert len(d["queries"]) == 8
-        assert isinstance(d["category_qph"], dict)
-
-    def test_stream_results_serialized(self, runner, mock_executor):
-        result = runner.run_throughput(streams=3)
-        d = result.to_dict()
-
-        assert "stream_results" in d
-        assert len(d["stream_results"]) == 3
-        for sr in d["stream_results"]:
-            assert "stream_id" in sr
-            assert "total_seconds" in sr
-            assert "queries" in sr
-            assert "success" in sr

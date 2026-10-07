@@ -16,44 +16,14 @@ import pytest
 import typer
 
 from lakebench.cli import _sustained
-from lakebench.spark.job import JobState, JobType
-from tests.conftest import make_config
-
-
-def _c360_cfg():
-    return make_config(
-        name="c360-reset",
-        platform={
-            "storage": {
-                "s3": {
-                    "endpoint": "http://127.0.0.1:1",
-                    "access_key": "x",
-                    "secret_key": "y",
-                    "buckets": {"bronze": "c-b", "silver": "c-s", "gold": "c-g"},
-                }
-            }
-        },
-    )
-
-
-class _Result:
-    def __init__(self, success, message="", elapsed=12.0):
-        self.success = success
-        self.message = message
-        self.elapsed_seconds = elapsed
-
-
-def test_reset_preflight_submits_bronze_verify_in_reset_mode():
-    jm = MagicMock()
-    jm.submit_job.return_value = MagicMock(state=JobState.RUNNING)
-    mon = MagicMock()
-    mon.wait_for_completion.return_value = _Result(True)
-    assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock(), timeout_seconds=5400)
-    jm.submit_job.assert_called_once_with(
-        JobType.BRONZE_VERIFY, cycle_env={"LB_CONTINUOUS_RESET": "1"}
-    )
-    assert mon.wait_for_completion.call_args.args[0] == "lakebench-bronze-verify"
-    assert mon.wait_for_completion.call_args.kwargs["timeout_seconds"] == 5400
+from lakebench.spark.job import JobState
+from tests.fixtures.c360_reset_helpers import _c360_cfg as _c360_cfg
+from tests.fixtures.c360_reset_helpers import _drive_sustained as _drive_sustained
+from tests.fixtures.c360_reset_helpers import _exit_in_chain as _exit_in_chain
+from tests.fixtures.c360_reset_helpers import _Result as _Result
+from tests.fixtures.c360_reset_helpers import _StopAfterFirstStream as _StopAfterFirstStream
+from tests.fixtures.c360_reset_helpers import _sustained_status_success as _sustained_status_success
+from tests.fixtures.c360_reset_helpers import events_ref as events_ref
 
 
 @pytest.mark.parametrize(
@@ -130,134 +100,6 @@ def test_reset_ownership_problem_raises_when_the_namespace_is_unreadable(monkeyp
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
     with pytest.raises(_sustained._OwnershipUnverifiable):
         _sustained._reset_ownership_problem(_c360_cfg())
-
-
-class _StopAfterFirstStream(Exception):
-    pass
-
-
-events_ref: dict = {}
-
-
-def _drive_sustained(
-    monkeypatch,
-    tmp_path,
-    cfg,
-    *,
-    reset_ok=True,
-    owned=True,
-    existing=(),
-    force_reset=False,
-    raw_problem=None,
-    dg_state="unfinished",
-    skip_generate=False,
-    stop_raises=None,
-    deploy_result=None,
-):
-    """Run _run_sustained with every cluster and S3 edge mocked; return the
-    ordered list of side effects it performed. The run is stopped at the
-    first stream submit, unless *deploy_result* is given: datagen starts
-    after the streams, so those runs go on to its deploy."""
-    monkeypatch.chdir(tmp_path)
-    events: list[str] = []
-
-    op = MagicMock()
-    op.check_status.return_value = MagicMock(ready=True, version="2.5.1")
-    op.ensure_namespace_watched.return_value = MagicMock(watching_namespace=True)
-    monkeypatch.setattr("lakebench.spark.SparkOperatorManager", lambda **kw: op)
-    monkeypatch.setattr(_sustained, "get_k8s_client", lambda **kw: MagicMock())
-
-    jm = MagicMock()
-    jm.deploy_scripts_configmap.return_value = True
-
-    def submit(job_type, **kw):
-        events.append(f"submit:{job_type.value}:{kw.get('cycle_env')}")
-        if job_type == JobType.BRONZE_INGEST:
-            events.append(f"dg_running={jm.datagen_running}")
-            if deploy_result is None:
-                raise _StopAfterFirstStream
-        return MagicMock(state=JobState.RUNNING)
-
-    jm.submit_job.side_effect = submit
-    monkeypatch.setattr("lakebench.engine.get_engine", lambda c, k: jm)
-    mon = MagicMock()
-    mon.wait_for_completion.return_value = _Result(reset_ok)
-    monkeypatch.setattr("lakebench.spark.SparkJobMonitor", lambda *a, **kw: mon)
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c, **kw: MagicMock())
-    dg = MagicMock()
-
-    def dg_deploy():
-        events.append("datagen")
-        if deploy_result is not None:
-            return deploy_result
-        return MagicMock(status=_sustained_status_success())
-
-    def dg_stop():
-        events.append("stop-datagen")
-        if stop_raises is not None:
-            raise stop_raises
-
-    dg.deploy.side_effect = dg_deploy
-    monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: dg_stop())
-    monkeypatch.setattr("lakebench.deploy.datagen.end_continuous_datagen", lambda c: True)
-    # The window opens at datagen's first file in bronze.
-    monkeypatch.setattr(_sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
-
-    def ownership(c):
-        events.append("ownership")
-        if not owned:
-            print("refused")
-            raise typer.Exit(1)
-
-    monkeypatch.setattr(_sustained, "_require_reset_ownership", ownership)
-    monkeypatch.setattr(
-        _sustained, "_stop_leftover_streams", lambda jm_, ns: events.append("stop-streams")
-    )
-    monkeypatch.setattr(
-        _sustained,
-        "_reset_continuous_state",
-        lambda c, clear_raw: events.append(f"reset-s3:clear_raw={clear_raw}"),
-    )
-    monkeypatch.setattr(_sustained, "_c360_existing_state", lambda c, clear_raw: list(existing))
-    monkeypatch.setattr(_sustained, "_c360_raw_replace_problem", lambda c: raw_problem)
-    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (dg_state, ""))
-    monkeypatch.setattr(_sustained, "_DATAGEN_RELEASE_WAIT_S", 0)
-    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock())
-    monkeypatch.setattr(_sustained, "_collect_platform_metrics", lambda *a, **kw: None)
-    events_ref["mon"] = mon
-
-    # The run ends at the first stream submit (or an Exit); the finally
-    # block may then fail on mocked metrics, which is irrelevant here.
-    with pytest.raises(Exception) as ei:  # noqa: B017
-        _sustained._run_sustained(
-            cfg,
-            tmp_path / "cfg.yaml",
-            60,
-            True,
-            60,
-            skip_generate=skip_generate,
-            force_reset=force_reset,
-        )
-    events_ref["exc"] = _exit_in_chain(ei.value)
-    return events
-
-
-def _exit_in_chain(exc):
-    """The typer/click Exit that ended the run: the finally block may raise
-    over it on mocked metrics, which keeps it as ``__context__``."""
-    seen = exc
-    while seen is not None:
-        if hasattr(seen, "exit_code"):
-            return seen
-        seen = seen.__context__
-    return exc
-
-
-def _sustained_status_success():
-    from lakebench.deploy import DeploymentStatus
-
-    return DeploymentStatus.SUCCESS
 
 
 def test_c360_continuous_entry_resets_before_any_stream(monkeypatch, tmp_path):
@@ -377,17 +219,14 @@ def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, 
     assert "Refusing" not in out and "a separate generate is not needed" in out
 
 
-@pytest.mark.parametrize(
-    "existing",
-    [
+def test_raw_plus_other_state_still_refuses(monkeypatch, tmp_path):
+    for existing in [
         ["c-b/customer/interactions/", "c-s/"],
         ["c-b/customer/interactions/", "c-b/checkpoints/bronze-ingest/"],
         ["c-b/customer/interactions/ (could not list: AccessDenied)"],
-    ],
-)
-def test_raw_plus_other_state_still_refuses(monkeypatch, tmp_path, existing):
-    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), existing=existing)
-    assert events == ["ownership"]
+    ]:
+        events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), existing=existing)
+        assert events == ["ownership"]
 
 
 def test_raw_only_but_unsafe_to_replace_still_refuses(monkeypatch, tmp_path, capsys):
@@ -435,12 +274,12 @@ def test_raw_replace_allowed_for_a_finished_small_generate(monkeypatch):
     assert problem is None
 
 
-@pytest.mark.parametrize("job", [_Job(3), _Job(0), _Job(None)])
-def test_raw_replace_refused_while_datagen_unfinished(monkeypatch, job):
+def test_raw_replace_refused_while_datagen_unfinished(monkeypatch):
     """Active pods, a Job not yet started, or one backing off between
     retries all still write into the prefix."""
-    problem, _ = _replace_problem(monkeypatch, job=job)
-    assert "has not finished" in problem
+    for job in [_Job(3), _Job(0), _Job(None)]:
+        problem, _ = _replace_problem(monkeypatch, job=job)
+        assert "has not finished" in problem
 
 
 def test_raw_replace_refused_when_job_check_fails(monkeypatch):
@@ -459,14 +298,6 @@ def test_raw_replace_refused_for_a_larger_corpus(monkeypatch):
 def test_raw_replace_refused_when_sizing_fails(monkeypatch):
     problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Complete"), s3_exc=RuntimeError("boom"))
     assert problem and "could not size" in problem
-
-
-@pytest.mark.parametrize("dg_state", ["finished", "absent", "unfinished", "unknown"])
-def test_streaming_budget_reserves_the_runs_own_datagen(monkeypatch, tmp_path, dg_state):
-    """The run's own datagen generates for the whole window, so the streams
-    are budgeted with its cores whatever its Job reads as at submit."""
-    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), dg_state=dg_state)
-    assert "dg_running=True" in events
 
 
 def test_datagen_job_state(monkeypatch):

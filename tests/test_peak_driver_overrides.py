@@ -83,33 +83,6 @@ def test_peak_drivers_are_the_manifest_drivers(image, overrides, schema):
             assert req.cpu_cores == req.executors * profile["executor_cores"] + drv["cores"]
 
 
-def test_default_config_changes_nothing():
-    for mode in ("batch", "sustained"):
-        for schema in ("customer360", "financial"):
-            cfg = _config(schema, mode)
-            assert compute_peak_requirements(1, mode, schema, config=cfg) == (
-                compute_peak_requirements(1, mode, schema)
-            )
-
-
-def test_driver_override_raises_the_batch_peak():
-    # silver-build: 8 x 60 GiB executors + a 64g driver (89.6 GiB pod).
-    peak = compute_peak_requirements(1, "batch", config=_config(driver_memory="64g"))
-    assert peak.memory_gb == 570
-    assert compute_peak_requirements(1, "batch").memory_gb == 525
-
-
-def test_spark3_driver_is_24g():
-    cfg = _config(spark_image="apache/spark:3.5.4-python3")
-    sb = next(
-        r
-        for r in compute_peak_requirements(1, "batch", config=cfg).per_job
-        if r.job_type == "silver-build"
-    )
-    # 8 x 60 GiB + 24 GiB heap + 9.6 GiB overhead
-    assert sb.memory_gb == 514
-
-
 def test_preflight_counts_the_driver_override():
     from lakebench.cli._prerequisites import _check_cluster_capacity
 
@@ -136,18 +109,17 @@ def test_plan_counts_the_driver_override():
     assert plan.spark.memory_gb == 570
 
 
-@pytest.mark.parametrize("value", ["16Gi", "1.5g", "16 g", "lots", "16384", "0g", "\u0661\u0666g"])
-def test_unreadable_driver_memory_is_refused_for_run(value):
-    # A model built without a load purpose refuses, as run and deploy do.
-    with pytest.raises(ValueError, match="not a Spark memory size"):
-        _config(driver_memory=value)
+def test_unreadable_driver_memory_is_refused_for_run():
+    for value in ["16Gi", "1.5g", "16 g", "lots", "16384", "0g", "\u0661\u0666g"]:
+        with pytest.raises(ValueError, match="not a Spark memory size"):
+            _config(driver_memory=value)
 
 
-@pytest.mark.parametrize("value", ["16g", "16G", "16384m", "16gb", "16GB", "1t"])
-def test_spark_sizes_load_and_count(value):
-    cfg = _config(driver_memory=value)
-    peak = compute_peak_requirements(1, "batch", config=cfg)
-    assert peak.memory_gb >= 480 + 16
+def test_spark_sizes_load_and_count():
+    for value in ["16g", "16G", "16384m", "16gb", "16GB", "1t"]:
+        cfg = _config(driver_memory=value)
+        peak = compute_peak_requirements(1, "batch", config=cfg)
+        assert peak.memory_gb >= 480 + 16
 
 
 def test_unreadable_driver_memory_drops_with_a_note_for_teardown(tmp_path):

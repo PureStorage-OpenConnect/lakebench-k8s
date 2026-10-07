@@ -60,18 +60,15 @@ _SCRATCH = {"platform": {"storage": {"scratch": {"enabled": True, "size": "200Gi
 # -- removed sizing blocks -----------------------------------------------------
 
 
-@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
-@pytest.mark.parametrize(
-    ("extra", "key"),
-    [(_EXECUTOR, "'executor' was removed"), (_DRIVER, "'driver' was removed")],
-)
-def test_removed_executor_block_refused_on_run(tmp_path, purpose, extra, key):
-    path = _write(tmp_path, extra)
-    with pytest.raises(ConfigValidationError) as e:
-        load_config(path, purpose=purpose, print_notes=False)
-    text = str(e.value)
-    assert key in text
-    assert "job profiles" in text and "<job>_executors" in text
+def test_removed_executor_block_refused_on_run(tmp_path):
+    for extra, key in [(_EXECUTOR, "'executor' was removed"), (_DRIVER, "'driver' was removed")]:
+        for purpose in [LoadPurpose.RUN, LoadPurpose.MUTATE]:
+            path = _write(tmp_path, extra)
+            with pytest.raises(ConfigValidationError) as e:
+                load_config(path, purpose=purpose, print_notes=False)
+            text = str(e.value)
+            assert key in text
+            assert "job profiles" in text and "<job>_executors" in text
 
 
 @pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
@@ -105,33 +102,28 @@ _SPARK_OP = {"platform": {"compute": {"spark": {"operator": {"install": True}}}}
 _HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}}}}
 
 
-@pytest.mark.parametrize(
-    ("extra", "names"),
-    [
-        (_SPARK_OP, "lakebench admin install --component spark-operator"),
-        (_HIVE_OP, "lakebench admin install --component stackable"),
-    ],
-)
-@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
-def test_operator_install_true_refused_names_admin_install(tmp_path, extra, names, purpose):
-    path = _write(tmp_path, extra)
-    with pytest.raises(ConfigValidationError) as e:
-        load_config(path, purpose=purpose, print_notes=False)
-    assert "install: true' is refused" in str(e.value)
-    assert names in str(e.value)
+def test_operator_install_true_refused_names_admin_install(tmp_path):
+    for purpose in [LoadPurpose.RUN, LoadPurpose.MUTATE]:
+        for extra, names in [
+            (_SPARK_OP, "lakebench admin install --component spark-operator"),
+            (_HIVE_OP, "lakebench admin install --component stackable"),
+        ]:
+            path = _write(tmp_path, extra)
+            with pytest.raises(ConfigValidationError) as e:
+                load_config(path, purpose=purpose, print_notes=False)
+            assert "install: true' is refused" in str(e.value)
+            assert names in str(e.value)
 
 
-@pytest.mark.parametrize("value", ["true", "yes", 1, "on"])
-def test_operator_install_coerced_true_refused(tmp_path, value):
-    # Pydantic reads these as True; the refusal runs after that coercion,
-    # so none of them reaches deploy's install branch.
-    for extra in (
-        {"platform": {"compute": {"spark": {"operator": {"install": value}}}}},
-        {"architecture": {"catalog": {"hive": {"operator": {"install": value}}}}},
-    ):
-        path = _write(tmp_path, extra)
-        with pytest.raises(ConfigValidationError, match="install: true' is refused"):
-            load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+def test_operator_install_coerced_true_refused(tmp_path):
+    for value in ["true", "yes", 1, "on"]:
+        for extra in (
+            {"platform": {"compute": {"spark": {"operator": {"install": value}}}}},
+            {"architecture": {"catalog": {"hive": {"operator": {"install": value}}}}},
+        ):
+            path = _write(tmp_path, extra)
+            with pytest.raises(ConfigValidationError, match="install: true' is refused"):
+                load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
 
 
 @pytest.mark.parametrize("extra", [_SPARK_OP, _HIVE_OP])
@@ -143,51 +135,23 @@ def test_operator_install_true_loads_false_for_teardown(tmp_path, extra):
     assert "install: true' is ignored" in " ".join(load_notes(cfg).texts())
 
 
-def test_operator_install_false_loads_quietly(tmp_path):
-    path = _write(
-        tmp_path,
-        {
-            "platform": {"compute": {"spark": {"operator": {"install": False}}}},
-            "architecture": {"catalog": {"hive": {"operator": {"install": False}}}},
-        },
-    )
-    cfg = load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-    assert not [t for t in load_notes(cfg).texts() if "install" in t]
-
-
 # -- run-only benchmark refusals ----------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("bench", "needle"),
-    [
+def test_run_refuses_what_it_does_not_run(tmp_path):
+    for bench, needle in [
         ({"cache": "cold"}, "lakebench benchmark --cold"),
         ({"mode": "throughput"}, "lakebench benchmark --mode"),
         ({"mode": "composite"}, "lakebench benchmark --mode"),
         ({"streams": 4}, "lakebench benchmark --streams"),
-    ],
-    ids=["cold", "throughput", "composite", "streams"],
-)
-def test_run_refuses_what_it_does_not_run(tmp_path, bench, needle):
-    path = _write(tmp_path, {"architecture": {"benchmark": bench}})
-    with pytest.raises(ConfigValidationError) as e:
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-    assert needle in str(e.value)
-    # `lakebench benchmark` (MUTATE) honours all of them.
-    cfg = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
-    assert cfg.architecture.benchmark.model_dump(include=set(bench)) == bench
-
-
-def test_run_refuses_cold_cache(tmp_path):
-    path = _write(tmp_path, {"architecture": {"benchmark": {"cache": "cold"}}})
-    with pytest.raises(ConfigValidationError, match="benchmark.cache cold"):
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-
-
-def test_run_refuses_throughput(tmp_path):
-    path = _write(tmp_path, {"architecture": {"benchmark": {"mode": "throughput"}}})
-    with pytest.raises(ConfigValidationError, match="benchmark.mode throughput"):
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+    ]:
+        path = _write(tmp_path, {"architecture": {"benchmark": bench}})
+        with pytest.raises(ConfigValidationError) as e:
+            load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+        assert needle in str(e.value)
+        # `lakebench benchmark` (MUTATE) honours all of them.
+        cfg = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+        assert cfg.architecture.benchmark.model_dump(include=set(bench)) == bench
 
 
 def test_run_refuses_explicit_streams(tmp_path):
@@ -212,32 +176,6 @@ def test_run_refuses_explicit_streams(tmp_path):
     assert cfg.architecture.benchmark.streams == 4
     one = _write(tmp_path, {"architecture": {"benchmark": {"streams": 1}}})
     load_config(one, purpose=LoadPurpose.RUN, print_notes=False)
-
-
-def test_saved_config_loads_for_run(tmp_path):
-    # save_config writes every field; the default streams count would then
-    # read as set and run would refuse its own saved config.
-    from lakebench.config.loader import save_config
-
-    cfg = load_config(_write(tmp_path, {}), purpose=LoadPurpose.MUTATE, print_notes=False)
-    out = tmp_path / "saved.yaml"
-    save_config(cfg, out)
-    assert "streams" not in yaml.safe_load(out.read_text())["architecture"]["benchmark"]
-    load_config(out, purpose=LoadPurpose.RUN, print_notes=False)
-    # An explicit value is kept.
-    set_cfg = load_config(
-        _write(tmp_path, {"architecture": {"benchmark": {"streams": 8}}}),
-        purpose=LoadPurpose.MUTATE,
-        print_notes=False,
-    )
-    save_config(set_cfg, out)
-    assert yaml.safe_load(out.read_text())["architecture"]["benchmark"]["streams"] == 8
-
-
-@pytest.mark.parametrize("mode", ["standard", "extended", "power"])
-def test_run_accepts_power_modes(tmp_path, mode):
-    path = _write(tmp_path, {"architecture": {"benchmark": {"mode": mode}}})
-    load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
 
 
 def test_run_snapshot_records_power_hot_1(tmp_path):

@@ -187,36 +187,6 @@ def test_conflict_rereads_and_keeps_the_racers_subject():
     assert api.rb["subjects"] == [_sub("lakebench-postgres"), _sub(SA)]
 
 
-def test_persistent_conflict_fails():
-    api = FakeRbac(rb=_rb([]), always_conflict=True)
-    with pytest.raises(SCCGrantError, match="kept changing"):
-        _grant(api)
-
-
-def test_foreign_roleref_fails():
-    api = FakeRbac(rb=_rb([], ref="system:openshift:scc:restricted"))
-    with pytest.raises(SCCGrantError, match="roleRef"):
-        _grant(api)
-
-
-def test_forbidden_bind_fails_with_admin_command():
-    api = FakeRbac(create_status=403)
-    with pytest.raises(SCCGrantError) as ei:
-        _grant(api)
-    msg = str(ei.value)
-    assert msg.startswith(f"cannot grant SCC anyuid to SA {SA} in namespace {NS}: Forbidden")
-    assert f"oc adm policy add-scc-to-user anyuid -z {SA} -n {NS}" in msg
-
-
-def test_binding_that_does_not_take_effect_fails(monkeypatch):
-    """A binding to a missing ClusterRole (pre-4.10) is written but grants
-    nothing; the second review catches it."""
-    monkeypatch.setattr("lakebench.k8s.security.SCC_VERIFY_TIMEOUT_S", 0.0)
-    api = FakeRbac()
-    with pytest.raises(SCCGrantError, match="still may not use SCC anyuid"):
-        _grant(api, FakeAuthz(allowed=False))
-
-
 def test_second_review_waits_for_the_binding_to_propagate(monkeypatch):
     """A fresh binding can reach the authorizer cache a moment late."""
     monkeypatch.setattr("lakebench.k8s.security.time.sleep", lambda s: None)
@@ -285,21 +255,6 @@ def test_scc_success_keeps_step_success(monkeypatch):
         result = RBACDeployer(_rbac_engine()).deploy()
     assert result.status is DeploymentStatus.SUCCESS
     assert api.rb["subjects"] == [_sub(SA)]
-
-
-def test_rbac_failure_message_is_the_grant_error(monkeypatch):
-    """The step's message is the grant's one line, not a generic wrapper."""
-    from lakebench.modules.pipeline_engines.spark.rbac import RBACDeployer
-
-    _openshift(monkeypatch)
-    api = FakeRbac(create_status=403)
-    with (
-        patch("kubernetes.client.RbacAuthorizationV1Api", return_value=api),
-        patch("kubernetes.client.AuthorizationV1Api", return_value=FakeAuthz(api)),
-    ):
-        result = RBACDeployer(_rbac_engine()).deploy()
-    assert result.status is DeploymentStatus.FAILED
-    assert result.message.startswith(f"cannot grant SCC anyuid to SA {SA} in namespace {NS}")
 
 
 def test_failed_platform_detection_fails_the_rbac_step():

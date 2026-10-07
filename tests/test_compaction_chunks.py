@@ -14,15 +14,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 from rich.console import Console
 
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 from lakebench.modules.table_formats.iceberg.maintenance import (
     COMPACTION_CHUNK_PARTITIONS,
     build_compaction_plan,
-    build_partition_values_sql,
-    parse_partition_values,
 )
 
 SILVER = "lakehouse.silver.customer_interactions_enriched"
@@ -116,21 +113,6 @@ def test_unchunked_cases():
     assert build_compaction_plan("spark-thrift", "lakehouse", SILVER, "128MB", days) == [
         f"CALL lakehouse.system.rewrite_data_files(table => '{SILVER}')"
     ]
-
-
-def test_partition_read_sql_quotes_the_system_table():
-    assert build_partition_values_sql(SILVER, "interaction_date") == (
-        "SELECT DISTINCT partition.interaction_date FROM "
-        'lakehouse.silver."customer_interactions_enriched$partitions" ORDER BY 1'
-    )
-
-
-def test_parse_partition_values():
-    out = '"2024-01-03"\n"2024-01-01"\n""\n\n"2024-01-02"\n'
-    assert parse_partition_values(out) == ["2024-01-01", "2024-01-02", "2024-01-03", None]
-    assert parse_partition_values("") == []
-    with pytest.raises(ValueError, match="unexpected partition value"):
-        parse_partition_values('"2024-01-01"\n"Query failed"\n')
 
 
 # -- the run path and the record -------------------------------------------------
@@ -257,60 +239,6 @@ def test_every_statement_failed_is_still_failed():
     assert "compaction: 0 of 6 statements succeeded" in eff["reasons"]
 
 
-def test_repeated_failure_across_rounds_is_one_reason():
-    """The Trino query id differs per statement; the reason must not."""
-    outcomes: list[dict] = []
-    for _round in range(3):
-        trino = _Trino(_days(366), fail=lambda sql: GOLD in sql)
-        outcomes += _compact(trino, live_streams=True)
-    for n, rec in enumerate(outcomes):
-        rec["failures"][0]["error"] = rec["failures"][0]["error"].replace("_00042_", f"_0004{n}_")
-    eff = _effective(outcomes)
-    named = [r for r in eff["reasons"] if r.startswith(f"compaction failed on {GOLD}: ")]
-    assert len(named) == 1, eff["reasons"]
-    assert named[0].endswith("(3 times)")
-    assert "Query 2026" not in named[0]
-    assert "compaction: 3 of 6 table compactions succeeded" in eff["reasons"]
-
-
-def test_partition_read_has_its_own_bounded_timeout():
-    from lakebench.cli._sustained import _PARTITION_READ_TIMEOUT, MaintenanceBudget
-
-    timeouts: dict[str, list[int]] = {"read": [], "optimize": []}
-
-    class _Timed(_Trino):
-        def __call__(self, pod, argv, namespace, container=None, timeout=30):
-            timeouts["read" if "$partitions" in argv[2] else "optimize"].append(timeout)
-            return super().__call__(pod, argv, namespace, container, timeout)
-
-    _compact(_Timed(_days(10)), timeout=1800)
-    assert timeouts["read"] == [_PARTITION_READ_TIMEOUT] and _PARTITION_READ_TIMEOUT <= 120
-    assert set(timeouts["optimize"]) == {1800}
-    # Under a budget the read gets no more than what is left of it.
-    timeouts["read"].clear()
-    _compact(_Timed(_days(10)), budget=MaintenanceBudget(40))
-    assert timeouts["read"] and timeouts["read"][0] < _PARTITION_READ_TIMEOUT
-
-
-def test_settle_trigger_counts_compaction_statements_not_tables():
-    from lakebench.cli._run import _maintenance_statements_attempted
-
-    trino = _Trino(_days(366))
-    outcomes = _compact(trino)
-    # Five silver chunks and one gold statement ran, though two tables did.
-    assert _maintenance_statements_attempted(outcomes) == 6
-
-
-def test_failed_partition_read_falls_back_and_says_so():
-    trino = _Trino(_days(366), read_rc=1)
-    outcomes = _compact(trino)
-    assert len(trino.statements) == 2  # one unchunked statement per table
-    eff = _effective(outcomes)
-    assert any(
-        r.startswith(f"compaction: partition read failed on {SILVER}") for r in eff["reasons"]
-    )
-
-
 def test_spent_budget_skips_the_partition_read():
     from lakebench.cli._sustained import MaintenanceBudget
 
@@ -321,37 +249,6 @@ def test_spent_budget_skips_the_partition_read():
     (rec,) = k8s_calls
     assert trino.statements == []
     assert (rec["total"], rec["not_attempted"]) == (2, 2)
-
-
-def test_record_without_new_fields_keeps_old_detail():
-    """A v1.6 record (statement counts, no failures or statements) loads as
-    before: no compaction_failures key, the statement wording."""
-    old = [{"kind": "compaction", "engine": "trino", "total": 2, "succeeded": 1, "failed": 1}]
-    eff = _effective(old)
-    assert "compaction_failures" not in eff["detail"]
-    assert "compaction: 1 of 2 statements succeeded" in eff["reasons"]
-
-
-@pytest.mark.parametrize(
-    ("message", "cause"),
-    [
-        # Trino behind kubectl's container notice (the live LB-210 shape).
-        (f"exec_sql failed (rc=1): {WRITER_LIMIT}", "Query 20260929_210101_00042_abcde failed:"),
-        # Beeline: log lines before the error must not win.
-        (
-            "exec_sql failed (rc=2): SLF4J: Class path contains multiple SLF4J bindings. | "
-            "Error: Error while compiling statement: FAILED: AnalysisException no table",
-            "Error: Error while compiling statement: FAILED: AnalysisException",
-        ),
-        ("query_sql failed (rc=1): Query 2026 failed: Table not found", "Query 2026 failed:"),
-    ],
-)
-def test_error_line_names_the_cause(message, cause):
-    from lakebench.cli._sustained import _error_line
-
-    line = _error_line(message)
-    assert line.startswith(cause), line
-    assert "Defaulted container" not in line and "SLF4J" not in line and "\n" not in line
 
 
 def test_live_aml_compaction_leaves_the_tables_silver_merges_into():

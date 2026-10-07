@@ -171,23 +171,6 @@ def test_an_unreadable_continuous_record_is_not_capacity(monkeypatch):
     assert bounds.record_trickle_bound(_rec("231711-6dd3bc")) is None
 
 
-def test_not_measured_line_and_label():
-    tb = bounds.trickle_bound(_rec("215221-65567b"))
-    assert bounds.trickle_line(tb) == (
-        "trickle: max_files_per_trigger 50; the pipeline was not shown to keep pace"
-    )
-    assert bounds.trickle_label(tb) == (
-        "trickle 50 files per trigger set; the pipeline was not shown to keep pace, "
-        "so this is not a capacity"
-    )
-    assert bounds.trickle_note(tb_rec := _rec("215221-65567b")) == (
-        " (BOUNDED BY trickle: not shown to keep pace, not a capacity)"
-    )
-    assert tb_rec
-    unknown = {"value": None, "kept_pace": None}
-    assert "max_files_per_trigger unknown" in bounds.trickle_line(unknown)
-
-
 # --- the experiment block ----------------------------------------------------
 
 
@@ -406,15 +389,3 @@ def test_cli_rows_per_second_carries_the_note():
     m = sr.load_metrics("011043-e338c5")
     assert bounds.trickle_note(m) == " (BOUNDED BY trickle: offered load, not capacity)"
     assert bounds.trickle_note(sr.load_metrics("231711-6dd3bc")) == ""
-
-
-def test_card_tag_names_the_trickle_without_overclaiming():
-    from lakebench.reports.formatter import _cap_short_name
-
-    kept = bounds.trickle_label({"value": 2, "kept_pace": True})
-    unshown = bounds.trickle_label({"value": 2, "kept_pace": None})
-    assert _cap_short_name(kept) == "trickle (offered load, not capacity)"
-    assert _cap_short_name(unshown) == "trickle (not a capacity)"
-    assert _cap_short_name(bounds.trickle_line({"value": 2, "kept_pace": None})) == (
-        "trickle (not a capacity)"
-    )

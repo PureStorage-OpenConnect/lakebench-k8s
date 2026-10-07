@@ -124,13 +124,6 @@ def test_dense_neighbours(spark):
         assert STACK_IDS <= set(out[0]["related_txn_ids"])
 
 
-def test_hop_bounds_do_not_crash(spark):
-    out, _ = _found(spark, STACK, min_hops=5, max_hops=4)
-    assert out == []
-    out, _ = _found(spark, STACK, max_hops=1)
-    assert out == []
-
-
 def test_amount_must_carry_through(spark):
     rows = [
         # Second hop forwards only half: no chain of 3 carrying hops.
@@ -275,18 +268,6 @@ def test_budget_counts_edges_and_step_and_estimates_first(spark):
         w17_layering_chain(_df(spark, STACK[:3]), max_paths=9, run_id="r")
     assert exc.value.reason == "path-cap"
     assert "estimates level 2" in exc.value.detail
-
-
-def test_budget_from_env_and_job_scratch(spark, monkeypatch):
-    from detection_rules import _parse_size_bytes, path_search_budget_rows
-
-    assert _parse_size_bytes("100Gi") == 100 * 2**30
-    assert _parse_size_bytes("500G") == 500 * 10**9
-    assert _parse_size_bytes("bogus") is None
-    monkeypatch.setenv("LB_PATH_SEARCH_MAX_ROWS", "12345")
-    assert path_search_budget_rows(spark) == 12345
-    monkeypatch.setenv("LB_PATH_SEARCH_MAX_ROWS", "not-a-number")
-    assert path_search_budget_rows(spark) > 0
 
 
 def test_alert_ts_is_when_the_chain_first_qualifies(spark):

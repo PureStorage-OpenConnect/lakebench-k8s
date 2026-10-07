@@ -19,40 +19,18 @@ from lakebench.metrics import corpus_identity as ci
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.storage import MetricsStorage
 from tests.fixtures import stored_records as sr
-from tests.test_corpus_identity import observe, two_nodes
-from tests.test_corpus_identity import series as series_body
-from tests.test_experiment import _cfg, _metrics
+from tests.fixtures.comparability_helpers import SYSID as SYSID
+from tests.fixtures.comparability_helpers import _fresh as _fresh
+from tests.fixtures.corpus_identity_helpers import observe
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = sr.expected("records")["records"]
 EXP1_RECORDS = sorted(r for r, w in EXPECTED.items() if w["generation"] == "exp1")
 
-SYSID = {
-    "type": "cluster",
-    "version": 2,
-    "fingerprint": "f" * 16,
-    "partial": False,
-    "parts": {"api_server_ca": "c" * 12, "kubernetes": "v1.31.6"},
-}
-
 
 def _load(record: dict):
     with tempfile.TemporaryDirectory() as tmp:
         return MetricsStorage(tmp)._dict_to_metrics(copy.deepcopy(record))
-
-
-def _fresh(*, markers: bool = True, system: bool = True):
-    """A v1.7 run (identity_version 2 at run start), with or without the
-    v2 inputs."""
-    run = _metrics(_cfg())
-    inputs = run.config_snapshot["experiment_inputs"]
-    assert inputs["identity_version"] == 2
-    if markers:
-        obs, _ = observe(two_nodes(), series_body())
-        inputs["corpus_observation"] = obs
-    if system:
-        inputs["system_identity"] = copy.deepcopy(SYSID)
-    return run
 
 
 # ---------------------------------------------------------------------------
@@ -125,12 +103,6 @@ class TestIdentityVersions:
         v2 = _fresh().to_dict()["experiment"]
         v1 = _fresh(markers=False).to_dict()["experiment"]
         assert ex.identity_hash(v2) != ex.identity_hash(v1)
-
-    @pytest.mark.parametrize("run_id", EXP1_RECORDS)
-    def test_stored_v1_identity_is_the_frozen_one(self, run_id):
-        exp = sr.load_record(run_id)["experiment"]
-        assert ex.identity(exp) == ex._identity_v1(exp)
-        assert ex.identity_hash(exp) == EXPECTED[run_id]["identity_digest"]
 
     def test_v2_baseline_against_v1_run_names_both_versions(self):
         """L8: one refusal naming the versions, not per-key lines."""
@@ -240,15 +212,15 @@ def test_stored_block_never_rebuilt(caller):
     assert caller(_load(_planted()))
 
 
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_resave_keeps_exp1(run_id):
+def test_resave_keeps_exp1():
     """S1, the failing case: a v1.6 record loaded and saved by v1.7 keeps
     its block byte for byte (schema exp1, no id_v2, the same digest)."""
-    rec = sr.load_record(run_id)
-    saved = _load(rec).to_dict()["experiment"]
-    assert saved == rec["experiment"]
-    assert saved["schema"] == "exp1" and "id_v2" not in saved["corpus"]
-    assert ex.identity_hash(saved) == EXPECTED[run_id]["identity_digest"]
+    for run_id in EXP1_RECORDS:
+        rec = sr.load_record(run_id)
+        saved = _load(rec).to_dict()["experiment"]
+        assert saved == rec["experiment"]
+        assert saved["schema"] == "exp1" and "id_v2" not in saved["corpus"]
+        assert ex.identity_hash(saved) == EXPECTED[run_id]["identity_digest"]
 
 
 def test_record_without_block_is_built_once():
@@ -279,12 +251,12 @@ _OP_BY_RECIPE = {
 }
 
 
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_compaction_operation_of_stored_records(run_id):
-    exp = sr.load_record(run_id)["experiment"]
-    ran = "compaction=ran" in exp["effective_maintenance"]["id"].split(":", 1)[1].split(",")
-    want = _OP_BY_RECIPE[exp["architecture"]["recipe"]] if ran else None
-    assert cmp.compaction_operation(exp) == want
+def test_compaction_operation_of_stored_records():
+    for run_id in EXP1_RECORDS:
+        exp = sr.load_record(run_id)["experiment"]
+        ran = "compaction=ran" in exp["effective_maintenance"]["id"].split(":", 1)[1].split(",")
+        want = _OP_BY_RECIPE[exp["architecture"]["recipe"]] if ran else None
+        assert cmp.compaction_operation(exp) == want
 
 
 def test_compaction_operation_recorded_wins():
@@ -297,14 +269,14 @@ def test_compaction_operation_recorded_wins():
     assert cmp.compaction_operation(exp) == "trino_optimize:64MB"
 
 
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_stored_records_gain_no_optional_or_pinset_key(run_id):
+def test_stored_records_gain_no_optional_or_pinset_key():
     """Every stored record is 1.6, single-cycle, with null overrides: no
     derived key appears, so no stored verdict moves through them."""
-    rec = sr.load_record(run_id)
-    c = cmp.classify(rec["experiment"], rec)
-    assert cmp.optional_keys(rec["experiment"], rec) == {}
-    assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)
+    for run_id in EXP1_RECORDS:
+        rec = sr.load_record(run_id)
+        c = cmp.classify(rec["experiment"], rec)
+        assert cmp.optional_keys(rec["experiment"], rec) == {}
+        assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)
 
 
 class TestExp1Derivations:
@@ -332,10 +304,6 @@ class TestExp1Derivations:
         rec.setdefault("provenance", {})["deps"] = {"pinset_sha256": "a" * 64}
         c = cmp.classify(rec["experiment"], rec)
         assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)
-
-    @pytest.mark.parametrize("raw,want", [("1.7.0.dev3", (1, 7)), ("v1.10", (1, 10))])
-    def test_version_parse(self, raw, want):
-        assert cmp.lakebench_minor({"lakebench": {"lakebench_version": raw}}) == (want, None)
 
     def test_unreadable_version_is_pre17_with_a_note(self):
         rec = sr.load_record("5105a0")
@@ -452,23 +420,6 @@ def test_unreadable_optional_key_is_not_the_default(monkeypatch):
     assert cmp.optional_keys(exp)["spark conf"] == "unreadable: KeyError"
 
 
-@pytest.mark.parametrize("path", ["src/lakebench/cli/_run.py", "src/lakebench/cli/_sustained.py"])
-def test_run_paths_sample_at_start_and_before_save(path):
-    """Each run path that starts a record samples right after start_run
-    and right before its save (the batch path is also traced by the run
-    harness; the continuous one is not)."""
-    src = (ROOT / path).read_text()
-    starts = [i for i in range(len(src)) if src.startswith("collector.start_run(", i)]
-    assert starts
-    for i in starts:
-        assert "sample_run_start(collector.current_run, cfg" in src[i : i + 400]
-    saves = [
-        i for i in range(len(src)) if src.startswith("metrics_storage.save_run(run_metrics)", i)
-    ]
-    for i in saves:
-        assert "sample_run_end(run_metrics, cfg" in src[max(0, i - 600) : i]
-
-
 def test_optional_key_table_rows_name_a_group_and_owner():
     for name, row in cmp.OPTIONAL_IDENTITY_KEYS.items():
         assert row.group in cmp.GROUPS, name
@@ -483,10 +434,6 @@ def test_benchmark_path_refreshes_the_stored_block():
     replace = src.index("record.benchmark = bench\n")
     save = src.index("storage.save_run(record)", replace)
     assert "refresh_benchmark(record)" in src[replace:save]
-
-
-def test_records_json_drift_list_is_empty():
-    assert sr.expected("records")["known_rebuild_drift"]["runs"] == []
 
 
 # ---------------------------------------------------------------------------

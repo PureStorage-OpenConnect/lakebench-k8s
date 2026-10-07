@@ -135,24 +135,25 @@ def test_c360_is_unchanged():
     assert get_executor_count("gold-refresh", 10, "customer360") == 2
 
 
-@pytest.mark.parametrize(
-    ("scale", "silver", "gold"),
-    [(1, 10, 12), (10, 10, 12), (20, 10, 24), (50, 13, 28), (100, 17, 28), (1000, 28, 28)],
-)
-def test_counts_scale_and_respect_the_cap(scale, silver, gold):
-    assert get_executor_count("silver-stream", scale, "financial") == silver
-    assert get_executor_count("gold-refresh", scale, "financial") == gold
-    assert silver <= _MAX_EXECUTORS_SAFE and gold <= _MAX_EXECUTORS_SAFE
+def test_counts_scale_and_respect_the_cap():
+    for scale, silver, gold in [
+        (1, 10, 12),
+        (10, 10, 12),
+        (20, 10, 24),
+        (50, 13, 28),
+        (100, 17, 28),
+        (1000, 28, 28),
+    ]:
+        assert get_executor_count("silver-stream", scale, "financial") == silver
+        assert get_executor_count("gold-refresh", scale, "financial") == gold
+        assert silver <= _MAX_EXECUTORS_SAFE and gold <= _MAX_EXECUTORS_SAFE
 
 
-@pytest.mark.parametrize(
-    ("scale", "cores", "memory"),
-    [(1, 118, 990), (10, 118, 990), (100, 222, 1958)],
-)
-def test_peak_requirements(scale, cores, memory):
+def test_peak_requirements():
     """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
-    peak = compute_peak_requirements(scale, "sustained", "financial")
-    assert (peak.cpu_cores, peak.memory_gb) == (cores, memory)
+    for scale, cores, memory in [(1, 118, 990), (10, 118, 990), (100, 222, 1958)]:
+        peak = compute_peak_requirements(scale, "sustained", "financial")
+        assert (peak.cpu_cores, peak.memory_gb) == (cores, memory)
 
 
 # Budget split per cluster size: (bronze, silver, gold) executors.
@@ -191,56 +192,54 @@ def _budget_cores(cfg, cores):
     return int(max(0, cores * 1000 - co - dg_m - 10_000) * 0.9) // 1000
 
 
-@pytest.mark.parametrize(("scale", "cores", "expected"), _BUDGET)
-def test_budget_split(scale, cores, expected):
-    cfg = _config("financial", scale)
-    got = _streaming_concurrent_budget(cfg, cores * 1000)
-    assert tuple(got[j] for j in _STAGES) == expected
-    base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-    base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
-    total = sum(got[j] * 4 for j in _STAGES)
-    assert total <= max(_budget_cores(cfg, cores), base_total)
-    for j in _STAGES:
-        floor = max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4)
-        assert floor <= got[j] <= get_executor_count(j.value, scale, "financial")
+def test_budget_split():
+    for scale, cores, expected in _BUDGET:
+        cfg = _config("financial", scale)
+        got = _streaming_concurrent_budget(cfg, cores * 1000)
+        assert tuple(got[j] for j in _STAGES) == expected
+        base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
+        base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
+        total = sum(got[j] * 4 for j in _STAGES)
+        assert total <= max(_budget_cores(cfg, cores), base_total)
+        for j in _STAGES:
+            floor = max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4)
+            assert floor <= got[j] <= get_executor_count(j.value, scale, "financial")
 
 
-@pytest.mark.parametrize("scale", [1, 10, 50, 100, 200, 500, 1000])
-@pytest.mark.parametrize("cores", range(20, 700, 3))
-def test_budget_never_overspends_and_uses_what_fits(scale, cores):
-    """Total within the budget (or the old split, when floors alone exceed
-    it); and no whole 4-core executor left unspent while a stage still
-    wants one."""
-    cfg = _config("financial", scale)
-    got = _streaming_concurrent_budget(cfg, cores * 1000)
-    base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-    base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
-    budget = _budget_cores(cfg, cores)
-    total = sum(got[j] * 4 for j in _STAGES)
-    assert total <= max(budget, base_total)
-    wants = any(got[j] < get_executor_count(j.value, scale, "financial") for j in _STAGES)
-    if wants:
-        assert budget - total < 4
-
-
-@pytest.mark.parametrize("scale", [1, 10, 50, 100, 500])
-@pytest.mark.parametrize("cores", range(20, 700, 3))
-def test_spare_cores_go_upstream_first(scale, cores):
-    """A stage runs no faster than its input: gold gets cores above its
-    floor only once bronze is full and silver is at its keep-up count, and
-    silver goes past keep-up only once bronze and gold are full."""
-    got = _streaming_concurrent_budget(_config("financial", scale), cores * 1000)
-    base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-    want = {j: get_executor_count(j.value, scale, "financial") for j in _STAGES}
-    floor = {j: max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4) for j in _STAGES}
-    keep_up = min(want[JobType.SILVER_STREAM], _KEEP_UP)
-    if got[JobType.SILVER_STREAM] > floor[JobType.SILVER_STREAM]:
-        assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST]
-    if got[JobType.GOLD_REFRESH] > floor[JobType.GOLD_REFRESH]:
-        assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST]
-        assert got[JobType.SILVER_STREAM] >= keep_up
-    if got[JobType.SILVER_STREAM] > max(floor[JobType.SILVER_STREAM], keep_up):
-        assert got[JobType.GOLD_REFRESH] == want[JobType.GOLD_REFRESH]
+def test_budget_properties_over_the_core_and_scale_grid():
+    """Over scales 1..1000 and 20..697 cores: the total stays within the
+    budget (or the old split, when floors alone exceed it); no whole 4-core
+    executor is left unspent while a stage still wants one; and spare cores go
+    upstream first (a stage runs no faster than its input): gold gets cores
+    above its floor only once bronze is full and silver is at its keep-up
+    count, and silver goes past keep-up only once bronze and gold are full."""
+    for scale in (1, 10, 50, 100, 200, 500, 1000):
+        cfg = _config("financial", scale)
+        c360 = _config("customer360", scale)
+        want = {j: get_executor_count(j.value, scale, "financial") for j in _STAGES}
+        keep_up = min(want[JobType.SILVER_STREAM], _KEEP_UP)
+        for cores in range(20, 700, 3):
+            at = f"scale={scale} cores={cores}"
+            got = _streaming_concurrent_budget(cfg, cores * 1000)
+            base = _streaming_concurrent_budget(c360, cores * 1000)
+            base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
+            budget = _budget_cores(cfg, cores)
+            total = sum(got[j] * 4 for j in _STAGES)
+            assert total <= max(budget, base_total), at
+            if any(got[j] < want[j] for j in _STAGES):
+                assert budget - total < 4, at
+            if scale == 200:  # the upstream-first grid ran over 1, 10, 50, 100, 500
+                continue
+            floor = {
+                j: max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4) for j in _STAGES
+            }
+            if got[JobType.SILVER_STREAM] > floor[JobType.SILVER_STREAM]:
+                assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST], at
+            if got[JobType.GOLD_REFRESH] > floor[JobType.GOLD_REFRESH]:
+                assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST], at
+                assert got[JobType.SILVER_STREAM] >= keep_up, at
+            if got[JobType.SILVER_STREAM] > max(floor[JobType.SILVER_STREAM], keep_up):
+                assert got[JobType.GOLD_REFRESH] == want[JobType.GOLD_REFRESH], at
 
 
 def test_silver_keep_up_count_holds_bronze_intake():
@@ -299,12 +298,12 @@ class TestPreflightBetweenOldAndNewMinimum:
             _free_from_total(get_client.return_value)
             return _check_cluster_capacity(_config("financial", 10))
 
-    @pytest.mark.parametrize("cores", [51, 80, 117, 130])
-    def test_runs_degraded_with_a_warning(self, cores):
-        r = self._check(cores)
-        assert r.passed
-        assert r.message.startswith("WARNING")
-        assert "silver-stream" in r.message or "gold-refresh" in r.message
+    def test_runs_degraded_with_a_warning(self):
+        for cores in [51, 80, 117, 130]:
+            r = self._check(cores)
+            assert r.passed
+            assert r.message.startswith("WARNING")
+            assert "silver-stream" in r.message or "gold-refresh" in r.message
 
     def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
         """The capped streams plus Trino, Hive/Postgres, lb-deps and datagen

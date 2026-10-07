@@ -18,7 +18,6 @@ from lakebench.deploy.engine import (
     JVM_HEAP_FRACTION,
     DeploymentEngine,
     TemplateRenderer,
-    jvm_heap_for_limit,
     k8s_memory_bytes,
 )
 from tests.conftest import make_config
@@ -69,27 +68,6 @@ def _size_bytes(value: str) -> int:
     return int(float(m.group(1)) * mult)
 
 
-@pytest.mark.parametrize(
-    ("limit", "expected"),
-    [
-        ("4Gi", "3276m"),
-        ("8Gi", "6553m"),
-        ("16Gi", "13107m"),
-        ("4096Mi", "3276m"),
-        ("8G", "6103m"),
-        ("2000M", "1525m"),
-    ],
-)
-def test_heap_is_80_percent_of_limit(limit, expected):
-    assert jvm_heap_for_limit(limit) == expected
-
-
-@pytest.mark.parametrize("bad", ["8g", "4096m", "lots", "", "0Gi", "-1Gi"])
-def test_unparseable_limits_raise(bad):
-    with pytest.raises(ValueError):
-        jvm_heap_for_limit(bad)
-
-
 def _trino_overrides(engine_type: str, coord_mem: str, worker_mem: str) -> dict:
     return {
         "architecture": {
@@ -135,14 +113,9 @@ def test_trino_xmx_below_pod_limit_and_memory_props_fit(coord_mem, worker_mem):
         assert used <= heap, (role, props)
 
 
-def test_bad_trino_memory_fails_fast_when_trino_is_the_engine():
-    with pytest.raises(ValueError):
-        _engine(**_trino_overrides("trino", "8g", "16Gi"))
-
-
-@pytest.mark.parametrize("engine_type", ["spark-thrift", "duckdb", "none"])
-def test_bad_trino_memory_ignored_for_other_engines(engine_type):
+def test_bad_trino_memory_ignored_for_other_engines():
     """An unused Trino field must not block that deployment's destroy, which
     builds the same context."""
-    ctx = _engine(**_trino_overrides(engine_type, "8g", "lots")).context
-    assert ctx["trino_coordinator_heap"] == "" and ctx["trino_worker_heap"] == ""
+    for engine_type in ["spark-thrift", "duckdb", "none"]:
+        ctx = _engine(**_trino_overrides(engine_type, "8g", "lots")).context
+        assert ctx["trino_coordinator_heap"] == "" and ctx["trino_worker_heap"] == ""

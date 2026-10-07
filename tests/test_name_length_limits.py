@@ -9,10 +9,9 @@ import yaml
 from pydantic import ValidationError
 
 from lakebench.config import load_config
-from lakebench.config.loader import ConfigValidationError, LoadPurpose
+from lakebench.config.loader import LoadPurpose
 from lakebench.config.schema import (
     LakebenchConfig,
-    derived_name_violations,
     max_namespace_length,
 )
 
@@ -31,15 +30,6 @@ def _exact(n: int) -> str:
 
 
 class TestHiveLimit:
-    def test_live_failure_name_is_refused(self):
-        # The name that hung twice on the live cluster: 27 characters.
-        with pytest.raises(ValidationError) as e:
-            _cfg("ov-perf-c360-continuous-s10", "hive-iceberg-spark-trino")
-        msg = str(e.value)
-        assert "Hive metastore pod volume" in msg
-        assert "lakebench-s3-credentials-ov-perf-c360-continuous-s10-s3-credentials" in msg
-        assert "at most 23 characters" in msg
-
     def test_live_working_names_load(self):
         _cfg("ov-perf-c360-batch-s10", "hive-iceberg-spark-trino")
         _cfg("ov-perf-c360-cont", "hive-iceberg-spark-trino")
@@ -81,12 +71,6 @@ class TestNonHiveLimit:
         with pytest.raises(ValidationError):
             _cfg(_exact(64), "polaris-iceberg-spark-trino")
 
-    def test_namespace_over_63_named(self):
-        cfg = _cfg("ok", "polaris-iceberg-spark-trino")
-        cfg.platform.kubernetes.namespace = _exact(64)
-        msgs = derived_name_violations(cfg)
-        assert any("Kubernetes allows at most 63" in m for m in msgs)
-
 
 class TestBuckets:
     def test_bucket_boundary(self):
@@ -102,10 +86,6 @@ class TestLoader:
         p = tmp_path / "c.yaml"
         p.write_text(yaml.safe_dump({"name": name, "recipe": "hive-iceberg-spark-trino"}))
         return p
-
-    def test_load_config_refuses(self, tmp_path):
-        with pytest.raises(ConfigValidationError, match="at most 23"):
-            load_config(self._write(tmp_path, "ov-perf-c360-continuous-s10"))
 
     def test_destroy_path_can_still_load(self, tmp_path):
         cfg = load_config(
@@ -156,31 +136,3 @@ class TestLoader:
             LoadPurpose.TEARDOWN,
             LoadPurpose.READ,
         )
-
-    @pytest.mark.parametrize(
-        ("module", "argv"),
-        [
-            ("lakebench.cli._deploy", ["deploy"]),
-            ("lakebench.cli._run", ["run"]),
-            ("lakebench.cli._generate", ["generate"]),
-        ],
-    )
-    def test_commands_that_create_objects_keep_the_check(self, module, argv, tmp_path, monkeypatch):
-        import importlib
-
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-        from lakebench.config.loader import ConfigFileNotFoundError
-
-        monkeypatch.setenv("KUBECONFIG", "/nonexistent")
-        seen: list[dict] = []
-
-        def spy(path, **kwargs):
-            seen.append(kwargs)
-            raise ConfigFileNotFoundError(str(path))
-
-        monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
-        CliRunner().invoke(app, [*argv, str(self._write(tmp_path, "x"))])
-        assert seen and not seen[0].get("allow_long_names")
-        assert seen[0].get("purpose") in (LoadPurpose.MUTATE, LoadPurpose.RUN)

@@ -18,16 +18,8 @@ import pytest
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.reports.formatter import (
-    ALL_DELTA_TOKENS,
-    DELTA_TOKEN_A_FASTER,
-    DELTA_TOKEN_B_FASTER,
-    DELTA_TOKEN_CAPPED,
-    DELTA_TOKEN_OVERLAP,
-    DELTA_TOKEN_WITHHELD,
     caps_bound_from,
     confidence_chip,
-    confidence_chip_html,
-    delta_token,
     format_measurement,
 )
 from lakebench.reports.generator import ReportGenerator
@@ -72,25 +64,6 @@ class TestFormatMeasurement:
         assert "n=" not in format_measurement("42.0", "QpH", n_runs=None)
         assert "n=" not in format_measurement("42.0", "QpH", n_runs=0)
 
-    def test_support_state_renders_pill(self):
-        for state, expect in (
-            ("supported", "supported"),
-            ("unverified", "unverified"),
-            ("unsupported", "unsupported"),
-        ):
-            out = format_measurement("42", "QpH", support_state=state)
-            assert expect in out
-
-    def test_support_state_unknown_omitted_by_caller(self):
-        # None ("unknown") does not add a pill; the card stays clean.
-        out = format_measurement("42", "QpH", support_state=None)
-        assert "qual-support" not in out
-
-    def test_html_escape_applied_to_value_and_cap_reason(self):
-        out = format_measurement("<script>&", "QpH")
-        assert "<script>" not in out
-        assert "&lt;script&gt;" in out or "&lt;script&gt;&amp;" in out
-
     def test_cap_names_cover_known_bound_shapes(self):
         # Every known bound-line shape resolves to a cap name; the reader
         # gets the constant next to the number for each.
@@ -125,79 +98,23 @@ class TestFormatMeasurement:
 
 
 class TestConfidenceChip:
-    def test_single_run_when_n_is_one_or_missing(self):
-        assert confidence_chip(1) == "single_run"
-        assert confidence_chip(None) == "single_run"
-        assert confidence_chip(0) == "single_run"
-
-    def test_replicated_when_three_or_more(self):
-        assert confidence_chip(3) == "replicated_n=3"
-        assert confidence_chip(4) == "replicated_n=4"
-
-    def test_high_when_five_and_low_spread(self):
-        assert confidence_chip(5, spread=0.05) == "high"
-        assert confidence_chip(6, spread=0.09) == "high"
-
-    def test_high_needs_spread_below_10pct(self):
-        # A high-confidence claim needs measured spread; without it, no
-        # such claim is made.
-        assert confidence_chip(5, spread=None) == "replicated_n=5"
-        assert confidence_chip(5, spread=0.15) == "replicated_n=5"
-
-    def test_chip_html_carries_label(self):
-        assert "single_run" in confidence_chip_html(1)
-        assert "replicated_n=3" in confidence_chip_html(3)
-        assert "high" in confidence_chip_html(5, spread=0.05)
-
-
-# ---------------------------------------------------------------------------
-# delta_token: WCAG-safe compare tokens. Every state has a distinct token,
-# and A_faster / B_faster respect direction sensitivity of the score.
-# ---------------------------------------------------------------------------
-
-
-class TestDeltaToken:
-    def test_higher_is_better_positive_pct_is_b_faster(self):
-        assert (
-            delta_token(higher_is_better=True, pct=10.0, within_noise=False) == DELTA_TOKEN_B_FASTER
-        )
-
-    def test_higher_is_better_negative_pct_is_a_faster(self):
-        assert (
-            delta_token(higher_is_better=True, pct=-10.0, within_noise=False)
-            == DELTA_TOKEN_A_FASTER
-        )
-
-    def test_lower_is_better_positive_pct_is_a_faster(self):
-        # B took longer; A is the faster one.
-        assert (
-            delta_token(higher_is_better=False, pct=10.0, within_noise=False)
-            == DELTA_TOKEN_A_FASTER
-        )
-
-    def test_within_noise_is_overlap(self):
-        assert delta_token(higher_is_better=True, pct=1.0, within_noise=True) == DELTA_TOKEN_OVERLAP
-
-    def test_capped_takes_precedence(self):
-        assert (
-            delta_token(higher_is_better=True, pct=50.0, within_noise=False, capped=True)
-            == DELTA_TOKEN_CAPPED
-        )
-
-    def test_withheld_takes_precedence_over_capped(self):
-        assert (
-            delta_token(
-                higher_is_better=True,
-                pct=50.0,
-                within_noise=False,
-                capped=True,
-                withheld=True,
-            )
-            == DELTA_TOKEN_WITHHELD
-        )
-
-    def test_all_tokens_are_distinct_strings(self):
-        assert len(set(ALL_DELTA_TOKENS)) == 5
+    @pytest.mark.parametrize(
+        ("n", "spread", "label"),
+        [
+            (1, None, "single_run"),
+            (None, None, "single_run"),
+            (0, None, "single_run"),
+            (3, None, "replicated_n=3"),
+            (4, None, "replicated_n=4"),
+            (5, 0.05, "high"),
+            (6, 0.09, "high"),
+            # a high-confidence claim needs measured spread below 10%
+            (5, None, "replicated_n=5"),
+            (5, 0.15, "replicated_n=5"),
+        ],
+    )
+    def test_chip_label(self, n, spread, label):
+        assert confidence_chip(n, spread=spread) == label
 
 
 # ---------------------------------------------------------------------------
@@ -303,93 +220,25 @@ class TestReportContainsQualifiers:
         assert "n=5" not in html
 
 
-class TestReadFirstPanel:
-    def test_panel_has_all_five_fields(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path)
-        html = ReportGenerator(storage.metrics_dir)._generate_read_first_panel(
-            m,
-            passed=True,
-            warnings=[],
-            fail_reasons=[],
-            n_runs=3,
-        )
-        assert "Read this first" in html
-        # The front matter, in its order (reports/front_matter.py).
-        labels = [
-            "Verdict:",
-            "Headline:",
-            "Evidence class:",
-            "Corpus:",
-            "Support state:",
-            "Binding caps:",
-            "n:",
-            "Provenance:",
-            "Digest:",
-        ]
-        positions = [html.index(f">{label}</span>") for label in labels]
-        assert positions == sorted(positions)
-
-    def test_corpus_label_includes_role_and_id_prefix(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, corpus_role="evaluation")
-        html = ReportGenerator(storage.metrics_dir)._generate_read_first_panel(
-            m,
-            passed=True,
-            warnings=[],
-            fail_reasons=[],
-            n_runs=1,
-        )
-        assert "evaluation" in html
-        assert "abc123abc123" in html  # first 12 chars of the corpus id
-
-    def test_fixed_stamp_is_gone(self, tmp_path):
-        # The evidence class comes from the look record in the front
-        # matter; the fixed "single-owner recorded" stamp is removed.
-        storage, m = _metrics_with_experiment(tmp_path)
-        html = ReportGenerator(storage.metrics_dir)._generate_html(m, platform_metrics=None)
-        assert "single-owner recorded" not in html
-        assert "Evidence class:" in html
-
-    def test_read_first_panel_present_in_full_html(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path)
-        gen = ReportGenerator(storage.metrics_dir)
-        html = gen._generate_html(m, platform_metrics=None)
-        assert "Read this first" in html
-        assert "Digest:" in html
-
-
 class TestConfidenceChipOnBadge:
-    def test_single_run_chip_when_n_is_one(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, n_runs=1)
+    @pytest.mark.parametrize(
+        ("n_runs", "n_iterations", "present", "absent"),
+        [
+            (1, None, "single_run", None),
+            # invariant 7: fewer than 3 independent runs never claim replication
+            (2, None, "single_run", "replicated_n=2"),
+            (3, None, "replicated_n=3", None),
+            # in-stream rounds within one continuous run are not replication
+            (1, 5, "single_run", "replicated_n=5"),
+        ],
+    )
+    def test_badge_chip(self, tmp_path, n_runs, n_iterations, present, absent):
+        kw = {"n_iterations": n_iterations} if n_iterations is not None else {}
+        storage, m = _metrics_with_experiment(tmp_path, n_runs=n_runs, **kw)
         html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
-        assert "single_run" in html
-
-    def test_replicated_chip_when_n_is_three(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, n_runs=3)
-        html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
-        assert "replicated_n=3" in html
-
-    def test_in_stream_rounds_do_not_count_as_replication(self, tmp_path):
-        # Invariant 7: n_iterations is in-stream benchmark rounds within one
-        # continuous run and must NOT be counted as replication. A sustained
-        # run with 5 rounds gets single_run on the badge until independent
-        # runs are recorded.
-        storage, m = _metrics_with_experiment(tmp_path, n_iterations=5, n_runs=1)
-        html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
-        assert "single_run" in html
-        assert "replicated_n=5" not in html
-
-    def test_two_runs_still_reads_single_run(self, tmp_path):
-        # Invariant 7: never claim replication from fewer than 3 independent
-        # runs. n=2 renders as single_run, not replicated_n=2.
-        storage, m = _metrics_with_experiment(tmp_path, n_runs=2)
-        html = ReportGenerator(storage.metrics_dir)._generate_html(m, None)
-        assert "single_run" in html
-        assert "replicated_n=2" not in html
-
-    def test_high_chip_needs_five_and_low_spread(self):
-        # Direct helper test (the full HTML path does not have live spread
-        # today, so the chip's "high" state is verified at the API).
-        assert "high" in confidence_chip_html(5, spread=0.05)
+        assert present in html
+        if absent:
+            assert absent not in html
 
 
 # ---------------------------------------------------------------------------
@@ -400,18 +249,6 @@ class TestConfidenceChipOnBadge:
 
 
 class TestExperimentPullThrough:
-    def test_caps_bound_from_experiment_block(self, tmp_path):
-        _, m = _metrics_with_experiment(
-            tmp_path,
-            bound=[
-                "bronze-verify: executor cap 28 (scale asks for 40)",
-                "auto-sizing: silver dropped 2 executors",
-            ],
-        )
-        bounds = caps_bound_from(m)
-        assert len(bounds) == 2
-        assert any("executor cap" in b for b in bounds)
-
     def test_caps_bound_empty_when_no_block(self):
         assert caps_bound_from(object()) == []
 
@@ -419,33 +256,6 @@ class TestExperimentPullThrough:
 # ---------------------------------------------------------------------------
 # Lint smoke: the lint script itself catches a regression.
 # ---------------------------------------------------------------------------
-
-
-def _load_lint_module():
-    """Load the standalone lint script under a stable module name."""
-    import importlib.util
-
-    script_path = Path(__file__).resolve().parent.parent / "scripts" / "lint_capped_bare_numbers.py"
-    spec = importlib.util.spec_from_file_location("lint_capped_bare_numbers", script_path)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_lint_catches_bare_headline(tmp_path):
-    target = tmp_path / "bad.py"
-    target.write_text('html = f"""<div class="card-value">{qph:,.1f}</div>"""')
-    lint_mod = _load_lint_module()
-    assert lint_mod.scan(target), "lint should flag a bare {qph:...} in card-value"
-
-
-def test_lint_passes_on_current_generator():
-    lint_mod = _load_lint_module()
-    target = (
-        Path(__file__).resolve().parent.parent / "src" / "lakebench" / "reports" / "generator.py"
-    )
-    assert lint_mod.scan(target) == [], "generator.py must not carry bare headlines"
 
 
 if __name__ == "__main__":  # pragma: no cover

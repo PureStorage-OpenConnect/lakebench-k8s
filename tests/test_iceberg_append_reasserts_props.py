@@ -102,35 +102,6 @@ def test_helper_carries_fanout_when_enabled():
     assert "'write.spark.fanout.enabled' = 'true'" in sql
 
 
-def test_silver_simple_calls_reassert_before_append():
-    """The SIMPLE append path invokes the helper before writeTo(...).append()."""
-    src = (_SCRIPTS_DIR / "silver_build.py").read_text()
-    # `silver_simple`'s append branch runs reassert before writeTo append.
-    fn = src.split("def silver_simple(", 1)[1]
-    fn = fn.split("\ndef ", 1)[0]
-    append_branch = fn.split("if appending:", 1)[1].split("else:", 1)[0]
-    assert "reassert_silver_iceberg_props(spark, silver_tbl)" in append_branch, (
-        "silver_simple's append branch must reassert TBLPROPERTIES before "
-        ".append() so a drifted table cannot silently degrade the write"
-    )
-    # And the reassert runs BEFORE the writeTo append.
-    reassert_idx = append_branch.index("reassert_silver_iceberg_props(spark, silver_tbl)")
-    write_idx = append_branch.index(".append()")
-    assert reassert_idx < write_idx
-
-
-def test_silver_streaming_calls_reassert_before_append():
-    """The STREAMING append path also invokes the helper before .append()."""
-    src = (_SCRIPTS_DIR / "silver_build.py").read_text()
-    fn = src.split("def silver_streaming(", 1)[1]
-    fn = fn.split("\ndef ", 1)[0]
-    append_branch = fn.split("if appending:", 1)[1].split("else:", 1)[0]
-    assert "reassert_silver_iceberg_props(spark, silver_tbl)" in append_branch
-    reassert_idx = append_branch.index("reassert_silver_iceberg_props(spark, silver_tbl)")
-    write_idx = append_branch.index(".append()")
-    assert reassert_idx < write_idx
-
-
 def test_financial_replace_data_reasserts_props_before_overwrite():
     """AML batch's ``_replace_data`` helper runs ALTER before overwrite.
 

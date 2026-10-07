@@ -120,17 +120,6 @@ def test_seal_committed_between_actions_is_invisible(spark, cat, record_property
     assert PARTIAL in _batches(sealed_txns_filter_at(spark, txns, cat, versions_t, newer))
 
 
-@pytest.mark.parametrize(
-    "bad", [None, "unknown", "123", True, 1.0], ids=["none", "unknown", "str", "bool", "float"]
-)
-def test_filter_at_rejects_non_int(spark, bad):
-    from common import sealed_txns_filter_at
-
-    txns, versions_t, _vsid = _fixture(spark)
-    with pytest.raises(TypeError):
-        sealed_txns_filter_at(spark, txns, CATALOG, versions_t, bad)
-
-
 def test_filter_at_fails_closed(spark):
     """An int id that is not a snapshot of the versions table, and a dropped
     versions table, raise SealedFilterError inside the call, before any

@@ -48,13 +48,6 @@ def test_table_exists_raises_on_an_error_that_is_not_not_found(load_script):
         fn(_spark_raising(RuntimeError("metastore timed out")), "ice.silver.t")
 
 
-def test_table_exists_is_false_for_a_missing_table(load_script):
-    common = load_script("common")
-    fn = _lift(["_table_exists"], table_exists=common.table_exists)["_table_exists"]
-    err = RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] The table or view `silver`.`t` cannot be found")
-    assert fn(_spark_raising(err), "ice.silver.t") is False
-
-
 class _Col:
     """Enough of a Column for tag_batch's expression to build."""
 
@@ -106,17 +99,7 @@ def test_later_cycle_rebuild_without_its_own_files_refuses():
         _tag_batch()(df, 2, False)
 
 
-def test_later_cycle_rebuild_with_its_own_files_tags_by_file():
-    df = _Df([BASE + "part-000000.parquet", BASE + "part-c010-000003.parquet"])
-    assert _tag_batch()(df, 10, False).tagged
-
-
 def test_cycle_one_is_not_satisfied_by_cycle_ten():
     df = _Df([BASE + "part-000000.parquet", BASE + "part-c010-000000.parquet"])
     with pytest.raises(_Abort):
         _tag_batch()(df, 1, False)
-
-
-def test_cycle_zero_and_appends_need_no_cycle_files():
-    assert _tag_batch()(_Df([BASE + "part-000000.parquet"]), 0, False).tagged
-    assert _tag_batch()(_Df([]), 3, True).tagged

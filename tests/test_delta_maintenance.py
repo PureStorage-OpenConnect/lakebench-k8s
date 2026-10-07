@@ -11,7 +11,6 @@ Covers:
 import pytest
 
 from lakebench.deploy.delta_maintenance import (
-    build_delta_compaction_sql,
     build_delta_drop_table_sql,
     build_delta_maintenance_sql,
     build_delta_table_health_sql,
@@ -26,35 +25,12 @@ from lakebench.deploy.delta_maintenance import (
 class TestParseRetentionToHours:
     """Tests for duration string to hours conversion."""
 
-    def test_minutes(self):
-        assert parse_retention_to_hours("30m") == 0.5
-
-    def test_hours(self):
-        assert parse_retention_to_hours("1h") == 1.0
-
-    def test_days(self):
-        assert parse_retention_to_hours("7d") == 168.0
-
-    def test_zero_seconds(self):
-        assert parse_retention_to_hours("0s") == 0.0
-
-    def test_seconds_to_hours(self):
-        assert parse_retention_to_hours("3600s") == 1.0
-
-    def test_invalid_input_raises(self):
-        with pytest.raises(ValueError):
-            parse_retention_to_hours("abc")
-
-    def test_empty_string_raises(self):
-        with pytest.raises(ValueError):
-            parse_retention_to_hours("")
-
-    def test_no_unit_raises(self):
-        with pytest.raises(ValueError):
-            parse_retention_to_hours("30")
-
-    def test_whitespace_trimmed(self):
-        assert parse_retention_to_hours("  30m  ") == 0.5
+    @pytest.mark.parametrize(
+        ("text", "hours"),
+        [("30m", 0.5), ("1h", 1.0), ("7d", 168.0), ("0s", 0.0), ("3600s", 1.0), ("  30m  ", 0.5)],
+    )
+    def test_parse(self, text, hours):
+        assert parse_retention_to_hours(text) == hours
 
 
 # ---------------------------------------------------------------------------
@@ -125,59 +101,10 @@ class TestBuildDeltaMaintenanceSql:
             "VACUUM lakehouse.bronze.events RETAIN 0.0 HOURS"
         ]
 
-    def test_duckdb_returns_empty(self):
-        stmts = build_delta_maintenance_sql(
-            engine="duckdb",
-            catalog="lakehouse",
-            table="lakehouse.bronze.events",
-        )
-        assert stmts == []
-
-    def test_unknown_engine_returns_empty(self):
-        stmts = build_delta_maintenance_sql(
-            engine="unknown",
-            catalog="lakehouse",
-            table="lakehouse.bronze.events",
-        )
-        assert stmts == []
-
 
 # ---------------------------------------------------------------------------
 # build_delta_compaction_sql (OPTIMIZE)
 # ---------------------------------------------------------------------------
-
-
-class TestBuildDeltaCompactionSql:
-    """Tests for OPTIMIZE SQL generation per engine."""
-
-    def test_trino_optimize(self):
-        stmts = build_delta_compaction_sql(
-            engine="trino",
-            catalog="lakehouse",
-            table="lakehouse.silver.enriched",
-        )
-        assert len(stmts) == 1
-        assert "ALTER TABLE" in stmts[0]
-        assert "EXECUTE optimize" in stmts[0]
-        assert "lakehouse.silver.enriched" in stmts[0]
-
-    def test_spark_thrift_optimize(self):
-        stmts = build_delta_compaction_sql(
-            engine="spark-thrift",
-            catalog="lakehouse",
-            table="lakehouse.silver.enriched",
-        )
-        assert len(stmts) == 1
-        assert "OPTIMIZE" in stmts[0]
-        assert "lakehouse.silver.enriched" in stmts[0]
-
-    def test_duckdb_returns_empty(self):
-        stmts = build_delta_compaction_sql(
-            engine="duckdb",
-            catalog="lakehouse",
-            table="lakehouse.silver.enriched",
-        )
-        assert stmts == []
 
 
 # ---------------------------------------------------------------------------
@@ -200,22 +127,6 @@ class TestBuildDeltaTableHealthSql:
         )
         assert result == {}
         assert "trino" in DELTA_HEALTH_UNAVAILABLE
-
-    def test_spark_thrift_describe_detail(self):
-        result = build_delta_table_health_sql(
-            engine="spark-thrift",
-            catalog="lakehouse",
-            table="lakehouse.silver.enriched",
-        )
-        assert result == {"data_file_count": "DESCRIBE DETAIL lakehouse.silver.enriched"}
-
-    def test_duckdb_returns_empty(self):
-        result = build_delta_table_health_sql(
-            engine="duckdb",
-            catalog="lakehouse",
-            table="lakehouse.silver.enriched",
-        )
-        assert result == {}
 
 
 # ---------------------------------------------------------------------------

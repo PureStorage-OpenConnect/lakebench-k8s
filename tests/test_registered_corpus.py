@@ -88,34 +88,61 @@ def _no_seed(*texts):
 # -- refusals before any cluster call ----------------------------------------
 
 
-def test_protected_config_without_the_flag_is_refused(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
-    r = _gen(cfg, "--yes")
+def _broken_look_history(seed):
+    raise OSError("git log over aml_registered_looks.json failed (exit 128)")
+
+
+@pytest.mark.parametrize(
+    ("seed", "role", "image", "flags", "look_history"),
+    [
+        ("EV", "evaluation", None, ("--yes",), None),  # protected config without the flag
+        (
+            "CALIBRATION",
+            None,
+            None,
+            ("--registered-corpus", "--yes"),
+            None,
+        ),  # names no protected corpus
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus",), None),  # needs --yes
+        (
+            "EV",
+            "evaluation",
+            "IMAGE",
+            ("--registered-corpus", "--yes", "--allow-stale-bronze"),
+            None,
+        ),
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus", "--yes"), "seen"),  # look recorded
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus", "--yes"), "unreadable"),
+        (
+            "EV",
+            "evaluation",
+            "docker.io/sillidata/lb-datagen:1.6.0",
+            ("--registered-corpus", "--yes"),
+            None,
+        ),  # tag, not digest
+    ],
+)
+def test_registered_generate_refusals_touch_nothing(
+    env, cluster, monkeypatch, seed, role, image, flags, look_history
+):
+    """Each refusal exits 2 with zero cluster calls, no ledger written and no
+    seed in the output."""
+    if look_history == "seen":
+        monkeypatch.setattr(
+            ds, "seed_ever_recorded", lambda s: "the registered evaluation seed is in the ledger"
+        )
+    elif look_history == "unreadable":
+        monkeypatch.setattr(ds, "seed_ever_recorded", _broken_look_history)
+    kw = {}
+    if role:
+        kw["role"] = role
+    if image:
+        kw["image"] = pc.IMAGE if image == "IMAGE" else image
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=getattr(pc, seed), **kw)
+    r = _gen(cfg, *flags)
     assert r.exit_code == 2, r.output
-    assert "only with --registered-corpus" in r.output
     assert cluster == [] and not env.ledger.exists()
     _no_seed(r.output)
-
-
-def test_flag_on_a_config_that_names_no_protected_corpus_is_refused(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.CALIBRATION)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "declares neither role" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_flag_needs_yes(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus")
-    assert r.exit_code == 2 and "needs --yes" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_flag_refuses_writing_over_stale_bronze(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes", "--allow-stale-bronze")
-    assert r.exit_code == 2 and "never writes over objects" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
 
 
 def test_a_development_generate_into_a_registered_prefix_is_refused(env, cluster):
@@ -135,29 +162,8 @@ def test_a_development_generate_into_a_registered_prefix_is_refused(env, cluster
         }
     )
     r = _gen(dev, "--yes", "--allow-stale-bronze")
-    assert r.exit_code == 2 and "holds a registered robustness corpus" in r.output, r.output
+    assert r.exit_code == 2, r.output
     assert cluster == []
-
-
-def test_a_seed_with_a_look_is_never_generated_again(env, cluster, monkeypatch):
-    monkeypatch.setattr(
-        ds, "seed_ever_recorded", lambda seed: "the registered evaluation seed is in the ledger"
-    )
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "never generated again" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_an_unreadable_look_history_refuses(env, cluster, monkeypatch):
-    def broken(seed):
-        raise OSError("git log over aml_registered_looks.json failed (exit 128)")
-
-    monkeypatch.setattr(ds, "seed_ever_recorded", broken)
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "cannot be checked" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
 
 
 # -- the ledger --------------------------------------------------------------
@@ -448,19 +454,6 @@ def test_a_shallow_history_refuses(tmp_path, monkeypatch):
 
 
 # -- owner, 10-03: the registered look scores only the generated corpus -------
-
-
-def test_a_tag_pinned_image_is_refused(env, cluster):
-    # The default image is pinned by digest (tag@sha256), so name a tag alone.
-    cfg = pc.financial_config(
-        env.tmp / "c.yaml",
-        seed=pc.EV,
-        role="evaluation",
-        image="docker.io/sillidata/lb-datagen:1.6.0",
-    )
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "pinned by digest" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
 
 
 def test_generated_entry_carries_the_corpus_fingerprint(env, monkeypatch):

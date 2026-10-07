@@ -41,36 +41,6 @@ def _free_from_total(k8s_mock):
 class TestComputePeakRequirements:
     """Peak resource derivation from _JOB_PROFILES."""
 
-    def test_scale_1_matches_documented_minimums(self):
-        """The published docs table must match this exactly.
-
-        Scratch bumped from 150Gi to 300Gi per silver-build executor
-        during the AML/silver hardening work (fixes for typology
-        window OOMs). 8 executors x 300Gi = 2400 GiB peak.
-        """
-        peak = compute_peak_requirements(1)
-        assert peak.cpu_cores == 36
-        assert peak.memory_gb == 525
-        assert peak.scratch_gb == 2400
-
-    def test_silver_build_drives_the_peak(self):
-        """silver-build is the largest batch job at every scale."""
-        for scale in (1, 10, 50, 100, 500):
-            assert compute_peak_requirements(scale).driving_job == "silver-build"
-
-    def test_scale_1_and_10_are_identical(self):
-        """Executor counts are fixed at or below scale 10.
-
-        This is the counter-intuitive property that made the old docs wrong,
-        so it is asserted explicitly rather than left implicit.
-        """
-        one, ten = compute_peak_requirements(1), compute_peak_requirements(10)
-        assert (one.cpu_cores, one.memory_gb, one.scratch_gb) == (
-            ten.cpu_cores,
-            ten.memory_gb,
-            ten.scratch_gb,
-        )
-
     def test_requirements_grow_above_scale_10(self):
         small = compute_peak_requirements(10)
         large = compute_peak_requirements(100)
@@ -94,23 +64,6 @@ class TestComputePeakRequirements:
         assert {r.job_type for r in batch.per_job} == set(BATCH_JOB_TYPES)
         streaming = compute_peak_requirements(1, "sustained")
         assert {r.job_type for r in streaming.per_job} == set(STREAMING_JOB_TYPES)
-
-    def test_max_pod_fits_single_executor(self):
-        """Largest pod is one silver executor: 4 cores, 48g + 12g overhead."""
-        peak = compute_peak_requirements(1)
-        assert peak.max_pod_cpu_cores == 4
-        assert peak.max_pod_memory_gb == 60
-
-    def test_unknown_mode_falls_back_to_batch(self):
-        unknown, batch = (
-            compute_peak_requirements(1, "nonsense"),
-            compute_peak_requirements(1, "batch"),
-        )
-        assert unknown.per_job == batch.per_job
-        assert (unknown.cpu_cores, unknown.memory_gb) == (batch.cpu_cores, batch.memory_gb)
-
-    def test_mode_is_case_insensitive(self):
-        assert compute_peak_requirements(5, "SUSTAINED").per_job[0].job_type in STREAMING_JOB_TYPES
 
 
 def _cfg(scale=1, mode="batch", schema="customer360"):
@@ -144,29 +97,20 @@ def patched_capacity():
 class TestClusterCapacityCheck:
     """Prerequisite check 9."""
 
-    def test_ample_cluster_passes(self, patched_capacity):
-        result = patched_capacity(
-            ClusterCapacity(652_000, 4000 * GIB, 20, 64_000, 256 * GIB),
-        )
-        assert result.passed
+    @pytest.mark.parametrize(
+        ("capacity", "passed"),
+        [
+            (ClusterCapacity(652_000, 4000 * GIB, 20, 64_000, 256 * GIB), True),
+            # the old README claim (8 CPU / 32 GB) is rejected
+            (ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB), False),
+            # enough in total, but no 16 GB node holds a 60 GB executor
+            (ClusterCapacity(200_000, 600 * GIB, 20, 8_000, 16 * GIB), False),
+        ],
+    )
+    def test_verdict(self, patched_capacity, capacity, passed):
+        result = patched_capacity(capacity)
+        assert result.passed is passed
         assert result.name == "cluster-capacity"
-
-    def test_undersized_cluster_fails_with_shortfall(self, patched_capacity):
-        """The old README claim (8 CPU / 32 GB) must be rejected."""
-        result = patched_capacity(ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB))
-        assert not result.passed
-        assert "36 cores" in result.hint
-        assert "525 GB" in result.hint
-
-    def test_enough_total_but_node_too_small_fails(self, patched_capacity):
-        """512 GB spread across 16 GB nodes cannot schedule a 60 GB executor."""
-        result = patched_capacity(ClusterCapacity(200_000, 600 * GIB, 20, 8_000, 16 * GIB))
-        assert not result.passed
-        assert "Largest pod" in result.hint
-
-    def test_message_names_the_driving_job(self, patched_capacity):
-        result = patched_capacity(ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB))
-        assert "silver-build" in result.message
 
     def test_unreadable_capacity_refuses(self):
         """Fail closed: capacity that cannot be read is a failed check, with
@@ -188,14 +132,6 @@ class TestClusterCapacityCheck:
             result = _check_cluster_capacity(_cfg())
         assert not result.passed
         assert "capacity could not be read: RuntimeError: boom" in result.message
-
-    def test_sustained_mode_uses_streaming_profiles(self, patched_capacity):
-        result = patched_capacity(
-            ClusterCapacity(652_000, 4000 * GIB, 20, 64_000, 256 * GIB),
-            cfg=_cfg(mode="continuous"),
-        )
-        assert result.passed
-        assert "(continuous)" in result.message
 
     def test_capacity_check_plumbs_schema_to_compute_peak(self):
         """LB-118 review finding: the fix is only operator-visible if

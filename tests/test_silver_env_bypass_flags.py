@@ -10,7 +10,7 @@ _build_env_vars accidentally exporting a test flag.
 from __future__ import annotations
 
 from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-from tests.test_spark import _make_config, _mock_k8s
+from tests.fixtures.spark_helpers import _make_config, _mock_k8s
 
 _BYPASS_FLAGS = ("LB_SILVER_TEST_ALLOW_EMPTY", "LB_TESTING")
 _SILVER_JOB_TYPES = (JobType.SILVER_BUILD, JobType.SILVER_STREAM)
@@ -20,22 +20,6 @@ def _env(job_type: JobType) -> dict[str, str]:
     """The env-var dict SparkJobManager would put on a silver driver pod."""
     manifest = SparkJobManager(_make_config(), _mock_k8s())._build_manifest(job_type)
     return {e["name"]: e["value"] for e in manifest["spec"]["driver"]["env"] if "value" in e}
-
-
-def test_silver_build_env_never_sets_bypass_flags():
-    env = _env(JobType.SILVER_BUILD)
-    for flag in _BYPASS_FLAGS:
-        assert flag not in env, (
-            f"{flag} leaked into silver-build env; would silence the LB-044 gate"
-        )
-
-
-def test_silver_stream_env_never_sets_bypass_flags():
-    env = _env(JobType.SILVER_STREAM)
-    for flag in _BYPASS_FLAGS:
-        assert flag not in env, (
-            f"{flag} leaked into silver-stream env; would silence the LB-044 gate"
-        )
 
 
 def test_bypass_flags_absent_from_all_silver_job_types():

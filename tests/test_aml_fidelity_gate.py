@@ -99,6 +99,7 @@ def _frame(n=1500, prev=0.06, seed=0, separable=True):
     return df
 
 
+@SLOW
 def test_planted_separable_feature_gives_ap_one_and_trips_single_cap():
     rep = fg.evaluate_gate(_frame(), _prereg())
     r = rep["typologies"]["beh"]
@@ -132,6 +133,7 @@ def test_noise_gives_ap_near_prevalence():
     assert rep["typologies"]["defn"]["definitional_check"]["pass"] is False
 
 
+@SLOW
 def test_pair_shortcut_catches_a_conjunction():
     """Label = a AND b: each alone is weak, the pair is exact."""
     rng = np.random.default_rng(3)
@@ -157,6 +159,7 @@ def test_pair_shortcut_catches_a_conjunction():
     assert pair["pass"] is False
 
 
+@SLOW
 def test_customers_only_and_power_flag():
     df = _frame(n=1500, prev=0.02)
     df.loc[: len(df) // 2, "is_customer"] = False
@@ -214,6 +217,7 @@ def test_empty_frame_verdict():
     assert rep["verdict"] == "empty_frame"
 
 
+@SLOW
 def test_level2_n_must_match_behavioural_subset():
     p = _prereg()
     p["level2"]["n"] = 4
@@ -406,6 +410,7 @@ def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
     assert fg.load_preregistration()[0] == {"version": "x"}
 
 
+@SLOW
 def test_passes_summary_and_corpus_role(monkeypatch):
     from tests.fixtures import heldout_test_seeds as ts
 
@@ -423,6 +428,7 @@ def test_passes_summary_and_corpus_role(monkeypatch):
     assert fg.corpus_role(7, p) == "other" and fg.corpus_role(None, p) == "unknown"
 
 
+@SLOW
 def test_reference_model_ignores_doc_keys():
     p = _prereg()
     p["reference_model"] = {**p["reference_model"], "_doc": "a note"}
@@ -473,6 +479,7 @@ def test_bootstrap_resamples_groups():
     assert fg._resample_rows(np.array([4, 4, 1]), order, start, length).tolist() == [4, 4, 1]
 
 
+@SLOW
 def test_report_records_groups_and_libraries():
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
@@ -574,6 +581,7 @@ def test_null_group_is_refused():
         fg.evaluate_gate(df, _prereg())
 
 
+@SLOW
 def test_exclusions_counts_only_and_lift_ratio():
     df = _frame(n=1500, prev=0.06)
     df["exclude:beh"] = 0
@@ -603,6 +611,7 @@ def test_counts_only_needs_no_sklearn(monkeypatch):
     assert rep["verdict"] == "counts_only" and rep["typologies"]["beh"]["n_positives"] > 0
 
 
+@SLOW
 def test_behavioural_six_and_empty_definitional_subset():
     p = json.loads(PREREG.read_text())
     assert len(p["behavioural_subset"]) == 6 and p["definitional_subset"] == []
@@ -805,6 +814,7 @@ def test_lifetime_prereg_drops_history_from_ablation_groups():
     fg._leakage_sets(life)
 
 
+@SLOW
 def test_oof_many_matches_oof_scores():
     """The parallel fold fitter gives the numbers the sequential one gives,
     narrow or wide."""
@@ -855,6 +865,7 @@ def test_reference_model_pair_catches_what_a_depth2_tree_misses():
     assert old["best"]["ap"] < 0.5 and old["best"]["ref_ap"] is None
 
 
+@SLOW
 def test_nuisance_only_model_and_ablation_catch_a_nuisance_leak():
     """A label readable from the nuisance feature fails nuisance_only, and
     the model loses most of its lift without it (the gated ablation)."""

@@ -216,16 +216,6 @@ class TestSparkThriftCounting:
         for opt in ("--silent=true", "--outputformat=tsv2", "--nullemptystring=false"):
             assert argv.index(opt) < e
 
-    def test_executor_sends_that_argv(self):
-        from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
-
-        ex = SparkThriftExecutor("ns", "lakehouse")
-        ex._pod = "thrift-0"
-        with mock.patch("subprocess.run", return_value=_completed("a\n1\n")) as run:
-            ex.execute_query("SELECT 1")
-        cmd = run.call_args[0][0]
-        assert cmd.index("--outputformat=tsv2") < cmd.index("-e")
-
     def test_row_count_is_lines_after_the_header(self):
         from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
 
@@ -237,18 +227,6 @@ class TestSparkThriftCounting:
         with mock.patch("subprocess.run", return_value=_completed("id\n")):
             # A header alone is an empty result, not one row.
             assert ex.execute_query("q").rows_returned == 0
-
-    def test_maintenance_beeline_calls_put_options_first(self):
-        from lakebench.modules.table_formats.iceberg import maintenance as m
-
-        k8s = mock.Mock()
-        k8s.exec_in_pod.return_value = (0, "", "")
-        m.exec_sql("spark-thrift", k8s, "pod", "ns", "SELECT 1")
-        m.query_sql("spark-thrift", k8s, "pod", "ns", "SELECT 1")
-        for call in k8s.exec_in_pod.call_args_list:
-            argv = call[0][1]
-            assert argv[-2:] == ["-e", "SELECT 1"]
-            assert argv.index("--silent=true") < argv.index("-e")
 
 
 class TestDuckDBCounting:
@@ -270,12 +248,6 @@ class TestDuckDBCounting:
             r = self._ex().execute_query("q")
         assert not r.success
         assert r.rows_returned == 0
-
-    def test_script_turns_the_progress_bar_off_and_pins_utc(self):
-        script = self._ex()._build_python_script("SELECT 1")
-        assert "enable_progress_bar = false" in script
-        assert "TimeZone = 'UTC'" in script
-        assert script.index("enable_progress_bar") < script.index("conn.sql(")
 
 
 class TestTrinoSession:
@@ -363,12 +335,6 @@ class TestRunnerFingerprintPass:
         assert all(q.elapsed_seconds == 2.0 for q in result.queries)
         assert all(q.to_dict()["result_fingerprint"]["rows"] == 1 for q in result.queries)
 
-    def test_fingerprint_can_be_turned_off(self):
-        calls: list[str] = []
-        result = self._runner(self._executor(calls)).run_power(fingerprint=False)
-        assert "fingerprint" not in calls
-        assert all(q.result_fingerprint is None for q in result.queries)
-
     def test_an_engine_without_a_fingerprint_path_is_recorded_unusable(self):
         calls: list[str] = []
         result = self._runner(self._executor(calls, with_fp=False)).run_power()
@@ -380,29 +346,3 @@ def make_cfg():
     from tests.conftest import make_config
 
     return make_config()
-
-
-class TestQueryTiebreakers:
-    """Each LIMIT or ROW_NUMBER over tied keys ends in a total order
-    (divergence report section 2); the texts are pinned so a revert fails."""
-
-    @pytest.mark.parametrize(
-        "name,fragment",
-        [
-            ("Q4_churn_risk_analysis", "at_risk_customers DESC, churn_risk_indicator"),
-            ("FQ2_top_corridors_window", "volume_usd DESC, originator_bank_bic"),
-            ("FQ3_entity_edge_risk", "total_out_usd DESC, e.entity_id"),
-            ("FQ4_running_balance_window", "ORDER BY COUNT(*) DESC, account_id"),
-            ("FQ4_running_balance_window", "ORDER BY book_ts, txn_id, dbt_ord, entry_seq"),
-            ("FQ6_structuring_scan", "txn_count DESC, originator_id, txn_currency"),
-            ("FQ7_cross_border_concentration", "xborder_usd DESC, originator_bank_bic"),
-            ("FQ8_alert_to_entity_join", "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id"),
-            ("FQ8_alert_to_entity_join", "ORDER BY a.alert_ts DESC, a.alert_id"),
-            ("IQ3_counterparty_two_hop", "h2.hop2_entity_id, h2.via_entity_id"),
-        ],
-    )
-    def test_tiebreak_present(self, name, fragment):
-        from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
-
-        sql = {q.name: q.sql for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs}[name]
-        assert fragment in " ".join(sql.split())

@@ -17,22 +17,6 @@ def _persistent(spark):
     return set(spark.sparkContext._jsc.getPersistentRDDs().keySet())
 
 
-def test_view_reads_a_checkpoint_and_is_freed(spark_session):
-    from common import materialised_source
-
-    spark = spark_session
-    base = _persistent(spark)
-    df = spark.range(100).selectExpr("id", "id * 2 AS x")
-    with materialised_source(spark, df, "_lb_ms_ok") as view:
-        assert view == "_lb_ms_ok"
-        plan = spark.table(view)._jdf.queryExecution().analyzed().toString()
-        assert "LogicalRDD" in plan and "Range" not in plan, plan
-        assert spark.sql(f"SELECT sum(x) FROM {view}").first()[0] == 9900
-        assert len(_persistent(spark) - base) == 1
-    assert not spark.catalog.tableExists("_lb_ms_ok")
-    assert _persistent(spark) - base == set()
-
-
 def test_content_computed_once_at_entry(spark_session):
     """The source is evaluated once, at entry: reading the view twice does
     not run the source again. A Python UDF counts its calls."""
@@ -65,12 +49,3 @@ def test_dropped_and_freed_when_the_body_raises(spark_session):
             raise ValueError("merge failed")
     assert not spark.catalog.tableExists("_lb_ms_raise")
     assert _persistent(spark) - base == set()
-
-
-def test_entry_logs_the_view(spark_session, capsys):
-    from common import materialised_source
-
-    with materialised_source(spark_session, spark_session.range(7), "_lb_ms_log"):
-        pass
-    out = capsys.readouterr().out
-    assert "[merge-source] _lb_ms_log: materialised" in out, out

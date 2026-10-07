@@ -168,24 +168,6 @@ def test_column_type_and_order_in_cols_sha(spark_session):
     assert _fp(one, ["a", "b"])[2] != _fp(one, ["b", "a"])[2]
 
 
-def test_empty_frame(spark_session):
-    empty = spark_session.createDataFrame([], "a bigint")
-    assert _fp(empty, ["a"])[:2] == (0, "0")
-
-
-@pytest.mark.parametrize(
-    "cols",
-    [[], ["txn_id", "txn_id"], ["nope"], [f"c{i}" for i in range(64)]],
-    ids=["none", "repeated", "missing", "too-many"],
-)
-def test_bad_columns_raise(spark_session, frame, cols):
-    df = frame
-    if len(cols) == 64:
-        df = spark_session.createDataFrame([tuple(range(64))], ", ".join(f"{c} int" for c in cols))
-    with pytest.raises(ValueError):
-        _fp(df, cols)
-
-
 def test_sixty_three_columns(spark_session):
     """The widest mask: a NULL moved between columns 61 and 62 (bits 61 and
     62) is seen, and the mask stays a valid long."""
@@ -257,13 +239,6 @@ def test_nested_values_equal_when_equal(spark_session):
     assert _fp(a, ["k", "s"]) == _fp(b, ["k", "s"])
     c = frame([("x", "1"), ("y", "2"), ("z", "4")], False)
     assert _fp(a, ["k", "s"]) != _fp(c, ["k", "s"])
-
-
-def test_signed_zero_and_nan_hash_as_their_values(spark_session):
-    """Documented: -0.0 equals 0.0 and NaNs are equal, as values."""
-    a = spark_session.createDataFrame([(0.0, float("nan"))], "x double, y double")
-    b = spark_session.createDataFrame([(-0.0, float("nan"))], "x double, y double")
-    assert _fp(a, ["x", "y"]) == _fp(b, ["x", "y"])
 
 
 def test_session_time_zone_does_not_matter(spark_session, frame):

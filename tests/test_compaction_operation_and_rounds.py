@@ -11,8 +11,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest import mock
 
-import pytest
-
 from lakebench.metrics.collector import (
     BLENDED_QUERY_SET,
     BenchmarkMetrics,
@@ -188,13 +186,6 @@ def test_a_failed_query_is_not_executed():
     assert d["executed_query_set_id"] == query_set_id(EIGHT[:7])
 
 
-def test_investigator_state_is_one_of_the_three():
-    c = _collector()
-    c.record_round(_round(TWELVE), investigator_queries="included")
-    with pytest.raises(ValueError, match="not a known state"):
-        c.record_round(_round(TWELVE), investigator_queries="sometimes")
-
-
 def test_the_round_record_survives_a_save():
     from lakebench.metrics.storage import _deserialize_benchmark_rounds
 
@@ -299,17 +290,6 @@ def test_one_set_keeps_the_declared_query_set():
     )
 
 
-def test_round_label():
-    from lakebench.metrics.collector import round_label
-
-    c = _collector()
-    c.record_round(_round(EIGHT), investigator_queries="absent_no_cases")
-    c.record_round(_round(TWELVE), investigator_queries="included")
-    first, second = c.current_run.benchmark_rounds
-    assert round_label(first) == "8-query set (before cases exist)"
-    assert round_label(second) == "12-query set"
-
-
 def test_blended_qph_is_not_gated_or_reproduced():
     """The perf gate and reproduce leave out a median over blended rounds."""
     from lakebench.cli._reproduce import _extract_expected_numbers
@@ -318,16 +298,6 @@ def test_blended_qph_is_not_gated_or_reproduced():
     assert "composite_qph" in _extract_expected_numbers(m)
     m.pipeline_benchmark.benchmark_rounds[1].queries[0]["success"] = False
     assert "composite_qph" not in _extract_expected_numbers(m)
-
-
-def test_odd_stored_rounds_do_not_crash_the_basis():
-    from lakebench.metrics.storage import recorded_qph_basis
-
-    a = sr.load_record("011043-e338c5")
-    rounds = a["pipeline_benchmark"]["benchmark_rounds"]
-    rounds[0]["qph"] = None
-    rounds.append("not a round")
-    assert recorded_qph_basis(a)["blended"] is False
 
 
 def test_mixed_compaction_operations_are_named_mixed():

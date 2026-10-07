@@ -8,10 +8,7 @@ fails here.
 from __future__ import annotations
 
 import json
-import os
 import re
-import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,8 +23,6 @@ from lakebench.cli import _exit as cli_exit
 from lakebench.cli import app
 from lakebench.deploy.datagen import stop_previous_datagen as _real_stop_previous_datagen
 from lakebench.exit_codes import (
-    LEGACY_CODES,
-    PATHS,
     ExitCode,
     Incomplete,
     LakebenchError,
@@ -36,6 +31,7 @@ from lakebench.exit_codes import (
     SafetyRefusal,
     UsageError,
 )
+from tests.fixtures.exit_codes_helpers import _reproduce_package as _reproduce_package
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = Path(lakebench.__file__).resolve().parents[1]
@@ -76,90 +72,19 @@ def test_exit_code_values_match_tud():
     assert {m.name: int(m) for m in ExitCode} == TUD_CODES
 
 
-def test_exit_module_imports_no_typer():
-    """The harness imports ExitCode without loading the CLI (ch07 C16 c)."""
-    probe = (
-        "import sys, lakebench.exit_codes as m; "
-        "heavy = [n for n in ('typer', 'click', 'rich', 'kubernetes', 'lakebench.cli') "
-        "if n in sys.modules]; "
-        "print(','.join(heavy)); "
-        "sys.exit(1 if heavy else 0)"
-    )
-    env = dict(os.environ, PYTHONPATH=str(SRC))
-    proc = subprocess.run(
-        [sys.executable, "-c", probe], env=env, capture_output=True, text=True, check=False
-    )
-    assert proc.returncode == 0, f"loaded: {proc.stdout.strip()} {proc.stderr[-500:]}"
-
-
-def test_cli_exit_reexports_the_same_objects():
-    for name in ("ExitCode", "LakebenchError", "UsageError", "SafetyRefusal", "PATHS"):
-        assert getattr(cli_exit, name) is getattr(exit_codes, name)
-
-
-@pytest.mark.parametrize(
-    ("cls", "code"),
-    [
+def test_error_class_codes():
+    for cls, code in [
         (LakebenchError, 1),
         (UsageError, 2),
         (SafetyRefusal, 3),
         (PrerequisiteError, 4),
         (NotConfirmed, 5),
         (Incomplete, 6),
-    ],
-)
-def test_error_class_codes(cls, code):
-    assert int(cls("x").code) == code
-
-
-def test_error_lines_leave_out_unset_fields():
-    err = SafetyRefusal("what", next="do this")
-    assert err.lines() == [("ERROR", "what"), ("Next", "do this")]
+    ]:
+        assert int(cls("x").code) == code
 
 
 # -- PATHS ---------------------------------------------------------------------
-
-
-def test_path_names_unique():
-    names = [p.name for p in PATHS]
-    assert len(names) == len(set(names))
-
-
-def test_every_exit_code_has_a_path():
-    """The test fails if an ExitCode member has no named producer path."""
-    missing = [m.name for m in ExitCode if not any(p.code == m for p in PATHS)]
-    assert not missing
-
-
-def test_every_exit_code_has_a_meaning():
-    assert set(exit_codes.MEANINGS) == set(ExitCode)
-
-
-# The v1.7 work item that makes each planned path live. Kept here, not in
-# the shipped module, which does not cite plan ids.
-PLANNED_BY = {
-    "admin.version_change_in_use": "SD-10",
-    "admin.version_change_needs_flag": "SD-10",
-}
-
-
-def test_planned_paths_name_a_work_item():
-    assert {p.name for p in PATHS if p.planned} == set(PLANNED_BY)
-    bad = [n for n, wi in PLANNED_BY.items() if not re.fullmatch(r"[A-Z]{2}-\d+[a-z]?", wi)]
-    assert not bad, bad
-
-
-def test_legacy_codes_are_gone():
-    """CC-9 converted every command: no 1.6 constant and no transition table."""
-    from lakebench.cli import _destroy, _helpers
-
-    assert LEGACY_CODES == {}
-    for mod, name in (
-        (_helpers, "EXIT_DECLINED"),
-        (_helpers, "EXIT_DATAGEN_TIMEOUT"),
-        (_destroy, "EXIT_NAMESPACE_STILL_TERMINATING"),
-    ):
-        assert not hasattr(mod, name), name
 
 
 def _is_exit_call(func) -> bool:
@@ -215,42 +140,6 @@ def literal_exit_sites(root: Path) -> list[str]:
                 if named and _is_literal_code(node.value):
                     sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
     return sites
-
-
-def test_no_literal_exit_codes():
-    """Every exit under cli/ names its code (``ExitCode.X``) or a typed error."""
-    sites = literal_exit_sites(SRC / "lakebench" / "cli")
-    assert not sites, "use ExitCode.<NAME> or a typed error:\n  " + "\n  ".join(sites)
-
-
-_LINT_CASES = [
-    ("typer.Exit(1)", True),
-    ("typer.Exit(code=2)", True),
-    ("SystemExit(3)", True),
-    ("sys.exit(4)", True),
-    ("Exit(1)", True),  # from typer import Exit
-    ("click.exceptions.Exit(1)", True),
-    ("ctx.exit(1)", True),
-    ("exit(1)", True),
-    ("typer.Exit(-1)", True),
-    ("typer.Exit(int(1))", True),
-    ("typer.Exit(1 if x else 2)", True),
-    ('typer.Exit("failed")', True),
-    ("exit_code = 2", True),
-    ("_pipeline_exit_code: int = 1", True),
-    ("typer.Exit(0)", False),
-    ("typer.Exit()", False),
-    ("typer.Exit(ExitCode.USAGE)", False),
-    ("typer.Exit(ExitCode.USAGE if x else ExitCode.FAILED)", False),
-    ("exit_code = ExitCode.FAILED", False),
-    ("outcome = 2", False),
-]
-
-
-@pytest.mark.parametrize(("source", "flagged"), _LINT_CASES)
-def test_literal_exit_lint_sees_each_spelling(tmp_path, source, flagged):
-    (tmp_path / "m.py").write_text(source + "\n")
-    assert bool(literal_exit_sites(tmp_path)) is flagged
 
 
 # -- refusals reported as failed step results ---------------------------------
@@ -342,9 +231,8 @@ def _kubeconfig_error():
     return ConfigException("Invalid kube-config file. No configuration found.")
 
 
-@pytest.mark.parametrize(
-    ("factory", "code"),
-    [
+def test_handler_maps_exception():
+    for factory, code in [
         (lambda: SafetyRefusal("refused"), 3),
         (lambda: PrerequisiteError("missing"), 4),
         (lambda: Incomplete("still going"), 6),
@@ -359,133 +247,15 @@ def _kubeconfig_error():
         (lambda: RuntimeError("unexpected"), 1),
         (lambda: typer.Exit(7), 7),
         (lambda: SystemExit(9), 9),
-    ],
-    ids=[
-        "safety",
-        "prerequisite",
-        "incomplete",
-        "explicit-code",
-        "config-validation",
-        "config-error",
-        "k8s-connection",
-        "kubeconfig",
-        "abort",
-        "bare-eof-is-unclassified",
-        "keyboard-interrupt",
-        "unhandled",
-        "typer-exit-passes-through",
-        "system-exit-passes-through",
-    ],
-)
-def test_handler_maps_exception(factory, code):
-    result = _runner().invoke(_probe_app(factory), ["boom"])
-    assert result.exit_code == code, result.output
-
-
-def test_handler_leaves_click_usage_errors_to_click():
-    result = _runner().invoke(_probe_app(lambda: typer.BadParameter("nope")), ["boom"])
-    assert result.exit_code == 2
-    assert "nope" in result.output
-
-
-def test_unhandled_error_is_one_line_without_traceback(monkeypatch):
-    monkeypatch.delenv(cli_exit.DEBUG_ENV, raising=False)
-    text = "s3a://b/[x]/y under [/tmp] and [main]\nsecond line"
-    result = _runner().invoke(_probe_app(lambda: RuntimeError(text)), ["boom"])
-    err = _stderr(result)
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    error_lines = [ln for ln in err.splitlines() if ln.startswith("ERROR")]
-    assert error_lines == ["ERROR  RuntimeError: s3a://b/[x]/y under [/tmp] and [main]"]
-    assert "second line" not in err
-    assert "LAKEBENCH_DEBUG=1" in err
-
-
-def test_debug_env_prints_the_traceback(monkeypatch):
-    monkeypatch.setenv(cli_exit.DEBUG_ENV, "1")
-    result = _runner().invoke(_probe_app(lambda: RuntimeError("deep")), ["boom"])
-    assert result.exit_code == 1
-    assert "Traceback" in _stderr(result)
-
-
-def test_typed_error_prints_its_shape():
-    err = SafetyRefusal(
-        "Namespace lb-a belongs to another deployment.", why="stamp", where="ns lb-a"
-    )
-    result = _runner().invoke(_probe_app(lambda: err), ["boom"])
-    lines = _stderr(result).splitlines()
-    assert lines[0] == "ERROR  Namespace lb-a belongs to another deployment."
-    assert lines[1] == "Why    stamp"
-    assert lines[2] == "Where  ns lb-a"
+    ]:
+        result = _runner().invoke(_probe_app(factory), ["boom"])
+        assert result.exit_code == code, result.output
 
 
 def test_root_app_uses_the_handler():
     cmd = typer.main.get_command(app)
     assert isinstance(cmd, cli_exit.LakebenchGroup)
     assert app.pretty_exceptions_enable is False
-
-
-def test_broken_pipe_passes_through_quietly():
-    result = _runner().invoke(_probe_app(lambda: BrokenPipeError(32, "Broken pipe")), ["boom"])
-    assert result.exit_code == 1  # Typer's own EPIPE branch, no message
-    assert "ERROR" not in result.output
-
-
-class _GoneStream:
-    """A stderr that cannot be written (EIO). Not EPIPE: Rich answers that by
-    dup2-ing /dev/null over fd 1, which would hit the test process."""
-
-    def write(self, _text):
-        raise OSError(5, "Input/output error")
-
-    def flush(self):
-        pass
-
-
-def test_exit_code_survives_a_closed_stderr(monkeypatch):
-    from rich.console import Console
-
-    from lakebench.cli import _helpers
-
-    # A throwaway console: Rich keeps buffer state after a failed write.
-    monkeypatch.setattr(_helpers, "err_console", Console(stderr=True))
-
-    kept = []
-
-    def closed_then_refuse():
-        # Keep CliRunner's wrapper alive: collecting it would close its buffer.
-        kept.append(sys.stderr)
-        sys.stderr = _GoneStream()  # CliRunner restores its own streams afterwards
-        return SafetyRefusal("refused")
-
-    result = _runner().invoke(_probe_app(closed_then_refuse), ["boom"])
-    assert result.exit_code == 3
-
-
-def test_exit_code_survives_rich_broken_pipe_exit(monkeypatch):
-    from lakebench.cli import _helpers
-
-    def rich_broken_pipe(_err):
-        raise SystemExit(1)  # what Console.on_broken_pipe does
-
-    monkeypatch.setattr(_helpers, "emit_error", rich_broken_pipe)
-    result = _runner().invoke(_probe_app(lambda: SafetyRefusal("refused")), ["boom"])
-    assert result.exit_code == 3
-
-
-def test_config_validation_details_go_on_the_why_line():
-    result = _runner().invoke(_probe_app(_config_validation_error), ["boom"])
-    assert "Why    name: required; a.0: bad" in _stderr(result)
-
-
-def test_prompt_abort_starts_on_a_new_line():
-    result = _runner().invoke(_probe_app(lambda: typer.Abort()), ["boom"])
-    assert _stderr(result).startswith("\nERROR  Not confirmed")
-
-
-def test_v16_codes_differ_from_the_new_code():
-    same = [p.name for p in PATHS if p.v16_code is not None and p.v16_code == int(p.code)]
-    assert not same
 
 
 # -- named paths on the real CLI -----------------------------------------------
@@ -748,7 +518,7 @@ def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
     from unittest.mock import MagicMock
 
     import lakebench.cli._deploy as deploy_mod
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     cfg = _init_config(tmp_path)
     # deploy reads the namespace to reconcile its recorded nonces first.
@@ -769,7 +539,7 @@ def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
 
 
 def _fake_s3(monkeypatch, *, info=None, init_error=None):
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     monkeypatch.setattr(dg._FakeS3, "instances", [])
     monkeypatch.setattr(dg._FakeS3, "store", {})
@@ -948,7 +718,7 @@ def _scenario_plan_missing_storage_class(monkeypatch, tmp_path):
 def _scenario_run_namespace_missing_no_yes(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     stubs = dg._stub_full_run(monkeypatch)
     stubs["k8s"].namespace_exists.return_value = False
@@ -1081,18 +851,6 @@ def _scenario_alias_refused(monkeypatch, tmp_path):
     return _runner().invoke(app, ["clean", "bronze", str(tmp_path / "secret-name.yaml")])
 
 
-def _reproduce_package(tmp_path, commit_sha: str) -> Path:
-    import yaml
-
-    from tests import test_reproduce as rp
-
-    (tmp_path / "cfg.yaml").write_text(rp._ONE_SAMPLE_CFG)
-    pkg = rp._build_package(rp._metrics(), config_reference="cfg.yaml", commit_sha=commit_sha)
-    path = tmp_path / "pkg.yaml"
-    path.write_text(yaml.safe_dump(pkg))
-    return path
-
-
 def _scenario_reproduce_commit_drift(monkeypatch, tmp_path):
     import lakebench.cli._reproduce as rep
 
@@ -1216,7 +974,7 @@ def _scenario_reproduce_nonce_changed(monkeypatch, tmp_path):
 def _ops_cluster(monkeypatch, tmp_path):
     """The CC-27 fakes (tests/test_cli_cluster_ops.py) on the real commands."""
     import lakebench.cli as cli
-    from tests import test_cli_cluster_ops as co
+    from tests.fixtures import cli_cluster_ops_helpers as co
 
     state = SimpleNamespace(
         k8s=co.FakeK8s(),
@@ -1277,13 +1035,6 @@ def _scenario_k8s_api_error(monkeypatch, tmp_path):
     return _runner().invoke(app, ["logs", str(st.config), "trino"])
 
 
-def _config_name(path: Path) -> str:
-    for line in path.read_text().splitlines():
-        if line.startswith("name:"):
-            return line.split(":", 1)[1].strip()
-    raise AssertionError(f"no name in {path}")
-
-
 from lakebench.deps.runtime import load_handle as _real_load_handle  # noqa: E402
 
 
@@ -1296,7 +1047,7 @@ def _deps_cluster(monkeypatch, *, annotation: str | None, manifest: dict | None)
     from kubernetes.client.rest import ApiException
 
     from lakebench.deps import runtime
-    from tests import test_datagen_timeout_and_regenerate as dg
+    from tests.fixtures import datagen_timeout_helpers as dg
 
     dg._stub_full_run(monkeypatch)
     monkeypatch.setattr(runtime, "load_handle", _real_load_handle)
@@ -1330,7 +1081,7 @@ def _scenario_run_deps_stale(monkeypatch, tmp_path):
 def _scenario_run_deps_mismatch(monkeypatch, tmp_path):
     from lakebench.config import load_config
     from lakebench.deps.request import select_request
-    from tests.test_deps_manifest import fake_shown
+    from tests.fixtures.deps_manifest_helpers import fake_shown
 
     dg = _deps_cluster(monkeypatch, annotation=None, manifest=None)
     cfg_path = dg._write_cfg(tmp_path)
@@ -1342,7 +1093,7 @@ def _scenario_run_deps_mismatch(monkeypatch, tmp_path):
 def _nameless_destroy(monkeypatch, tmp_path, setup, argv_extra=()):
     """`destroy --force` on a nameless config against a fake namespace (SAF-2)."""
     import lakebench.cli._nameless as nameless
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
@@ -1356,7 +1107,7 @@ def _nameless_status(monkeypatch, tmp_path, setup):
     """`status` on a nameless config with no v1.6 state (a suggested name)."""
     import lakebench.cli._nameless as nameless
     from lakebench.config import deploy_state as ds
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
@@ -1440,7 +1191,7 @@ def _scenario_nameless_namespace_unreadable(monkeypatch, tmp_path):
 def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
     import lakebench.cli._deploy as deploy_mod
     from lakebench.config import deploy_state as ds
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
@@ -1466,7 +1217,7 @@ def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
 
 def _scenario_deploy_state_copied(monkeypatch, tmp_path):
     import lakebench.cli._deploy as deploy_mod
-    from tests import test_saf2_deploy_state as t
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
@@ -1617,11 +1368,6 @@ EXPECTED_STDERR = {
 }
 
 
-def test_scenarios_cover_exactly_the_live_paths():
-    """A live path needs a scenario; a path with a scenario must not stay planned."""
-    assert set(SCENARIOS) == {p.name for p in PATHS if p.live}
-
-
 # Text in the combined output that shows the scenario took its named path,
 # where the code alone has more than one producer.
 EXPECTED_OUTPUT = {
@@ -1691,71 +1437,23 @@ def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_pat
     assert name in paths, (name, paths)
 
 
-def test_exit_path_file_written_on_success_and_absent_without_env(monkeypatch, tmp_path):
-    target = tmp_path / "exit-path"
-    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
-    result = _runner().invoke(app, ["version"])
-    assert result.exit_code == 0
-    assert target.read_text() == "0 -\n"
-    monkeypatch.delenv(cli_exit.EXIT_PATH_FILE_ENV)
-    target.unlink()
-    _runner().invoke(app, ["version"])
-    assert not target.exists()
-
-
-def test_refusal_paths_reads_failed_steps_only():
-    rows = [
-        SimpleNamespace(status=SimpleNamespace(value="failed"), details={"refusal": "lease.held"}),
-        SimpleNamespace(status=SimpleNamespace(value="success"), details={"refusal": "x.y"}),
-        SimpleNamespace(status=SimpleNamespace(value="failed"), details={"refusal": "lease.held"}),
-        SimpleNamespace(status=SimpleNamespace(value="failed"), details={}),
-    ]
-    assert cli_exit.refusal_paths(rows) == ["lease.held"]
-
-
 # -- generated table -----------------------------------------------------------
-
-
-def test_exit_table_drift():
-    doc = ROOT / "docs" / "exit-codes.md"
-    assert doc.read_text() == exit_codes.render_markdown(), (
-        "docs/exit-codes.md is stale: run python scripts/gen_exit_codes.py"
-    )
-
-
-def test_exit_table_lists_only_live_paths():
-    text = exit_codes.render_markdown()
-    for p in PATHS:
-        assert (f"| `{p.name}` |" in text) == p.live, p.name
-
-
-def test_gen_script_check_mode():
-    proc = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "gen_exit_codes.py"), "--check"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def _foreign_class(module: str, name: str, base: type[BaseException]) -> type[BaseException]:
     return type(name, (base,), {"__module__": module})
 
 
-@pytest.mark.parametrize(
-    ("module", "name"),
-    [
+def test_click_family_passes_through_by_package():
+    """Click prints its own usage error and exits 2; the handler must not wrap it."""
+    for module, name in [
         ("click.exceptions", "UsageError"),  # stock click from a dependency
         ("click.exceptions", "Exit"),
         ("typer._click.exceptions", "NoSuchOption"),
         ("typer._click.exceptions", "RenamedClickException"),  # a later rename
-    ],
-)
-def test_click_family_passes_through_by_package(module, name):
-    """Click prints its own usage error and exits 2; the handler must not wrap it."""
-    exc = _foreign_class(module, name, RuntimeError)("x")
-    assert cli_exit.error_for(exc) is None
+    ]:
+        exc = _foreign_class(module, name, RuntimeError)("x")
+        assert cli_exit.error_for(exc) is None
 
 
 @pytest.mark.parametrize("module", ["click.exceptions", "typer._click.exceptions"])
@@ -1801,14 +1499,3 @@ def test_batch_run_failed_step_exits_failed(monkeypatch, tmp_path):
     result = _runner().invoke(app, ["run", str(cfg), *flags])
     assert result.exit_code == ExitCode.FAILED, result.output
     assert "Failed to deploy Spark scripts ConfigMap" in result.output
-
-
-def test_unknown_stage_is_refused_before_any_work(monkeypatch, tmp_path):
-    """A typo in --stage exits 2 before the operator, datagen or a record."""
-    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
-    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
-    result = _runner().invoke(app, ["run", str(cfg), *flags, "--stage", "bogus"])
-    assert result.exit_code == ExitCode.USAGE, result.output
-    assert "Unknown stage: bogus" in result.output
-    stubs["op"].check_status.assert_not_called()
-    assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))

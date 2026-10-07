@@ -21,9 +21,8 @@ from lakebench.quantity import QuantityError, parse, to_bytes, to_gib, to_millic
 GIB = 1024**3
 
 
-@pytest.mark.parametrize(
-    ("value", "want"),
-    [
+def test_parse_every_kubernetes_form():
+    for value, want in [
         ("16Gi", 16 * GIB),
         ("2000000Ki", 2_048_000_000),
         ("1Ti", 1024 * GIB),
@@ -48,18 +47,14 @@ GIB = 1024**3
         (".5", Decimal("0.5")),
         (4, 4),
         (1.5, Decimal("1.5")),
-    ],
-)
-def test_parse_every_kubernetes_form(value, want):
-    assert parse(value) == Decimal(want)
+    ]:
+        assert parse(value) == Decimal(want)
 
 
-@pytest.mark.parametrize(
-    "value", ["16g", "1.5gb", "16GB", "-1Gi", "", "12e6Ki", "1K", "Gi", "1 Gi x", True, -2]
-)
-def test_rejects_what_kubernetes_rejects(value):
-    with pytest.raises(QuantityError):
-        parse(value)
+def test_rejects_what_kubernetes_rejects():
+    for value in ["16g", "1.5gb", "16GB", "-1Gi", "", "12e6Ki", "1K", "Gi", "1 Gi x", True, -2]:
+        with pytest.raises(QuantityError):
+            parse(value)
 
 
 def test_rounding_and_units():
@@ -89,13 +84,11 @@ def _old_cpu(cpu):
     return int(float(cpu) * 1000)
 
 
-@pytest.mark.parametrize("mem", ["421547872Ki", "263842736Ki", "32Gi", "17179869184", "500M"])
-@pytest.mark.parametrize("cpu", ["39500m", "40", "7800m", "8"])
-def test_node_allocatable_reads_as_before(mem, cpu):
-    # The system fingerprint reads node allocatable through these: what the
-    # API returns must read exactly as it did, or every fingerprint moves.
-    assert K8sClient._parse_memory_to_bytes(mem) == _old_mem(mem)
-    assert K8sClient._parse_cpu_to_millicores(cpu) == _old_cpu(cpu)
+def test_node_allocatable_reads_as_before():
+    for cpu in ["39500m", "40", "7800m", "8"]:
+        for mem in ["421547872Ki", "263842736Ki", "32Gi", "17179869184", "500M"]:
+            assert K8sClient._parse_memory_to_bytes(mem) == _old_mem(mem)
+            assert K8sClient._parse_cpu_to_millicores(cpu) == _old_cpu(cpu)
 
 
 def test_node_allocatable_in_other_units_now_reads():
@@ -163,13 +156,13 @@ def test_trino_memory_in_ki_is_counted():
     assert _engine_gb(cfg) == pytest.approx(coordinator + 2 * to_gib("2000000Ki"))
 
 
-@pytest.mark.parametrize("bad", ["16g", "16GB", "lots"])
-def test_unreadable_config_quantity_fails_the_check(bad):
-    trino = {"type": "trino", "trino": {"worker": {"memory": bad}}}
-    result = _check(_config(trino))
-    assert not result.passed
-    assert "cannot read the config" in result.message
-    assert bad in result.message
+def test_unreadable_config_quantity_fails_the_check():
+    for bad in ["16g", "16GB", "lots"]:
+        trino = {"type": "trino", "trino": {"worker": {"memory": bad}}}
+        result = _check(_config(trino))
+        assert not result.passed
+        assert "cannot read the config" in result.message
+        assert bad in result.message
 
 
 def test_unreadable_node_quantity_fails_the_check():
@@ -210,21 +203,17 @@ def test_non_finite_numbers_are_quantity_errors(value):
         parse(value)
 
 
-@pytest.mark.parametrize(
-    "value", ["421547872Ki", "39500m", "40", "17179869184", "500M", "256Gi", "7800m", "1e3"]
-)
-def test_fingerprint_quantities_match_the_kubernetes_client(value):
-    # system_identity used kubernetes.utils.parse_quantity; canonical API
-    # strings must read identically, or stored fingerprints move.
-    from kubernetes.utils import parse_quantity as k8s_parse
+def test_fingerprint_quantities_match_the_kubernetes_client():
+    for value in ["421547872Ki", "39500m", "40", "17179869184", "500M", "256Gi", "7800m", "1e3"]:
+        from kubernetes.utils import parse_quantity as k8s_parse
 
-    from lakebench.metrics.system_identity import _quantities
+        from lakebench.metrics.system_identity import _quantities
 
-    assert parse(value) == k8s_parse(value)
-    assert _quantities({"cpu": value, "memory": value}) == (
-        float(k8s_parse(value)),
-        float(k8s_parse(value)),
-    )
+        assert parse(value) == k8s_parse(value)
+        assert _quantities({"cpu": value, "memory": value}) == (
+            float(k8s_parse(value)),
+            float(k8s_parse(value)),
+        )
 
 
 def test_bad_node_allocatable_fails_the_real_capacity_read():

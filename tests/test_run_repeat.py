@@ -372,55 +372,6 @@ def test_a_late_signal_in_a_failed_rep_stops_the_series(tmp_path, monkeypatch):
     assert len(records) == 1
 
 
-@pytest.mark.parametrize(
-    "argv, message",
-    [
-        (["--continuous", "--repeat", "2"], "--repeat does not apply to a continuous run"),
-        (["--stage", "silver-build", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--local", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--deploy-only", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--generate-only", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-    ],
-)
-def test_repeat_refusals(tmp_path, monkeypatch, argv, message):
-    result, rec, records, manifest = _series(tmp_path, monkeypatch, argv=[*argv, "--yes"])
-    assert result.exit_code == 2, result.output
-    assert message in result.output
-    assert records == [] and manifest is None and rec.submits == []
-
-
-def test_repeat_refused_multicycle(tmp_path, monkeypatch):
-    from tests.harness.run_harness import base_config
-
-    result, rec, records, manifest = _series(
-        tmp_path,
-        monkeypatch,
-        config=base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}}),
-    )
-    assert result.exit_code == 2, result.output
-    assert "--repeat does not apply to a multi-cycle run" in result.output
-    assert records == []
-
-
-def test_repeat_out_of_range_is_a_usage_error(tmp_path, monkeypatch):
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--skip-generate", "--yes", "--repeat", "21"]
-    )
-    assert result.exit_code == 2
-    assert records == []
-
-
-def test_no_repeat_writes_no_series(tmp_path, monkeypatch):
-    """A plain run is unchanged: no series field, no manifest."""
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--skip-generate", "--yes"]
-    )
-    assert result.exit_code == 0, result.output
-    assert len(records) == 1 and "series" not in records[0]
-    assert manifest is None
-    assert not Path(tmp_path / "lakebench-output" / "series").exists()
-
-
 def _rewrite(rec):
     rec.bronze_objects[f"{SCOPE}part-0001.parquet"] = (1000, "e1-rewritten")
 

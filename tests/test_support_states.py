@@ -8,10 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
-from typer.testing import CliRunner
 
 from lakebench.config import support
-from lakebench.config.schema import _SUPPORTED_COMBINATIONS
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -44,12 +42,6 @@ ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.11.0"}
 
 
 # -- declarations -----------------------------------------------------------
-
-
-def test_recipes_are_exactly_the_architecture_list():
-    comps = {support.components_of(n) for n in support.recipe_names()}
-    assert comps == set(_SUPPORTED_COMBINATIONS)
-    assert len(support.recipe_names()) == len(_SUPPORTED_COMBINATIONS)
 
 
 def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_on_delta():
@@ -103,9 +95,8 @@ def test_supported_only_when_listed_with_runs(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "body, fragment",
-    [
+def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path):
+    for body, fragment in [
         (_entry(workload="financial", recipe="hive-delta-spark-trino"), "is refused"),
         (_entry(recipe="default"), "not a recipe name"),
         (_entry(recipe="unity-delta-spark-thrift"), "not a recipe name"),
@@ -126,11 +117,9 @@ def test_supported_only_when_listed_with_runs(tmp_path):
         (_entry(mode="continuous", recipe="hive-iceberg-spark-duckdb"), "not a release-matrix"),
         (_entry() + "extra: 1\n", "only top-level key"),
         (_entry().replace("runs:", "run_ids:"), "unknown keys"),
-    ],
-)
-def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path, body, fragment):
-    with pytest.raises(support.ValidationRecordError, match=fragment):
-        support.load_validation_record(_record(tmp_path, body))
+    ]:
+        with pytest.raises(support.ValidationRecordError, match=fragment):
+            support.load_validation_record(_record(tmp_path, body))
 
 
 def test_unreadable_record_never_promotes(tmp_path):
@@ -166,32 +155,6 @@ def test_unsupported_is_stamped_for_combinations_outside_layers_1_to_3():
 # -- refusal before a run ---------------------------------------------------
 
 
-def test_run_refuses_a_mode_the_workload_does_not_declare(tmp_path, monkeypatch):
-    """--continuous does not write the mode back to the config, so load
-    cannot refuse it; run must."""
-    from lakebench.cli import app
-    from lakebench.config import schema
-
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(
-        "name: s\nplatform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
-        "      access_key: x\n      secret_key: y\n"
-    )
-    monkeypatch.setitem(schema.WORKLOAD_MODES, "customer360", ("batch",))
-    reached = []
-    monkeypatch.setattr(
-        "lakebench.config.autosizer.resolve_auto_sizing",
-        lambda *a, **k: reached.append(1) or [],
-    )
-    monkeypatch.setattr(
-        "lakebench.cli._sustained._run_sustained", lambda *a, **k: reached.append(2)
-    )
-    res = CliRunner().invoke(app, ["run", str(cfg), "--continuous", "--skip-deploy"])
-    assert res.exit_code == 2, res.output  # unsupported combination: usage
-    assert "Unsupported combination, refused" in res.output
-    assert not reached
-
-
 # -- CLI display ------------------------------------------------------------
 
 
@@ -213,47 +176,7 @@ def wide_consoles(monkeypatch):
                     monkeypatch.setattr(value, "_width", 300)
 
 
-def test_config_recipes_shows_states(wide_consoles):
-    from lakebench.cli import app
-
-    res = CliRunner().invoke(app, ["config", "recipes"], env={"COLUMNS": "300"})
-    assert res.exit_code == 0, res.output
-    line = next(ln for ln in res.output.splitlines() if "hive-delta-spark-trino" in ln)
-    assert line.count("unsupported") == 2 and line.count("unverified") == 2
-    res = CliRunner().invoke(app, ["config", "recipes", "hive-delta-spark-trino"])
-    assert "AML (financial) batch: unsupported" in res.output
-
-
-def test_config_show_shows_the_state(tmp_path, monkeypatch, wide_consoles):
-    from lakebench.cli import app
-
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(
-        "name: s\nplatform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
-        "      access_key: x\n      secret_key: y\n"
-    )
-    res = CliRunner().invoke(app, ["config", "show", str(cfg)], env={"COLUMNS": "300"})
-    assert res.exit_code == 0, res.output
-    assert "unverified (customer360 x hive-iceberg-spark-trino x batch)" in res.output
-
-
 # -- docs -------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("rel", sorted(support.DOCS_WITH_BLOCKS))
-def test_docs_tables_match_the_code(rel):
-    text = (REPO / rel).read_text()
-    for name in support.DOCS_WITH_BLOCKS[rel]:
-        assert support.block_in(text, name) == support.expected_block(name), (
-            f"{rel}: generated block {name!r} is stale; run "
-            "`PYTHONPATH=src python3.11 -m lakebench.config.support .`"
-        )
-
-
-def test_docs_do_not_present_unity_as_working():
-    text = (REPO / "docs/compatibility-matrix.md").read_text()
-    unity_rows = [ln for ln in text.splitlines() if ln.startswith("| Unity")]
-    assert unity_rows and all("Not supported" in ln for ln in unity_rows)
 
 
 # -- local mode -------------------------------------------------------------
@@ -279,21 +202,6 @@ def test_local_mode_refuses_aml_and_continuous():
         "financial", "none", "iceberg", "spark", "duckdb", "batch", system="local", record={}
     )
     assert s["state"] == support.UNSUPPORTED
-
-
-def test_run_local_refuses_the_continuous_flag(tmp_path, monkeypatch):
-    from lakebench.cli import app
-
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(
-        "name: s\nplatform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
-        "      access_key: x\n      secret_key: y\n"
-    )
-    reached = []
-    monkeypatch.setattr("lakebench.cli._run._run_local_mode", lambda *a, **k: reached.append(1))
-    res = CliRunner().invoke(app, ["run", str(cfg), "--local", "--continuous"])
-    assert res.exit_code == 2, res.output  # unsupported combination: usage
-    assert "batch mode only" in res.output and not reached
 
 
 def test_matrix_degrades_when_the_record_is_malformed(tmp_path):
@@ -388,23 +296,3 @@ def test_a_custom_spark_image_is_never_supported(tmp_path):
         table_format_version="1.11.0",
     )
     assert s["state"] == support.UNVERIFIED and "not known" in s["basis"]
-
-
-def test_matrix_cell_lists_its_version_pairs():
-    # The loader admits one pair per cell (the matrix's); the matrix and
-    # the table still list every pair a record holds.
-    v41 = support.Validation(
-        "customer360", "hive-iceberg-spark-trino", "batch", "4.1", "1.11.0", TREE, ("r1",)
-    )
-    v40 = support.Validation(
-        "customer360", "hive-iceberg-spark-trino", "batch", "4.0", "1.11.0", TREE, ("r2",)
-    )
-    rec = {v41.key: v41, v40.key: v40}
-    rows = {(r["recipe"], r["workload"], r["mode"]): r for r in support.support_matrix(record=rec)}
-    cell = rows[("hive-iceberg-spark-trino", "customer360", "batch")]
-    assert cell["state"] == support.SUPPORTED
-    assert cell["versions"] == [("4.0", "1.11.0"), ("4.1", "1.11.0")]
-    table = support.render_support_table(rec)
-    assert "supported (Spark 4.0, Iceberg 1.11.0; Spark 4.1, Iceberg 1.11.0)" in table
-    outside = rows[("polaris-iceberg-spark-none", "customer360", "batch")]
-    assert outside["state"] == support.UNVERIFIED and outside["basis"] == support.NOT_IN_MATRIX

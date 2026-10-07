@@ -343,33 +343,29 @@ class TestDestroy:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("tags", "problem"),
-    [
+def test_continuous_reset_applies_the_matrix():
+    for tags, problem in [
         ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP}, False),
         ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: OTHER_FP}, True),
         ({TAG_DEPLOYMENT_NAME: NS}, True),  # row 4, not in the record
-    ],
-    ids=["mine", "foreign-cluster", "unproven"],
-)
-def test_continuous_reset_applies_the_matrix(tags, problem):
-    from kubernetes import client
+    ]:
+        from kubernetes import client
 
-    from lakebench.cli._sustained import _bucket_ownership_problem
-    from tests.conftest import make_config
+        from lakebench.cli._sustained import _bucket_ownership_problem
+        from tests.conftest import make_config
 
-    cfg = make_config(name=NS)
-    with recording() as rec:
-        rec.for_config(cfg)
-        rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
-        for b in ("u01-bronze", "u01-silver", "u01-gold"):
-            rec.add_bucket(b, tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP})
-        rec.tags_store[B] = dict(tags)
-        with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=FP):
-            got = _bucket_ownership_problem(cfg, client.CoreV1Api())
-        assert (got is not None) is problem, got
-        if problem:
-            assert B in got
+        cfg = make_config(name=NS)
+        with recording() as rec:
+            rec.for_config(cfg)
+            rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
+            for b in ("u01-bronze", "u01-silver", "u01-gold"):
+                rec.add_bucket(b, tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP})
+            rec.tags_store[B] = dict(tags)
+            with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=FP):
+                got = _bucket_ownership_problem(cfg, client.CoreV1Api())
+            assert (got is not None) is problem, got
+            if problem:
+                assert B in got
 
 
 # ---------------------------------------------------------------------------

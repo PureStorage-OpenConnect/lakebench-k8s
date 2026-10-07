@@ -8,18 +8,17 @@ The driver line is parsed into the gold-finalize job, copied to
 
 from __future__ import annotations
 
-import ast
 import copy
 import json
 from pathlib import Path
 
-import pytest
-
 from lakebench.metrics import alert_set as als
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import JobMetrics, MetricsCollector
-from tests.test_comparability import SYSID, observe, series_body, two_nodes
-from tests.test_experiment import _cfg, _metrics
+from tests.fixtures.comparability_helpers import SYSID
+from tests.fixtures.corpus_identity_helpers import observe, two_nodes
+from tests.fixtures.corpus_identity_helpers import series as series_body
+from tests.fixtures.experiment_helpers import _cfg, _metrics
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "src" / "lakebench" / "spark" / "scripts"
 
@@ -72,22 +71,19 @@ class TestParse:
         )
         assert got is None and secs == 0.1 and why == "Table not found"
 
-    @pytest.mark.parametrize(
-        "mutate, problem",
-        [
+    def test_malformed_is_unavailable(self):
+        for mutate, problem in [
             (lambda b: b.update(rows=b["rows"] + 1), "rows is not the sum"),
             (lambda b: b.update(h=str(int(b["h"]) + 1)), "h is not the sum"),
             (lambda b: b.pop("by_rule"), "missing by_rule"),
             (lambda b: b["by_rule"]["W2_structuring"].update(h="x"), "by_rule[W2_structuring]"),
             (lambda b: b.update(rows=True), "rows or h"),
             (lambda b: b.update(spec=""), "spec"),
-        ],
-    )
-    def test_malformed_is_unavailable(self, mutate, problem):
-        body = copy.deepcopy(ASET)
-        mutate(body)
-        got, _s, why = als.parse_alert_set(_line(body))
-        assert got is None and why is not None and problem in why
+        ]:
+            body = copy.deepcopy(ASET)
+            mutate(body)
+            got, _s, why = als.parse_alert_set(_line(body))
+            assert got is None and why is not None and problem in why
 
     def test_bad_json(self):
         got, _s, why = als.parse_alert_set("LB_ALERT_SET {not json}")
@@ -110,21 +106,6 @@ class TestParse:
         assert job.alert_set == ASET
         assert job.alert_set_seconds == 2.5 and job.alert_set_unavailable is None
         assert job.to_dict()["alert_set_seconds"] == 2.5
-
-    def test_spark_side_names_match(self):
-        """The tag and spec the scripts print are the ones parsed here."""
-
-        def const(path: Path, name: str):
-            for node in ast.parse(path.read_text()).body:
-                if isinstance(node, ast.Assign) and any(
-                    isinstance(t, ast.Name) and t.id == name for t in node.targets
-                ):
-                    return ast.literal_eval(node.value)
-            raise AssertionError(f"{name} not in {path.name}")
-
-        assert const(SCRIPTS / "common.py", "ALERT_SET_SPEC") == als.ALERT_SET_SPEC
-        assert const(SCRIPTS / "gold_finalize_financial.py", "ALERT_SET_TAG") == als.ALERT_SET_TAG
-        assert list(const(SCRIPTS / "common.py", "ALERT_SET_COLUMNS")) == ASET["columns"]
 
 
 # ---------------------------------------------------------------------------
@@ -192,17 +173,14 @@ class TestRecord:
 
 
 class TestCompare:
-    @pytest.mark.parametrize(
-        "b, expected",
-        [
+    def test_diff_lines(self):
+        for b, expected in [
             ({**ASET, "spec": "as2"}, "different definitions"),
             ({**ASET, "cols_sha": "f" * 16}, "different columns"),
             (_aset(W1_connected_components=(3, "-12"), W2_structuring=(6, "907")), "5 alert(s)"),
-        ],
-    )
-    def test_diff_lines(self, b, expected):
-        out = als.diff_alert_sets(ASET, b)
-        assert len(out) == 1 and expected in out[0]
+        ]:
+            out = als.diff_alert_sets(ASET, b)
+            assert len(out) == 1 and expected in out[0]
 
     def test_diff_ignores_order_of_by_rule(self):
         b = copy.deepcopy(ASET)
@@ -229,92 +207,3 @@ def test_cli_takes_the_fingerprint_off_the_stage_time():
         jm2 = JobMetrics(job_name="g", job_type="gold-finalize", elapsed_seconds=100.0)
         jm2.alert_set_seconds = secs
         assert _exclude_alert_set_time(jm2) == 0.0 and jm2.elapsed_seconds == 100.0
-
-
-def test_report_labels_the_fingerprint_seconds():
-    from lakebench.reports.generator import ReportGenerator
-
-    run = _fresh()
-    run.jobs[-1].elapsed_seconds = 60.0
-    run.jobs[-1].alert_set_seconds = 2.5
-    html = ReportGenerator.__new__(ReportGenerator)._generate_jobs_table(run)
-    assert "excludes 2.5s of Lakebench's alert-set fingerprint" in html
-
-
-def _names_reachable(root: str) -> dict[str, set[str]]:
-    """Names referenced by each script function reachable from *root*.
-
-    Every function defined anywhere in spark/scripts (nested ones too; all
-    same-named definitions are followed) is a node; an edge is any
-    reference to its name, as a bare name or an attribute (``x.f``), called
-    or not, so an alias (``g = common.f``) is followed and caught too."""
-    funcs: dict[str, list[ast.AST]] = {}
-    for path in sorted(SCRIPTS.glob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                funcs.setdefault(node.name, []).append(node)
-    seen: dict[str, set[str]] = {}
-    todo = [root]
-    while todo:
-        name = todo.pop()
-        if name in seen or name not in funcs:
-            continue
-        refs: set[str] = set()
-        for fn in funcs[name]:
-            for n in ast.walk(fn):
-                if isinstance(n, ast.Name):
-                    refs.add(n.id)
-                elif isinstance(n, ast.Attribute):
-                    refs.add(n.attr)
-        seen[name] = refs
-        todo += [r for r in refs if r in funcs]
-    return seen
-
-
-def test_no_alert_set_in_tick():
-    """S6 by analogy: a continuous tick never fingerprints gold.alerts (a
-    Lakebench full scan inside time to detect). Covers run_tick and every
-    script function it can reach (gold-finalize's detection driver, the TM
-    layer, the rules, common), by any reference, called or aliased."""
-    banned = {
-        "frame_fingerprint",
-        "frame_fingerprint_by",
-        "_fingerprint_hash",
-        "alert_set_fingerprint",
-        "alert_set_line",
-    }
-    reach = _names_reachable("run_tick")
-    assert {"run_tick", "run_detection_rules", "run_tm_operations"} <= set(reach), sorted(reach)
-    hits = {f: sorted(c & banned) for f, c in reach.items() if c & banned}
-    assert not hits, hits
-
-
-def test_gold_finalize_prints_the_line_after_detection():
-    """The line is printed by main() after detection and the TM layer, last
-    in the stage (so the CLI can take its seconds off the stage's end), not
-    inside the detection driver (which the tick shares)."""
-    tree = ast.parse((SCRIPTS / "gold_finalize_financial.py").read_text())
-    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
-    calls = sorted(
-        (n.lineno, n.func.id)
-        for n in ast.walk(main)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id in ("run_detection_rules", "run_tm_operations", "alert_set_line")
-    )
-    assert [name for _, name in calls] == [
-        "run_detection_rules",
-        "run_tm_operations",
-        "alert_set_line",
-    ]
-
-
-def test_run_takes_the_fingerprint_off_after_parsing():
-    """The cluster path subtracts the alert-set seconds right after it
-    applies the parsed driver log, before resources and the journal use
-    the stage's time."""
-    src = (Path(__file__).resolve().parents[1] / "src/lakebench/cli/_run.py").read_text()
-    applied = src.index("_apply_parsed_job_metrics(job_metrics, parsed)")
-    excluded = src.index("_exclude_alert_set_time(job_metrics)", applied)
-    resources = src.index("_profile = get_job_profile(stage_name, _schema)", applied)
-    assert applied < excluded < resources

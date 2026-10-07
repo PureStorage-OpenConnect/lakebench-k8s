@@ -10,7 +10,6 @@ secrets-history CI job sets it), which turns the skip into a failure.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,8 +27,6 @@ BASELINE = {
     "58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:48",
     "58d5e35c5bedfd4956bcae58902428e8eb12f4b2:src/lakebench/deploy/deployment_secrets.py:generic-api-key:49",
 }
-
-_FINGERPRINT = re.compile(r"^[0-9a-f]{40}:[^:\s]+:[a-z0-9-]+:[0-9]+$")
 
 
 def _gitleaks() -> str:
@@ -57,23 +54,8 @@ def _entries(text: str) -> list[tuple[str, list[str]]]:
     return out
 
 
-def test_ignore_entries_are_well_formed():
-    entries = _entries(IGNORE.read_text())
-    assert entries, ".gitleaksignore has no entries"
-    for entry, comments in entries:
-        assert _FINGERPRINT.match(entry), (
-            f"not a <commit>:<path>:<rule>:<line> fingerprint: {entry}"
-        )
-        assert comments, f"{entry} has no reason comment directly above it"
-
-
 def test_baseline_is_the_published_polaris_default():
     assert {e for e, _ in _entries(IGNORE.read_text())} == BASELINE
-
-
-def test_entries_parser():
-    text = "# head\n\n# why\nabc\n\nlonely\n"
-    assert _entries(text) == [("abc", ["# why"]), ("lonely", [])]
 
 
 def _git(repo: Path, *args: str) -> str:

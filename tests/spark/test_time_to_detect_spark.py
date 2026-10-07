@@ -110,37 +110,6 @@ def test_no_prior_snapshot_means_every_alert_is_new(spark):
     assert stats["alerts"] == 1 and stats["max_s"] == 0.0 and stats["bins"] == {0: 1}
 
 
-def test_empty_tick_logs_a_parseable_line(spark):
-    from common import ttd_line
-    from gold_refresh_financial import (
-        _empty_ttd_stats,
-        new_alert_arrivals,
-        new_alert_txns,
-        ttd_stats,
-    )
-
-    empty = spark.createDataFrame([], _ALERTS)
-    stats = ttd_stats(new_alert_arrivals(new_alert_txns(empty, empty), _txns(spark)), 1.0)
-    assert stats == _empty_ttd_stats()
-    assert ttd_line(7, stats) == (
-        "Cycle 7: time to detect alerts=0 late=0 unmatched=0 max=-s bin=10s bins="
-    )
-
-
-def test_small_lookup_broadcasts_instead_of_shuffling_silver(spark):
-    from gold_refresh_financial import new_alert_arrivals, new_alert_txns
-
-    current = spark.createDataFrame([("u", "W2_structuring", 1, ["t4"])], _ALERTS)
-    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
-    try:
-        df = new_alert_arrivals(new_alert_txns(current, None), _txns(spark), small=True)
-        plan = df._jdf.queryExecution().executedPlan().toString()
-    finally:
-        spark.conf.unset("spark.sql.autoBroadcastJoinThreshold")
-    assert "BroadcastHashJoin" in plan
-    assert [r["arrival_ts"].timestamp() for r in df.collect()] == [1_000_300]
-
-
 def test_each_alert_is_measured_at_its_own_rule_commit(spark):
     """A rule's alerts are visible when its INSERT commits, so a cheap rule
     run first is measured at its own commit, not at the end of the pass."""

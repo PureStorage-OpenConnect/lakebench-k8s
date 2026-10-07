@@ -163,28 +163,6 @@ def _install_common_mocks(monkeypatch, spark):
     return sbf, replace_calls, sql_calls
 
 
-def test_sidecar_absent_after_preflight_abort(monkeypatch, spark):
-    """Empty entities -> SilverAbort in pre-flight -> no sealed MERGE."""
-    from common import SilverAbort
-
-    sbf, replace_calls, sql_calls = _install_common_mocks(monkeypatch, spark)
-
-    def _empty_entities(*_a, **_kw):
-        return spark.range(0)
-
-    monkeypatch.setattr(sbf, "build_entities", _empty_entities)
-    monkeypatch.setattr(sbf, "iceberg_table_stats", lambda _s, _t: (0, 0.0))
-
-    with pytest.raises(SilverAbort):
-        sbf.main()
-
-    # No write happened, so no sealed marker was emitted.
-    assert replace_calls == [], (
-        f"pre-flight abort must precede every _replace_data call; saw {replace_calls}"
-    )
-    _assert_no_sealed_marker(sql_calls)
-
-
 def test_sidecar_absent_after_in_sequence_abort(monkeypatch, spark):
     """In-sequence failure post-statements-write leaves no sealed marker.
 

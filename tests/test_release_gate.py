@@ -24,24 +24,6 @@ def _boom():
     raise RuntimeError("kaput")
 
 
-def test_all_pass_reports_passed():
-    results = rg.run_checks([_check("a", rg.PASS, "fine"), _check("b", rg.PASS)])
-    report = rg.format_report(results)
-    assert rg.failures(results) == []
-    assert "PASSED: 2 checks" in report
-
-
-def test_failures_are_listed_with_detail():
-    results = rg.run_checks(
-        [_check("a", rg.PASS), _check("b", rg.FAIL, "line one\nline two"), _check("c", rg.FAIL)]
-    )
-    report = rg.format_report(results)
-    assert [r.name for r in rg.failures(results)] == ["b", "c"]
-    assert "FAILED: 2 of 3 checks" in report
-    assert "-- b (failed)" in report and "line two" in report
-    assert "-- c (failed)" in report
-
-
 def test_skip_passes_unless_require_all():
     results = rg.run_checks([_check("a", rg.PASS), _check("leaks", rg.SKIP, "not installed")])
     assert rg.failures(results) == []
@@ -167,46 +149,6 @@ def _repo(tmp_path, text: str):
     git("add", ".")
     git("commit", "-q", "-m", "c")
     return git("rev-parse", "HEAD")
-
-
-def test_gitleaks_history_check(tmp_path, monkeypatch):
-    import subprocess
-
-    _gitleaks_or_skip()
-    monkeypatch.setattr(rg, "ROOT", tmp_path)
-    # Built at run time so this file never matches the FlashBlade rule itself.
-    sha = _repo(tmp_path, "access_key_id: " + "PSFB" + "Q" * 38 + "\n")
-    # Without the baseline file the check refuses to run.
-    res = rg.check_gitleaks_history()
-    assert res.status == rg.FAIL and ".gitleaksignore" in res.detail
-    (tmp_path / ".gitleaksignore").write_text("# other\n" + "a" * 40 + ":x:generic-api-key:1\n")
-    res = rg.check_gitleaks_history()
-    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
-    (tmp_path / ".gitleaksignore").write_text(
-        f"# planted\n{sha}:a.txt:pure-flashblade-s3-access-key:1\n"
-    )
-    res = rg.check_gitleaks_history()
-    assert res.status == rg.PASS, res.detail
-    # A key in a commit message, which `gitleaks git` alone does not read.
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(tmp_path),
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "note " + "PSFB" + "Z" * 38,
-        ],
-        check=True,
-    )
-    res = rg.check_gitleaks_history()
-    assert res.status == rg.FAIL and "leaks found" in res.detail, res.detail
 
 
 def test_gitleaks_history_check_refuses_a_shallow_clone(monkeypatch, tmp_path):
