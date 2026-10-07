@@ -73,6 +73,29 @@ def test_continuous_ticks_are_all_gated():
     assert [p.split(":")[0] for p in tm_gate_problems(parse_tm_invariants(logs))] == ["cycle 2"]
 
 
+def test_aml_gate_reads_the_drain_tick():
+    """The window's log stops before the drain tick; the gate reads the
+    drain's alerts and TM cycle, keeping the window's cycles."""
+    from lakebench.cli._sustained import _aml_cumulative_alerts, _aml_gate_logs
+
+    window = (
+        "[detection] cumulative gold.alerts rows: 10\n"
+        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+    )
+    drain = SimpleNamespace(
+        state="drained",
+        logs=window
+        + "[detection] cumulative gold.alerts rows: 25\n"
+        + "[tm-status] status=ran cycle=2 reason=\n"
+        + "[tm-invariant] reconciliation: status=fail cycle=2 detail=b\n",
+    )
+    logs, inv, status = _aml_gate_logs(window, drain)
+    assert _aml_cumulative_alerts(logs) == 25
+    assert sorted(inv) == [1, 2] and 2 in status
+    assert [p.split(":")[0] for p in tm_gate_problems(inv)] == ["cycle 2"]
+    assert _aml_gate_logs(window, SimpleNamespace(state="timeout", logs=drain.logs))[0] == window
+
+
 def test_driver_log_to_metrics_json_to_scorecard(tmp_path):
     from lakebench.cli._run import _apply_parsed_job_metrics
     from lakebench.reports.scorecard import FinancialScorecardBlock

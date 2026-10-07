@@ -25,13 +25,13 @@ def test_one_delete_per_restart_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Run 1: one query run, three non-empty micro-batches. Pre-fix, every
-    # micro-batch issues a DELETE on each of silver.transactions and
-    # silver.counterparty_edges, so 6 DELETE calls. Post-fix, only the
-    # run's first micro-batch does, so 2 DELETE calls.
-    assert out["run1_delete_sql_calls"] == 2, out
+    # micro-batch issues a DELETE on each of silver.transactions,
+    # silver.counterparty_edges and silver.counterparty_pairs, so 9 DELETE
+    # calls. Post-fix, only the run's first micro-batch does, so 3.
+    assert out["run1_delete_sql_calls"] == 3, out
     # Run 2: a restart-from-checkpoint style new run adds one delete per
-    # table (its first micro-batch): 2 more DELETE calls.
-    assert out["run2_delete_sql_calls"] == 2, out
+    # table (its first micro-batch): 3 more DELETE calls.
+    assert out["run2_delete_sql_calls"] == 3, out
     # Snapshot count check: on Iceberg 1.10.x a no-match DELETE still
     # materialises a snapshot, so per-run counts match the SQL-call counts.
     # Some 1.6+ builds may elide no-match DELETE snapshots; the SQL-call
@@ -152,8 +152,8 @@ def _run(jars):
         # Wrap spark.sql so the test records every "DELETE FROM ..." the
         # code issues. This is independent of any Iceberg version-specific
         # snapshot elision on no-match DELETE: pre-fix the code calls
-        # DELETE once per micro-batch per table (6 per run); post-fix once
-        # per run's first micro-batch per table (2 per run).
+        # DELETE once per micro-batch per table (9 per run); post-fix once
+        # per run's first micro-batch per table (3 per run).
         delete_sql_calls: list[str] = []
         real_sql = spark.sql
 

@@ -331,6 +331,8 @@ def window_gate_problems(
     stats_by_job: dict[str, dict[str, Any] | None],
     window_seconds: float | None = None,
     min_commits: int = MIN_WINDOW_COMMITS,
+    *,
+    continuous_datagen: bool = False,
 ) -> list[str]:
     """Reasons a continuous run is not continuous processing (invariant 3).
 
@@ -349,8 +351,9 @@ def window_gate_problems(
     for job, stats in stats_by_job.items():
         if stats is None:
             problems.append(
-                f"continuous gate: no {job} driver log with timestamped lines; cannot show "
-                "it processed data during the window"
+                f"continuous gate: no {job} batch lines in its driver log (it processed "
+                "nothing, or the log could not be read); cannot show it processed data "
+                "during the window"
             )
     bronze = stats_by_job.get("bronze-ingest")
     if bronze is not None:
@@ -372,8 +375,15 @@ def window_gate_problems(
                     f"continuous gate: data stopped arriving {last:.0f}s into the "
                     f"{window_seconds:.0f}s window ({batches} bronze batch(es) inside it, "
                     f"{before:,} rows before it): at least {min_commits} batches and arrival "
-                    f"through {MIN_ARRIVAL_FRACTION:.0%} of the window are needed. Lower "
-                    "max_files_per_trigger so the trickle lasts the window"
+                    f"through {MIN_ARRIVAL_FRACTION:.0%} of the window are needed. "
+                    + (
+                        "Either arrival exceeded what bronze takes in (its batches grow until "
+                        "one fills the window): offer less with workload.datagen.cpu and "
+                        "parallelism, or unset them to balance datagen to bronze; or datagen "
+                        "stopped writing: check the datagen pod logs"
+                        if continuous_datagen
+                        else "Lower max_files_per_trigger so the trickle lasts the window"
+                    )
                 )
     first = (bronze or {}).get("first_write_offset_seconds")
 
@@ -500,22 +510,31 @@ def classify_submission_failure(message: str | None) -> str:
 
 
 def settle_state(
-    events_by_job: dict[str, list[StreamEvent]], datagen_rows: int
+    events_by_job: dict[str, list[StreamEvent]],
+    datagen_rows: int,
+    *,
+    bronze_rows: int | None = None,
 ) -> tuple[bool, str]:
     """Whether the pipeline has taken in and published the whole corpus.
 
     Settled when every datagen row reached bronze, silver committed every
     one of them, and a gold cycle read silver after silver's last commit and
-    finished its refresh. Pod log timestamps only, so no CLI clock enters.
+    finished its refresh. With ``bronze_rows`` (a drain: bronze stopped
+    after taking that many rows) the corpus is what bronze took, bronze's own
+    log is not read, and every silver batch with rows must be committed. Pod log timestamps only, so no
+    CLI clock enters.
     """
-    if datagen_rows <= 0:
-        return False, "datagen row count not measured"
-    bronze = events_by_job.get("bronze-ingest") or []
     silver = events_by_job.get("silver-stream") or []
     gold = events_by_job.get("gold-refresh") or []
-    b_rows = sum(e.rows or 0 for e in bronze if e.kind == "write")
-    if b_rows < datagen_rows:
-        return False, f"bronze has {b_rows:,} of {datagen_rows:,} rows"
+    if bronze_rows is not None:
+        b_rows = bronze_rows
+    else:
+        if datagen_rows <= 0:
+            return False, "datagen row count not measured"
+        bronze = events_by_job.get("bronze-ingest") or []
+        b_rows = sum(e.rows or 0 for e in bronze if e.kind == "write")
+        if b_rows < datagen_rows:
+            return False, f"bronze has {b_rows:,} of {datagen_rows:,} rows"
     rows_in: dict[int, int] = {}
     committed: dict[int, datetime] = {}
     for e in silver:
@@ -526,6 +545,12 @@ def settle_state(
     s_rows = sum(rows_in.get(b, 0) for b in committed)
     if s_rows < b_rows:
         return False, f"silver has committed {s_rows:,} of {b_rows:,} bronze rows"
+    if bronze_rows is not None:
+        # A drain: bronze may have written a last batch while it was being
+        # stopped, so silver may still be transforming rows past the count.
+        pending = sorted(b for b, n in rows_in.items() if n and b not in committed)
+        if pending:
+            return False, f"silver batch {pending[0]} is not committed yet"
     last_commit = max(committed.values()) if committed else None
     read_after = {
         e.ident for e in gold if e.kind == "aggregate" and last_commit and e.at > last_commit

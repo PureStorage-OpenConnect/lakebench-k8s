@@ -114,6 +114,7 @@ SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+SILVER_PAIRS = env("LB_FINANCIAL_SILVER_PAIRS", "silver.counterparty_pairs")
 # Every silver table silver_stream_financial writes; the continuous reset
 # drops them all (its fresh-checkpoint refusal checks the same set).
 CONTINUOUS_SILVER_TABLES = (
@@ -124,6 +125,7 @@ CONTINUOUS_SILVER_TABLES = (
     SILVER_STATEMENTS,
     SILVER_PROFILES,
     SILVER_BATCH_VERSIONS,
+    SILVER_PAIRS,
 )
 # The gold tables gold-refresh writes, besides the TM tables (TM_TABLES):
 # until its first tick a reader would take the previous run's rows as this
@@ -258,6 +260,22 @@ def register_manifest(spark) -> bool:
             "(reads manifest via --manifest arg) are unaffected."
         )
         return False
+
+
+def pacs008_schema():
+    """The pacs.008 bronze schema the generator writes, as Spark reads it
+    (spark/data/aml/pacs008_schema.json, shipped with the AML data)."""
+    import json
+
+    from detection_rules import _aml_data_candidates
+    from pyspark.sql.types import StructType
+
+    for cand in _aml_data_candidates():
+        path = os.path.join(cand, "pacs008_schema.json")
+        if os.path.isfile(path):
+            with open(path) as f:
+                return StructType.fromJson(json.load(f))
+    raise SystemExit("pacs008_schema.json not found in the AML data directories")
 
 
 def _continuous_reset(spark, df):
@@ -451,6 +469,16 @@ def main() -> None:
     log("Bronze Data Verification (Financial / pacs.008)")
     log("=" * 60)
     log(f"Reading from: {BRONZE_URI}{PACS_PREFIX}")
+
+    if CONTINUOUS_RESET:
+        # The continuous preflight runs before datagen starts, so the streams
+        # take files as they land and there is nothing to infer a schema
+        # from: bronze takes the generator's (pacs008_schema.json).
+        # bronze-ingest checks the first file against it before it streams.
+        _continuous_reset(spark, spark.createDataFrame([], pacs008_schema()))
+        log(f"Bronze verification complete in {time.time() - start_time:.1f}s: continuous reset")
+        spark.stop()
+        return
 
     try:
         df = spark.read.parquet(BRONZE_URI + PACS_PREFIX)

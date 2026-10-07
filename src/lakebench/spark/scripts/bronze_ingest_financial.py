@@ -45,7 +45,45 @@ CHECKPOINT_URI = env(
     "LB_FINANCIAL_BRONZE_CHECKPOINT", "s3a://lb-bronze/_checkpoints/bronze_ingest_financial/"
 )
 MAX_FILES = int(env("LB_FINANCIAL_BRONZE_MAX_FILES", "8"))
+#: How long to wait for datagen's first file before the schema check.
+FIRST_FILE_WAIT_S = 1800
 TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "10"))
+
+
+def _fields(schema) -> dict:
+    """Field name to type (as JSON), nullability left out."""
+    return {f.name: f.dataType.json() for f in schema.fields}
+
+
+def check_first_file(spark) -> None:
+    """Wait for datagen's first file and exit 2 when its schema is not the
+    shipped pacs008_schema.json the continuous preflight created bronze
+    from: a column the generator renamed or retyped would otherwise read as
+    null in every row, silently."""
+    from bronze_verify_financial import pacs008_schema
+
+    jvm = spark._jvm  # type: ignore[attr-defined]
+    hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+    pattern = jvm.org.apache.hadoop.fs.Path(f"{BRONZE_URI}{PACS_PREFIX}part-*.parquet")
+    fs = pattern.getFileSystem(hconf)
+    deadline = time.time() + FIRST_FILE_WAIT_S
+    while True:
+        found = fs.globStatus(pattern) or []
+        if found:
+            break
+        if time.time() >= deadline:
+            log(
+                f"ERROR: no datagen file under {BRONZE_URI}{PACS_PREFIX} after {FIRST_FILE_WAIT_S}s"
+            )
+            sys.exit(2)
+        time.sleep(5)
+    first = min(found, key=lambda s: s.getPath().toString()).getPath().toString()
+    want, got = _fields(pacs008_schema()), _fields(spark.read.parquet(first).schema)
+    if want != got:
+        diff = sorted(k for k in set(want) | set(got) if want.get(k) != got.get(k))
+        log(f"ERROR: {first} does not match pacs008_schema.json; columns differ: {diff}")
+        sys.exit(2)
+    log(f"Schema check: {first} matches pacs008_schema.json ({len(want)} columns)")
 
 
 def _log_new_progress(query, logged_batch: int) -> int:
@@ -104,13 +142,12 @@ def main() -> None:
     # micro-batch (current_timestamp is fixed per batch). It is the start of
     # the continuous freshness clock that gold_refresh reports.
     source_schema = StructType([f for f in target_schema.fields if f.name != "ingest_ts"])
-    df = (
-        spark.readStream.format("parquet")
-        .schema(source_schema)
-        .option("maxFilesPerTrigger", MAX_FILES)
-        .load(BRONZE_URI + PACS_PREFIX)
-        .withColumn("ingest_ts", current_timestamp())
-    )
+    check_first_file(spark)
+    reader = spark.readStream.format("parquet").schema(source_schema)
+    # 0: no per-trigger limit, so each micro-batch takes every landed file.
+    if MAX_FILES > 0:
+        reader = reader.option("maxFilesPerTrigger", MAX_FILES)
+    df = reader.load(BRONZE_URI + PACS_PREFIX).withColumn("ingest_ts", current_timestamp())
 
     query = (
         df.writeStream.format("iceberg")

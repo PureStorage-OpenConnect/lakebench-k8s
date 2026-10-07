@@ -279,11 +279,9 @@ class TestPreflightBetweenOldAndNewMinimum:
     failing preflight.
 
     The preflight sizes the config as ``run`` does (CC-22: auto-sizing on a
-    copy against the cluster), so datagen is 4 pods x 8 cores here even
-    though this test's config is not resolved in place. The capped request
-    is then 82 cores (81 before lb-deps was counted in it); before CC-22 an unresolved config was checked with the
-    schema's datagen defaults and passed from 57 cores, a cluster on which
-    ``run`` itself is refused.
+    copy against the cluster), so datagen is balanced to silver-stream, one
+    pod of 1 core, even though this test's config is not resolved in place.
+    The capped request is then 51 cores and the full one 131.
     """
 
     GIB = 1024**3
@@ -301,7 +299,7 @@ class TestPreflightBetweenOldAndNewMinimum:
             _free_from_total(get_client.return_value)
             return _check_cluster_capacity(_config("financial", 10))
 
-    @pytest.mark.parametrize("cores", [82, 100, 117, 160])
+    @pytest.mark.parametrize("cores", [51, 80, 117, 130])
     def test_runs_degraded_with_a_warning(self, cores):
         r = self._check(cores)
         assert r.passed
@@ -310,11 +308,11 @@ class TestPreflightBetweenOldAndNewMinimum:
 
     def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
         """The capped streams plus Trino, Hive/Postgres, lb-deps and datagen
-        (4 pods x 8 cores, as run sizes them) need 82: below that the run
-        would hang Pending, so preflight fails."""
-        assert not self._check(54).passed
-        assert not self._check(81).passed
-        assert self._check(82).passed
+        (one 1-core pod, as run sizes it) need 51: below that the run would
+        hang Pending, so preflight fails."""
+        assert not self._check(40).passed
+        assert not self._check(50).passed
+        assert self._check(51).passed
 
     @pytest.mark.parametrize("cores", [30, 37])
     def test_c360_below_the_capped_request_still_fails(self, cores):
@@ -350,7 +348,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         def run(driver_cores):
             cfg = _config("financial", 10)
             cfg.platform.compute.spark.driver_cores = driver_cores
-            cap = ClusterCapacity(82_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+            cap = ClusterCapacity(54_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
             with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
                 get_client.return_value.get_cluster_capacity.return_value = cap
                 _free_from_total(get_client.return_value)
@@ -471,3 +469,25 @@ def _free_from_total(k8s_mock):
 
     k8s_mock.get_free_capacity.side_effect = _free
     k8s_mock.get_scratch_capacity.return_value = ScratchCapacity(None, "none published (test)")
+
+
+@pytest.mark.parametrize("schema", ["financial", "customer360"])
+def test_run_continuous_on_a_batch_config_keeps_datagen_balanced(schema):
+    """`run --continuous` on a batch config: the run sizes datagen to the
+    pipeline, then the continuous path builds a DeploymentEngine, which
+    auto-sizes again. Read from the config's batch mode, that second pass
+    put back batch datagen (2 pods x 8 cores at scale 1), several times what
+    the balance offers, so bronze took one giant batch."""
+    from unittest import mock
+
+    from lakebench.config.autosizer import continuous_datagen_plan, resolve_auto_sizing
+    from lakebench.deploy.engine import DeploymentEngine
+
+    cfg = _config(schema, 1)
+    cfg.architecture.pipeline.mode = "batch"
+    resolve_auto_sizing(cfg, None, continuous=True)
+    plan = continuous_datagen_plan(cfg)
+    with mock.patch.object(DeploymentEngine, "_detect_openshift", return_value=False):
+        DeploymentEngine(cfg, k8s_client=mock.MagicMock(), dry_run=True, continuous=True)
+    dg = cfg.architecture.workload.datagen
+    assert (dg.parallelism, int(dg.cpu)) == (plan["pods"], plan["cpu"])

@@ -189,7 +189,82 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
 DATAGEN_MIN_PODS = 8
 
 
-def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> None:
+#: Continuous datagen is sized to the slowest pipeline stage with a measured
+#: rate: MB/s per core (bytes of datagen's files) of the datagen generator
+#: (flat out) and of each stage's executors while busy. n=1 estimates from
+#: scale-10 continuous runs: run-20261007-000019-7e10a9 (AML: datagen 134 MB/s
+#: on 4 cores; bronze 126 MB/s on 20 cores, busy all window; silver one
+#: 74.6M-row batch in 497 s on 40 cores) and run-20261006-213032-0c6e78 (C360;
+#: its silver kept pace, so it has no measured limit and is left out).
+CONTINUOUS_MB_S_PER_CORE: dict[str, dict[str, float]] = {
+    "financial": {"datagen": 31.0, "bronze": 6.3, "silver": 1.4},
+    "customer360": {"datagen": 105.0, "bronze": 65.0},
+}
+#: The stages a rate can bound, and their job profiles.
+_CONTINUOUS_STAGE_JOBS = {"bronze": "bronze-ingest", "silver": "silver-stream"}
+#: The share of the slowest stage's estimated intake continuous datagen
+#: offers: below 1 so the pipeline keeps up (steady state). A capacity run
+#: sets datagen.cpu and parallelism above it.
+CONTINUOUS_BRONZE_LOAD = 0.7
+#: Most generator cores in one pod (memory bandwidth per node; see Datagen).
+DATAGEN_MAX_POD_CORES = 8
+
+
+def _run_is_continuous(config: LakebenchConfig, continuous: bool | None) -> bool:
+    """The run's mode: *continuous* when the caller knows it (``run
+    --continuous`` does not write the mode back to the config), else the
+    config's."""
+    if continuous is not None:
+        return continuous
+    from lakebench.config.schema import is_continuous_mode
+
+    return is_continuous_mode(config.architecture.pipeline.mode)
+
+
+def continuous_datagen_plan(config: LakebenchConfig) -> dict[str, Any]:
+    """Datagen cores for a continuous run, balanced to the slowest stage:
+    floor(load x stage cores x stage MB/s per core / datagen MB/s per core)
+    for the stage where that is least, at least 1, in pods of at most
+    DATAGEN_MAX_POD_CORES. Returns the inputs ("stage", its "stage_cores")
+    and {"cores", "pods", "cpu"} (cpu per pod)."""
+    import math
+
+    from lakebench.modules.pipeline_engines.spark.job import (
+        executor_override,
+        get_executor_count,
+        get_job_profile,
+    )
+
+    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    rates = CONTINUOUS_MB_S_PER_CORE.get(schema, CONTINUOUS_MB_S_PER_CORE["customer360"])
+    scale = float(config.architecture.workload.datagen.get_effective_scale())
+    stage_cores: dict[str, int] = {}
+    for stage, job in _CONTINUOUS_STAGE_JOBS.items():
+        if stage not in rates:
+            continue
+        profile = get_job_profile(job, schema) or {}
+        executors = executor_override(job, config) or get_executor_count(job, scale, schema)
+        stage_cores[stage] = executors * int(profile.get("executor_cores", 1))
+    stage = min(stage_cores, key=lambda st: stage_cores[st] * rates[st])
+    cores = max(
+        1,
+        math.floor(CONTINUOUS_BRONZE_LOAD * stage_cores[stage] * rates[stage] / rates["datagen"]),
+    )
+    pods = math.ceil(cores / DATAGEN_MAX_POD_CORES)
+    return {
+        "stage": stage,
+        "stage_cores": stage_cores[stage],
+        "load": CONTINUOUS_BRONZE_LOAD,
+        "mb_s_per_core": dict(rates),
+        "cores": cores,
+        "pods": pods,
+        "cpu": max(1, cores // pods),
+    }
+
+
+def _apply_datagen_pod_floor(
+    config: LakebenchConfig, changes: list[str], continuous: bool | None = None
+) -> None:
     datagen = config.architecture.workload.datagen
     schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
     if (
@@ -202,6 +277,14 @@ def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> Non
             f"datagen.parallelism raised to {DATAGEN_MIN_PODS}: the datagen memory model "
             f"was measured at {DATAGEN_MIN_PODS} or more pods"
         )
+        if _run_is_continuous(config, continuous) and not (
+            {"cpu", "memory"} & datagen.model_fields_set
+        ):
+            # Keep the balanced cores: spread them over the floor's pods.
+            cpu = str(max(1, continuous_datagen_plan(config)["cores"] // DATAGEN_MIN_PODS))
+            object.__setattr__(datagen, "cpu", cpu)
+            object.__setattr__(datagen, "memory", _datagen_memory_default(config, cpu))
+            changes.append(f"datagen.cpu={cpu} per pod, to keep the cores balanced to the pipeline")
 
 
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
@@ -231,6 +314,8 @@ def _resolve_datagen_mode(config: LakebenchConfig) -> str:
 def resolve_auto_sizing(
     config: LakebenchConfig,
     cluster_capacity: ClusterCapacity | None = None,
+    *,
+    continuous: bool | None = None,
 ) -> list[str]:
     """Resolve auto-sized resource fields on *config* in place.
 
@@ -305,6 +390,20 @@ def resolve_auto_sizing(
     # the CPU (thread count) actually used.
     datagen = config.architecture.workload.datagen
     dg_cpu = datagen.cpu if "cpu" in datagen.model_fields_set else "8"
+    dg_pods = guidance.datagen.parallelism
+    if _run_is_continuous(config, continuous) and not (
+        {"cpu", "parallelism"} & datagen.model_fields_set
+    ):
+        # Continuous: datagen generates for the whole window, so it is
+        # balanced to the pipeline instead of sized to write a corpus fast.
+        plan = continuous_datagen_plan(config)
+        dg_cpu, dg_pods = str(plan["cpu"]), plan["pods"]
+        changes.append(
+            f"datagen balanced to {plan['stage']}: {plan['cores']} cores = "
+            f"{plan['load']} x {plan['stage_cores']} {plan['stage']} cores x "
+            f"{plan['mb_s_per_core'][plan['stage']]:g} / {plan['mb_s_per_core']['datagen']:g} "
+            "MB/s per core (n=1 estimates); set datagen.cpu and parallelism to offer more"
+        )
     dg_memory = _datagen_memory_default(config, dg_cpu)
     clamp = _datagen_clamp_note(config, dg_cpu)
     if clamp and "memory" not in datagen.model_fields_set:
@@ -314,8 +413,8 @@ def resolve_auto_sizing(
     if _set_if_default(datagen, "memory", dg_memory):
         changes.append(f"datagen.memory={dg_memory}")
 
-    if _set_if_default(datagen, "parallelism", guidance.datagen.parallelism):
-        changes.append(f"datagen.parallelism={guidance.datagen.parallelism}")
+    if _set_if_default(datagen, "parallelism", dg_pods):
+        changes.append(f"datagen.parallelism={dg_pods}")
 
     # -- Schema-specific overrides --
     # Workload schemas that differ from Customer360 on baseline resource shape
@@ -340,9 +439,11 @@ def resolve_auto_sizing(
     # -- Cluster capacity: cap to fit --
     # The pod floor goes first so a cluster cap (which also sets the
     # continuous-mode streaming budget) always has the last word.
-    _apply_datagen_pod_floor(config, changes)
+    _apply_datagen_pod_floor(config, changes, continuous)
     if cluster_capacity is not None:
-        _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
+        _apply_cluster_scaling(
+            config, cluster_capacity, effective_mode, guidance, changes, continuous
+        )
 
     if changes:
         log.info(
@@ -521,6 +622,19 @@ def _apply_schema_overrides(
                 target_memory = f"{int(fitted)}g"
         if _set_if_default(thrift, "memory", target_memory):
             changes.append(f"query_engine.spark_thrift.memory={target_memory}")
+    elif config.architecture.query_engine.type.value == "duckdb":
+        duck = config.architecture.query_engine.duckdb
+        # 4g OOMKilled the DuckDB pod (exit 137) in an AML continuous
+        # benchmark round at scale 1 (polaris-iceberg-spark-duckdb,
+        # 2026-10-07): the AML query set joins gold.alerts to the silver
+        # tables. 16g, capped on a small node as for Thrift (8 GiB headroom).
+        target_memory = "16g"
+        if cluster_capacity is not None:
+            largest_node_gi = _largest_node_memory_gi(cluster_capacity)
+            if largest_node_gi is not None and largest_node_gi < 24.0:
+                target_memory = f"{int(max(4.0, largest_node_gi - 8.0))}g"
+        if _set_if_default(duck, "memory", target_memory):
+            changes.append(f"query_engine.duckdb.memory={target_memory}")
 
     if not changes:
         return None
@@ -611,6 +725,7 @@ def _apply_cluster_scaling(
     effective_mode: str,
     guidance: object,
     changes: list[str],
+    continuous: bool | None = None,
 ) -> None:
     """Fit workload to the cluster, scaling up large workloads.
 
@@ -702,7 +817,11 @@ def _apply_cluster_scaling(
         )
 
         if "parallelism" not in datagen.model_fields_set:
-            if scale > 50 and cluster_max_datagen > datagen.parallelism:
+            if (
+                scale > 50
+                and cluster_max_datagen > datagen.parallelism
+                and not _run_is_continuous(config, continuous)
+            ):
                 # Large scale: use the cluster
                 object.__setattr__(datagen, "parallelism", cluster_max_datagen)
                 changes.append(f"datagen.parallelism scaled to {cluster_max_datagen} (cluster CPU)")

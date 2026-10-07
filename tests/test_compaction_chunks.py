@@ -352,3 +352,35 @@ def test_error_line_names_the_cause(message, cause):
     line = _error_line(message)
     assert line.startswith(cause), line
     assert "Defaulted container" not in line and "SLF4J" not in line and "\n" not in line
+
+
+def test_live_aml_compaction_leaves_the_tables_silver_merges_into():
+    """A rewrite committed while silver-stream's MERGE is planned fails the
+    MERGE ("Missing required files to delete", AML hive-iceberg-spark-trino
+    continuous, 2026-10-07) and ends the stream, so with live streams only
+    the silver tables it appends to are compacted."""
+    from lakebench.cli._sustained import _run_iceberg_compaction
+
+    cfg = _cfg()
+    cfg.architecture.workload.schema_type.value = "financial"
+    trino = _Trino(_days(30))
+    k8s = MagicMock()
+    k8s.exec_in_pod.side_effect = trino
+    with patch(
+        "lakebench.deploy.iceberg.find_maintenance_engine",
+        return_value=("trino", "trino-coordinator-0", "lakehouse"),
+    ):
+        _run_iceberg_compaction(cfg, k8s, Console(quiet=True), MagicMock(), live_streams=True)
+    touched = {
+        t
+        for t in cfg.architecture.tables.workload_tables("financial")
+        if any(f"lakehouse.{t}" in s for s in trino.statements)
+    }
+    merged = {
+        "silver.entities",
+        "silver.accounts",
+        "silver.entity_profiles",
+        "silver.silver_batch_versions",
+    }
+    assert touched and not touched & merged
+    assert not any(t.startswith("gold.") for t in touched)

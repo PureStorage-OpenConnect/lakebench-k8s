@@ -336,12 +336,14 @@ def _compact(trino: _Trino, **kw) -> list[dict]:
 
 
 def test_continuous_aml_silver_compacts_every_table():
-    """The live case: continuous AML compacts the 7 silver tables, and the
-    two month tables no longer fail on the per-node memory limit."""
+    """The live case: continuous AML compacts the 4 silver tables
+    silver-stream only appends to (the 4 it MERGEs into are left, see
+    _run_iceberg_compaction), and the two month tables no longer fail on the
+    per-node memory limit."""
     trino = _Trino()
     outcomes = _compact(trino, live_streams=True)
     (rec,) = outcomes
-    assert (rec["total"], rec["succeeded"], rec["failed"]) == (7, 7, 0), rec.get("failures")
+    assert (rec["total"], rec["succeeded"], rec["failed"]) == (4, 4, 0), rec.get("failures")
     assert rec["failures"] == []
     assert sorted(trino.reads) == [
         'SELECT partition.book_ts_month, count(*) FROM lakehouse.silver."account_statements'
@@ -349,8 +351,9 @@ def test_continuous_aml_silver_compacts_every_table():
         'SELECT partition.txn_timestamp_month, count(*) FROM lakehouse.silver."transactions'
         '$files" WHERE content = 0 AND file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1',
     ]
-    # 13 + 13 month statements and one each for the other five tables.
-    assert rec["statements_total"] == len(trino.statements) == 31
+    # 13 + 13 month statements and one each for counterparty_edges and
+    # counterparty_pairs.
+    assert rec["statements_total"] == len(trino.statements) == 28
     assert sum(TXNS in s for s in trino.statements) == 13
     assert sum(STMTS in s for s in trino.statements) == 13
     # The record names the operation as before.
@@ -369,8 +372,8 @@ def test_continuous_aml_silver_compacts_every_table():
 def test_failed_month_read_falls_back_to_one_statement():
     trino = _Trino(read_rc=1)
     (rec,) = _compact(trino, live_streams=True)
-    assert rec["statements_total"] == 7
-    assert (rec["succeeded"], rec["failed"]) == (5, 2)
+    assert rec["statements_total"] == 4
+    assert (rec["succeeded"], rec["failed"]) == (2, 2)
     assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
 
 
@@ -380,6 +383,6 @@ def test_unreadable_threshold_falls_back_and_says_so():
     trino = _Trino()
     (rec,) = _compact(trino, live_streams=True, file_size_threshold="128mb")
     assert trino.reads == []
-    assert rec["statements_total"] == 7
+    assert rec["statements_total"] == 4
     assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
     assert "data size '128mb'" in rec["note"]

@@ -455,6 +455,64 @@ def stop_previous_datagen(cfg: Any) -> None:
     wait_for_datagen_pods_stopped(cfg)
 
 
+#: The marker continuous datagen polls (generate.rs STOP_KEY): every pod
+#: stops within about 10 s of it, between files.
+DATAGEN_STOP_KEY = "_corpus/stop"
+
+
+def _delete_datagen_job(cfg: Any) -> bool:
+    """Delete the lakebench-datagen Job (its pods with it); True when gone."""
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    try:
+        k8s_client.BatchV1Api().delete_namespaced_job(
+            name="lakebench-datagen",
+            namespace=cfg.get_namespace(),
+            body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
+            _request_timeout=30,
+        )
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning("Could not delete the datagen Job: HTTP %s %s", e.status, e.reason)
+            return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not delete the datagen Job: %s", e)
+        return False
+    return True
+
+
+def stop_continuous_datagen(cfg: Any) -> bool:
+    """Write the stop marker under the datagen prefix, so continuous datagen
+    ends with the run's window instead of at its ``--deliver-until``. When
+    the marker cannot be written the Job is deleted instead, so no pod keeps
+    writing (its fleet record is then not read). False when neither worked."""
+    key = f"{bronze_datagen_prefix(cfg).strip('/')}/{DATAGEN_STOP_KEY}"
+    bucket = cfg.platform.storage.s3.buckets.bronze
+    try:
+        _s3_client_for(cfg).raw_client.put_object(Bucket=bucket, Key=key, Body=b"")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not write the datagen stop marker s3://%s/%s: %s", bucket, key, e)
+        return _delete_datagen_job(cfg)
+    return True
+
+
+def end_continuous_datagen(cfg: Any, *, wait_s: float = 180) -> bool:
+    """Stop continuous datagen at the window's end and wait (bounded) for its
+    pods to exit, so the fleet record reads finished pods. False when it
+    could not be stopped; pods still running after ``wait_s`` are deleted
+    with the Job, and the fleet then reads as incomplete."""
+    if not stop_continuous_datagen(cfg):
+        return False
+    try:
+        wait_for_datagen_pods_stopped(cfg, timeout_s=wait_s)
+    except Exception as e:  # noqa: BLE001
+        # A pod that ignored the marker must not keep writing.
+        logger.warning("Datagen pods still running after the stop marker: %s", e)
+        _delete_datagen_job(cfg)
+    return True
+
+
 def _refusal_details(e: BaseException) -> dict[str, Any]:
     """``details`` for a failed deploy result: the refusal's exit path, if any."""
     path = getattr(e, "exit_path", None) if isinstance(e, DatagenRefused) else None
@@ -691,6 +749,10 @@ def bronze_prefix_gate(
     return BronzeGateResult(True, bucket, prefix, owned, n, stale_allowed=True)
 
 
+#: Continuous AML: the history and every live epoch span this many months.
+CONTINUOUS_EPOCH_MONTHS = 24
+
+
 class DatagenDeployer:
     """Deploys and monitors the datagen job."""
 
@@ -704,11 +766,16 @@ class DatagenDeployer:
         continuous: bool = False,
         stale_record: dict[str, Any] | None = None,
         window_seconds: int | None = None,
+        lead_seconds: int = 0,
     ):
         self.allow_stale_bronze = allow_stale_bronze
         # A continuous run's window as it runs (`run --duration` or the
         # config); the pods are kept until it ends.
         self.window_seconds = window_seconds
+        # The most a continuous run's setup can take between this deploy and
+        # its window opening: datagen's deadline is that much later, and the
+        # run stops datagen with the marker when its window ends.
+        self.lead_seconds = lead_seconds
         # The bronze gate's ``datagen.stale_bronze`` record when it allowed
         # generating over existing objects; the series marker carries it so a
         # run that reuses the corpus keeps the label.
@@ -759,10 +826,15 @@ class DatagenDeployer:
         # Completed pods are kept until the run has read the fleet record from
         # them: a continuous window's end, plus an hour.
         ttl_seconds = 3600
-        if self.continuous:
-            ttl_seconds += int(
-                self.window_seconds or cfg.architecture.pipeline.sustained.run_duration
-            )
+        sustained = cfg.architecture.pipeline.sustained
+        window = int(self.window_seconds or sustained.run_duration)
+        # Continuous datagen generates until the window ends: a continuous
+        # run's datagen, or `generate` with a continuous config.
+        from lakebench.config.schema import PipelineMode
+
+        continuous = self.continuous or cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
+        if continuous:
+            ttl_seconds += self.lead_seconds + window
         context.update(
             {
                 "datagen_ttl_seconds": ttl_seconds,
@@ -804,6 +876,13 @@ class DatagenDeployer:
                 "datagen_timestamp_end": datagen.timestamp_end,
             }
         )
+        # Continuous datagen: every pod generates at full speed until the
+        # deadline or the stop marker. AML epochs are CONTINUOUS_EPOCH_MONTHS
+        # long, which holds the longest planted pattern (a 365-day dormancy).
+        if continuous:
+            context["datagen_deliver_until"] = int(time.time()) + self.lead_seconds + window
+            if schema_value == "financial":
+                context["datagen_corpus_months"] = CONTINUOUS_EPOCH_MONTHS
 
         # datagen_duration context var dropped 2026-09-28 (Wave 2 D8). The
         # entrypoint.py argparse layer silently discarded --duration; the Rust

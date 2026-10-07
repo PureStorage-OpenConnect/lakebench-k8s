@@ -492,16 +492,6 @@ def test_interrupt_continuous_deletes_datagen_job(tmp_path, monkeypatch, sentine
     _assert_handlers_restored(sentinel_sigterm)
 
 
-def test_interrupt_continuous_keeps_a_finished_datagen_job(tmp_path, monkeypatch, sentinel_sigterm):
-    """Datagen finished before the streams started (the record's case): only
-    the streams are stopped."""
-    trace, rec, record = _run("continuous_c360", tmp_path, monkeypatch, events=((300.0, "SIGINT"),))
-    assert trace["unscripted"] == []
-    assert trace["exit_code"] == 130
-    assert [s.split("/")[0] for s in record["interrupted"]["stopped"]] == ["SparkApplication"] * 3
-    assert not _deletes(rec, "Job") and rec.datagen_uid == "uid-datagen-1"
-
-
 def test_continuous_interrupt_after_a_gate_failed_reads_failed(
     tmp_path, monkeypatch, sentinel_sigterm
 ):

@@ -46,7 +46,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:3f4729b6@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -107,6 +107,14 @@ spec:
             {% if datagen_timestamp_end %}
             - "--timestamp-end"
             - "{{ datagen_timestamp_end }}"
+            {% endif %}
+            {% if datagen_deliver_until is defined %}
+            - "--deliver-until"
+            - "{{ datagen_deliver_until }}"
+            {% endif %}
+            {% if datagen_corpus_months is defined and datagen_corpus_months %}
+            - "--corpus-months"
+            - "{{ datagen_corpus_months }}"
             {% endif %}
             {% if datagen_cycles is defined and datagen_cycles > 1 %}
             - "--cycle"

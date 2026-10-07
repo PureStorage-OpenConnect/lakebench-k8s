@@ -109,7 +109,7 @@ architecture:
 |---|---|---|
 | `query_engine.type` | `trino` | Set to `duckdb` to deploy DuckDB instead of Trino. |
 | `duckdb.cores` | `2` | CPU request and limit for the DuckDB pod. |
-| `duckdb.memory` | `"4g"` | Memory request and limit for the DuckDB pod. |
+| `duckdb.memory` | `"4g"` | Memory request and limit for the DuckDB pod. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
 | `duckdb.catalog_name` | `"lakehouse"` | The catalog name used in SQL queries (e.g. `SELECT ... FROM lakehouse.silver.table`). Must match the catalog registered in Hive or Polaris. |
 | `duckdb.version` | `"1.5.5"` | Version of the `duckdb` Python package installed in the pod. Pinned so runs weeks apart use the same engine. |
 

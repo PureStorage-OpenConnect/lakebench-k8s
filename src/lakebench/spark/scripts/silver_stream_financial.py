@@ -104,7 +104,6 @@ from pyspark.sql.functions import (
     avg as avg_,
 )
 from pyspark.sql.functions import (
-    broadcast,
     coalesce,
     col,
     greatest,
@@ -112,9 +111,6 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.functions import (
     count as count_,
-)
-from pyspark.sql.functions import (
-    countDistinct as count_distinct_,
 )
 from pyspark.sql.functions import (
     max as max_,
@@ -133,6 +129,7 @@ from silver_build_financial import (
     DDL_BATCH_VERSIONS,
     DDL_EDGES,
     DDL_ENTITIES,
+    DDL_PAIRS,
     DDL_PROFILES,
     DDL_STATEMENTS,
     DDL_TXNS,
@@ -166,6 +163,7 @@ SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver
 # sidecar is I10's (silver.silver_batch_versions), owned there and consumed
 # here for the sealed-txns filter in the distinct-counterparty recompute.
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
+SILVER_PAIRS = env("LB_FINANCIAL_SILVER_PAIRS", "silver.counterparty_pairs")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
 # I7: the KYC frame is reloaded on the first micro-batch after this many
 # seconds have passed since the previous successful load. Default 1 hour;
@@ -822,7 +820,7 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
         accts.unpersist(blocking=False)
 
 
-def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
+def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: bool) -> None:
     """Maintain silver.entity_profiles incrementally for the touched entities.
 
     Aggregate strategies per column:
@@ -843,15 +841,12 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
     - Derived on write (txn_count_total, active_span_days, avg_gap_days,
       passthrough_ratio): recomputed from the freshly merged base columns
       using the merged LEAST/GREATEST/SUM values.
-    - Per-batch recompute (distinct_counterparties_out/in): exact
-      count_distinct cannot be maintained incrementally without a
-      per-entity seen-set (a stream-safe HLL sketch would be additive but
-      is not what the DDL declares). The merge reads silver.transactions
-      through I10's common.sealed_txns_filter (semi-joined against
-      silver.silver_batch_versions) so a mid-crash batch's ghost txns
-      cannot inflate the count; the current batch's own tagged_txns are
-      UNIONed in because PHASE 5's sealed marker has not yet been
-      written when this MERGE runs.
+    - Additive over new pairs (distinct_counterparties_out/in): the batch's
+      (originator, beneficiary) pairs that no sealed earlier batch had, read
+      from silver.counterparty_pairs (one row per pair, written by the batch
+      that first sealed it) instead of recounting every sealed transaction.
+      Unsealed rows are hidden by common.sealed_txns_filter and the batch's
+      own rows are left out, so a replay counts the same new pairs.
 
     Self-idempotent MERGE (blocker fix): the WHEN MATCHED branch is
     guarded by ``(t._stream_id, t._batch_id) = (s.batch_stream_id,
@@ -884,41 +879,42 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
     )
     delta = out_delta.join(in_delta, on="entity_id", how="fullouter").cache()
     try:
-        touched = delta.select(col("entity_id"))
-        # Per-batch recompute of distinct counterparties. Reads
-        # silver.transactions through I10's sealed_txns_filter so a
-        # partial batch's ghost rows (committed to silver.transactions
-        # but not yet sealed in silver_batch_versions after a mid-crash
-        # window) cannot inflate the count. sealed_txns_filter DOES NOT
-        # include the current batch's rows because PHASE 5's sealed
-        # marker MERGE runs AFTER this function returns; the UNION with
-        # tagged_txns adds them back so the count reflects the current
-        # batch's contribution. Both frames project the (originator_id,
-        # beneficiary_id) pair used by count_distinct; unionByName
-        # aligns on those two columns.
-        silver_txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
-        sealed = sealed_txns_filter(spark, silver_txns, CATALOG, SILVER_BATCH_VERSIONS)
-        pairs_sealed = sealed.select(col("originator_id"), col("beneficiary_id"))
-        pairs_current = tagged_txns.select(col("originator_id"), col("beneficiary_id"))
-        pairs = pairs_sealed.unionByName(pairs_current, allowMissingColumns=False)
-        touched_l = broadcast(touched.withColumnRenamed("entity_id", "_t"))
-        touched_r = broadcast(touched.withColumnRenamed("entity_id", "_t2"))
-        recomputed_out = (
-            pairs.join(touched_l, pairs["originator_id"] == col("_t"), "inner")
-            .groupBy(pairs["originator_id"].alias("entity_id"))
-            .agg(count_distinct_(pairs["beneficiary_id"]).alias("recomputed_dco"))
+        # Distinct counterparties, incrementally: the batch's pairs that no
+        # sealed earlier batch had (silver.counterparty_pairs holds one row
+        # per pair, inserted by the batch that first sealed it). Reading the
+        # pairs table, not every sealed transaction, bounds the cost by the
+        # world's relationships rather than the run's length. The batch's
+        # own rows are left out of "seen", so a replay of this batch counts
+        # the same new pairs as its first attempt; the profiles MERGE's
+        # first branch keeps the replay from adding them twice. Unsealed
+        # rows (a crashed attempt) are hidden by sealed_txns_filter, so they
+        # never hide a pair.
+        batch_pairs = tagged_txns.select(col("originator_id"), col("beneficiary_id")).distinct()
+        seen = (
+            sealed_txns_filter(
+                spark, spark.table(f"{CATALOG}.{SILVER_PAIRS}"), CATALOG, SILVER_BATCH_VERSIONS
+            )
+            .filter(~((col("_stream_id") == lit(sid)) & (col("_batch_id") == lit(int(batch_id)))))
+            .select(col("originator_id"), col("beneficiary_id"))
         )
-        recomputed_in = (
-            pairs.join(touched_r, pairs["beneficiary_id"] == col("_t2"), "inner")
-            .groupBy(pairs["beneficiary_id"].alias("entity_id"))
-            .agg(count_distinct_(pairs["originator_id"]).alias("recomputed_dci"))
+        # Materialised once: the same rows feed the profiles delta and the
+        # pairs write below, and no MERGE source plan reads the pairs table
+        # (Spark 4.1 MERGE).
+        new_pairs = batch_pairs.join(
+            seen, on=["originator_id", "beneficiary_id"], how="left_anti"
+        ).localCheckpoint(eager=True)
+        new_out = new_pairs.groupBy(col("originator_id").alias("entity_id")).agg(
+            count_(lit(1)).alias("new_dco")
+        )
+        new_in = new_pairs.groupBy(col("beneficiary_id").alias("entity_id")).agg(
+            count_(lit(1)).alias("new_dci")
         )
         # Assemble the source frame for the MERGE, filling counts with 0
         # for entities only present on one side and computing batch-wide
         # profile min / max (for LEAST/GREATEST against the target).
         final_delta = (
-            delta.join(recomputed_out, on="entity_id", how="left")
-            .join(recomputed_in, on="entity_id", how="left")
+            delta.join(new_out, on="entity_id", how="left")
+            .join(new_in, on="entity_id", how="left")
             .select(
                 col("entity_id"),
                 coalesce(col("batch_first_out_ts"), col("batch_first_in_ts")).alias(
@@ -944,8 +940,8 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
                 col("batch_sum_recv").alias("batch_sum_recv_or_null"),
                 col("batch_mean_out"),
                 coalesce(col("batch_m2_out"), lit(0.0)).alias("batch_m2_out"),
-                coalesce(col("recomputed_dco"), lit(0)).cast("bigint").alias("recomputed_dco"),
-                coalesce(col("recomputed_dci"), lit(0)).cast("bigint").alias("recomputed_dci"),
+                coalesce(col("new_dco"), lit(0)).cast("bigint").alias("new_dco"),
+                coalesce(col("new_dci"), lit(0)).cast("bigint").alias("new_dci"),
                 greatest(col("batch_last_out_ts"), col("batch_last_in_ts")).alias(
                     "batch_profile_updated_ts"
                 ),
@@ -1041,8 +1037,10 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
                 ) AS DOUBLE)
                 / CAST(t.txn_count_out + s.batch_n_out - 1 AS DOUBLE)
             END,
-            t.distinct_counterparties_out = s.recomputed_dco,
-            t.distinct_counterparties_in = s.recomputed_dci,
+            t.distinct_counterparties_out =
+                COALESCE(t.distinct_counterparties_out, 0) + s.new_dco,
+            t.distinct_counterparties_in =
+                COALESCE(t.distinct_counterparties_in, 0) + s.new_dci,
             t.passthrough_ratio = CASE
                 WHEN (COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
                       + s.batch_sum_recv) > 0
@@ -1082,7 +1080,7 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
                 ELSE CAST(DATEDIFF(s.batch_last_out_ts, s.batch_first_out_ts) AS DOUBLE)
                      / CAST(s.batch_n_out - 1 AS DOUBLE)
             END,
-            s.recomputed_dco, s.recomputed_dci,
+            s.new_dco, s.new_dci,
             CASE WHEN s.batch_sum_recv > 0
                  THEN CAST(s.batch_sum_sent AS DOUBLE) / CAST(s.batch_sum_recv AS DOUBLE)
                  ELSE NULL
@@ -1096,6 +1094,22 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
         # source plan reads an Iceberg table can fail.
         with materialised_source(spark, final_delta, "_lb_profiles_delta"):
             spark.sql(merge_sql)
+        # The batch's new pairs, the transactions pattern (a replay deletes
+        # its own earlier rows first): before the seal, so they become
+        # "seen" exactly when this batch is sealed. Not an insert-only
+        # MERGE: a leftover row from an unsealed attempt would match it,
+        # never be seen, and make its pair count as new in every batch.
+        if check_replay:
+            spark.sql(
+                f"DELETE FROM {CATALOG}.{SILVER_PAIRS} "
+                f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+            )
+        (
+            new_pairs.withColumn("_stream_id", lit(sid))
+            .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+            .writeTo(f"{CATALOG}.{SILVER_PAIRS}")
+            .append()
+        )
     finally:
         delta.unpersist(blocking=False)
 
@@ -1227,7 +1241,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         # (I10), UNIONed with the current batch's tagged_txns so the
         # current batch's contribution is included (its versions row is
         # not written until PHASE 6 below).
-        _merge_profiles(spark, tagged_txns, sid, batch_id)
+        _merge_profiles(spark, tagged_txns, sid, batch_id, check_replay)
         log(f"[batch {batch_id}] merged entity_profiles")
 
         # PHASE 6 (I10 sealed marker): must be LAST. Only after
@@ -1283,6 +1297,7 @@ def refuse_reused_silver(spark, checkpoint_uri) -> None:
                 SILVER_STATEMENTS,
                 SILVER_PROFILES,
                 SILVER_BATCH_VERSIONS,
+                SILVER_PAIRS,
             )
         ],
     )
@@ -1334,6 +1349,7 @@ def main() -> None:
             DDL_EDGES,
             DDL_PROFILES,
             DDL_BATCH_VERSIONS,
+            DDL_PAIRS,
         ),
     )
     for _name, _ddl in (
@@ -1348,6 +1364,7 @@ def main() -> None:
         # consumes it read-only for the sealed-txns filter in the
         # distinct-counterparty recompute.
         ("silver_batch_versions", DDL_BATCH_VERSIONS),
+        ("counterparty_pairs", DDL_PAIRS),
     ):
         spark.sql(_ddl)
         log(f"[startup] bootstrapped silver.{_name}")

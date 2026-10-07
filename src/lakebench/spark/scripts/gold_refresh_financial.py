@@ -96,7 +96,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from bronze_verify_financial import MANIFEST_TABLE, register_manifest
+from bronze_verify_financial import BRONZE_URI, MANIFEST_PATH, MANIFEST_TABLE, register_manifest
 from common import (
     TTD_SNAPSHOT_UNKNOWN,
     SealedFilterError,
@@ -696,6 +696,9 @@ class TickState:
 
     def __init__(self, run_start, window_end_s=0.0, manifest_ready=False):
         self.manifest_ready = manifest_ready
+        # The manifest files the table was last registered from (None: not
+        # known, so the first tick registers again).
+        self.manifest_files = None
         self.last_ingest_s = 0.0
         self.ttd_baseline = TtdBaseline()
         self.prev_tick_ingest_s = None
@@ -724,6 +727,20 @@ class TickState:
         )
 
 
+def manifest_files(spark):
+    """The manifest files under MANIFEST_PATH now, with their sizes; None
+    when they cannot be listed."""
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        path = jvm.org.apache.hadoop.fs.Path(f"{BRONZE_URI}{MANIFEST_PATH}")
+        found = path.getFileSystem(hconf).globStatus(path) or []
+        return frozenset(f"{s.getPath().toString()}:{s.getLen()}" for s in found)
+    except Exception as e:  # noqa: BLE001
+        log(f"[manifest] could not list {MANIFEST_PATH}: {one_line(e)}")
+        return None
+
+
 def run_tick(spark, state, cycle) -> dict:
     """One detection tick. Returns its phase timings ({name: seconds}, in
     order, ``total`` last), which are also logged as the tick timing line.
@@ -732,9 +749,13 @@ def run_tick(spark, state, cycle) -> dict:
     tick = time.time()
     phases = {}
     # The continuous reset drops the previous run's manifest table; register
-    # this run's once datagen has written it.
-    if not state.manifest_ready:
-        state.manifest_ready = register_manifest(spark)
+    # this run's once datagen has written it, and again whenever the files
+    # change: continuous datagen adds one manifest per live period.
+    files = manifest_files(spark)
+    if not state.manifest_ready or (files is not None and files != state.manifest_files):
+        if register_manifest(spark):
+            state.manifest_ready = True
+            state.manifest_files = files
     # Pinned before anything reads silver, so every reader sees this corpus.
     pinned_at = time.time()
     txns, sid, versions_used, silver_rows, newest_ingest_s, tt = _pin_silver(spark)

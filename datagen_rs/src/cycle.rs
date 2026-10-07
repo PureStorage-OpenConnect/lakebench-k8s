@@ -80,3 +80,21 @@ pub fn ref_key(key: &str, cycle: u64) -> String {
 pub fn c360_file_id(fid: u64, cycle: u64) -> u64 {
     fid + (cycle << 32)
 }
+
+/// Name of a paced part file: epoch `e` of file `fid` (c360: relative to
+/// --prefix, every epoch; AML: under bronze/pacs008/, epochs after the
+/// history). The epoch in the name means a paced file never reads as a
+/// batch or multi-cycle one.
+pub fn epoch_part_key(fid: i64, epoch: u64) -> String {
+    format!("part-e{epoch:04}-{fid:06}.parquet")
+}
+
+/// (epoch, fid) of a `epoch_part_key` name; None for any other name.
+pub fn parse_epoch_part_key(key: &str) -> Option<(u64, i64)> {
+    let rest = key.strip_prefix("part-e")?.strip_suffix(".parquet")?;
+    let (e, f) = rest.split_once('-')?;
+    if e.len() < 4 || f.len() < 6 || !e.bytes().chain(f.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((e.parse().ok()?, f.parse().ok()?))
+}

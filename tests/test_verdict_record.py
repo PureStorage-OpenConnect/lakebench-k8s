@@ -946,3 +946,31 @@ def test_benchmark_record_success_follows_its_verdict(tmp_path: Path) -> None:
     assert saved["success"] is False and saved["verdict"]["status"] == "FAILED"
     assert any("silver has 0 rows" in r for r in saved["verdict"]["reasons"])
     shutil.rmtree(runs)
+
+
+def _stale(rec: dict, offered: str, ahead: bool) -> None:
+    pb = rec["pipeline_benchmark"]
+    for d in (pb, pb["scorecard"], pb["scores"]):
+        d["data_freshness_seconds"] = 0.8 * rec["total_elapsed_seconds"]
+        d["datagen_ahead"] = ahead
+    pb.setdefault("config_snapshot", {}).update(
+        {"datagen_continuous": True, "datagen_offered": offered}
+    )
+
+
+def test_stale_gold_fails_a_balanced_run_and_warns_on_a_capacity_run() -> None:
+    """A capacity run offers more than the pipeline takes in, so its slowest
+    stage falls behind by design: stale gold is a warning there, a failure
+    when datagen was balanced to the pipeline and nothing fell behind at
+    bronze."""
+    rec = sr.load_record(C360_CONT)
+    _stale(rec, "balanced", False)
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and any("Gold freshness" in str(r) for r in v.reasons)
+    for offered, ahead in (("user", False), ("balanced", True)):
+        rec = sr.load_record(C360_CONT)
+        _stale(rec, offered, ahead)
+        v = V.verdict_from_record(rec)
+        assert not any("Gold freshness" in str(r) for r in v.reasons), (offered, ahead)
+        _, _, warnings = V.compute_badge_status(_metrics(rec))
+        assert any("capacity run" in str(w) for w in warnings), (offered, ahead)

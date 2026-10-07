@@ -14,7 +14,7 @@ code introduces a threshold of its own, so no code is a tuned constant. A
 code never changes which alerts a rule raises.
 
 This module has no pyspark import at its top: detection_rules imports it
-inside ``_alert_frame`` only, and the frozen scripts that import
+inside ``_alert_frame`` only, and the scripts that import
 detection_rules never reach it.
 """
 

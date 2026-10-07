@@ -92,9 +92,10 @@ def test_the_namespace_is_read_at_every_interval(tmp_path, monkeypatch):
     i_window = next(i for i, c in enumerate(rec.calls) if c[:2] == ["VersionApi", "get_code"])
     in_window = [c for c in rec.calls[i_window:] if c[:2] == ["CoreV1Api", "read_namespace"]]
     # Start, 42 sleeps of the 1800 s window, before and after each of the 3
-    # rounds, 2 maintenance rounds and 1 compaction round; then 29 settle
-    # sleeps and one before the streams are stopped by name.
-    assert len(in_window) == 1 + 42 + 3 + 3 + 2 + 1 + 29 + 1
+    # rounds, 2 maintenance rounds and 1 compaction round; then one before
+    # the drain stops bronze by name, 28 settle sleeps, and one before the
+    # other streams are stopped by name.
+    assert len(in_window) == 1 + 42 + 3 + 3 + 2 + 1 + 1 + 28 + 1
 
 
 def test_namespace_gone_inside_a_round_is_seen_when_it_ends(tmp_path, monkeypatch):
@@ -107,15 +108,17 @@ def test_namespace_gone_inside_a_round_is_seen_when_it_ends(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("event", ["namespace_gone", "namespace_redeployed"])
 def test_namespace_gone_during_settle_stops_the_settle(tmp_path, monkeypatch, event):
-    """After the window, the run waits up to 30 min for the corpus to settle
-    and then stops its streams by name. Gone (or deployed again, with new
+    """After the window, the drain stops bronze (by name, the namespace still
+    this run's), waits up to 30 min for silver and gold to settle and then
+    stops the other streams by name. Gone (or deployed again, with new
     streams of the same names) during the settle: the run stops at the next
-    settle poll and deletes nothing by name."""
+    settle poll and deletes nothing else by name."""
     trace, rec, record = _run(tmp_path, monkeypatch, (1810.0, event))
     assert trace["exit_code"] == 1
     abort = record["abort_reason"]
     assert 1810.0 <= abort["at_elapsed"] <= 1810.0 + INTERVAL_S
-    assert not [c for c in rec.calls if c[:2] == ["k8s", "delete_custom_resource"]]
+    deletes = [c for c in rec.calls if c[:2] == ["k8s", "delete_custom_resource"]]
+    assert [c[3] for c in deletes] == ["lakebench-bronze-ingest"]
     assert record["verdict"]["status"] == "FAILED"
 
 

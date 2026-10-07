@@ -124,7 +124,7 @@ DEFAULT_OVERRIDES: dict[str, str] = {
     "platform.storage.s3.buckets.bronze": "`<name>-bronze`",
     "platform.storage.s3.buckets.silver": "`<name>-silver`",
     "platform.storage.s3.buckets.gold": "`<name>-gold`",
-    "architecture.pipeline.continuous.max_files_per_trigger": "auto",
+    "architecture.pipeline.continuous.max_files_per_trigger": "none",
     "architecture.pipeline.continuous.retention_interval": "auto",
     "workload.datagen.parallelism": "auto (by scale and cluster)",
     "workload.datagen.cpu": "auto (by scale and cluster)",

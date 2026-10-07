@@ -181,6 +181,7 @@ def build_profiles(spark):
         "DDL_EDGES",
         "DDL_PROFILES",
         "DDL_BATCH_VERSIONS",
+        "DDL_PAIRS",
     ):
         spark.sql(getattr(ss, ddl_attr))
     ss._KYC = None

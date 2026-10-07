@@ -322,6 +322,41 @@ fn financial_seed_is_required_strict_and_never_spent() {
     }
 }
 
+/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
+/// relative path string.
+fn tree_digest(dir: &Path) -> (u64, usize) {
+    let mut paths = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
+                stack.push(p);
+            } else {
+                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    paths.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for rel in &paths {
+        for &x in rel
+            .as_bytes()
+            .iter()
+            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
+        {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    (h, paths.len())
+}
+
 #[test]
 fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
     // A registered corpus's seed arrives in LB_DATAGEN_SEED (from a Secret)
@@ -441,86 +476,6 @@ fn rows_are_independent_of_threads_file_size_and_nodes() {
     assert_eq!(ra.len() as u64, want, "rows != total_txns + screen_rows");
     assert!(ra == rb, "rows depend on threads, file size or nodes");
     let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// FNV-1a over every file the customer360 driver writes, in path order.
-fn c360_driver_digest(threads: &str) -> (u64, usize) {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-c360-{}-{threads}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let out = generate_cmd()
-        .env("DG_LOCAL_DIR", &dir)
-        .args([
-            "--schema",
-            "customer360",
-            "--bucket",
-            "b",
-            "--seed",
-            "43",
-            "--target-tb",
-            "0.00002",
-            "--file-size-mb",
-            "4",
-            "--threads",
-            threads,
-        ])
-        .output()
-        .expect("run generate");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let mut paths = Vec::new();
-    let mut stack = vec![dir.clone()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                // The per-node marker records build and time, so it is
-                // excluded by path, as in the image byte-compare.
-                if p.file_name().is_some_and(|n| n == "_corpus") {
-                    continue;
-                }
-                stack.push(p);
-            } else {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for p in &paths {
-        let rel = p.strip_prefix(&dir).unwrap().to_string_lossy().to_string();
-        for &x in rel
-            .as_bytes()
-            .iter()
-            .chain(std::fs::read(p).unwrap().iter())
-        {
-            h ^= x as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    (h, paths.len())
-}
-
-#[test]
-fn c360_driver_output_is_pinned() {
-    // The whole c360 driver path (argument defaults, id sizing, rows per
-    // file, file ids), not just build_batch: the programme reuses c360
-    // evidence only while this output is unchanged. Captured at ab585eb.
-    // A change here is a c360 data change: re-run the c360 evidence, then
-    // update the digest deliberately.
-    let a = c360_driver_digest("2");
-    assert_eq!(a, c360_driver_digest("3"), "c360 output depends on threads");
-    // Updated 2026-09-28 (LB-191 dirty-ratio fix, Wave 1 C1). Pre-fix digest
-    // was (8_993_469_679_856_816_545, 5).
-    assert_eq!(
-        a,
-        (7_884_786_140_200_387_728, 5),
-        "c360 driver output changed"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,224 +957,6 @@ fn reference_files_are_byte_identical_across_node_counts() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
-/// relative path string.
-fn tree_digest(dir: &Path) -> (u64, usize) {
-    let mut paths = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                // The per-node marker records build and time, so it is
-                // excluded by path, as in the image byte-compare.
-                if p.file_name().is_some_and(|n| n == "_corpus") {
-                    continue;
-                }
-                stack.push(p);
-            } else {
-                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
-            }
-        }
-    }
-    paths.sort();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for rel in &paths {
-        for &x in rel
-            .as_bytes()
-            .iter()
-            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
-        {
-            h ^= x as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    (h, paths.len())
-}
-
-#[test]
-fn financial_output_is_pinned_to_the_frozen_generator() {
-    // Every financial object (pacs008 bronze, party, account, watchlist,
-    // manifest) of a 2-node --mode all run, byte for byte. The digest was
-    // captured from the frozen generator (datagen_rs at 9382420) with the same
-    // arguments, so this pins the LB-204 changes (owned-file typology pruning,
-    // on-demand world columns, mimalloc) as output-neutral. A change here is
-    // an AML generator output change: it voids the AML freeze
-    // (docs/internal/aml-protocol.md).
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-fin-pin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    for node in ["0", "1"] {
-        let out = generate_cmd()
-            .env("DG_LOCAL_DIR", &dir)
-            .args([
-                "--bucket",
-                "b",
-                "--seed",
-                "7777",
-                "--scale",
-                "0.02",
-                "--threads",
-                "2",
-                "--mode",
-                "all",
-                "--total-nodes",
-                "2",
-                "--node-id",
-                node,
-                "--file-size-mb",
-                "1",
-                "--delivery-mode",
-                "batch",
-            ])
-            .output()
-            .expect("run generate");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let got = tree_digest(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(
-        got,
-        (14_946_780_858_166_320_800, 179),
-        "financial generator output changed"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Three more pins, captured at integrate 77a65d2 source (equal
-// to the v1.6 release generator, which passes the two pins above). With the
-// two above they cover the paths the look-image changes touch: the
-// perturbation branch, and cycle slicing with cycle-suffixed keys on both
-// schemas. A change here is a generator output change: on financial it
-// voids the AML freeze (docs/internal/aml-protocol.md).
-// ---------------------------------------------------------------------------
-
-/// Run `generate` once per argv into one fresh local tree and digest it.
-fn pin_tree(tag: &str, runs: &[Vec<&str>]) -> (u64, usize) {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-pin-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    for argv in runs {
-        let out = generate_cmd()
-            .env("DG_LOCAL_DIR", &dir)
-            .args(argv)
-            .output()
-            .expect("run generate");
-        assert!(
-            out.status.success(),
-            "generate {:?} failed: {}",
-            argv,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let got = tree_digest(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    got
-}
-
-/// The financial pin's argv (2 nodes, batch delivery) plus `extra`.
-fn financial_pin_runs<'a>(extra: &[&'a str]) -> Vec<Vec<&'a str>> {
-    ["0", "1"]
-        .iter()
-        .map(|node| {
-            let mut a = vec![
-                "--bucket",
-                "b",
-                "--seed",
-                "7777",
-                "--scale",
-                "0.02",
-                "--threads",
-                "2",
-                "--mode",
-                "all",
-                "--total-nodes",
-                "2",
-                "--node-id",
-                node,
-                "--file-size-mb",
-                "1",
-                "--delivery-mode",
-                "batch",
-            ];
-            a.extend_from_slice(extra);
-            a
-        })
-        .collect()
-}
-
-#[test]
-fn financial_perturbed_output_is_pinned() {
-    let got = pin_tree(
-        "fin-pert",
-        &financial_pin_runs(&["--robustness-perturbation"]),
-    );
-    assert_eq!(
-        got,
-        (2_899_328_701_438_880_645, 179),
-        "financial perturbed output changed"
-    );
-}
-
-#[test]
-fn financial_two_cycle_output_is_pinned() {
-    let mut runs = financial_pin_runs(&["--cycle", "0", "--cycles", "2"]);
-    runs.extend(financial_pin_runs(&["--cycle", "1", "--cycles", "2"]));
-    let got = pin_tree("fin-cyc", &runs);
-    assert_eq!(
-        got,
-        (6_502_905_751_768_177_657, 181),
-        "financial two-cycle output changed"
-    );
-}
-
-#[test]
-fn c360_two_cycle_output_is_pinned() {
-    // The c360 pin's argv as two cycles, with the windows the deployer gives
-    // two cycles over its default range.
-    let windows = [
-        ("0", "2024-01-01", "2024-12-31"),
-        ("1", "2024-12-31", "2025-12-31"),
-    ];
-    let runs: Vec<Vec<&str>> = windows
-        .iter()
-        .map(|(n, start, end)| {
-            vec![
-                "--schema",
-                "customer360",
-                "--bucket",
-                "b",
-                "--seed",
-                "43",
-                "--target-tb",
-                "0.00002",
-                "--file-size-mb",
-                "4",
-                "--threads",
-                "2",
-                "--timestamp-start",
-                start,
-                "--timestamp-end",
-                end,
-                "--cycle",
-                n,
-                "--cycles",
-                "2",
-            ]
-        })
-        .collect();
-    let got = pin_tree("c360-cyc", &runs);
-    assert_eq!(
-        got,
-        (9_956_579_246_127_600_639, 10),
-        "c360 two-cycle output changed"
-    );
-}
-
 fn strict_run(args: &[&str]) -> std::process::Output {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1372,65 +1109,333 @@ fn financial_scale_defaults_to_one() {
     );
 }
 
-/// The output pins, by the generator version they were captured under: the
-/// sha256 of every pinned (digest, files) pair in this file, in order. A pin
-/// re-captured without a new MODEL_VERSION (model.rs) fails, because two
-/// corpora with different bytes would then carry one model_version in their
-/// markers' corpus_args.
-const PINS_BY_MODEL_VERSION: &[(&str, &str)] = &[(
-    "datagen-v2-rs-0.3",
-    "dd77637b7c743794752fff4c99c1472d7a83cf1775abddf4f9aa78650e328d90",
-)];
+// ---------------------------------------------------------------------------
+// Continuous c360 delivery (--deliver-until): silent-data
+// invariants only. Argument refusals, log lines, timing and stop-marker
+// behaviour are verified once per change, not here (they fail loud).
+// ---------------------------------------------------------------------------
 
-/// Every pinned `(digest, files)` literal in the five pin tests, as text.
-fn pinned_pairs() -> Vec<String> {
-    let src = include_str!("cycles.rs");
-    let mut out = Vec::new();
-    for name in [
-        "fn c360_driver_output_is_pinned",
-        "fn financial_output_is_pinned_to_the_frozen_generator",
-        "fn financial_perturbed_output_is_pinned",
-        "fn financial_two_cycle_output_is_pinned",
-        "fn c360_two_cycle_output_is_pinned",
-    ] {
-        let body = &src[src.find(name).expect(name)..];
-        let body = &body[..body.find("\n#[test]").unwrap_or(body.len())];
-        let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-        for part in flat.split("assert_eq!(").skip(1) {
-            let Some(rest) = part.split_once(",(").map(|(_, r)| r) else {
-                continue;
-            };
-            let pair = &rest[..rest.find(')').unwrap_or(0)];
-            let ok = pair.split(',').count() == 2
-                && pair
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '_' || c == ',');
-            if ok {
-                out.push(pair.replace('_', ""));
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// 5 files of 4 MB over 2024.
+fn c360_continuous(dir: &Path, node: &str, until: i64, seed: &str) -> Command {
+    let mut c = generate_cmd();
+    c.env("DG_LOCAL_DIR", dir).args([
+        "--schema",
+        "customer360",
+        "--bucket",
+        "b",
+        "--seed",
+        seed,
+        "--target-tb",
+        "0.00002",
+        "--file-size-mb",
+        "4",
+        "--threads",
+        "2",
+        "--total-nodes",
+        "2",
+        "--node-id",
+        node,
+        "--deliver-until",
+        &until.to_string(),
+    ]);
+    c
+}
+
+type EpochFiles = BTreeMap<(u64, i64), (Vec<i64>, i64, i64, std::time::SystemTime)>;
+
+fn epoch_files(dir: &Path) -> EpochFiles {
+    use arrow::array::{Int64Array, TimestampMicrosecondArray};
+    let mut out = BTreeMap::new();
+    for p in c360_files(dir) {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let key = datagen_rs::cycle::parse_epoch_part_key(&name).expect("an epoch key");
+        let (mut ids, mut lo, mut hi) = (Vec::new(), i64::MAX, i64::MIN);
+        for b in batches(&p) {
+            let id = b.column_by_name("row_id").unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap();
+            let ts = b.column_by_name("event_timestamp").unwrap();
+            let ts = ts
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            for i in 0..b.num_rows() {
+                ids.push(id.value(i));
+                lo = lo.min(ts.value(i));
+                hi = hi.max(ts.value(i));
             }
         }
+        let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+        out.insert(key, (ids, lo, hi, mtime));
     }
     out
 }
 
+fn node_count(files: &EpochFiles, node: i64) -> usize {
+    files.keys().filter(|(_, f)| f % 2 == node).count()
+}
+
 #[test]
-fn output_pins_are_keyed_by_model_version() {
-    let pairs = pinned_pairs();
-    assert_eq!(
-        pairs.len(),
-        5,
-        "expected one pinned digest per pin test: {pairs:?}"
-    );
-    let got = datagen_rs::corpus::sha256_hex(&pairs.join(";"));
-    let version = datagen_rs::model::MODEL_VERSION;
-    match PINS_BY_MODEL_VERSION.iter().find(|(v, _)| *v == version) {
-        Some((_, want)) => assert_eq!(
-            &got, want,
-            "an output pin changed but MODEL_VERSION is still {version}: bump MODEL_VERSION \
-             (model.rs) and add the new pin set here"
-        ),
-        None => {
-            panic!("no pin set recorded for MODEL_VERSION {version}: add ({version:?}, {got:?})")
+fn continuous_c360_silent_data_invariants() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-c360-cont-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Both pods at once, as on a cluster.
+    let until = unix_now() + 3;
+    let pods: Vec<_> = ["0", "1"]
+        .map(|n| {
+            c360_continuous(&dir, n, until, "42")
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    for p in pods {
+        let out = p.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let files = epoch_files(&dir);
+
+    // Invariant 1: row ids are disjoint across every file (duplicates would
+    // break joins and recall silently).
+    let mut seen = BTreeSet::new();
+    for (k, (ids, ..)) in &files {
+        for id in ids {
+            assert!(seen.insert(*id), "row id {id} repeats at {k:?}");
         }
     }
+
+    // Invariant 2: every file lies inside its round's time slice (silent
+    // wrong-time rows would land in the wrong gold aggregation).
+    // round r = (e * 5 + fid) / 2, slice = 2/5 of 2024.
+    let (start, end) = (1_704_067_200_000_000i64, 1_735_689_600_000_000i64);
+    let slice = (end - start) * 2 / 5;
+    for (&(e, fid), (_, lo, hi, _)) in &files {
+        let s_lo = start + (e as i64 * 5 + fid) / 2 * slice;
+        assert!(
+            *lo >= s_lo && *hi < s_lo + slice,
+            "({e}, {fid}) [{lo},{hi}] out of [{s_lo},{})",
+            s_lo + slice
+        );
+    }
+
+    // Invariant 3: each node's indices are contiguous (a silent gap would
+    // leave the gold stage short rows with no error).
+    for node in [0, 1] {
+        let own: Vec<i64> = (0..5).filter(|f| f % 2 == node).collect();
+        for j in 0..node_count(&files, node) {
+            let key = ((j / own.len()) as u64, own[j % own.len()]);
+            assert!(
+                files.contains_key(&key),
+                "node {node} misses index {j} {key:?}"
+            );
+        }
+    }
+
+    // Invariant 4: a restart rewrites nothing (silent id and time collisions
+    // if it did).
+    let n0 = node_count(&files, 0);
+    let out = c360_continuous(&dir, "0", unix_now() + 2, "42")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let again = epoch_files(&dir);
+    for (k, v) in files.iter().filter(|((_, f), _)| f % 2 == 0) {
+        assert_eq!(again[k].3, v.3, "restart rewrote {k:?}");
+    }
+    assert!(node_count(&again, 0) > n0, "restart wrote nothing");
+
+    // Invariant 5: a run with another configuration is refused on resume
+    // (a mixed corpus would be labelled with the new corpus_args).
+    let out = c360_continuous(&dir, "0", unix_now() + 5, "7")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Continuous AML delivery: silent-data invariants only (refusals, timing and the
+// stop marker fail loud and are checked once per change).
+// ---------------------------------------------------------------------------
+
+fn aml_continuous(dir: &Path, node: &str, until: i64) -> Command {
+    let mut c = generate_cmd();
+    c.env("DG_LOCAL_DIR", dir).args([
+        "--bucket",
+        "b",
+        "--seed",
+        "7777",
+        "--scale",
+        "0.02",
+        "--corpus-months",
+        "24",
+        "--threads",
+        "2",
+        "--mode",
+        "all",
+        "--total-nodes",
+        "2",
+        "--node-id",
+        node,
+        "--file-size-mb",
+        "1",
+        "--delivery-mode",
+        "batch",
+        "--deliver-until",
+        &until.to_string(),
+    ]);
+    c
+}
+
+/// Epoch of an AML bronze file name: 0 for the history's part-NNNNNN.
+fn aml_epoch(name: &str) -> u64 {
+    datagen_rs::cycle::parse_epoch_part_key(name).map_or(0, |(e, _)| e)
+}
+
+#[test]
+fn continuous_aml_silent_data_invariants() {
+    use arrow::array::{ListArray, StringArray, TimestampMicrosecondArray};
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-aml-cont-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let until = unix_now() + 6;
+    let pods: Vec<_> = ["0", "1"]
+        .map(|n| {
+            aml_continuous(&dir, n, until)
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    for p in pods {
+        let out = p.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Bronze: UETRs per epoch, and each epoch's time range.
+    let bronze = files(&dir, "bronze/pacs008", "part-");
+    let mut uetrs: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut span: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
+    let mut all = BTreeSet::new();
+    for p in &bronze {
+        let e = aml_epoch(&p.file_name().unwrap().to_string_lossy());
+        for b in batches(p) {
+            let ts = b.column_by_name("cre_dt_tm").unwrap();
+            let ts = ts
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let s = span.entry(e).or_insert((i64::MAX, i64::MIN));
+            for i in 0..b.num_rows() {
+                s.0 = s.0.min(ts.value(i));
+                s.1 = s.1.max(ts.value(i));
+            }
+        }
+        for u in uetr_col(std::slice::from_ref(p)) {
+            // Invariant 1: no UETR repeats, across files or epochs.
+            assert!(all.insert(u.clone()), "UETR {u} repeats (epoch {e})");
+            uetrs.entry(e).or_default().insert(u);
+        }
+    }
+    let complete: Vec<u64> = (1..)
+        .take_while(|e| {
+            (0..2).all(|n| {
+                dir.join(format!("b/_corpus/e{e:04}-node-{n:04}.json"))
+                    .exists()
+            })
+        })
+        .collect();
+    assert!(
+        complete.len() >= 2,
+        "only {} live epochs completed",
+        complete.len()
+    );
+
+    // Invariant 2: event time advances: each epoch lies after the previous.
+    for (e, (lo, _)) in span.iter().skip(1) {
+        assert!(*lo > span[&(e - 1)].1, "epoch {e} overlaps epoch {}", e - 1);
+    }
+
+    // Invariants 3 and 4: each complete epoch's manifest names exactly
+    // planted rows of that epoch's bronze, and typology ids never repeat.
+    let mut ids = BTreeSet::new();
+    for e in std::iter::once(0).chain(complete.iter().copied()) {
+        let name = if e == 0 {
+            "manifest.parquet".into()
+        } else {
+            format!("manifest-e{e:04}.parquet")
+        };
+        let mut planted = 0;
+        for b in batches(&dir.join("b/manifest").join(name)) {
+            let tid = b.column_by_name("typology_id").unwrap();
+            let tid = tid.as_any().downcast_ref::<StringArray>().unwrap();
+            let pu = b.column_by_name("participant_uetrs").unwrap();
+            let pu = pu.as_any().downcast_ref::<ListArray>().unwrap();
+            for i in 0..b.num_rows() {
+                assert!(
+                    ids.insert(tid.value(i).to_string()),
+                    "typology id {} repeats",
+                    tid.value(i)
+                );
+                let v = pu.value(i);
+                let v = v.as_any().downcast_ref::<StringArray>().unwrap();
+                for j in 0..v.len() {
+                    assert!(
+                        uetrs[&e].contains(v.value(j)),
+                        "epoch {e} manifest UETR not in its bronze"
+                    );
+                    planted += 1;
+                }
+            }
+        }
+        assert!(planted > 0, "epoch {e} plants nothing");
+    }
+
+    // Invariant 5: a restart rewrites nothing and continues.
+    let mtimes = |d: &Path| -> BTreeMap<PathBuf, std::time::SystemTime> {
+        files(d, "bronze/pacs008", "part-")
+            .into_iter()
+            .map(|p| {
+                (
+                    p.clone(),
+                    std::fs::metadata(&p).unwrap().modified().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let before = mtimes(&dir);
+    let out = aml_continuous(&dir, "0", unix_now() + 3).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = mtimes(&dir);
+    for (p, t) in &before {
+        assert_eq!(after[p], *t, "restart rewrote {}", p.display());
+    }
+    assert!(after.len() > before.len(), "restart wrote nothing");
+    let _ = std::fs::remove_dir_all(&dir);
 }

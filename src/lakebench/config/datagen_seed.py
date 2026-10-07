@@ -19,8 +19,8 @@ Guard (financial schema, and the local gate ``scripts/aml_gate.py``):
 - a seed in ``corpora.spent_seeds`` is always refused;
 - the evaluation and robustness seeds are refused unless the run declares
   that role explicitly (``datagen.corpus_role`` in config, ``--registered``
-  on the gate). Each is generated and scored once, after the freeze, as the
-  registered gate run for its role; anything else would be a look that burns
+  on the gate). Each is generated and scored once, as the registered gate
+  run for its role; anything else would be a look that burns
   the seed (R3);
 - a declared role must match its registered seed, so a role cannot be
   attached to another seed to make a tuning run look registered. The
@@ -28,8 +28,7 @@ Guard (financial schema, and the local gate ``scripts/aml_gate.py``):
   ``heldout_hashes.json`` (next to the pre-registration), so a registered
   run names its seed in ``datagen.seed`` and the guard checks its hash;
 - a registered evaluation or robustness run is refused until the
-  pre-registration sets ``corpora.registered_looks_open`` (done with the
-  datagen freeze). The look records itself in ``aml_registered_looks.json``
+  pre-registration sets ``corpora.registered_looks_open``. The look records itself in ``aml_registered_looks.json``
   (next to the pre-registration): its seed when it starts, its report's
   sha256 before any verdict is printed. Every recorded seed is spent, so a
   second look is refused without editing the pre-registration. A held-out
@@ -742,6 +741,38 @@ _SCREEN_ID = re.compile(r"(?:SANCTIONS|PEP)_MATCH_[0-9]+")
 #: Distinct corpus seeds a manifest may recover before it is refused as not
 #: following the derivation.
 MAX_CORPUS_SEEDS = 8
+#: A continuous run's epoch e > 0 (datagen_rs generate.rs pacs008_main)
+#: suffixes every instance id with ``-eNNNN`` and draws it from the epoch's
+#: activity seed splitmix64(seed ^ EPOCH_SALT ^ splitmix64(e)), so the corpus
+#: seed is recovered exactly through one more inversion.
+EPOCH_SALT = 0xE90C_0000_0000_0001  # generate.rs pacs008_main aseed
+_EPOCH_ID = re.compile(r"(.+)-e([0-9]{4,})")
+
+
+def epoch_seed(seed: int, epoch: int) -> int:
+    """The activity seed of *epoch* (*seed* itself for epoch 0)."""
+    if epoch == 0:
+        return seed
+    return _signed64(_splitmix64((seed & _MASK64) ^ EPOCH_SALT ^ _splitmix64(epoch)))
+
+
+def split_epoch(typology_id: str) -> tuple[str, int]:
+    """(instance id without its epoch suffix, epoch). Raises ValueError on a
+    ``-e0000`` suffix: epoch 0 ids carry none."""
+    m = _EPOCH_ID.fullmatch(typology_id)
+    if m is None:
+        return typology_id, 0
+    epoch = int(m.group(2))
+    if epoch == 0:
+        raise ValueError(f"epoch suffix -e0000 on {typology_id!r}")
+    return m.group(1), epoch
+
+
+def _corpus_seed_of(activity_seed: int, epoch: int) -> int:
+    """The inverse of ``epoch_seed``."""
+    if epoch == 0:
+        return activity_seed
+    return _signed64(unsplitmix64(activity_seed & _MASK64) ^ EPOCH_SALT ^ _splitmix64(epoch))
 
 
 def _screen_row_from(iseed: int, seed: int) -> bool:
@@ -762,7 +793,7 @@ def recover_corpus_seeds(rows: Iterable[tuple[str, int]]) -> set[int]:
     recovered seed explains, no typology row, or zero rows. The message counts
     the bad rows and never prints a seed."""
     seeds: set[int] = set()
-    screening: set[int] = set()
+    screening: set[tuple[int, int]] = set()  # (epoch, instance seed)
     n = bad = 0
     for typology_id, iseed in rows:
         n += 1
@@ -770,12 +801,14 @@ def recover_corpus_seeds(rows: Iterable[tuple[str, int]]) -> set[int]:
             bad += 1
             continue
         try:
-            if _SCREEN_ID.fullmatch(str(typology_id)):
-                screening.add(int(iseed) & _MASK64)
+            base, epoch = split_epoch(str(typology_id))
+            if _SCREEN_ID.fullmatch(base):
+                screening.add((epoch, int(iseed) & _MASK64))
                 continue
-            _, tid, j = str(typology_id).rsplit("_", 2)
+            _, tid, j = base.rsplit("_", 2)
             inner = _splitmix64((0xF100 + int(tid) * TID_SEED_STRIDE + int(j)) & _MASK64)
-            seeds.add(_signed64(unsplitmix64(int(iseed) & _MASK64) ^ inner))
+            activity = _signed64(unsplitmix64(int(iseed) & _MASK64) ^ inner)
+            seeds.add(_corpus_seed_of(activity, epoch))
         except (TypeError, ValueError):
             bad += 1
     if n == 0:
@@ -797,7 +830,9 @@ def recover_corpus_seeds(rows: Iterable[tuple[str, int]]) -> set[int]:
             f"the manifest rows recover {len(seeds)} distinct corpus seeds (more than "
             f"{MAX_CORPUS_SEEDS}): the instance seeds do not follow the generator's derivation"
         )
-    unexplained = sum(1 for i in screening if not any(_screen_row_from(i, s) for s in seeds))
+    unexplained = sum(
+        1 for e, i in screening if not any(_screen_row_from(i, epoch_seed(s, e)) for s in seeds)
+    )
     if unexplained:
         raise CorpusSeedError(
             f"{unexplained} of {len(screening)} screening rows come from no seed the typology "
@@ -1125,8 +1160,7 @@ def aml_seed_error(
         if corpus_role in PROTECTED_ROLES and not looks_open(corpora):
             return (
                 f"registered {corpus_role} runs are closed: the pre-registration's "
-                "corpora.registered_looks_open is false. It is set true with the datagen "
-                "freeze, and the seed is spent after its look."
+                "corpora.registered_looks_open is false; the seed is spent after its look."
             )
         if corpus_role == "robustness" and not ROBUSTNESS_PERTURBATION_IMPLEMENTED:
             return (
@@ -1140,7 +1174,7 @@ def aml_seed_error(
             f"this seed (given, or recovered from the corpus) is the registered {eff_role} "
             "seed: its corpus is generated only with `lakebench generate "
             "--registered-corpus` and scored only by `scripts/aml_gate.py --registered "
-            f"{eff_role}`, once, after the datagen freeze. Any other use burns the seed."
+            f"{eff_role}`, once. Any other use burns the seed."
         )
     return None
 

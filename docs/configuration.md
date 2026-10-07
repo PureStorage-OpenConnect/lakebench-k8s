@@ -330,7 +330,7 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
+  datagen: docker.io/sillidata/lb-datagen:3f4729b6@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb
   spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -523,7 +523,7 @@ architecture:
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
       run_duration: 1800              # Seconds (30 min default)
-      # max_files_per_trigger: auto (unset) keeps data arriving through the window
+      # max_files_per_trigger: unset = no limit (datagen generates for the whole window)
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Clamped to gold_refresh_interval at runtime
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
@@ -592,7 +592,7 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on the five byte-compare cases; this build adds the held-out seed check, strict argument parsing and per-node corpus markers. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:3f4729b6@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
@@ -725,7 +725,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.spark_thrift.memory` | string | `4g` | advanced | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive and `24g` on the financial schema when unset. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for Spark Thrift Server. |
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
-| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB memory. |
+| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
 | `architecture.query_engine.duckdb.version` | string | `1.5.5` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
 
@@ -744,10 +744,10 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.gold_refresh_interval` | string | `5 minutes` | advanced | Gold refresh trigger interval. |
 | `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; a continuous run refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or more, UAT included. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | advanced | S3 prefix for streaming checkpoints. |
-| `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | auto | advanced | Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets the offered load. Unset: derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50 (a Lakebench-imposed cap; 50 files per 30 s is about 107 MB/s, so an auto-capped ingest rate measures the cap, not the infrastructure). An explicit value that would offer the corpus before the window ends is refused at run start. |
+| `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
 | `architecture.pipeline.continuous.silver_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for silver writes (MB) |
-| `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): run_duration / 4, floored at 10 s, so a short run cannot spend its whole window on the wait. The old fixed 1800 was longer than a default run_duration, so the check for a stalled bronze-ingest never fired. |
+| `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): run_duration / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
 | `architecture.pipeline.continuous.gold_target_file_size_mb` | integer | `128` | advanced | Target Iceberg file size for gold writes (MB) |
 | `architecture.pipeline.continuous.retention_interval` | integer or null | auto | advanced | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: `run_duration / 3`, within 300--7200, resolved at run start (600 s for the default 1800 s window), so a default run maintains inside its window. An explicit value too long for the first round to run inside the window is refused at run start unless `--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so continuous Delta has no effective table maintenance in v1.6. Range: 300--7200. |
 | `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
@@ -830,6 +830,7 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 | `architecture.tables.silver_counterparty_edges` | string | `silver.counterparty_edges` | advanced | Silver entity-to-entity edge table (Financial): namespace.table |
 | `architecture.tables.silver_entity_profiles` | string | `silver.entity_profiles` | advanced | Silver per-entity behavioural baseline table (Financial, C-PROFILES): namespace.table |
 | `architecture.tables.silver_batch_versions` | string | `silver.silver_batch_versions` | advanced | Silver sealed-batch marker sidecar (Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes |
+| `architecture.tables.silver_counterparty_pairs` | string | `silver.counterparty_pairs` | advanced | Silver distinct (originator, beneficiary) pairs (Financial, continuous only): one row per pair, so the stream counts a batch's new counterparties without re-reading the history |
 | `architecture.tables.gold_alerts` | string | `gold.alerts` | advanced | Gold alerts table (Financial): namespace.table |
 | `architecture.tables.gold_risk_scores` | string | `gold.risk_scores` | advanced | Gold entity risk-score table (Financial): namespace.table |
 | `architecture.tables.gold_entity_clusters` | string | `gold.entity_clusters` | advanced | Gold synthetic-id / community-detection cluster table (Financial): namespace.table |

@@ -15,7 +15,7 @@ log, and R-numbers to its rules.
   plaintext, and a seed is checked by hashing it. Their corpora are generated and
   scored only as the registered look for their role
   (`scripts/aml_gate.py --registered`, `corpora.registered_looks_open`), once
-  each, after the generator freeze.
+  each.
 - Spent seeds (42, 50000042) are refused for the AML schema
   (`config/datagen_seed.py`). A seed is spent when a look at it is taken,
   voided or burned: a look or burn is recorded in `aml_registered_looks.json`
@@ -58,31 +58,11 @@ log, and R-numbers to its rules.
   in its changelog (3.5.0 reference model and leakage cap after the voided
   D0, #37/#38; 3.6.0 D8 rule, #45/#45a). Any further change needs an owner
   decision, a decision-log row and a fresh evaluation seed.
-- Everything that changes AML generator output lands before the freeze:
-  sanctions and PEP planting (#50), and moving answer keys out of bronze.
-- The freeze spans bronze AND silver (#55). It covers the AML generator
-  output (bronze rows, manifest, MODEL_VERSION at a fixed seed) and the
-  silver transform output: the business-column content of the six silver
-  tables `silver_build_financial` writes (silver.transactions, .entities,
-  .accounts, .account_statements, .counterparty_edges, .entity_profiles)
-  at a fixed seed. Per-run sentinels (`_batch_id`, `_stream_id`,
-  `ingest_ts`, and the sidecar's `committed_at`) are not part of the
-  frozen content -- they vary per run by design and are excluded from the
-  parity definition, exactly as the batch/stream parity tests exclude
-  them. Silver was hardened and its batch vs stream row-content parity
-  proven before this extension; freezing bronze->silver gives gold,
-  detection, scoring and replay a stable silver contract to build on.
-- After the freeze, any change that alters AML generator output OR silver
-  transform output (AML rows, manifest, MODEL_VERSION, or any frozen
-  silver business-column content at a fixed seed) voids the freeze: it
-  needs a MODEL_VERSION bump, a re-run of the calibration table and a new
-  evaluation seed. Customer 360 only and output-neutral changes to
-  `datagen_rs/` or `silver_build_financial.py` are fine when a
-  byte-identical AML corpus and byte-identical silver business columns at
-  seed 43 prove them so; the spark-tier batch/stream parity tests
-  (statements, profiles, dimensions, replay-idempotency) are the standing
-  automated guard, matching how MODEL_VERSION plus the seed-43
-  byte-compare guards the generator (no separate silver-hash gate).
+- Generator and silver code are not frozen. A registered look, its
+  calibration corpora and its predictions use one datagen image, named by
+  digest (below), and their results hold for that image. A change to AML
+  generator output needs a new image and a `MODEL_VERSION` bump; a look on
+  the new image needs its calibration and predictions re-run on it.
 
 ## The look image
 
@@ -131,7 +111,7 @@ use one datagen image, named by digest:
   0.17.14, mimalloc 0.1.52), built with `cargo build --release --locked`.
   The image inputs (`datagen_rs/src`, `Cargo.toml`, `Cargo.lock`,
   `Dockerfile`, `entrypoint.py`) are fixed at the build commit; a change to
-  any of them needs a new image and a new byte-compare. Reference scorer: `REFERENCE_PY_DEPS` in
+  any of them needs a new image. Reference scorer: `REFERENCE_PY_DEPS` in
   `modules/pipeline_engines/spark/job.py` (numpy 2.2.6, scipy 1.15.3,
   pandas 2.3.3, scikit-learn 1.7.2, joblib 1.5.2, threadpoolctl 3.6.0,
   python-dateutil 2.9.0.post0, pytz 2025.2, tzdata 2025.2, six 1.17.0).
@@ -140,8 +120,7 @@ use one datagen image, named by digest:
 
 The one-shot looks are already approved (#41, #42). Take them once:
 
-1. the freeze commit (including the items above) and MODEL_VERSION are
-   recorded;
+1. the look image digest and MODEL_VERSION are recorded;
 2. the paired run-to-run standard deviation is reported (#44a);
 3. per-typology predictions are committed (#46).
 
@@ -163,8 +142,7 @@ reads a held-out seed only from `--seed-file PATH` (one integer, `chmod
 
 What this does not hide: anyone who can read the corpus bucket can recover
 the seed from the manifest's instance seeds, by design; the reference
-scorer's report records it as `corpus_seed` (LB-229, open: the scorer is a
-frozen script). The run record (`metrics.json`, `report.html`) stores a
+scorer's report records it as `corpus_seed` (open). The run record (`metrics.json`, `report.html`) stores a
 protected seed as its salted reference and role, never the value
 (`metrics/seed_record.py`). Do not check in the run
 output of a registered generate before its look is recorded. In practice

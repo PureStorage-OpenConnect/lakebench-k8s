@@ -227,7 +227,7 @@ def _quiet_autosizer() -> Iterator[None]:
 
 
 def _resolved_copy(
-    cfg: LakebenchConfig, capacity: ClusterCapacity | None
+    cfg: LakebenchConfig, capacity: ClusterCapacity | None, continuous: bool | None = None
 ) -> tuple[LakebenchConfig, list[str]]:
     """Deep copy of *cfg* after ``resolve_auto_sizing``; *cfg* is untouched.
 
@@ -242,7 +242,7 @@ def _resolved_copy(
 
     copy = cfg.model_copy(deep=True)
     with _quiet_autosizer():
-        cuts = list(resolve_auto_sizing(copy, capacity) or [])
+        cuts = list(resolve_auto_sizing(copy, capacity, continuous=continuous) or [])
     return copy, cuts
 
 
@@ -393,7 +393,7 @@ def _plan(
 
     mode = _mode_of(cfg, run_mode)
     continuous = is_continuous_mode(mode)
-    resolved, cuts = _resolved_copy(cfg, capacity)
+    resolved, cuts = _resolved_copy(cfg, capacity, continuous)
     spark = peak_for_config(resolved, mode=mode)
     co = co_resident_request(resolved, continuous, datagen_runs=datagen_runs)
     scale = resolved.architecture.workload.datagen.get_effective_scale()

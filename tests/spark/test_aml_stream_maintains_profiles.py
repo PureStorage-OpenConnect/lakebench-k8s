@@ -122,6 +122,7 @@ def _bootstrap_stream(spark, ss):
         "DDL_EDGES",
         "DDL_PROFILES",
         "DDL_BATCH_VERSIONS",
+        "DDL_PAIRS",
     ):
         spark.sql(getattr(ss, ddl_attr))
     # Skip KYC + dimension writes: this test isolates the profiles MERGE.
@@ -181,3 +182,65 @@ def test_stream_maintains_profiles_monotone_across_five_batches(spark, tmp_path)
     for r in a_rows + b_rows:
         assert r["_m2"] is not None
         assert r["_m2"] >= 0.0, f"_m2 must be non-negative; got {r['_m2']}"
+
+
+def test_stream_distinct_counterparties_equal_a_full_count(spark):
+    """distinct_counterparties_out/in are maintained from new pairs only
+    (silver.counterparty_pairs), not a recount of every sealed transaction.
+    They must still equal count_distinct over all of silver.transactions:
+    with pairs repeated across batches, a batch applied twice (a replay),
+    and an unsealed pairs row left by another stream, which must not hide
+    its pair."""
+    import silver_stream_financial as ss
+    from pyspark.sql.functions import countDistinct
+
+    for t in ("transactions", "entity_profiles", "counterparty_pairs", "silver_batch_versions"):
+        spark.sql(f"DROP TABLE IF EXISTS lh.silver.{t}")
+    _bootstrap_stream(spark, ss)
+    ss.SILVER_PAIRS = "silver.counterparty_pairs"
+
+    def batch(bid, pairs):
+        rows = None
+        for k, (o, b) in enumerate(pairs):
+            r = _bronze_row(
+                spark, f"T{bid}-{k}", o, b, datetime(2024, 6, 1) + timedelta(days=bid), "10.00"
+            )
+            rows = r if rows is None else rows.union(r)
+        return rows
+
+    batches = [
+        [("A", "Z"), ("A", "Y")],
+        [("A", "Z"), ("B", "Z")],  # A->Z repeats batch 0
+        [("A", "X"), ("B", "Z"), ("Z", "A")],
+        [("A", "W"), ("A", "Y"), ("B", "Y")],  # A->W first sealed here
+    ]
+    ss._merge_batch(batch(0, batches[0]), 0)
+    ss._merge_batch(batch(1, batches[1]), 1)
+    ss._merge_batch(batch(2, batches[2]), 2)
+    ss._merge_batch(batch(2, batches[2]), 2)  # replay of batch 2
+    # A crashed attempt of another stream left B->Y (first sealed in batch
+    # 3) unsealed in the pairs table: it must not hide the pair.
+    ids = {
+        r["txn_id"]: (r["originator_id"], r["beneficiary_id"])
+        for r in spark.table("lh.silver.transactions").collect()
+    }
+    b_id, y_id = ids["T1-1"][0], ids["T0-1"][1]
+    spark.sql(f"INSERT INTO lh.silver.counterparty_pairs VALUES ({b_id}, {y_id}, 'qid-other', 99)")
+    ss._merge_batch(batch(3, batches[3]), 3)
+
+    txns = spark.table("lh.silver.transactions")
+    want_out = {
+        r[0]: r[1]
+        for r in txns.groupBy("originator_id").agg(countDistinct("beneficiary_id")).collect()
+    }
+    want_in = {
+        r[0]: r[1]
+        for r in txns.groupBy("beneficiary_id").agg(countDistinct("originator_id")).collect()
+    }
+    got = {r["entity_id"]: r for r in spark.table("lh.silver.entity_profiles").collect()}
+    assert set(got) == set(want_out) | set(want_in)
+    for e, r in got.items():
+        assert r["distinct_counterparties_out"] == want_out.get(e, 0), (e, "out")
+        assert r["distinct_counterparties_in"] == want_in.get(e, 0), (e, "in")
+    # A: Z, Y, X, W; B: Z, Y (Y despite the stale row).
+    assert sorted(want_out.values(), reverse=True)[:2] == [4, 2]

@@ -197,11 +197,11 @@ def main() -> None:
 
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
     table_location = _table_location(bronze_uri, bronze_table_path)
-    stream = (
-        spark.readStream.schema(inferred_schema)
-        .option("maxFilesPerTrigger", max_files_per_trigger)
-        .parquet(landing_zone)
-    )
+    reader = spark.readStream.schema(inferred_schema)
+    # 0: no per-trigger limit, so each micro-batch takes every landed file.
+    if int(max_files_per_trigger) > 0:
+        reader = reader.option("maxFilesPerTrigger", max_files_per_trigger)
+    stream = reader.parquet(landing_zone)
     query = (
         stream.writeStream.foreachBatch(
             lambda df, bid: write_bronze_batch(

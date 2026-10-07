@@ -146,7 +146,7 @@ architecture:
 
 **Does not deploy:** Trino, Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator. DuckDB uses 2 cores and 4g memory by default (configurable via `architecture.query_engine.duckdb`). Queries are adapted from Trino SQL to DuckDB-compatible syntax at runtime.
+**Caveats:** Requires the Stackable Hive Operator. DuckDB uses 2 cores and 4g memory by default, 16g on the financial schema (configurable via `architecture.query_engine.duckdb`). Queries are adapted from Trino SQL to DuckDB-compatible syntax at runtime.
 
 ---
 
@@ -236,7 +236,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore, Trino.
 
-**Caveats:** Polaris 1.3.0-incubating+ required (lakebench defaults to 1.6.0). DuckDB uses 2 cores and 4g memory by default.
+**Caveats:** Polaris 1.3.0-incubating+ required (lakebench defaults to 1.6.0). DuckDB uses 2 cores and 4g memory by default, 16g on the financial schema.
 
 ---
 

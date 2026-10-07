@@ -1,0 +1,811 @@
+{
+ "fields": [
+  {
+   "metadata": {},
+   "name": "msg_id",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "cre_dt_tm",
+   "nullable": true,
+   "type": "timestamp_ntz"
+  },
+  {
+   "metadata": {},
+   "name": "nb_of_txs",
+   "nullable": true,
+   "type": "integer"
+  },
+  {
+   "metadata": {},
+   "name": "ctrl_sum",
+   "nullable": true,
+   "type": "decimal(18,5)"
+  },
+  {
+   "metadata": {},
+   "name": "ttl_intr_bk_sttlm_amt",
+   "nullable": true,
+   "type": "decimal(18,5)"
+  },
+  {
+   "metadata": {},
+   "name": "intr_bk_sttlm_dt",
+   "nullable": true,
+   "type": "date"
+  },
+  {
+   "metadata": {},
+   "name": "sttlm_inf",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "sttlm_mtd",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "pmt_tp_inf",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "instr_prty",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "clr_chanl",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "svc_lvl",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lcl_instrm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "ctgy_purp",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "instg_agt",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "instd_agt",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "txn_id",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "instr_id",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "end_to_end_id",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "uetr",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "clr_sys_ref",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "intr_bk_sttlm_amt",
+   "nullable": true,
+   "type": "decimal(18,5)"
+  },
+  {
+   "metadata": {},
+   "name": "intr_bk_sttlm_ccy",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "instd_amt",
+   "nullable": true,
+   "type": "decimal(18,5)"
+  },
+  {
+   "metadata": {},
+   "name": "instd_ccy",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "xchg_rate",
+   "nullable": true,
+   "type": "decimal(11,10)"
+  },
+  {
+   "metadata": {},
+   "name": "chrg_br",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "intrmy_agt_1",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "intrmy_agt_2",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "intrmy_agt_3",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "prvs_instg_agt_1",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "prvs_instg_agt_2",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "prvs_instg_agt_3",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "ultmt_dbtr",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "ctry",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "initg_pty",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "dbtr",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "pstl_adr",
+      "nullable": true,
+      "type": {
+       "fields": [
+        {
+         "metadata": {},
+         "name": "strt_nm",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "twn_nm",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "ctry",
+         "nullable": true,
+         "type": "string"
+        }
+       ],
+       "type": "struct"
+      }
+     },
+     {
+      "metadata": {},
+      "name": "id",
+      "nullable": true,
+      "type": {
+       "fields": [
+        {
+         "metadata": {},
+         "name": "any_bic",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "lei",
+         "nullable": true,
+         "type": "string"
+        }
+       ],
+       "type": "struct"
+      }
+     },
+     {
+      "metadata": {},
+      "name": "ctry_of_res",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "dbtr_acct",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "iban",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "othr",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "ccy",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "dbtr_agt",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "cdtr_agt",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "bicfi",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "cdtr",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "pstl_adr",
+      "nullable": true,
+      "type": {
+       "fields": [
+        {
+         "metadata": {},
+         "name": "strt_nm",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "twn_nm",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "ctry",
+         "nullable": true,
+         "type": "string"
+        }
+       ],
+       "type": "struct"
+      }
+     },
+     {
+      "metadata": {},
+      "name": "id",
+      "nullable": true,
+      "type": {
+       "fields": [
+        {
+         "metadata": {},
+         "name": "any_bic",
+         "nullable": true,
+         "type": "string"
+        },
+        {
+         "metadata": {},
+         "name": "lei",
+         "nullable": true,
+         "type": "string"
+        }
+       ],
+       "type": "struct"
+      }
+     },
+     {
+      "metadata": {},
+      "name": "ctry_of_res",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "cdtr_acct",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "iban",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "othr",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "ccy",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "ultmt_cdtr",
+   "nullable": true,
+   "type": {
+    "fields": [
+     {
+      "metadata": {},
+      "name": "nm",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "lei",
+      "nullable": true,
+      "type": "string"
+     },
+     {
+      "metadata": {},
+      "name": "ctry",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "type": "struct"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "purp_cd",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "purp_prtry",
+   "nullable": true,
+   "type": "string"
+  },
+  {
+   "metadata": {},
+   "name": "rgltry_rptg",
+   "nullable": true,
+   "type": {
+    "containsNull": true,
+    "elementType": {
+     "fields": [
+      {
+       "metadata": {},
+       "name": "dbt_cdt_rptg_ind",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "metadata": {},
+       "name": "authrty_nm",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "metadata": {},
+       "name": "authrty_ctry",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "metadata": {},
+       "name": "details",
+       "nullable": true,
+       "type": {
+        "containsNull": true,
+        "elementType": "string",
+        "type": "array"
+       }
+      }
+     ],
+     "type": "struct"
+    },
+    "type": "array"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "rmt_inf_ustrd",
+   "nullable": true,
+   "type": {
+    "containsNull": true,
+    "elementType": "string",
+    "type": "array"
+   }
+  },
+  {
+   "metadata": {},
+   "name": "rmt_inf_strd",
+   "nullable": true,
+   "type": {
+    "containsNull": true,
+    "elementType": {
+     "fields": [
+      {
+       "metadata": {},
+       "name": "ref_doc",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "metadata": {},
+       "name": "amt",
+       "nullable": true,
+       "type": "decimal(18,5)"
+      }
+     ],
+     "type": "struct"
+    },
+    "type": "array"
+   }
+  }
+ ],
+ "type": "struct"
+}

@@ -371,6 +371,7 @@ class DeploymentEngine:
         dry_run: bool = False,
         deploy_nonce: str | None = None,
         require_new: bool = False,
+        continuous: bool | None = None,
     ):
         """Initialize deployment engine.
 
@@ -385,6 +386,9 @@ class DeploymentEngine:
                 what it created). The namespace is created with a plain
                 create, so a competing create between a caller's check and
                 this step is refused (409), not adopted.
+            continuous: The run's mode for auto-sizing when it differs from
+                the config's (``run --continuous`` on a batch config); None
+                reads the config.
         """
         self.deploy_nonce = deploy_nonce
         self.require_new = require_new
@@ -421,7 +425,9 @@ class DeploymentEngine:
                 cluster_cap = self.k8s.get_cluster_capacity()
             except Exception as e:
                 logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
-        resolve_auto_sizing(config, cluster_cap)
+        # continuous: the run's mode when --continuous overrides the config's
+        # (None reads the config), so continuous datagen stays balanced.
+        resolve_auto_sizing(config, cluster_cap, continuous=continuous)
 
         self.context = self._build_context()
 

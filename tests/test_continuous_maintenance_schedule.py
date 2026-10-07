@@ -152,7 +152,7 @@ def test_run_start_refuses_before_anything_is_submitted(monkeypatch):
     monkeypatch.setattr(
         sus,
         "resolve_trickle",
-        lambda cfg, d: {"problem": None, "value": 10, "arrival_seconds": None, "source": "t"},
+        lambda cfg, d, **kw: {"problem": None, "value": 10, "arrival_seconds": None, "source": "t"},
     )
     errors: list[str] = []
     monkeypatch.setattr(sus, "print_error", errors.append)
@@ -167,7 +167,7 @@ def test_run_start_writes_the_resolved_values_back(monkeypatch):
     monkeypatch.setattr(
         sus,
         "resolve_trickle",
-        lambda cfg, d: {"problem": None, "value": 10, "arrival_seconds": None, "source": "t"},
+        lambda cfg, d, **kw: {"problem": None, "value": 10, "arrival_seconds": None, "source": "t"},
     )
 
     class Stop(Exception):

@@ -844,6 +844,12 @@ class MetricsStorage:
                 corpus_drained=scores.get("corpus_drained"),
                 intake_limit=scores.get("intake_limit"),
                 bronze_busy_fraction=scores.get("bronze_busy_fraction"),
+                backlog_rows=scores.get("backlog_rows"),
+                datagen_ahead=scores.get("datagen_ahead"),
+                pace_seconds_per_million_rows=scores.get("pace_seconds_per_million_rows"),
+                bronze_pace_seconds_per_million_rows=scores.get(
+                    "bronze_pace_seconds_per_million_rows"
+                ),
                 corpus_drain_seconds=scores.get("corpus_drain_seconds"),
                 window_seconds=scores.get("window_seconds"),
                 corpus_ingest_ratio=scores.get("corpus_ingest_ratio"),

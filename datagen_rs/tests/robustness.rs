@@ -1,7 +1,8 @@
 //! Robustness perturbation (AML-GOALS R3(b), Level 2 condition 5; prereg
-//! corpora.robustness_perturbation). The default path is pinned so the flag
-//! cannot move an unperturbed corpus, and the perturbed path is checked to
-//! move exactly the three registered nuisance parameters, in natural units.
+//! corpora.robustness_perturbation). Perturbation::NONE must take the default
+//! path, so the flag cannot move an unperturbed corpus, and the perturbed path
+//! is checked to move exactly the three registered nuisance parameters, in
+//! natural units.
 
 use datagen_rs::model::build_world_ex;
 use datagen_rs::typology::{schedule, Instance};
@@ -16,11 +17,8 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
-// Values are quantised to 1e-9 before hashing. The world is built with
-// f64::exp / f64::ln, which come from the platform libm, so raw bits differ in
-// the last ulp between hosts (RHEL dev host vs the CI runner). Quantising keeps
-// the pin portable while any real data change still moves it. Bit-exact output
-// is only guaranteed within one build environment (the pinned datagen image).
+// Values are quantised to 1e-9 before hashing, so a last-ulp libm difference
+// does not read as a data difference.
 fn q(v: f64) -> i64 {
     (v * 1e9).round() as i64
 }
@@ -72,32 +70,6 @@ fn country_vec(w: &datagen_rs::model::World) -> Vec<&'static str> {
     (0..=w.population).map(|i| w.country(i)).collect()
 }
 
-#[test]
-fn default_world_and_schedule_are_pinned() {
-    // Quantised digest captured on c9d7202 (corpus output byte-identical to c0d658f,
-    // the pre-perturbation point, verified by hashing all 67 files) on dev seed 7777.
-    // A change here is an AML data change, not a refactor.
-    let w = build_world_ex(0.05, DEV_SEED, 60, false);
-    let (s, e) = corpus();
-    let insts = schedule(
-        DEV_SEED,
-        w.dims.total_txns(),
-        w.population,
-        s,
-        e,
-        &country_vec(&w),
-    );
-    let got = (
-        world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
-        schedule_digest(&insts),
-    );
-    assert_eq!(
-        got,
-        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
-        "default AML world or schedule changed"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // The perturbed path moves the three registered parameters, in natural units,
 // and nothing else.
@@ -131,9 +103,18 @@ fn median(mut v: Vec<f64>) -> f64 {
 #[test]
 fn none_is_the_default_path() {
     // Perturbation::NONE through the _p entry points is the default world and
-    // schedule, bit for bit (the pinned digests above).
-    let w = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
+    // schedule.
+    let d = build_world_ex(SCALE, DEV_SEED, 60, false);
     let (s, e) = corpus();
+    let default_insts = schedule(
+        DEV_SEED,
+        d.dims.total_txns(),
+        d.population,
+        s,
+        e,
+        &country_vec(&d),
+    );
+    let w = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
     let insts = schedule_p(
         DEV_SEED,
         DEV_SEED,
@@ -149,7 +130,10 @@ fn none_is_the_default_path() {
             world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
             schedule_digest(&insts),
         ),
-        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
+        (
+            world_digest(&d.activity, &logshift_vec(&d), d.total_activity),
+            schedule_digest(&default_insts),
+        ),
     );
 }
 

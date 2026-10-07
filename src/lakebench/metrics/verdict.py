@@ -378,12 +378,22 @@ def compute_badge_status(
                 f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
                 "but silver's pace was not measured, so saturation is unknown"
             )
+        elif (
+            is_sustained
+            and pb.ingest_ratio is not None
+            and pb.ingest_ratio < 0.95
+            and getattr(pb, "datagen_ahead", None)
+            and pb.intake_limit == "bronze_capacity"
+        ):
+            # Continuous datagen stayed ahead of a busy bronze: the backlog
+            # is what the run measures (bronze's capacity), not a failure.
+            pass
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
-            cause = (
-                "intake held to the trickle rate, silver did not keep pace"
-                if pb.intake_limit == "trickle_rate"
-                else "pipeline saturated"
-            )
+            cause = {
+                "trickle_rate": "intake held to the trickle rate, silver did not keep pace",
+                # Bronze had idle time: a late start or a stall, not capacity.
+                "below_bronze_capacity": "bronze took in less than arrived without being at capacity",
+            }.get(pb.intake_limit or "", "pipeline saturated")
             reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
             warnings.append(
@@ -403,7 +413,21 @@ def compute_badge_status(
     if is_sustained and pb is not None and pb.data_freshness_seconds is not None:
         run_dur = metrics.total_elapsed_seconds or 1.0
         freshness_pct = pb.data_freshness_seconds / run_dur
-        if freshness_pct > 0.5:
+        snap = getattr(pb, "config_snapshot", None) or {}
+        # A capacity run offers more than the pipeline takes in, so its
+        # slowest stage falls behind by design and pace is its score: stale
+        # gold is reported, not failed. One is a run whose datagen left a
+        # backlog at bronze, or whose datagen the config sized itself.
+        capacity_run = bool(snap.get("datagen_continuous")) and (
+            bool(getattr(pb, "datagen_ahead", None)) or snap.get("datagen_offered") == "user"
+        )
+        if freshness_pct > 0.5 and capacity_run:
+            warnings.append(
+                f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
+                f"({freshness_pct:.0%} of run duration): a capacity run, its slowest stage "
+                "fell behind what datagen offered; pace is the score"
+            )
+        elif freshness_pct > 0.5:
             reasons.append(
                 f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
                 f"({freshness_pct:.0%} of run duration -- gold was stale for most of the run)"

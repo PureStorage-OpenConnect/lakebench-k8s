@@ -469,6 +469,124 @@ impl S3Sink {
             last_err.unwrap_or_default()
         );
     }
+
+    /// Every object directly under `sub` (relative to the sink's prefix; ""
+    /// for the prefix itself), as (name relative to it, size in bytes). Every
+    /// page of the listing is read; a path that does not exist yet lists
+    /// empty. Retried like a PUT.
+    pub fn list_keys(&self, sub: &str) -> Vec<(String, u64)> {
+        let dir = if sub.is_empty() {
+            self.prefix.clone()
+        } else {
+            self.full_key(sub)
+        };
+        let base = Path::from(dir.as_str());
+        let mut last_err: Option<String> = None;
+        for attempt in 0..3 {
+            let store = self.store.clone();
+            let base_c = base.clone();
+            let has_prefix = !dir.is_empty();
+            let res = self.handle.block_on(async move {
+                store
+                    .list_with_delimiter(if has_prefix { Some(&base_c) } else { None })
+                    .await
+            });
+            match res {
+                Ok(listing) => {
+                    let strip = if dir.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}/", dir.trim_end_matches('/'))
+                    };
+                    return listing
+                        .objects
+                        .into_iter()
+                        .map(|m| {
+                            let full = m.location.to_string();
+                            let key = full.strip_prefix(&strip).unwrap_or(&full).to_string();
+                            (key, m.size as u64)
+                        })
+                        .collect();
+                }
+                Err(OsError::NotFound { .. }) => return Vec::new(),
+                Err(e) => {
+                    if is_fatal(&e) {
+                        panic!("s3 list fatal (no retry): prefix={} err={}", dir, e);
+                    }
+                    last_err = Some(format!("{}", e));
+                    eprintln!(
+                        "[s3sink] list retry {} for {}: {}",
+                        attempt + 1,
+                        dir,
+                        last_err.as_deref().unwrap_or("")
+                    );
+                    std::thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+                }
+            }
+        }
+        panic!(
+            "s3 list failed after 3 attempts: prefix={} err={}",
+            dir,
+            last_err.unwrap_or_default()
+        );
+    }
+
+    /// The bytes of `key` (relative to the prefix); None when it does not
+    /// exist. Retried like a PUT.
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let full = self.full_key(key);
+        let path = Path::from(full.as_str());
+        let mut last_err: Option<String> = None;
+        for attempt in 0..3 {
+            let store = self.store.clone();
+            let path_c = path.clone();
+            let res = self.handle.block_on(async move {
+                match store.get(&path_c).await {
+                    Ok(r) => r.bytes().await,
+                    Err(e) => Err(e),
+                }
+            });
+            match res {
+                Ok(b) => return Some(b.to_vec()),
+                Err(OsError::NotFound { .. }) => return None,
+                Err(e) => {
+                    if is_fatal(&e) {
+                        panic!("s3 get fatal (no retry): key={} err={}", full, e);
+                    }
+                    last_err = Some(format!("{}", e));
+                    eprintln!(
+                        "[s3sink] get retry {} for {}: {}",
+                        attempt + 1,
+                        full,
+                        last_err.as_deref().unwrap_or("")
+                    );
+                    std::thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+                }
+            }
+        }
+        panic!(
+            "s3 get failed after 3 attempts: key={} err={}",
+            full,
+            last_err.unwrap_or_default()
+        );
+    }
+
+    /// Whether `key` (relative to the prefix) exists. An error other than
+    /// not-found is logged and read as absent, so a transient S3 error never
+    /// ends a run.
+    pub fn exists(&self, key: &str) -> bool {
+        let full = self.full_key(key);
+        let path = Path::from(full.as_str());
+        let store = self.store.clone();
+        match self.handle.block_on(async move { store.head(&path).await }) {
+            Ok(_) => true,
+            Err(OsError::NotFound { .. }) => false,
+            Err(e) => {
+                eprintln!("[s3sink] head {} failed, read as absent: {}", full, e);
+                false
+            }
+        }
+    }
 }
 
 /// Non-retryable object_store errors. Anything auth/perm/config-shaped bails

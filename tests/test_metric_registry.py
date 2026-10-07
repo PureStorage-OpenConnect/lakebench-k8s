@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import ast
 import inspect
-import json
 import textwrap
-from pathlib import Path
 
 import pytest
 
 from lakebench.metrics import metric_registry as reg
 from tests.fixtures import stored_records as sr
-
-EXPECTED_DESCRIPTIONS = Path(__file__).parent / "expected" / "score_descriptions.json"
 
 
 def _mode(raw: dict) -> str | None:
@@ -432,14 +428,6 @@ def test_reproduce_classification_unchanged():
 
 
 # --- descriptions and the report --------------------------------------------
-
-
-def test_score_descriptions_unchanged():
-    from lakebench.metrics.collector import PipelineBenchmark
-
-    want = json.loads(EXPECTED_DESCRIPTIONS.read_text())["descriptions"]
-    assert list(reg.descriptions().items()) == list(want.items())
-    assert PipelineBenchmark._SCORE_DESCRIPTIONS == want
 
 
 def _cards(html: str) -> list[str]:

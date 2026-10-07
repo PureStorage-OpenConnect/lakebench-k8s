@@ -132,10 +132,13 @@ def spark_jars() -> _SparkJars:
 
 @pytest.fixture(scope="session")
 def iceberg_catalog() -> Callable[..., str]:
-    def register(spark: Any, name: str, warehouse: Path) -> str:
+    def register(spark: Any, name: str, warehouse: Path, *, cache_enabled: bool = True) -> str:
         spark.conf.set(f"spark.sql.catalog.{name}", "org.apache.iceberg.spark.SparkCatalog")
         spark.conf.set(f"spark.sql.catalog.{name}.type", "hadoop")
         spark.conf.set(f"spark.sql.catalog.{name}.warehouse", f"file://{warehouse}")
+        # Off for tests that read a table right after a writer outside the
+        # session's cached copy committed (the AML stream's MERGE phases).
+        spark.conf.set(f"spark.sql.catalog.{name}.cache-enabled", str(cache_enabled).lower())
         return name
 
     return register

@@ -359,6 +359,9 @@ READERS: dict[str, str] = {
     "architecture.tables.silver_batch_versions": (
         "lakebench.config.schema:TableNamesConfig.financial_env"
     ),
+    "architecture.tables.silver_counterparty_pairs": (
+        "lakebench.config.schema:TableNamesConfig.financial_env"
+    ),
     "architecture.tables.gold_alerts": "lakebench.cli._financial:replay",
     "architecture.tables.gold_risk_scores": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_entity_clusters": "lakebench.benchmark.executor:get_executor",

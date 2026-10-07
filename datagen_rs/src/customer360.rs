@@ -212,7 +212,7 @@ const CH_CALL_CENTER: u8 = 3;
 // not per row) and one timestamp anchor per session (small offset per row).
 const SESSION_LEN_MIN: u32 = 5;
 const SESSION_LEN_RANGE: u32 = 16; // -> lengths in [5, 20]
-const SESSION_TIMESPAN_US: i64 = 30 * 60 * 1_000_000; // 30 min max between rows in one session
+pub const SESSION_TIMESPAN_US: i64 = 30 * 60 * 1_000_000; // 30 min max between rows in one session
 /// Probability that a row within a session keeps the session's base product
 /// category. 0.7 = "70% of rows in a session shop the same category, 30%
 /// browse across categories". Real basket-analysis queries need this

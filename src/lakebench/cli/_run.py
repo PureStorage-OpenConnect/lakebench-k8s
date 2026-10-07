@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1316,6 +1317,19 @@ def _held_out_check_only(
     raise typer.Exit(ExitCode.FAILED)
 
 
+_PY_ERROR_LINE = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Abort): \S")
+
+
+def driver_error_line(logs: str | None) -> str | None:
+    """The last Python exception line in a driver log (``SilverAbort: ...``),
+    or None. Spark's shutdown lines follow it, so the log's tail hides it."""
+    found = None
+    for line in (logs or "").splitlines():
+        if _PY_ERROR_LINE.match(line.strip()):
+            found = line.strip()
+    return found[:500] if found else None
+
+
 def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
     """(no_query_engine, skip_benchmark) for a batch run of *cfg*.
 
@@ -2045,9 +2059,27 @@ def _run_once(
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     # Cuts to fit the cluster are shown with their reason, never silent.
-    autosize_cuts = [str(c) for c in resolve_auto_sizing(cfg, cluster_cap) or []]
+    # The run's mode, which --continuous does not write back to the config:
+    # continuous datagen is balanced to the pipeline.
+    _dg = cfg.architecture.workload.datagen
+    _balanced = _plan.mode == "continuous" and not ({"cpu", "parallelism"} & _dg.model_fields_set)
+    autosize_cuts = [
+        str(c)
+        for c in resolve_auto_sizing(cfg, cluster_cap, continuous=_plan.mode == "continuous") or []
+    ]
     for cut in autosize_cuts:
         print_warning(f"Auto-sizing: {cut}")
+    if _balanced:
+        # Continuous datagen is sized to what the pipeline takes in, which sets the
+        # run's arrival rate: shown so the reader can offer more.
+        from lakebench.config.autosizer import continuous_datagen_plan
+
+        _p = continuous_datagen_plan(cfg)
+        print_info(
+            f"Datagen balanced to {_p['stage']} ({_p['stage_cores']} cores): "
+            f"{_dg.parallelism} pod(s) x {_dg.cpu} cores (n=1 estimate); "
+            "set datagen.cpu and parallelism to offer more"
+        )
 
     # Auto-scale timeout if not explicitly set
     if timeout is None:
@@ -3077,6 +3109,9 @@ def _run_once(
                         raise typer.Exit(ExitCode.USAGE)
                     print_error(f"{stage_name} failed: {result.message}{_retry_note(job_metrics)}")
                     if result.driver_logs:
+                        cause = driver_error_line(result.driver_logs)
+                        if cause:
+                            print_error(f"Cause: {esc(cause)}")
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
                         for line in result.driver_logs.split("\n")[-20:]:
                             console.print(f"  {line}")

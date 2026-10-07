@@ -56,8 +56,8 @@ def test_floor_matches_rust():
     # The Rust floor holds every hash of the Python floor, in order, under the
     # same salt (SPEC section 10: the current role hashes are compiled into
     # the generator). A redraw appends to the file and _HELDOUT_FLOOR; it is
-    # not finished until heldout.rs carries the same hashes and the look image
-    # is rebuilt from it (test_aml_protocol_look_image pins the image inputs).
+    # not finished until heldout.rs carries the same hashes and the default
+    # image is rebuilt from it.
     src = (ROOT / "datagen_rs/src/heldout.rs").read_text()
     salt = re.findall(r'FLOOR_SALT: &str = "([0-9a-f]{64})"', src)
     assert salt == [ds._HELDOUT_FLOOR["salt"]]
@@ -831,3 +831,28 @@ def test_absence_refusal_text_masks_long_numbers(two_configs, monkeypatch):
     with pytest.raises(sm.ScriptsMapError) as e:
         sm.build_script_configmaps(two_configs[0], "ns")
     assert _no_seed_in(str(e.value))
+
+
+def _epoch_rows(rows: list[tuple[str, int]], seed: int, epoch: int) -> list[tuple[str, int]]:
+    """*rows* of *seed* as continuous epoch *epoch* writes them: drawn from
+    the epoch's activity seed, ids suffixed -eNNNN."""
+    a = ds.epoch_seed(seed, epoch)
+    return [(f"{i}-e{epoch:04d}", s) for i, s in rows(a)]
+
+
+def test_continuous_epoch_rows_recover_the_corpus_seed(held):
+    # Real generator output (seed 43, epochs 3 and 11): the derivation the
+    # guard inverts is the one datagen_rs writes.
+    doc = json.loads(
+        (ROOT / "tests/fixtures/datagen_reference/aml_epoch_manifest_rows_seed43.json").read_text()
+    )
+    real = [(i, s) for i, s in doc["rows"]]
+    assert any("MATCH" in i for i, _ in real) and all("-e00" in i for i, _ in real)
+    assert ds.recover_corpus_seeds(iter(real)) == {43}
+    # A held-out seed behind an epoch manifest is still found and refused.
+    rows = _epoch_rows(lambda a: ts.manifest_rows(a, 40) + ts.screening_rows(a, 4), EV, 7)
+    assert ds.recover_corpus_seeds(iter(rows)) == {EV}
+    verdict = ds.corpus_verdict(iter(rows), claimed=43, spent=[42])
+    assert verdict.verdict == "refused" and verdict.role == "evaluation"
+    with pytest.raises(ds.CorpusSeedError):
+        ds.recover_corpus_seeds(iter([("W2_2_0000001-e0000", 1)]))

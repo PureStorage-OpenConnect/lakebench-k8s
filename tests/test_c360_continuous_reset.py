@@ -155,7 +155,9 @@ def _drive_sustained(
     deploy_result=None,
 ):
     """Run _run_sustained with every cluster and S3 edge mocked; return the
-    ordered list of side effects it performed."""
+    ordered list of side effects it performed. The run is stopped at the
+    first stream submit, unless *deploy_result* is given: datagen starts
+    after the streams, so those runs go on to its deploy."""
     monkeypatch.chdir(tmp_path)
     events: list[str] = []
 
@@ -172,7 +174,8 @@ def _drive_sustained(
         events.append(f"submit:{job_type.value}:{kw.get('cycle_env')}")
         if job_type == JobType.BRONZE_INGEST:
             events.append(f"dg_running={jm.datagen_running}")
-            raise _StopAfterFirstStream
+            if deploy_result is None:
+                raise _StopAfterFirstStream
         return MagicMock(state=JobState.RUNNING)
 
     jm.submit_job.side_effect = submit
@@ -180,7 +183,7 @@ def _drive_sustained(
     mon = MagicMock()
     mon.wait_for_completion.return_value = _Result(reset_ok)
     monkeypatch.setattr("lakebench.spark.SparkJobMonitor", lambda *a, **kw: mon)
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c: MagicMock())
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c, **kw: MagicMock())
     dg = MagicMock()
 
     def dg_deploy():
@@ -196,6 +199,9 @@ def _drive_sustained(
 
     dg.deploy.side_effect = dg_deploy
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: dg_stop())
+    monkeypatch.setattr("lakebench.deploy.datagen.end_continuous_datagen", lambda c: True)
+    # The window opens at datagen's first file in bronze.
+    monkeypatch.setattr(_sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
 
     def ownership(c):
@@ -262,9 +268,8 @@ def test_c360_continuous_entry_resets_before_any_stream(monkeypatch, tmp_path):
         "stop-streams",
         "stop-datagen",  # an earlier datagen Job's pods stop before the reset clears raw
         "reset-s3:clear_raw=True",
-        "datagen",
+        reset_submit,  # datagen starts after the streams, so the reset needs no data
     ]
-    assert reset_submit in events
     first_stream = next(i for i, e in enumerate(events) if e.startswith("submit:bronze-ingest"))
     assert events.index(reset_submit) < first_stream
 
@@ -366,13 +371,7 @@ def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, 
     events = _drive_sustained(
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-b/customer/interactions/"]
     )
-    assert events[:5] == [
-        "ownership",
-        "stop-streams",
-        "stop-datagen",
-        "reset-s3:clear_raw=True",
-        "datagen",
-    ]
+    assert events[:4] == ["ownership", "stop-streams", "stop-datagen", "reset-s3:clear_raw=True"]
     assert any(e.startswith("submit:bronze-ingest") for e in events)
     out = " ".join("".join(capsys.readouterr()).split())
     assert "Refusing" not in out and "a separate generate is not needed" in out
@@ -462,17 +461,12 @@ def test_raw_replace_refused_when_sizing_fails(monkeypatch):
     assert problem and "could not size" in problem
 
 
-@pytest.mark.parametrize(
-    ("dg_state", "running"),
-    [("finished", False), ("absent", False), ("unfinished", True), ("unknown", True)],
-)
-def test_streaming_budget_releases_datagen_only_once_finished(
-    monkeypatch, tmp_path, dg_state, running
-):
-    """LB-158: a finished (or absent) datagen Job holds no cores, so the
-    streams are budgeted without them; unfinished or unknown keeps them."""
+@pytest.mark.parametrize("dg_state", ["finished", "absent", "unfinished", "unknown"])
+def test_streaming_budget_reserves_the_runs_own_datagen(monkeypatch, tmp_path, dg_state):
+    """The run's own datagen generates for the whole window, so the streams
+    are budgeted with its cores whatever its Job reads as at submit."""
     events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), dg_state=dg_state)
-    assert f"dg_running={running}" in events
+    assert "dg_running=True" in events
 
 
 def test_datagen_job_state(monkeypatch):
@@ -575,8 +569,9 @@ def test_refused_datagen_deploy_exits_3(monkeypatch, tmp_path):
         details={REFUSAL_DETAIL: "run.bronze_nonempty"},
     )
     events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), deploy_result=refused)
-    assert "datagen" in events
-    assert not any(e.startswith("submit:bronze-ingest") for e in events)
+    # Datagen starts once the streams run; its refusal still exits 3.
+    first_stream = next(i for i, e in enumerate(events) if e.startswith("submit:bronze-ingest"))
+    assert events.index("datagen") > first_stream
     assert events_ref["exc"].exit_code == 3
 
 

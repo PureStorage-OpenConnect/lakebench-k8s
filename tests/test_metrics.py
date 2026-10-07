@@ -165,6 +165,27 @@ class TestMetricsStorage:
         assert job.rules_skipped == {"W1_connected_components": "vertex-cap"}
         assert job.rule_errors == {"W7_cross_border_high_risk": "boom"}
 
+    def test_detection_line_with_a_glued_jvm_log_line_still_counts(self):
+        """stdout and log4j share the driver log: a JVM line landed on the end
+        of W8's line (AML batch, polaris-iceberg-spark-none, 2026-10-07), the
+        parser missed W8 and the rules gate read it as not run."""
+        from lakebench.metrics import MetricsCollector
+
+        logs = (
+            "[detection] W7_cross_border_high_risk: alerts=509768 prior=0 elapsed=12.0s\n"
+            "[detection] W8_dormant_reactivation: alerts=58562 prior=0 elapsed=10.5s"
+            "26/10/07 07:40:00 INFO BlockManager: Removing RDD 1150\n"
+            "[detection] W1_connected_components: skipped=giant-component "
+            "detail=x elapsed=0.4s26/10/07 07:40:01 INFO DAGScheduler: Job 9 finished\n"
+        )
+        parsed = MetricsCollector().parse_driver_logs(logs, "gold-finalize")
+        assert parsed.alerts_by_rule == {
+            "W7_cross_border_high_risk": 509768,
+            "W8_dormant_reactivation": 58562,
+        }
+        assert parsed.rule_elapsed_s["W8_dormant_reactivation"] == 10.5
+        assert parsed.rules_skipped == {"W1_connected_components": "giant-component"}
+
     def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
         """LB-123 re-review F1 guard: the detection dicts must survive the
         FULL cluster path shape -- parse_driver_logs (the only producer) ->
@@ -1673,3 +1694,28 @@ class TestQphDegradation:
 
 class TestCycleMetricsStorage:
     """Tests for CycleMetrics serialization and deserialization."""
+
+
+def test_stored_record_carries_no_address_url_in_error_text():
+    """An engine error quoting the object store's URL (DuckDB "HTTP GET to
+    'http://<ip>:80/...'", 2026-10-07) is stored with the snapshot's
+    endpoint hash in place of the address."""
+    from datetime import datetime, timezone
+
+    from lakebench.metrics import PipelineMetrics
+
+    m = PipelineMetrics(
+        run_id="scrub-001",
+        deployment_name="t",
+        start_time=datetime(2026, 10, 7, tzinfo=timezone.utc),
+        success=False,
+        config_snapshot={"s3": {"endpoint": "s3-endpoint-0123456789abcdef"}},
+        failure_reasons=[
+            "IOException: IO Error: Could not connect to server error for HTTP GET to "
+            "'http://10.0.1.50:80/lb-silver/silver/x.parquet'"
+        ],
+    )
+    d = m.to_dict()
+    text = str(d)
+    assert "10.0.1.50" not in text
+    assert "http://s3-endpoint-0123456789abcdef/lb-silver/silver/x.parquet" in text

@@ -24,6 +24,7 @@ from lakebench.metrics.collector import (
     build_config_snapshot,
 )
 from lakebench.metrics.continuous_window import (
+    StreamEvent,
     arrival_seconds,
     classify_submission_failure,
     parse_events,
@@ -124,7 +125,7 @@ def test_idle_gold_cycles_do_not_count_as_continuous():
 def test_unreadable_log_fails_the_gate():
     stats = _stats(HEALTHY)
     stats["gold-refresh"] = None
-    assert any("no gold-refresh driver log" in p for p in window_gate_problems(stats))
+    assert any("no gold-refresh batch lines" in p for p in window_gate_problems(stats))
 
 
 def test_gold_freshness_must_be_measured_inside_the_window():
@@ -420,6 +421,18 @@ def test_settled_needs_every_row_through_silver_and_a_gold_read_after():
     ev["gold-refresh"] = parse_events(gold_log([(599, 510_000, 40, False)]), "gold-refresh")
     ok, why = settle_state(ev, bronze_rows)
     assert ok, why
+    # A drain: bronze stopped (its log gone) after taking its rows. Silver
+    # must still have committed every one of them.
+    drained = {k: v for k, v in ev.items() if k != "bronze-ingest"}
+    assert settle_state(drained, 0, bronze_rows=bronze_rows)[0]
+    ok, why = settle_state(drained, 0, bronze_rows=bronze_rows + 1)
+    assert not ok and "silver has committed" in why
+    # A last bronze batch written while it stopped: silver is transforming it.
+    last = drained["silver-stream"][-1]
+    in_flight = StreamEvent(last.at, "transform", 999, rows=1_000)
+    drained["silver-stream"] = [*drained["silver-stream"], in_flight]
+    ok, why = settle_state(drained, 0, bronze_rows=bronze_rows)
+    assert not ok and "not committed yet" in why
 
 
 def test_continuous_results_are_established_only_by_a_result_check():
@@ -519,13 +532,16 @@ def _drive(
         name.removeprefix("lakebench-"), clock.now_utc_naive()
     )
     monkeypatch.setattr("lakebench.spark.SparkJobMonitor", lambda *a, **kw: mon)
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c: MagicMock())
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c, **kw: MagicMock())
     dg = MagicMock()
     from lakebench.deploy import DeploymentStatus
 
     dg.deploy.return_value = MagicMock(status=DeploymentStatus.SUCCESS)
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
+    monkeypatch.setattr("lakebench.deploy.datagen.end_continuous_datagen", lambda c: True)
+    # The window opens at datagen's first file in bronze.
+    monkeypatch.setattr(_sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
     monkeypatch.setattr(_sustained, "_stop_leftover_streams", lambda *a: None)
     monkeypatch.setattr(_sustained, "_reset_continuous_state", lambda c, clear_raw: None)
@@ -915,19 +931,28 @@ def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
     op = MagicMock()
     monkeypatch.setattr("lakebench.spark.SparkOperatorManager", lambda **kw: op)
     with pytest.raises(typer.Exit) as exc:
+        # A finite corpus (--skip-generate) is the one a trickle reads.
         _sustained._run_sustained(
-            _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
+            _cont_cfg(1, max_files_per_trigger=50),
+            tmp_path / "c.yaml",
+            60,
+            True,
+            900,
+            skip_generate=True,
         )
     assert exc.value.exit_code == 2  # usage: the window and trickle do not fit
     op.check_status.assert_not_called()
     assert "max_files_per_trigger" in "".join(capsys.readouterr())
 
 
-def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):
+def test_the_runs_own_datagen_sets_no_trickle(monkeypatch, tmp_path):
+    """Datagen generates for the whole window, so bronze reads with no
+    per-trigger limit, and the record says so."""
     code, saved = _drive(monkeypatch, tmp_path, _settling_logs)
     trickle = saved.continuous["trickle"]
-    assert trickle["source"] == "auto" and trickle["value"] >= 1
-    assert saved.config_snapshot["sustained"]["max_files_per_trigger"] == trickle["value"]
+    assert trickle["source"] == "none" and trickle["value"] is None
+    assert saved.config_snapshot["sustained"]["max_files_per_trigger"] is None
+    assert saved.config_snapshot["datagen_continuous"] is True
 
 
 # ------------------------------------- ingest_ratio against what was released
@@ -988,6 +1013,60 @@ def test_without_a_file_count_the_corpus_ratio_stands():
     pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=0)
     assert pb.released_rows is None
     assert pb.ingest_ratio == pytest.approx(pb.corpus_ingest_ratio)
+
+
+def _datagen_pb(bronze_rows, datagen_rows, datagen_elapsed_s):
+    """The run's own continuous datagen: no trickle, a 900 s window, 30 s
+    bronze trigger (the shape of a scale-1 matrix run, 2026-10-07)."""
+    t0 = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=900),
+        success=True,
+        stages=[
+            StageMetrics(
+                stage_name="bronze",
+                stage_type="streaming",
+                engine="spark",
+                elapsed_seconds=900,
+                input_rows=bronze_rows,
+                window_input_rows=bronze_rows,
+                pre_window_input_rows=0,
+                last_write_offset_seconds=890,
+                trickle_start_offset_seconds=5.0,
+            )
+        ],
+        config_snapshot={
+            "datagen_output_rows": datagen_rows,
+            "datagen_output_files": 1404,
+            "datagen_continuous": True,
+            "datagen_elapsed_s": datagen_elapsed_s,
+            "sustained": {"bronze_trigger_interval": "30 seconds", "max_files_per_trigger": None},
+        },
+    )
+    pb.compute_aggregates()
+    return pb
+
+
+def test_continuous_datagen_bronze_one_trigger_behind_kept_up():
+    # Datagen wrote 21.75M rows over 906.6 s; bronze's last trigger and the
+    # seconds before the pods saw the stop marker left 1.25M rows untaken.
+    # Against datagen's total that read 0.94, a saturated pipeline.
+    pb = _datagen_pb(20_494_593, 21_749_364, 906.625)
+    assert pb.released_rows == round(21_749_364 / 906.625 * 870)
+    assert pb.ingest_ratio == pytest.approx(0.982, abs=1e-3)
+    assert pb.pipeline_saturated is False
+    assert pb.datagen_ahead is False
+    assert pb.backlog_rows == 21_749_364 - 20_494_593
+
+
+def test_continuous_datagen_a_real_backlog_is_still_ahead():
+    pb = _datagen_pb(15_000_000, 21_749_364, 906.625)
+    assert pb.ingest_ratio < 0.95
+    assert pb.datagen_ahead is True
 
 
 def test_every_streams_submission_failures_are_recorded_while_another_is_waited_on():
@@ -1168,3 +1247,110 @@ def test_iceberg_run_header_is_unchanged():
         ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
     ]
     assert "not run" in _header("iceberg", "duckdb")[0][1]
+
+
+def test_result_check_counts_an_unfingerprinted_result_as_failed():
+    """A query that ran but whose result could not be fingerprinted
+    ({spec, error}: DuckDB lost its S3 connection re-reading silver,
+    2026-10-07) has no answer to compare: it is failed, not fingerprinted."""
+    from types import SimpleNamespace
+
+    from lakebench.cli._sustained import continuous_result_check
+
+    def qr(name, success, fp):
+        return SimpleNamespace(
+            query=SimpleNamespace(name=name),
+            success=success,
+            result_fingerprint=fp,
+            to_dict=lambda: {"name": name},
+        )
+
+    ok = {"spec": "rf2", "rows": 1, "cols": 1, "exact": "ab"}
+    result = SimpleNamespace(
+        queries=[
+            qr("Q1", True, ok),
+            qr("Q2", True, {"spec": "rf2", "error": "IOException: IO Error"}),
+            qr("Q6", False, None),
+        ]
+    )
+    runner = SimpleNamespace(run_power=lambda **kw: result)
+    record, _ = continuous_result_check(runner)
+    assert record["failed"] == ["Q2", "Q6"]
+
+
+def test_result_check_retries_a_transient_store_error_once_and_records_it():
+    from types import SimpleNamespace
+
+    from lakebench.cli._sustained import continuous_result_check
+
+    ok = {"spec": "rf2", "rows": 1, "cols": 1, "exact": "ab"}
+
+    def qr(name, success, fp=None, err=""):
+        return SimpleNamespace(
+            query=SimpleNamespace(name=name),
+            success=success,
+            result_fingerprint=fp,
+            error_message=err,
+            to_dict=lambda: {"name": name},
+        )
+
+    result = SimpleNamespace(
+        queries=[
+            qr("Q1", True, ok),
+            # Ran, then the fingerprint run lost the S3 connection.
+            qr("Q2", True, {"spec": "rf2", "error": "IO Error: Could not connect to server"}),
+            # The engine pod died (OOM): not transient, not retried.
+            qr("Q6", False, err='unable to upgrade connection: container not found ("duckdb")'),
+        ]
+    )
+    calls = []
+
+    def repeat(query, cache, iterations, timeout):
+        calls.append(query.name)
+        return qr(query.name, True)
+
+    def fingerprint(results, timeout):
+        for r in results:
+            r.result_fingerprint = ok
+
+    runner = SimpleNamespace(
+        run_power=lambda **kw: result, _repeat_query=repeat, fingerprint_results=fingerprint
+    )
+    record, _ = continuous_result_check(runner)
+    assert calls == ["Q2"]
+    assert record["retried"] == ["Q2"]
+    assert record["failed"] == ["Q6"]
+
+
+def test_stream_marker_is_cleared_only_once_the_driver_pod_is_gone(monkeypatch):
+    """A clean stop clears the AML stream's _STARTED marker so a later batch
+    may rebuild silver; while the driver pod still exists it may write, so
+    the marker stays."""
+    from types import SimpleNamespace
+
+    import lakebench.cli._sustained as sus
+    import lakebench.deploy.datagen as dg
+
+    s3 = MagicMock()
+    monkeypatch.setattr(dg, "_s3_client_for", lambda cfg: s3)
+    monkeypatch.setattr(sus, "_STREAM_POD_GONE_WAIT_S", 0)
+    monkeypatch.setattr(sus.time, "sleep", lambda s: None)
+    cfg = MagicMock()
+    cfg.architecture.pipeline.sustained.checkpoint_base = "checkpoints"
+    cfg.platform.storage.s3.buckets.silver = "ns-silver"
+    k8s = MagicMock()
+
+    k8s.get_pod_status.return_value = SimpleNamespace(exists=True)
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is False
+    s3.raw_client.delete_object.assert_not_called()
+
+    k8s.get_pod_status.side_effect = RuntimeError("api down")
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is False
+    s3.raw_client.delete_object.assert_not_called()
+
+    k8s.get_pod_status.side_effect = None
+    k8s.get_pod_status.return_value = SimpleNamespace(exists=False)
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is True
+    s3.raw_client.delete_object.assert_called_once_with(
+        Bucket="ns-silver", Key="checkpoints/silver-stream/_STARTED"
+    )

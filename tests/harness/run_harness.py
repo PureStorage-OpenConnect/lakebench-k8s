@@ -1746,7 +1746,9 @@ class FakeDatagenDeployer:
 
 #: The datagen fleet of the continuous record: both pods reported
 #: (pipeline_benchmark.config_snapshot.datagen_output_rows and _files).
-CONTINUOUS_FLEET = {"rows": 2_478_560, "files": 160}
+#: Continuous datagen's output by the window's end: what bronze took, so the
+#: scenario is a steady-state run (no backlog).
+CONTINUOUS_FLEET = {"rows": 1_858_920, "files": 120}
 
 
 #: The image the fake datagen pods ran, and the resolved id their status
@@ -2103,6 +2105,23 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
         rec.add("Datagen", "stop_previous_datagen")
 
     monkeypatch.setattr(lakebench.deploy.datagen, "stop_previous_datagen", stop_previous_datagen)
+    # The window's end stops continuous datagen with its marker.
+    _real_end = lakebench.deploy.datagen.end_continuous_datagen
+
+    def end_continuous_datagen(*args, **kwargs) -> bool:
+        try:
+            inspect.signature(_real_end).bind(*args, **kwargs)
+        except TypeError as e:
+            raise rec.refuse(f"call the real end_continuous_datagen would refuse: {e}") from None
+        return True
+
+    monkeypatch.setattr(lakebench.deploy.datagen, "end_continuous_datagen", end_continuous_datagen)
+    # An early exit (an error, an interrupt) writes the stop marker alone.
+    monkeypatch.setattr(lakebench.deploy.datagen, "stop_continuous_datagen", lambda cfg: True)
+    # The window opens at datagen's first file in bronze.
+    import lakebench.cli._sustained
+
+    monkeypatch.setattr(lakebench.cli._sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
     # The datagen pods' fleet (a run that generates reads it from its pods).
     import lakebench.metrics.datagen_aggregator
 

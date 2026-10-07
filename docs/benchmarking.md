@@ -81,17 +81,21 @@ differ, so reproduce refuses them).
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. |
+| `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. Above half the window it fails a steady-state run; in a capacity run (`datagen_ahead`, or `datagen.cpu`/`parallelism` set in the config, recorded as `config_snapshot.datagen_offered: user`) it is a warning, since the slowest stage falls behind by design and pace is the score. |
 | `sustained_throughput_rps` | `bronze rows ingested inside the window / arrival_seconds` | Rows/sec entering bronze while data was arriving. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity. |
 | `window_seconds` | window end - window start | Length of the measurement window. |
 | `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
 | `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic, with no better side). |
-| `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
+| `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. With the run's own continuous datagen there is no trickle: `released_rows` = the rows datagen had written one bronze trigger before the window's end, at its mean rate (its total also holds rows written after the window, before its pods saw the stop marker). 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
 | `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up: `ingest_ratio >= 0.95`). Whether the trickle held intake is `experiment.limits.trickle_bound`, below. |
+| `pace_seconds_per_million_rows` | `window_seconds / (silver window rows / 1e6)` | End-to-end pace, lower is better: window seconds per million rows that came through silver. A capacity when `datagen_ahead` is true and `intake_limit` is `bronze_capacity`; otherwise the arrival rate. Gold's lag behind silver is `data_freshness_seconds`. |
+| `bronze_pace_seconds_per_million_rows` | `window_seconds / (bronze window rows / 1e6)` | Bronze's pace, on the same terms. |
+| `backlog_rows` | `datagen_rows - bronze_rows` | Rows the run's continuous datagen wrote by the window's end that bronze had not taken. |
+| `datagen_ahead` | `bronze_rows < 0.95 x datagen_rows` | True: a capacity run (datagen stayed ahead). False: a steady-state run (bronze took everything). Absent with `--skip-generate`. |
 | `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
@@ -280,7 +284,10 @@ architecture:
 Continuous mode does not wait. Its maintenance and compaction run on a
 timer during the stream (`architecture.pipeline.continuous.retention_interval`,
 `architecture.pipeline.continuous.compaction_interval`), and an in-stream benchmark round that
-starts soon after one of them can read slow for the same reason. The
+starts soon after one of them can read slow for the same reason. For AML,
+in-window compaction leaves the tables a stream rewrites every batch or
+tick (the gold tables, and silver's entities, accounts, entity_profiles and
+silver_batch_versions): a rewrite committed under their MERGE fails it. The
 continuous scorecard does not separate those rounds: `in_stream_composite_qph`
 is the median over all rounds and `qph_degradation_pct` compares the first
 and second halves, so settling rounds are included in both. The median
@@ -756,39 +763,40 @@ are excluded.
 gold_ms]` showing per-stage micro-batch processing latency. If one stage has
 significantly higher latency, it is the bottleneck.
 
-**Offered load.** Continuous mode trickles a finite corpus. Datagen writes
-the whole scale's corpus at full speed (one measurement, n=1, on the
-pre-v1.6 generator: 1 TB in 121 s on 44 pods at scale 100,
-run-20260924-201745-cb354f)
-and bronze reads it at a fixed rate: `max_files_per_trigger` files of about
-64 MB per `bronze_trigger_interval`. A run measures sustained throughput and
-freshness at that offered load.
+**Offered load.** In continuous mode the run's datagen generates for the
+whole window: every pod writes flat out until the window ends, when the run
+stops it with the `_corpus/stop` marker. AML writes the 24-month history,
+then successive 24-month periods of the same bank, each with its own answer
+key; Customer360 writes successive time slices. Bronze reads with no
+per-trigger limit. The arrival rate is set by `workload.datagen.parallelism`
+and `workload.datagen.cpu` (about 240 MB/s per 8-core AML pod and 850 MB/s
+per 8-core Customer360 pod, n=1 each, 2026-10-06); `scale` sets the size of
+the data the pipeline works on, not the rate. Unset, they are balanced to
+bronze-ingest (0.7 of its estimated intake, so the pipeline keeps up); the
+autosizer prints the formula and its inputs. The rate a run had is in its
+datagen fleet record. Datagen starts once the streams are running and the
+window opens at its first file.
 
-**Data must keep arriving through the window.** `max_files_per_trigger` is
-unset by default (auto): the run derives the most files per trigger, up to
-50, whose arrival still lasts 1.2 x `run_duration`, from the nominal corpus
-size, and prints the value and the arrival it gives. At the defaults (30 s
-trigger, 1800 s window):
+**Two regimes, one mode.** The record says which one a run was:
 
-| Corpus | Files per trigger | Arrival |
-|---|---|---|
-| c360 scale 1 (~160 files) | 2 | ~2,400 s |
-| c360 scale 10 (~1,600 files) | 22 | ~2,190 s |
-| c360 scale 100 | 50 (the Lakebench-imposed cap) | ~9,600 s |
-| AML scale 1 | 1 | ~4,050 s |
-| AML scale 10 | 18 | ~2,250 s |
+- *Capacity:* datagen stayed ahead, leaving a backlog at the window's end
+  (`datagen_ahead: true`: bronze under 0.95 of datagen's rows) with bronze busy
+  (`intake_limit: bronze_capacity`). The paces
+  (`pace_seconds_per_million_rows` end to end, through silver, and
+  `bronze_pace_seconds_per_million_rows`) are the pipeline's capacity, and
+  the backlog is not a failure. Freshness under that overload measures how
+  far behind the pipeline fell, not a steady-state latency.
+- *Steady state:* bronze took everything datagen wrote
+  (`datagen_ahead: false`). Freshness is the score; the paces are the
+  arrival rate, not a capacity. Use fewer datagen pods or less CPU per pod
+  for this regime.
 
-So the offered load now grows with scale up to 50 files per 30 s (about
-107 MB/s, 25,818 rows/s for c360), where it stays. That ceiling is a
-Lakebench-imposed cap, not an infrastructure limit: at scale 100 the window
-takes about 19% of the corpus, which the scorecard reports as
-`intake_limit: trickle_rate`, not saturation. A config that sets
-`max_files_per_trigger` explicitly to a value that would offer the corpus in
-less time than the window is refused at run start, with the value to set
-(for c360 scale 1 and a 600 s window, 6 or lower). Before this change the
-default was a fixed 50, which offered the c360 scale-1 corpus in about 96 s.
-Whatever the estimate, the continuous gate decides on what the run did (see
-Continuous Gate below).
+A backlog with bronze idle (`intake_limit: below_bronze_capacity`) is a
+stall or a late start, and fails the run. A configured
+`max_files_per_trigger` is a Lakebench cap on intake and is labelled as one.
+With `--skip-generate` bronze reads a finite corpus already in the bucket,
+and the earlier trickle rules apply: unset, the run derives the most files
+per trigger, up to 50, whose arrival lasts 1.2 x `run_duration`.
 
 **Continuous gate.** A continuous run passes only on continuous processing
 inside the measurement window. It is refused before it starts when
@@ -820,11 +828,15 @@ are printed and journaled as they happen and recorded per stream in
 reached RUNNING is recorded as `running_at`.
 
 **Result check.** In-stream rounds read tables still being written, so their
-results are not compared. After a run that passed its gates, the CLI keeps
-the streams running until the whole corpus has reached gold (every datagen
-row in bronze, every bronze row committed by silver, and a gold refresh that
-read silver after its last commit), for at most 1800 s, then stops the
-streams and runs the query set once over the settled tables. A query that
+results are not compared. After a run that passed its gates, the CLI drains
+the pipeline as a production one shuts down: bronze stops at the window's
+end, silver and gold finish the rows bronze took (every one committed by
+silver and a gold refresh that read silver after its last commit), for at
+most 1800 s, then the streams stop and the query set runs once over the
+settled tables. How many rows bronze took depends on the system, so two
+continuous runs' result fingerprints match only when bronze took the same
+rows; the check establishes that the queries succeed over what was ingested.
+With `--skip-generate` the CLI instead waits for the whole corpus. A query that
 fails there fails the run, as in batch. Its result
 fingerprints are the run's results (`continuous.result_check` and the
 experiment block's `results`), the same as a batch run's, so the perf

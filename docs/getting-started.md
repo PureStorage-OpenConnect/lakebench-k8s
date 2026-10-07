@@ -51,15 +51,15 @@ from the default-parallelism column below:
 | Customer 360 | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 8 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 16 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 40 GB | 38 cores / 215 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 59 cores | 309 GB | 38 cores / 282 GB | in always on | 21 cores / 27 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 82 cores | 345 GB | 38 cores / 282 GB | in always on | 44 cores / 63 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 202 cores | 955 GB | 84 cores / 700 GB | in always on | 118 cores / 255 GB | 1,700 Gi | 8 cores / 48 GB |
+| Customer 360 | continuous | 1 | 44 cores | 305 GB | 38 cores / 282 GB | in always on | 6 cores / 23 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 10 | 51 cores | 333 GB | 38 cores / 282 GB | in always on | 13 cores / 51 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 100 | 126 cores | 919 GB | 84 cores / 700 GB | in always on | 42 cores / 219 GB | 1,700 Gi | 8 cores / 48 GB |
 | AML | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 14 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 28 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 80 GB | 38 cores / 215 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 139 cores | 1,023 GB | 118 cores / 990 GB | in always on | 21 cores / 33 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 162 cores | 1,065 GB | 118 cores / 990 GB | in always on | 44 cores / 75 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 340 cores | 2,253 GB | 222 cores / 1,958 GB | in always on | 118 cores / 295 GB | 4,660 Gi | 8 cores / 48 GB |
+| AML | continuous | 1 | 124 cores | 1,016 GB | 118 cores / 990 GB | in always on | 6 cores / 26 GB | 2,300 Gi | 4 cores / 40 GB |
+| AML | continuous | 10 | 131 cores | 1,044 GB | 118 cores / 990 GB | in always on | 13 cores / 54 GB | 2,300 Gi | 4 cores / 40 GB |
+| AML | continuous | 100 | 262 cores | 2,181 GB | 222 cores / 1,958 GB | in always on | 40 cores / 223 GB | 4,660 Gi | 8 cores / 48 GB |
 
 <!-- END GENERATED: sizing-detail -->
 

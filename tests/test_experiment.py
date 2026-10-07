@@ -120,7 +120,8 @@ class TestStamping:
             assert "corpus_role" in e["corpus"]
             assert e["limits"]["w1_max_vertices"] == cfg.architecture.workload.w1_max_vertices
         if mode == "sustained":
-            assert e["limits"]["max_files_per_trigger"] is not None
+            # None: no per-trigger limit under the run's continuous datagen.
+            assert "max_files_per_trigger" in e["limits"]
             assert e["results"]["not_checked"]
         else:
             assert e["results"]["fingerprints"]["Q1_full_aggregation_scan"]["rows"] == 1

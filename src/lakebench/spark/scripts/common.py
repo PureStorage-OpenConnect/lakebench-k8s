@@ -1839,6 +1839,48 @@ def await_stream(spark, query):
     log("Streaming query stopped")
 
 
+def refresh_daily_kpis(silver_df, existing_gold, since_ts):
+    """Daily KPIs for a gold refresh, recomputed only for the dates silver
+    changed on since the last refresh.
+
+    Returns ``(gold, newest_ts, dates)``. With no previous refresh
+    (``existing_gold`` or ``since_ts`` None) every date is computed and
+    ``dates`` is None. Otherwise the dates of rows whose
+    ``silver_processing_timestamp`` is after ``since_ts`` are recomputed from
+    all of silver's rows on them and replace those dates in ``existing_gold``;
+    ``gold`` is None when no row is newer. ``newest_ts`` is taken before the
+    KPIs are, so a row committed in between is newer than it and its date is
+    recomputed next time. Exact for late rows: continuous datagen pods drift
+    apart, so a row can land on a date older than the newest one seen.
+    """
+    from pyspark.sql.functions import col, collect_set
+    from pyspark.sql.functions import max as max_
+
+    ts = col("silver_processing_timestamp")
+    if existing_gold is None or since_ts is None:
+        newest = silver_df.agg(max_(ts).alias("t")).collect()[0]["t"]
+        return (
+            silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations()),
+            newest,
+            None,
+        )
+    row = (
+        silver_df.filter(ts > since_ts)
+        .agg(collect_set("interaction_date").alias("d"), max_(ts).alias("t"))
+        .collect()[0]
+    )
+    dates = list(row["d"] or [])
+    if not dates:
+        return None, since_ts, []
+    kpis = (
+        silver_df.filter(col("interaction_date").isin(dates))
+        .groupBy("interaction_date")
+        .agg(*get_daily_kpi_aggregations())
+    )
+    kept = existing_gold.filter(~col("interaction_date").isin(dates))
+    return kept.unionByName(kpis), row["t"], dates
+
+
 def get_daily_kpi_aggregations():
     """Return the list of aggregation expressions for daily KPIs.
 

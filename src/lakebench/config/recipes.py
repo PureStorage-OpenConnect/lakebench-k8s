@@ -76,7 +76,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
+            "query_engine": {"type": "duckdb"},
         },
     },
     "polaris-iceberg-spark-duckdb": {
@@ -84,7 +84,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
+            "query_engine": {"type": "duckdb"},
         },
     },
     # -- Hive + Delta Lake (v1.2) --

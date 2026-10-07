@@ -757,7 +757,11 @@ def test_continuous_jobs_get_the_cli_run_id_and_window():
     from lakebench.cli._sustained import _streaming_job_env
 
     env = _streaming_job_env("20260925-101010-abcdef", 900)
-    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_S": "900"}
+    assert env == {
+        "LB_RUN_ID": "20260925-101010-abcdef",
+        "LB_CONTINUOUS_WINDOW_S": "900",
+        "LB_GOLD_INCREMENTAL": "true",
+    }
     import inspect
 
     from lakebench.cli import _sustained

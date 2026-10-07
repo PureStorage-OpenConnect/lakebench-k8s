@@ -452,8 +452,7 @@ class ImagesConfig(ConfigModel):
     # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
     # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
     # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
-    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled; cargo pin
-    # cycles.rs::financial_output_is_pinned_to_the_frozen_generator. MODEL_VERSION
+    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled. MODEL_VERSION
     # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
     # registered-look corpora as below.
     # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
@@ -476,23 +475,22 @@ class ImagesConfig(ConfigModel):
     # cargo --locked) after the docker.io repository was wiped. Release
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    # 2a36ae21: the v1.7 release image, built from integrate
-    # 2a36ae2162d0672c8a46173bc70da448cac497ae with LB_BUILD_COMMIT set and
-    # pushed 2026-10-05. Carries forward the five-case byte-compare equality
-    # against 1.6.0 that a592385 produced on 2026-10-03 (same datagen_rs
-    # source on the F0/F1/F2/C0/C2 public-seed cases). It is the v1.7 look
-    # image (docs/internal/aml-protocol.md), so the "disqualified from
-    # registered looks" note above applies to older tags only. The default
-    # names the tag and the digest; the runtime pulls the digest, so a
-    # re-push of the tag cannot move it.
+    # 2a36ae21: the v1.7 release image and v1.7 look image
+    # (sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04);
+    # deleted from docker.io with the repository on 2026-10-06.
+    # 3f4729b6: tagged by the git tree of datagen_rs/ it was built from
+    # (`git rev-parse <commit>:datagen_rs` starts with it; pushed
+    # 2026-10-07). Adds continuous delivery (--deliver-until); batch output
+    # is byte-identical to 4274bb67 on the nine A/B cases. The default names
+    # the tag and the digest; the runtime pulls the digest, so a re-push of
+    # the tag cannot move it.
     datagen: str = (
-        "docker.io/sillidata/lb-datagen:2a36ae21"
-        "@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04"
+        "docker.io/sillidata/lb-datagen:3f4729b6"
+        "@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb"
     )
     """Data generator image, pinned by tag and digest (the digest is what is pulled).
-    Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on
-    the five byte-compare cases; this build adds the held-out seed check, strict
-    argument parsing and per-node corpus markers.
+    In continuous mode it generates until the run window ends: AML as successive
+    24-month periods of the same bank, Customer360 as successive time slices.
     """
     spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
@@ -1318,7 +1316,8 @@ class DuckDBConfig(ConfigModel):
     cores: int = Field(default=2, ge=1)
     """DuckDB CPU cores."""
     memory: str = "4g"
-    """DuckDB memory."""
+    """DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a
+    node with under 24 GiB allocatable)."""
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for DuckDB."""
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
@@ -1413,12 +1412,11 @@ class SustainedConfig(ConfigModel):
         default=None,
         ge=1,
         description=(
-            "Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets "
-            "the offered load. Unset: derived per run so data keeps arriving for about 1.2 x "
-            "`run_duration`, capped at 50 (a Lakebench-imposed cap; 50 files per 30 s is about "
-            "107 MB/s, so an auto-capped ingest rate measures the cap, not the infrastructure). "
-            "An explicit value that would offer the corpus before the window ends is refused at "
-            "run start."
+            "Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no "
+            "limit when the run starts its own datagen, which generates for the whole window. "
+            "With --skip-generate (a finite corpus) unset is derived per run so data keeps "
+            "arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that "
+            "would offer the corpus before the window ends is refused at run start."
         ),
     )
     bronze_target_file_size_mb: int = Field(
@@ -1436,10 +1434,9 @@ class SustainedConfig(ConfigModel):
         ge=10,
         description=(
             "Seconds silver-stream waits for the bronze table to appear before "
-            "it stops the run. Unset (auto): run_duration / 4, floored at 10 s, "
-            "so a short run cannot spend its whole window on the wait. The old "
-            "fixed 1800 was longer than a default run_duration, so the check for "
-            "a stalled bronze-ingest never fired."
+            "it stops the run. Unset (auto): run_duration / 4, floored at 600 s. "
+            "The wait runs before the window opens: datagen starts once the "
+            "streams run, and bronze creates its table with its first batch."
         ),
     )
     gold_target_file_size_mb: int = Field(
@@ -1589,16 +1586,17 @@ class SustainedConfig(ConfigModel):
         return 2 * self.effective_retention_interval(run_duration)
 
     def effective_silver_bronze_wait_seconds(self, run_duration: int | None = None) -> int:
-        """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 10.
+        """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 600.
 
-        A3 (silver-plan): caps the wait for the bronze table so a stream
-        cannot burn its whole window on the wait. The floor keeps the value
-        positive even for a minimum-length run.
+        A3 (silver-plan): caps the wait for the bronze table so a stalled
+        bronze-ingest stops the run. The floor covers datagen's start (it
+        starts once the streams run) and bronze's first batch, all before
+        the window opens.
         """
         if self.silver_bronze_wait_seconds is not None:
             return self.silver_bronze_wait_seconds
         window = self.run_duration if run_duration is None else run_duration
-        return max(10, int(window) // 4)
+        return max(600, int(window) // 4)
 
 
 class ProcessingConfig(ConfigModel):
@@ -2364,6 +2362,10 @@ class TableNamesConfig(ConfigModel):
         default="silver.silver_batch_versions",
         description="Silver sealed-batch marker sidecar (Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes",
     )
+    silver_counterparty_pairs: str = Field(
+        default="silver.counterparty_pairs",
+        description="Silver distinct (originator, beneficiary) pairs (Financial, continuous only): one row per pair, so the stream counts a batch's new counterparties without re-reading the history",
+    )
     gold_alerts: str = Field(
         default="gold.alerts",
         description="Gold alerts table (Financial): namespace.table",
@@ -2415,6 +2417,7 @@ class TableNamesConfig(ConfigModel):
             "LB_FINANCIAL_SILVER_EDGES": self.silver_counterparty_edges,
             "LB_FINANCIAL_SILVER_PROFILES": self.silver_entity_profiles,
             "LB_FINANCIAL_SILVER_BATCH_VERSIONS": self.silver_batch_versions,
+            "LB_FINANCIAL_SILVER_PAIRS": self.silver_counterparty_pairs,
             "LB_FINANCIAL_GOLD_ALERTS": self.gold_alerts,
             "LB_FINANCIAL_GOLD_RISK_SCORES": self.gold_risk_scores,
             "LB_FINANCIAL_GOLD_CLUSTERS": self.gold_entity_clusters,
@@ -2447,6 +2450,7 @@ class TableNamesConfig(ConfigModel):
                     self.silver_counterparty_edges,
                     self.silver_entity_profiles,
                     self.silver_batch_versions,
+                    self.silver_counterparty_pairs,
                 ],
                 "gold": [
                     self.gold_alerts,

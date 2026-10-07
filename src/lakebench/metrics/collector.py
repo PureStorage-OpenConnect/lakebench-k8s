@@ -198,6 +198,9 @@ class StreamingJobMetrics:
     # budget and any override. None when unknown (the profile is used).
     requested_executors: int | None = None
     micro_batch_duration_ms: float = 0.0
+    # Median batch time: one huge batch (bronze's first, with no trigger
+    # limit, takes everything written before the window) does not move it.
+    median_batch_duration_ms: float | None = None
     batch_size: int = 0
     total_batches: int = 0
     total_rows_processed: int = 0
@@ -661,8 +664,29 @@ class PipelineMetrics:
             d["tm_operations"] = self.tm_operations
         if self.c360_correctness is not None:
             d["c360_correctness"] = self.c360_correctness
+        token = ((self.config_snapshot or {}).get("s3") or {}).get("endpoint") or "s3-endpoint"
+        d = _scrub_address_urls(d, str(token))
         d["verdict"] = verdict_from_record(d).to_dict()
         return d
+
+
+#: A URL whose host is an IPv4 literal: what an engine's error message quotes
+#: when an object-store request fails (DuckDB "HTTP GET to 'http://<ip>:80/
+#: <bucket>/...'"). The config snapshot holds only a hash of the endpoint.
+_ADDRESS_URL = re.compile(r"(https?://)(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?")
+
+
+def _scrub_address_urls(value: Any, token: str) -> Any:
+    """*value* with the host of every IPv4-literal URL in its strings
+    replaced by *token* (the snapshot's endpoint hash), so a stored error
+    message does not carry the lab address."""
+    if isinstance(value, str):
+        return _ADDRESS_URL.sub(lambda m: m.group(1) + token, value) if "://" in value else value
+    if isinstance(value, dict):
+        return {k: _scrub_address_urls(v, token) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_address_urls(v, token) for v in value]
+    return value
 
 
 #: The completeness threshold a stored ratio is judged against (the
@@ -831,6 +855,7 @@ class StageMetrics:
 
     # Streaming-specific (None = unmeasurable, 0.0 = measured-and-zero)
     latency_ms: float | None = None
+    median_batch_ms: float | None = None  # streaming: median micro-batch time
     freshness_seconds: float | None = None
     freshness_active_seconds: float | None = None  # all but the trailing idle run
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
@@ -1054,6 +1079,20 @@ class PipelineBenchmark:
     # had released by the window's end (ingest_ratio's denominator when known).
     corpus_ingest_ratio: float | None = None
     released_rows: int | None = None
+    # The run's own continuous datagen, generating for the whole window
+    # (config_snapshot "datagen_continuous"): rows it wrote by the window's
+    # end that bronze had not taken, and whether that left a backlog (bronze
+    # under 0.95 of datagen's rows). With a backlog and bronze busy (intake_limit "bronze_capacity") the paces are
+    # the pipeline's capacity; without one they are datagen's rate. None when
+    # datagen was not continuous or its rows are unknown.
+    backlog_rows: int | None = None
+    datagen_ahead: bool | None = None
+    # Window seconds per million rows taken in inside the window, lower is
+    # better: bronze's, and end to end (rows through silver; gold re-reads
+    # silver, and how far it trails is data_freshness_seconds). None when
+    # unmeasured.
+    bronze_pace_seconds_per_million_rows: float | None = None
+    pace_seconds_per_million_rows: float | None = None
     window_arrival_fraction: float | None = None
     pre_window_rows: int | None = None
     # AML continuous time to detect: from the newest bronze ingest_ts of an
@@ -1320,6 +1359,25 @@ class PipelineBenchmark:
                     datagen_rows,
                     int(self.config_snapshot.get("datagen_output_files") or 0),
                 )
+            dg_elapsed = self.config_snapshot.get("datagen_elapsed_s")
+            if (
+                released is None
+                and windowed
+                and self.config_snapshot.get("datagen_continuous")
+                and isinstance(dg_elapsed, (int, float))
+                and dg_elapsed > 0
+            ):
+                # The run's continuous datagen: the rows it had written one
+                # bronze trigger before the window's end, at its mean rate,
+                # the same one-trigger allowance as the trickle's released
+                # rows. Its total includes the rows it wrote after the
+                # window, before its pods saw the stop marker, and bronze's
+                # last trigger cannot take what lands after it starts.
+                trigger = _interval_seconds(sustained.get("bronze_trigger_interval")) or 0.0
+                released = min(
+                    datagen_rows,
+                    round(datagen_rows / dg_elapsed * max(0.0, run_duration - trigger)),
+                )
             self.released_rows = released
             self.ingest_ratio = (
                 total_bronze_rows / released if released else self.corpus_ingest_ratio
@@ -1339,9 +1397,15 @@ class PipelineBenchmark:
         # limit was not bronze's processing.
         bronze = bronze_stages[0] if bronze_stages else None
         bronze_batches = _window_batches(bronze) if bronze else 0
-        if bronze and bronze.latency_ms and bronze_batches and bronze.elapsed_seconds > 0:
-            self.bronze_busy_fraction = (
-                bronze_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
+        # The median batch time, not the mean: with no trigger limit
+        # bronze's first batch takes everything written before the window,
+        # and that one batch would read a stall inside it as busy.
+        batch_ms = (bronze.median_batch_ms or bronze.latency_ms) if bronze else None
+        if bronze and batch_ms and bronze_batches and bronze.elapsed_seconds > 0:
+            # Capped at 1: a batch that straddles the window's start or end
+            # counts whole, so a bronze busy throughout can read above it.
+            self.bronze_busy_fraction = min(
+                1.0, bronze_batches * batch_ms / 1000.0 / bronze.elapsed_seconds
             )
         if self.ingest_ratio is not None:
             if self.ingest_ratio >= 0.95:
@@ -1349,8 +1413,12 @@ class PipelineBenchmark:
             elif self.bronze_busy_fraction is not None:
                 # Trigger evidence first: a bronze that finishes each batch
                 # inside its trigger is held by the trigger even when busy
-                # for most of it.
-                if bronze is not None and self._bronze_kept_to_trigger(bronze):
+                # for most of it. With no trigger limit nothing held it.
+                if (
+                    bronze is not None
+                    and sustained.get("max_files_per_trigger")
+                    and self._bronze_kept_to_trigger(bronze)
+                ):
                     self.intake_limit = "trickle_rate"
                 elif self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND:
                     self.intake_limit = "bronze_capacity"
@@ -1375,6 +1443,25 @@ class PipelineBenchmark:
             kept = self._silver_kept_pace(silver, silver_committed, total_bronze_rows)
             self.pipeline_saturated = None if kept is None else not kept
 
+        # Continuous datagen: the backlog it left and the window paces.
+        if self.config_snapshot.get("datagen_continuous") and datagen_rows > 0:
+            self.backlog_rows = max(0, datagen_rows - total_bronze_rows)
+            # Ahead: a backlog past the 0.95 ingest line, against the rows
+            # datagen had written one bronze trigger before the window's end
+            # (released_rows, as ingest_ratio), not its total, which includes
+            # what it wrote after the window, before its pods saw the stop
+            # marker.
+            offered = self.released_rows or datagen_rows
+            self.datagen_ahead = total_bronze_rows < 0.95 * offered
+        if windowed and run_duration > 0:
+            silver_window = [s.window_input_rows for s in silver]
+            if window_rows > 0:
+                self.bronze_pace_seconds_per_million_rows = run_duration / (window_rows / 1e6)
+            if silver and all(r is not None for r in silver_window):
+                through = sum(r or 0 for r in silver_window)
+                if through > 0:
+                    self.pace_seconds_per_million_rows = run_duration / (through / 1e6)
+
         # Time to detect (AML continuous): the gold stage's merged histogram.
         gold = next((s for s in streaming if s.stage_name == "gold"), None)
         is_aml = self.config_snapshot.get("workload_schema") == "financial"
@@ -1393,6 +1480,10 @@ class PipelineBenchmark:
         # last commit unlogged) is not drained and keeps its full staleness.
         if self.ingest_ratio is None:
             self.corpus_drained = None
+        elif self.config_snapshot.get("datagen_continuous"):
+            # Datagen generated until the window ended: no finite corpus ran
+            # out early (a datagen that stopped early is the window gate's).
+            self.corpus_drained = False
         else:
             # Exact counts, no slack: a bronze stall that leaves even a few
             # files unread is a stall. Every datagen row in bronze and every
@@ -1692,6 +1783,13 @@ class PipelineBenchmark:
             if self.corpus_ingest_ratio is not None:
                 scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
                 scores["released_rows"] = self.released_rows
+            if self.datagen_ahead is not None:
+                scores["backlog_rows"] = self.backlog_rows
+                scores["datagen_ahead"] = self.datagen_ahead
+            for key in ("pace_seconds_per_million_rows", "bronze_pace_seconds_per_million_rows"):
+                value = getattr(self, key)
+                if value is not None:
+                    scores[key] = round(value, 2)
             if self.window_seconds is not None:
                 scores["window_seconds"] = round(self.window_seconds, 1)
                 scores["arrival_seconds"] = round(self.arrival_seconds or 0.0, 1)
@@ -2190,6 +2288,7 @@ def build_pipeline_benchmark(
             trickle_start_offset_seconds=sj.trickle_start_offset_seconds,
             throughput_rows_per_second=sj.throughput_rps,
             latency_ms=sj.micro_batch_duration_ms or None,
+            median_batch_ms=sj.median_batch_duration_ms,
             freshness_seconds=sj.freshness_seconds or None,
             freshness_active_seconds=sj.freshness_active_seconds,
             trailing_idle_cycles=sj.trailing_idle_cycles,
@@ -2245,6 +2344,13 @@ def build_pipeline_benchmark(
         snapshot["datagen_output_rows"] = datagen_output_rows
     if datagen_output_files > 0:
         snapshot["datagen_output_files"] = datagen_output_files
+    # Continuous datagen's wall time: with its rows it gives the rate, and so
+    # the rows it had written by a point in the window (ingest_ratio).
+    _fleet = datagen_fleet if datagen_fleet is not None else getattr(run, "datagen_fleet", None)
+    if snapshot.get("datagen_continuous") and isinstance(_fleet, dict):
+        _elapsed = _fleet.get("wall_elapsed_max_s")
+        if isinstance(_elapsed, (int, float)) and _elapsed > 0:
+            snapshot["datagen_elapsed_s"] = float(_elapsed)
 
     benchmark = PipelineBenchmark(
         run_id=run.run_id,
@@ -3273,12 +3379,17 @@ class MetricsCollector:
         # Rule slug is ``[A-Za-z0-9_]+`` (matches DEFAULT_DETECTION_RULES
         # plus any future additions) so a stray ``:`` in a message cannot
         # be mis-picked as the rule/alerts separator.
+        # The driver's stdout and log4j share the container log, so a JVM log
+        # line can land on the end of a [detection] line before its newline
+        # ("... elapsed=10.5s26/10/07 07:40:00 INFO BlockManager: ..."). The
+        # token then ends at end of line or where such a timestamp starts.
+        _LINE_END = r"(?=\s*$|\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} )"
         detection_re = re.compile(
             r"\[detection\]\s+"
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"alerts=(?P<n>\d+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s" + _LINE_END,
             re.MULTILINE,
         )
         for m in detection_re.finditer(logs):
@@ -3309,7 +3420,7 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s" + _LINE_END,
             re.MULTILINE,
         )
         for m in skip_re.finditer(logs):
@@ -3583,6 +3694,7 @@ class MetricsCollector:
 
         if batch_durations:
             metrics.micro_batch_duration_ms = (sum(batch_durations) / len(batch_durations)) * 1000
+            metrics.median_batch_duration_ms = statistics.median(batch_durations) * 1000
 
         if freshness_values:
             metrics.freshness_seconds = max(freshness_values)

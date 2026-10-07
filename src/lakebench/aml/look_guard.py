@@ -44,7 +44,7 @@ __all__ = [
 #: The exit path every protected-corpus refusal takes (exit 2).
 PATH = "run.protected_corpus"
 #: The prefix bronze_verify_financial.py gives its protected-corpus refusal
-#: (that frozen script cannot import this module; a test keeps them equal).
+#: (that Spark script cannot import this module; a test keeps them equal).
 REFUSAL_MARKER = "LAKEBENCH-PROTECTED-CORPUS-REFUSED"
 
 

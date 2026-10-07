@@ -28,6 +28,7 @@ from common import (
     env,
     get_daily_kpi_aggregations,
     log,
+    refresh_daily_kpis,
     set_utc_session,
     table_exists,
     write_delta_table,
@@ -73,7 +74,8 @@ except Exception as e:
 _refresh_count = 0
 _read_failures = 0  # consecutive cycles whose silver lookup errored
 _MAX_READ_FAILURES = 5
-_last_max_date = None  # Track last-seen max interaction_date for incremental reads
+# Incremental: the newest silver_processing_timestamp the last refresh took in.
+_last_ts = None
 _last_silver_max_ts = None  # newest silver_processing_timestamp seen last cycle
 _incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
@@ -100,7 +102,7 @@ def refresh_gold(trigger_df, batch_id):
     read and merged into Gold. In full mode, the entire Silver table is
     re-aggregated and Gold is overwritten.
     """
-    global _refresh_count, _last_max_date, _read_failures, _last_silver_max_ts
+    global _refresh_count, _last_ts, _read_failures, _last_silver_max_ts
     _refresh_count += 1
     cycle_start = time.time()
 
@@ -128,93 +130,48 @@ def refresh_gold(trigger_df, batch_id):
     silver_df = spark.table(silver_tbl)
     silver_all = silver_df  # unfiltered, for the freshness/idle check
 
-    # Incremental: only read partitions newer than what we last processed
-    if _incremental and _last_max_date is not None:
-        from pyspark.sql.functions import col
-
-        silver_df = silver_df.filter(col("interaction_date") >= _last_max_date)
-        log(f"Cycle {_refresh_count}: incremental read from {_last_max_date}")
+    def _write(df):
+        gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
+        opts = {"overwriteSchema": "true", "compression": "snappy"}
+        opts.update(_delta_write_props())
+        write_delta_table(
+            spark, df.coalesce(1), gold_tbl, gold_bucket, mode="overwrite", options=opts
+        )
 
     silver_count = silver_df.count()
     if silver_count == 0:
         log(f"Cycle {_refresh_count}: no new Silver data, skipping")
         return
-
+    # The rows of silver this cycle's gold covers (all of it in both modes;
+    # the window gate reads a cycle as new data when this grows).
     log(f"Cycle {_refresh_count}: aggregating {silver_count:,} Silver records")
-
-    # Compute daily KPIs using shared aggregation expressions
-    daily_kpis = (
-        silver_df.groupBy("interaction_date")
-        .agg(*get_daily_kpi_aggregations())
-        .orderBy("interaction_date")
-    )
-
-    kpi_count = daily_kpis.count()
-    log(f"Cycle {_refresh_count}: generated {kpi_count:,} daily KPI records")
-
-    # Track max date for next incremental cycle
     if _incremental:
-        from pyspark.sql.functions import max as max_
-
-        max_date_row = daily_kpis.agg(max_("interaction_date").alias("max_date")).collect()[0]
-        if max_date_row.max_date is not None:
-            _last_max_date = max_date_row.max_date
-            log(f"Cycle {_refresh_count}: updated max date to {_last_max_date}")
-
-    # Coalesce to single file -- Gold is small (daily aggregates)
-    daily_kpis_consolidated = daily_kpis.coalesce(1)
-
-    if _incremental and _refresh_count > 1:
-        # Incremental: merge new KPIs into existing Gold table.
-        # For dates that appear in both old Gold and new aggregation, the new
-        # aggregation wins (it's computed from the latest Silver data).
-        try:
+        # Only the dates silver changed on since the last refresh are
+        # recomputed, from all their rows (common.refresh_daily_kpis).
+        existing_gold = None
+        if _last_ts is not None and table_exists(spark, gold_tbl):
             existing_gold = spark.table(gold_tbl)
-
-            # Keep existing Gold rows for dates NOT in the new batch
-            new_dates = daily_kpis_consolidated.select("interaction_date")
-            merged = (
-                existing_gold.join(new_dates, on="interaction_date", how="left_anti")
-                .unionByName(daily_kpis_consolidated)
-                .orderBy("interaction_date")
+        gold_df, newest_ts, dates = refresh_daily_kpis(silver_df, existing_gold, _last_ts)
+        if gold_df is None:
+            log(f"Cycle {_refresh_count}: no date changed since the last refresh")
+        else:
+            log(
+                f"Cycle {_refresh_count}: "
+                + ("full aggregation" if dates is None else f"recomputed {len(dates)} date(s)")
             )
-            gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
-            opts = {"overwriteSchema": "true", "compression": "snappy"}
-            opts.update(_delta_write_props())
-            write_delta_table(
-                spark,
-                merged.coalesce(1),
-                gold_tbl,
-                gold_bucket,
-                mode="overwrite",
-                options=opts,
-            )
-        except Exception:
-            # Gold table doesn't exist yet -- fall through to overwrite
-            gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
-            opts = {"overwriteSchema": "true", "compression": "snappy"}
-            opts.update(_delta_write_props())
-            write_delta_table(
-                spark,
-                daily_kpis_consolidated,
-                gold_tbl,
-                gold_bucket,
-                mode="overwrite",
-                options=opts,
-            )
+            _write(gold_df)
+            _last_ts = newest_ts
+        kpi_count = spark.table(gold_tbl).count() if table_exists(spark, gold_tbl) else 0
     else:
-        # Full mode or first cycle: overwrite Gold table completely
-        gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
-        opts = {"overwriteSchema": "true", "compression": "snappy"}
-        opts.update(_delta_write_props())
-        write_delta_table(
-            spark,
-            daily_kpis_consolidated,
-            gold_tbl,
-            gold_bucket,
-            mode="overwrite",
-            options=opts,
+        # Full mode: re-aggregate all of silver and overwrite gold.
+        daily_kpis = (
+            silver_df.groupBy("interaction_date")
+            .agg(*get_daily_kpi_aggregations())
+            .orderBy("interaction_date")
         )
+        kpi_count = daily_kpis.count()
+        _write(daily_kpis)
+    log(f"Cycle {_refresh_count}: generated {kpi_count:,} daily KPI records")
 
     # Compute data freshness: how old is the most recent Silver data.
     # A cycle whose newest silver row is the same as the previous cycle's saw
@@ -227,8 +184,7 @@ def refresh_gold(trigger_df, batch_id):
         from pyspark.sql.functions import col, current_timestamp
         from pyspark.sql.functions import max as max_
 
-        # Whole table, not the incremental slice: late rows whose event dates
-        # fall before _last_max_date still move silver and must not read idle.
+        # Whole table, not the incremental slice: any new row moves silver.
         freshness_row = silver_all.agg(
             max_(col("silver_processing_timestamp")).alias("newest_ts"),
             (

@@ -441,37 +441,17 @@ PYTHONPATH=src python3.11 -m tests.fixtures.report_goldens 5105a0
 A second agent reviews the golden diff (`git show -- tests/fixtures/reports`)
 against the record before the change is ready.
 
-## The frozen AML scope
+## The AML pre-registration
 
 The AML measurements are pre-registered
 (`src/lakebench/spark/data/aml/aml_preregistration.json`, protocol in
-[docs/internal/aml-protocol.md](internal/aml-protocol.md)), so the code
-that produces their inputs is frozen until the registered looks are spent:
-
-- the data generator: `datagen_rs/src/`, `datagen_rs/Cargo.lock`, and the
-  image inputs `datagen_rs/Cargo.toml`, `datagen_rs/Dockerfile` and
-  `datagen_rs/entrypoint.py`;
-- the bronze and silver financial scripts in `src/lakebench/spark/scripts/`
-  (`bronze_ingest_financial.py`, `bronze_verify_financial.py`,
-  `silver_build_financial.py`, `silver_stream_financial.py`);
-- `aml_features.py`, `score_financial_reference.py`,
-  `src/lakebench/aml/fidelity_gate.py` and
-  `src/lakebench/aml/reference_score.py`;
-- the pre-registration JSON, the silver DDL in `deploy/financial_ddl.py`
-  and the `REFERENCE_PY_DEPS` pins;
-- every symbol a frozen script imports from a module that is not frozen
-  (in `common.py`, `detection_rules.py`, `tm_operations.py`,
-  `config/datagen_seed.py` and others): an edit to one counts as an edit
-  to a frozen file, while a new helper next to it does not.
-
-At this commit the list is policy, held by review; no CI check enforces it
-yet. A commit that changes a frozen file names its cost in a `Freeze-cost:`
-trailer: `None`, `Parity proof` (the batch and stream parity guards on
-both Spark lines plus their mutation check), `Rebuild` (an output-neutral
-generator image with a byte-compare at a fixed seed), `Re-derive` (the
-calibration and predictions are run again) or `Void` (a new evaluation
-seed is drawn, which only the maintainers decide). Any change to the
-generator's output after the freeze is `Void`.
+[docs/internal/aml-protocol.md](internal/aml-protocol.md)). Its gated
+constants are locked at prereg 3.6.0; changing one is a maintainer decision
+and needs a fresh evaluation seed. Generator and silver code are not frozen:
+a registered look, its calibration and its predictions name one datagen
+image by digest, and their results hold for that image. A change to AML
+generator output needs a new image and a `MODEL_VERSION` bump
+(`datagen_rs/src/model.rs`).
 
 ## Refactoring and shared cluster state
 

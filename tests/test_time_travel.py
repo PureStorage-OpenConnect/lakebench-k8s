@@ -641,7 +641,7 @@ def test_the_step_runs_after_the_scorer_with_the_streams_stopped():
     text = (SRC / "cli" / "_sustained.py").read_text()
     body = text[text.index("def _run_sustained(") :]
     drain = body.index("drain_gold_refresh(")
-    stop = body.index("_stop_streams(k8s, namespace, submitted)")
+    stop = body.index("_stopped_now = _stop_streams(")
     score = body.index("continuous_scoring(\n")
     step = body.index("run_time_travel(\n")
     assert drain < stop < score < step

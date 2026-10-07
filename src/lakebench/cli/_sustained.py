@@ -1468,6 +1468,10 @@ def _run_iceberg_compaction(
     ``live_streams``: continuous jobs are writing. For AML the gold tables
     are then skipped: gold-refresh deletes and rewrites each rule's alerts
     every tick, so a concurrent rewrite conflicts with it and buys nothing.
+    So are the silver tables silver-stream MERGEs into every batch
+    (entities, accounts, entity_profiles, silver_batch_versions): a rewrite
+    committed while a MERGE is planned fails the MERGE ("Missing required
+    files to delete"), and with no driver retries that ends the stream.
 
     - Iceberg: rewrite_data_files / optimize
     - Delta: OPTIMIZE
@@ -1520,7 +1524,16 @@ def _run_iceberg_compaction(
     layers: tuple[str, ...] = ("silver", "gold")
     if live_streams and schema == "financial":
         layers = ("silver",)
-    all_tables = [f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=layers)]
+    names = tables.workload_tables(schema, layers=layers)
+    if live_streams and schema == "financial":
+        merged = {
+            tables.silver_entities,
+            tables.silver_accounts,
+            tables.silver_entity_profiles,
+            tables.silver_batch_versions,
+        }
+        names = [t for t in names if t not in merged]
+    all_tables = [f"{catalog}.{t}" for t in names]
     table_names = _rotated(all_tables, start_at)
 
     import time as _time
@@ -1951,9 +1964,11 @@ def _run_benchmark_round(
         if freshness_result.success:
             value = scalar_from_output(freshness_result.engine, freshness_result.raw_output)
             if value is None:
+                # An empty table reads NULL: gold has no event yet.
                 print_warning(
-                    "Gold event-age probe: could not read a number from the "
-                    f"{freshness_result.engine} output; event age not recorded for this round"
+                    "Gold event-age probe: no number in the "
+                    f"{freshness_result.engine} output (NULL while {target_table} is empty); "
+                    "event age not recorded for this round"
                 )
             else:
                 round_meta.gold_event_age_seconds = value
@@ -2365,7 +2380,14 @@ def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
     anchors it on its first driver's start (persisted in its checkpoint), not
     on the CLI's clock at submit, which precedes the driver-ready wait.
     """
-    return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_S": str(int(run_duration))}
+    # LB_GOLD_INCREMENTAL: c360 gold-refresh recomputes only the dates silver
+    # changed on (common.refresh_daily_kpis, exact), so its cost does not
+    # grow with the corpus. The AML gold job does not read it.
+    return {
+        "LB_RUN_ID": run_id,
+        "LB_CONTINUOUS_WINDOW_S": str(int(run_duration)),
+        "LB_GOLD_INCREMENTAL": "true",
+    }
 
 
 class StreamStartWatch:
@@ -2797,9 +2819,12 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     return drain, tick, reason, problem
 
 
-def _stop_streams(k8s, namespace: str, submitted: list) -> None:
+def _stop_streams(k8s, namespace: str, submitted: list) -> list:
+    """Delete each stream's SparkApplication; returns the entries deleted."""
     console.print("[bold]Stopping continuous jobs...[/bold]")
-    for _job_type, job_name in submitted:
+    stopped = []
+    for entry in submitted:
+        job_name = entry[1]
         try:
             k8s.delete_custom_resource(
                 group="sparkoperator.k8s.io",
@@ -2809,8 +2834,54 @@ def _stop_streams(k8s, namespace: str, submitted: list) -> None:
                 namespace=namespace,
             )
             print_success(f"Stopped: lakebench-{job_name}")
+            stopped.append(entry)
         except Exception as e:  # noqa: BLE001
             print_warning(f"Could not stop {job_name}: {e}")
+    return stopped
+
+
+#: How long a clean stop waits for the silver stream's driver pod to go
+#: before it clears the stream's ``_STARTED`` marker.
+_STREAM_POD_GONE_WAIT_S = 120
+
+
+def _clear_silver_stream_marker(cfg, k8s, namespace: str) -> bool:
+    """Remove the AML silver stream's ``_STARTED`` marker once its driver
+    pod is gone, after a clean stop. The stream clears it from a SIGTERM
+    handler that deleting its SparkApplication does not reliably reach, and
+    a marker left behind makes the next batch silver build refuse the
+    deployment. Kept while the pod may still write or its state is unknown;
+    returns whether it was removed."""
+    from lakebench.deploy.datagen import _s3_client_for
+
+    pod = "lakebench-silver-stream-driver"
+    deadline = time.time() + _STREAM_POD_GONE_WAIT_S
+    try:
+        while k8s.get_pod_status(pod, namespace).exists:
+            if time.time() >= deadline:
+                print_warning(
+                    f"{pod} still exists {_STREAM_POD_GONE_WAIT_S}s after the stop; its "
+                    "stream-active marker is kept, so a batch silver build here needs "
+                    "--force-rebuild"
+                )
+                return False
+            time.sleep(5)
+        key = f"{cfg.architecture.pipeline.sustained.checkpoint_base}/silver-stream/_STARTED"
+        _s3_client_for(cfg).raw_client.delete_object(
+            Bucket=cfg.platform.storage.s3.buckets.silver, Key=key
+        )
+    except Exception as e:  # noqa: BLE001 -- the marker then stays, which is safe
+        print_warning(f"Could not clear the silver stream's stream-active marker: {e}")
+        return False
+    return True
+
+
+def _record_failure(collector, problem: str) -> None:
+    """Name a failed gate in the run's verdict, so a run whose streams ran
+    the whole window does not read as crashed or as its streams failing."""
+    run = collector.current_run
+    if run is not None and problem not in run.failure_reasons:
+        run.failure_reasons.append(problem)
 
 
 def _measure_bucket_sizes(cfg, collector) -> int:
@@ -2912,10 +2983,26 @@ def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenan
     return out
 
 
-def resolve_trickle(cfg, run_duration: int) -> dict:
+#: How long before the window opens a continuous run's datagen starts: it
+#: starts once the streams run, then the run waits up to 300 s for its first
+#: file. Its deadline is this plus the window; the run stops it with the
+#: marker when the window ends, so the deadline only bounds a run that died.
+DATAGEN_LEAD_S = 600
+
+
+def datagen_lead_seconds(cfg) -> int:
+    """Seconds between datagen's start and the window's opening, at most."""
+    return DATAGEN_LEAD_S
+
+
+def resolve_trickle(cfg, run_duration: int, *, continuous_datagen: bool = False) -> dict:
     """The max_files_per_trigger this run uses, and why.
 
-    Unset (auto): the most files per trigger, up to AUTO_TRICKLE_CEILING,
+    With the run's own continuous datagen (``continuous_datagen``), data keeps
+    arriving for the whole window: unset is no limit (value None, source
+    "none"), and a configured value is a Lakebench cap on intake.
+    Otherwise (a finite corpus, --skip-generate), unset (auto): the most
+    files per trigger, up to AUTO_TRICKLE_CEILING,
     whose arrival still lasts AUTO_ARRIVAL_MARGIN x run_duration, from the
     nominal corpus size (scale dimensions / datagen file size). Returns
     {"value", "source" ("auto" | "config"), "arrival_seconds" (estimate or
@@ -2925,6 +3012,13 @@ def resolve_trickle(cfg, run_duration: int) -> dict:
 
     sustained = cfg.architecture.pipeline.sustained
     explicit = sustained.max_files_per_trigger
+    if continuous_datagen:
+        return {
+            "value": explicit,
+            "source": "config" if explicit else "none",
+            "arrival_seconds": None,
+            "problem": None,
+        }
     trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval)
     try:
         dims = cfg.get_scale_dimensions()
@@ -3077,9 +3171,10 @@ SETTLE_MAX_SECONDS = 1800
 
 
 def settle_budget_seconds(cfg, datagen_rows: int, bronze_rows: int, rows_per_s: float) -> float:
-    """Seconds the remaining corpus needs to reach gold: the rows bronze has
-    still to take in at the rate it held, plus two silver triggers and two
-    gold refreshes, plus a minute."""
+    """Seconds the remaining corpus needs to reach gold: the rows the stage
+    still has to take in (*datagen_rows* less *bronze_rows*; a drain passes
+    bronze's rows and silver's committed ones) at the rate it held, plus two
+    silver triggers and two gold refreshes, plus a minute."""
     sustained = cfg.architecture.pipeline.sustained
     remaining = max(0, datagen_rows - bronze_rows)
     intake = remaining / rows_per_s if rows_per_s > 0 else (0.0 if remaining == 0 else float("inf"))
@@ -3098,11 +3193,12 @@ def wait_for_settle(
     budget_s: float,
     poll_s: float = 30.0,
     probe=None,
+    bronze_rows: int | None = None,
 ) -> dict:
     """Keep polling the stream logs until the whole corpus has reached gold
-    (continuous_window.settle_state) or *budget_s* runs out. *probe* runs
-    after every sleep (the namespace read, which raises when it is gone).
-    Returns {"settled", "seconds", "reason"}."""
+    (continuous_window.settle_state; *bronze_rows* for a drain) or *budget_s*
+    runs out. *probe* runs after every sleep (the namespace read, which
+    raises when it is gone). Returns {"settled", "seconds", "reason"}."""
     from lakebench.metrics.continuous_window import settle_state
 
     start = time.time()
@@ -3115,7 +3211,7 @@ def wait_for_settle(
             except Exception:  # noqa: BLE001
                 logs = None
             events[name] = parse_events(logs, name)
-        settled, reason = settle_state(events, datagen_rows)
+        settled, reason = settle_state(events, datagen_rows, bronze_rows=bronze_rows)
         waited = time.time() - start
         if settled:
             return {"settled": True, "seconds": round(waited, 1), "reason": reason}
@@ -3135,6 +3231,7 @@ def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
         result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=True)
     except Exception as e:  # noqa: BLE001
         return {"not_checked": f"the result check could not run: {e}"}, []
+    retried = _retry_transient_results(bench_runner, result.queries)
     queries = [qr.to_dict() for qr in result.queries]
     fps = {qr.query.name: (qr.result_fingerprint if qr.success else None) for qr in result.queries}
     if not fps:
@@ -3144,8 +3241,45 @@ def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
     return {
         "query_set_id": query_set_id(fps),
         "fingerprints": fps,
-        "failed": sorted(n for n, f in fps.items() if f is None),
+        # A query that ran but whose result could not be fingerprinted
+        # ({spec, error}) has no answer to compare, so it failed too.
+        "failed": sorted(
+            n for n, f in fps.items() if f is None or (isinstance(f, dict) and "error" in f)
+        ),
+        **({"retried": retried} if retried else {}),
     }, queries
+
+
+#: An object-store connection that dropped for a moment (the query engine's
+#: S3 client), not a wrong answer or a dead engine: worth one retry.
+_TRANSIENT_QUERY_ERROR = re.compile(
+    r"Could not connect to server|Connection (?:reset|refused)|SlowDown|"
+    r"Service Unavailable|\b503\b|Temporary failure in name resolution"
+)
+
+
+def _retry_transient_results(bench_runner, results: list) -> list[str]:
+    """Re-run, once, each result-check query that failed, or whose result
+    could not be fingerprinted, on a transient object-store connection
+    error, and keep the new result. Returns the queries retried (recorded,
+    so a retried answer is never silent). A dead engine pod is not retried:
+    its error is not transient."""
+    repeat = getattr(bench_runner, "_repeat_query", None)
+    fingerprint = getattr(bench_runner, "fingerprint_results", None)
+    if repeat is None or fingerprint is None:
+        return []
+    retried: list[str] = []
+    for i, r in enumerate(results):
+        fp = r.result_fingerprint if r.success else None
+        text = str(r.error_message or "") if not r.success else str((fp or {}).get("error") or "")
+        if not _TRANSIENT_QUERY_ERROR.search(text):
+            continue
+        again = repeat(r.query, "hot", 1, 300)
+        if again.success:
+            fingerprint([again], 300)
+        results[i] = again
+        retried.append(r.query.name)
+    return retried
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
@@ -3169,6 +3303,22 @@ def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
         int(m) for m in _re.findall(r"cumulative gold\.alerts rows:\s*(\d+)", gold_refresh_logs)
     ]
     return max(counts) if counts else None
+
+
+def _aml_gate_logs(window_logs: str | None, drain: Any) -> tuple[str | None, dict, dict]:
+    """The gold log the AML gate reads, with its TM invariants and statuses
+    by cycle. The drain's log runs past the window's capture to the scored
+    tick, so a drained run reads it; the cycles are the window capture's,
+    then the drain's (the same driver pod: a restart already fails the
+    window)."""
+    from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status
+
+    logs = window_logs
+    if drain is not None and drain.state == "drained" and drain.logs:
+        logs = drain.logs
+    inv = {**parse_tm_invariants(window_logs), **parse_tm_invariants(logs)}
+    status = {**parse_tm_status(window_logs), **parse_tm_status(logs)}
+    return logs, inv, status
 
 
 @restores_handlers
@@ -3219,16 +3369,23 @@ def _run_sustained(
     # The trickle this run offers: derived from the corpus and the window
     # unless the config sets it, and refused when data would stop arriving
     # before the window ends (DESIGN 5: a corpus that keeps arriving).
-    trickle = resolve_trickle(cfg, run_duration)
+    trickle = resolve_trickle(cfg, run_duration, continuous_datagen=not skip_generate)
     if trickle["problem"]:
         print_error(trickle["problem"])
         raise typer.Exit(ExitCode.USAGE)
     cfg.architecture.pipeline.sustained.max_files_per_trigger = trickle["value"]
     _arrival = trickle["arrival_seconds"]
-    print_info(
-        f"Trickle: {trickle['value']} files per bronze trigger ({trickle['source']})"
-        + (f", about {_arrival:.0f}s of arrival for the {run_duration}s window" if _arrival else "")
-    )
+    if trickle["value"] is None:
+        print_info("Bronze intake: no per-trigger limit (datagen generates for the whole window)")
+    else:
+        print_info(
+            f"Trickle: {trickle['value']} files per bronze trigger ({trickle['source']})"
+            + (
+                f", about {_arrival:.0f}s of arrival for the {run_duration}s window"
+                if _arrival
+                else ""
+            )
+        )
 
     # Maintenance inside the window (DESIGN 5: continuous mode includes
     # periodic maintenance). Resolved values are written back so the config
@@ -3280,6 +3437,14 @@ def _run_sustained(
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous", config_path=config_file)
+    # This run's datagen generates for the whole window: what it wrote by the
+    # window's end is the offered load (metrics/collector.py backlog_rows).
+    config_snapshot["datagen_continuous"] = not skip_generate
+    # "user": the config set datagen.cpu or parallelism, so the run offers
+    # the load it chose (a capacity run) instead of the pipeline balance.
+    if not skip_generate:
+        _dg_set = {"cpu", "parallelism"} & cfg.architecture.workload.datagen.model_fields_set
+        config_snapshot["datagen_offered"] = "user" if _dg_set else "balanced"
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
     collector.record_preflight(preflight)
@@ -3308,6 +3473,11 @@ def _run_sustained(
     # any early exit, so an error or Ctrl-C never leaves them running.
     submitted: list = []
     streams_stopped = False
+    # Streams stopped before the others: bronze, at a drain's start.
+    _stopped_early: set[str] = set()
+    # This run's continuous datagen, until its stop marker is written: the
+    # window's end writes it, and the finally block on any early exit.
+    _datagen_live = False
     k8s = None
     _total_s3_objects: int | None = None
     # The gold-refresh drain at window end (financial only); None
@@ -3427,7 +3597,7 @@ def _run_sustained(
         # the continuous jobs, which consume the same prefix as it lands.
         # Skipping is only sensible when bronze is already being populated by
         # another process; otherwise the continuous stages have no input.
-        engine = DeploymentEngine(cfg)
+        engine = DeploymentEngine(cfg, continuous=True)
         # Every continuous run starts clean; see _reset_continuous_state, and
         # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
         # bronze_verify LB_CONTINUOUS_RESET (c360).
@@ -3499,34 +3669,7 @@ def _run_sustained(
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
         else:
-            _stage = "datagen"
-            console.print()
-            console.print("[bold]Starting datagen...[/bold]")
-            datagen = DatagenDeployer(engine, continuous=True, window_seconds=run_duration)
-            _interrupt.creating("Job", "lakebench-datagen")
-            datagen_result = datagen.deploy()
-            if datagen_result.status != DeploymentStatus.SUCCESS:
-                _interrupt.not_created("Job", "lakebench-datagen")
-                print_error(f"Failed to start datagen: {datagen_result.message}")
-                pipeline_success = False
-                # A refusal (stale bronze, live datagen pods) exits 3.
-                from lakebench.cli._exit import refused_result_code
-
-                raise typer.Exit(refused_result_code([datagen_result]) or ExitCode.FAILED)
-            _interrupt.datagen_created()
-            print_success("Datagen started (continuous mode)")
-            # Only when this run started datagen: --skip-generate journalled
-            # a datagen start that never happened.
-            _journal_safe(
-                j.record,
-                EventType.GENERATE_START,
-                message="Datagen started for continuous pipeline",
-                details={
-                    "scale": dims.scale,
-                    "parallelism": cfg.architecture.workload.datagen.parallelism,
-                    "target_gb": round(dims.approx_bronze_gb, 1),
-                },
-            )
+            print_info("Datagen starts once the streams are running")
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
 
@@ -3534,25 +3677,14 @@ def _run_sustained(
         # exist before bronze_ingest_financial starts -- the streaming
         # source cannot infer a schema from parquet files, so it hard-
         # exits with `sys.exit(2)` when the table is missing. Only
-        # bronze_verify_financial creates the table (with
-        # LB_REGISTER_TABLE=1); nothing else in the sustained path
-        # writes it. Run one bronze-verify pass here so the streaming
-        # jobs have a target to write to. C360 uses `bronze_ingest.py`
-        # which does not have this dependency, so we scope the
-        # preflight to workload.schema=financial.
-        #
-        # Ordering is intentional: bronze_verify_financial's schema
-        # inference calls ``spark.read.parquet(prefix)`` which fails
-        # with AnalysisException on an empty prefix, so we start
-        # datagen first and poll for the first parquet to land before
-        # submitting bronze-verify. Adversarial-review finding: without
-        # this ordering the preflight hard-fails on the first ever
-        # sustained deploy of a fresh bronze bucket.
+        # bronze_verify_financial creates the table; nothing else in the
+        # sustained path writes it. Run one bronze-verify pass here so the
+        # streaming jobs have a target to write to. It runs before datagen
+        # starts and creates bronze from the generator's schema
+        # (pacs008_schema.json), so it needs no data. C360 uses
+        # `bronze_ingest.py`, which infers its schema from the first file.
         if cfg.architecture.workload.schema_type.value == "financial":
             console.print()
-            print_info("Waiting for first parquet to land in bronze before preflight...")
-            _wait_for_bronze_data(cfg, timeout_seconds=300)
-
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
             _stage = "preflight"
             _interrupt.creating("SparkApplication", "lakebench-bronze-verify")
@@ -3611,9 +3743,8 @@ def _run_sustained(
             # c360: a batch run, or an earlier continuous run, leaves
             # bronze_raw, silver and gold full. The checkpoints were deleted
             # above, and silver-stream refuses a fresh checkpoint over a full
-            # table, so drop the tables before any stream starts. Unlike the
-            # AML preflight this needs no schema, so it does not wait for
-            # datagen; datagen keeps writing while it runs.
+            # table, so drop the tables before any stream starts. It needs
+            # no schema, and datagen has not started yet.
             _reset_timeout = aml_bronze_verify_timeout_budget(
                 cfg.architecture.workload.datagen.get_effective_scale()
             )
@@ -3624,17 +3755,21 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
 
-        # The corpus is finite and usually written within minutes; a finished
-        # datagen Job holds no cores, so the streaming budget stops reserving
-        # them. Wait a bounded time for it so the executor counts do
-        # not depend on a race with one API read. Unfinished or unknown keeps
-        # the reservation, so the streams never over-commit the cluster.
-        job_manager.datagen_running = not _datagen_released(
-            cfg.get_namespace(), deployed_here=not skip_generate
-        )
-        if not job_manager.datagen_running:
-            # Finished (or gone): nothing of it to stop on an interrupt.
-            _interrupt.finished("Job", "lakebench-datagen")
+        # This run's datagen generates for the whole window, so the streams
+        # are sized with its cores reserved. With --skip-generate another
+        # writer's Job may have finished: a finished Job holds no cores, and
+        # unfinished or unknown keeps the reservation, so the streams never
+        # over-commit the cluster.
+        if skip_generate:
+            job_manager.datagen_running = not _datagen_released(
+                cfg.get_namespace(), deployed_here=False
+            )
+            if not job_manager.datagen_running:
+                # Finished (or gone): nothing of it to stop on an interrupt.
+                _interrupt.finished("Job", "lakebench-datagen")
+        else:
+            # Started below, once the streams run; reserved from now.
+            job_manager.datagen_running = True
 
         # Launch all streaming jobs concurrently
         _stage = "streams-start"
@@ -3736,6 +3871,46 @@ def _run_sustained(
             at="streams running",
             apps={f"lakebench-{n}" for _, n in submitted},
         )
+        if not skip_generate:
+            # Datagen starts now, with every stream running: bronze takes
+            # files as they land instead of one batch of everything written
+            # during setup. The window opens once the first file is there.
+            _stage = "datagen"
+            console.print()
+            console.print("[bold]Starting datagen...[/bold]")
+            datagen = DatagenDeployer(
+                engine,
+                continuous=True,
+                window_seconds=run_duration,
+                lead_seconds=datagen_lead_seconds(cfg),
+            )
+            _interrupt.creating("Job", "lakebench-datagen")
+            datagen_result = datagen.deploy()
+            if datagen_result.status != DeploymentStatus.SUCCESS:
+                _interrupt.not_created("Job", "lakebench-datagen")
+                print_error(f"Failed to start datagen: {datagen_result.message}")
+                pipeline_success = False
+                # A refusal (stale bronze, live datagen pods) exits 3.
+                from lakebench.cli._exit import refused_result_code
+
+                raise typer.Exit(refused_result_code([datagen_result]) or ExitCode.FAILED)
+            _interrupt.datagen_created()
+            _datagen_live = True
+            print_success("Datagen started (continuous mode)")
+            # Only when this run started datagen: --skip-generate journalled
+            # a datagen start that never happened.
+            _journal_safe(
+                j.record,
+                EventType.GENERATE_START,
+                message="Datagen started for continuous pipeline",
+                details={
+                    "scale": dims.scale,
+                    "parallelism": cfg.architecture.workload.datagen.parallelism,
+                    "target_gb": round(dims.approx_bronze_gb, 1),
+                },
+            )
+            print_info("Waiting for datagen's first file...")
+            _wait_for_bronze_data(cfg, timeout_seconds=300)
         # The window in cluster time (pod log clocks), not this host's.
         clock_offset = cluster_clock_offset_seconds()
         from datetime import timedelta as _td
@@ -4061,6 +4236,16 @@ def _run_sustained(
 
         window_end = utc_naive(datetime.now(timezone.utc)) + _shift
         _stage = "collect"
+        if _datagen_live:
+            # Datagen ends with the window. Its pods stop between files; the
+            # fleet record below reads them once they have exited.
+            from lakebench.deploy.datagen import end_continuous_datagen
+
+            _datagen_live = not end_continuous_datagen(cfg)
+            if not _datagen_live:
+                # Its pods have stopped: an interrupt from here leaves the Job
+                # (and the pod logs the fleet record reads).
+                _interrupt.finished("Job", "lakebench-datagen")
         window_seconds = (window_end - window_start).total_seconds()
         # A stream that died or restarted inside the window did not process
         # continuously.
@@ -4180,7 +4365,11 @@ def _run_sustained(
                 sm.running_at = watch.running_at
                 sm.submission_failures = list(watch.failures)
             parsed[job_name] = sm
-        window_problems.extend(window_gate_problems(window_stats_by_job, window_seconds))
+        window_problems.extend(
+            window_gate_problems(
+                window_stats_by_job, window_seconds, continuous_datagen=not skip_generate
+            )
+        )
         # The verdict names what failed instead of "crashed or was
         # interrupted".
         if collector.current_run is not None:
@@ -4261,7 +4450,13 @@ def _run_sustained(
         # micro-batches add files.
         _total_s3_objects = _measure_bucket_sizes(cfg, collector)
         if bench_runner is None:
-            result_check = {"not_checked": "no benchmark (--skip-benchmark)"}
+            result_check = {
+                "not_checked": (
+                    "no query engine in this recipe"
+                    if cfg.architecture.query_engine.type.value == "none"
+                    else "no benchmark (--skip-benchmark)"
+                )
+            }
         elif not pipeline_success:
             result_check = {"not_checked": "the run failed its gates"}
         elif cfg.architecture.workload.schema_type.value == "financial":
@@ -4271,6 +4466,68 @@ def _run_sustained(
                     "relative to arrival, so they are not a function of the corpus alone"
                 )
             }
+        elif not skip_generate:
+            # Drain at shutdown: this run's datagen generated for the whole
+            # window and was stopped with it, so the corpus is what bronze
+            # took by then. Bronze stops; silver and gold finish those rows.
+            _bronze = parsed.get("bronze-ingest")
+            _silver = parsed.get("silver-stream")
+            _b_rows = _bronze.total_rows_processed if _bronze is not None else 0
+            _s_done = (_silver.committed_rows or 0) if _silver is not None else 0
+            _s_rps = (
+                (_silver.window_input_rows or 0) / window_seconds
+                if _silver is not None and window_seconds > 0
+                else 0.0
+            )
+            _need = settle_budget_seconds(cfg, _b_rows, _s_done, _s_rps)
+            if _b_rows <= 0:
+                result_check = {"not_checked": "bronze took no rows, so there is nothing to drain"}
+            elif _need > SETTLE_MAX_SECONDS:
+                result_check = {
+                    "not_checked": (
+                        f"silver needs about {_need:,.0f}s to finish the rows bronze took, over "
+                        f"the {SETTLE_MAX_SECONDS}s settle limit"
+                    )
+                }
+                settle = {"settled": False, "reason": result_check["not_checked"]}
+            else:
+                _drain_stop = [s for s in submitted if s[1] == "bronze-ingest"]
+                # Bronze kept writing after the window: its rows as it stops.
+                try:
+                    _b_log = monitor._get_driver_logs("lakebench-bronze-ingest", tail_lines=None)
+                except Exception:  # noqa: BLE001 -- the window's count stands
+                    _b_log = None
+                _b_now = sum(
+                    e.rows or 0 for e in parse_events(_b_log, "bronze-ingest") if e.kind == "write"
+                )
+                if _b_now > _b_rows:
+                    _need += (_b_now - _b_rows) / _s_rps if _s_rps > 0 else 0.0
+                    _b_rows = _b_now
+                # By name: first make sure the namespace is still this run's.
+                _ns_watch.check(time.time() - start)
+                for _job_type, job_name in _stop_streams(k8s, namespace, _drain_stop):
+                    _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
+                    _stopped_early.add(job_name)
+                print_info(
+                    f"Draining: bronze stopped at {_b_rows:,} rows; silver and gold finish "
+                    f"them for the result check (up to {_need:.0f}s, not scored)..."
+                )
+                settle = wait_for_settle(
+                    monitor,
+                    [n for _, n in submitted if n not in _stopped_early],
+                    0,
+                    _need,
+                    probe=lambda: _ns_watch.check(time.time() - start),
+                    bronze_rows=_b_rows,
+                )
+                if settle["settled"]:
+                    print_success(f"Bronze's rows settled in gold after {settle['seconds']:.0f}s")
+                else:
+                    result_check = {"not_checked": f"the drain did not settle: {settle['reason']}"}
+                    print_warning(
+                        f"Result check skipped: {result_check['not_checked']}. The run's "
+                        "results are not established, so it cannot be compared."
+                    )
         elif _datagen_output_rows <= 0:
             result_check = {"not_checked": "datagen row count not measured, so settling is unknown"}
         else:
@@ -4334,6 +4591,7 @@ def _run_sustained(
             )
             if _drain_problem:
                 print_error(_drain_problem)
+                _record_failure(collector, _drain_problem)
                 pipeline_success = False
 
         # Stop streaming jobs. By name: so first make sure the namespace is
@@ -4345,8 +4603,18 @@ def _run_sustained(
         collector.observe_images(
             namespace, at="before stop", apps={f"lakebench-{n}" for _, n in submitted}
         )
-        _stop_streams(k8s, namespace, submitted)
+        _stopped_now = _stop_streams(
+            k8s, namespace, [s for s in submitted if s[1] not in _stopped_early]
+        )
         streams_stopped = True
+        if (
+            cfg.architecture.workload.schema_type.value == "financial"
+            and not window_problems
+            and any(n == "silver-stream" for _, n in _stopped_now)
+        ):
+            # A clean stop: the stream is not mid-write, so a later batch
+            # run on this deployment may rebuild silver.
+            _clear_silver_stream_marker(cfg, k8s, namespace)
         if _driver_log_capturer is not None:
             _driver_log_capturer.close()
             _driver_log_capturer = None
@@ -4371,6 +4639,7 @@ def _run_sustained(
 
                 for problem in _benchmark_gate_problems(cfg, _check_queries, check_empty=True):
                     print_error(f"Result check: {problem}")
+                    _record_failure(collector, f"Result check: {problem}")
                     pipeline_success = False
             if result_check.get("fingerprints"):
                 _n = len(result_check["fingerprints"])
@@ -4403,13 +4672,14 @@ def _run_sustained(
         # possible false-fail if driver-log capture times out on a very long
         # run, which is preferred over silently passing an unverifiable run.
         if cfg.architecture.workload.schema_type.value == "financial":
-            gold_logs = driver_logs.get("gold-refresh")
+            gold_logs, _inv, _tm_status = _aml_gate_logs(driver_logs.get("gold-refresh"), _drain)
             alert_count = _aml_cumulative_alerts(gold_logs)
             if gold_logs is None:
                 print_error(
                     "AML continuous gate: no gold-refresh driver logs captured; "
                     "cannot confirm detection ran. Marking FAILURE."
                 )
+                _record_failure(collector, "AML continuous gate: no gold-refresh driver log")
                 pipeline_success = False
             elif alert_count is None:
                 print_error(
@@ -4417,6 +4687,7 @@ def _run_sustained(
                     "activity (no '[detection] cumulative gold.alerts rows:' line). "
                     "Detection did not run. Marking FAILURE."
                 )
+                _record_failure(collector, "AML continuous gate: detection did not run")
                 pipeline_success = False
             elif alert_count == 0:
                 print_error(
@@ -4425,6 +4696,7 @@ def _run_sustained(
                     "rule errored. Marking FAILURE (a real continuous run must "
                     "detect something)."
                 )
+                _record_failure(collector, "AML continuous gate: detection produced 0 alerts")
                 pipeline_success = False
             else:
                 print_success(
@@ -4436,17 +4708,11 @@ def _run_sustained(
             # run (no manifest within the window, an error) is reported as
             # not run, and a missing log as unknown, as in batch.
             from lakebench.cli._run import _report_tm_verdict
-            from lakebench.metrics.tm_ops import (
-                parse_tm_invariants,
-                parse_tm_ops,
-                parse_tm_status,
-                tm_verdict,
-            )
+            from lakebench.metrics.tm_ops import parse_tm_ops, tm_verdict
 
-            _inv = parse_tm_invariants(gold_logs)
             _tm = tm_verdict(
                 _inv,
-                parse_tm_status(gold_logs),
+                _tm_status,
                 enabled=cfg.architecture.workload.tm_operations.enabled,
                 logs_captured=gold_logs is not None,
                 continuous=True,
@@ -4458,6 +4724,8 @@ def _run_sustained(
             if collector.current_run is not None:
                 collector.current_run.tm_operations = _tm
             if _report_tm_verdict(_tm, "AML continuous gate"):
+                for _problem in _tm.get("problems") or []:
+                    _record_failure(collector, _problem)
                 pipeline_success = False
 
         # c360 honest continuous gate (AML has its own above).
@@ -4472,6 +4740,7 @@ def _run_sustained(
                     )
             for _problem in _c360_continuous_gate_problems(_rows_by_job):
                 print_error(_problem)
+                _record_failure(collector, _problem)
                 pipeline_success = False
 
         # Record streaming metrics (from pre-captured driver logs)
@@ -4510,7 +4779,9 @@ def _run_sustained(
             # The measured window, not the configured run_duration.
             streaming_metrics.elapsed_seconds = window_seconds
             streaming_metrics.requested_executors = requested_executors.get(job_name)
-            streaming_metrics.success = pipeline_success
+            # The stream's own outcome: it ran the window without a window
+            # problem. A failed gate is named in the verdict by itself.
+            streaming_metrics.success = not window_problems
             _rows = streaming_metrics.window_input_rows
             if streaming_metrics.elapsed_seconds > 0 and _rows:
                 streaming_metrics.throughput_rps = _rows / streaming_metrics.elapsed_seconds
@@ -4556,12 +4827,8 @@ def _run_sustained(
                                 print_warning(f"Round {idx}: {name} returned no rows")
                         for problem in _benchmark_gate_problems(cfg, rest, check_empty=final):
                             print_error(f"Round {idx}: {problem}")
+                            _record_failure(collector, f"Round {idx}: {problem}")
                             pipeline_success = False
-                    if not pipeline_success and collector.current_run:
-                        # The stage records were written before this gate;
-                        # keep them consistent with the run's verdict.
-                        for sm in collector.current_run.streaming:
-                            sm.success = False
             except Exception as e:
                 print_warning(f"Benchmark aggregation failed: {e}")
 
@@ -4730,7 +4997,13 @@ def _run_sustained(
             pipeline_success,
         )
         if submitted and not streams_stopped and k8s is not None:
-            _stop_streams(k8s, cfg.get_namespace(), submitted)
+            _stop_streams(
+                k8s, cfg.get_namespace(), [s for s in submitted if s[1] not in _stopped_early]
+            )
+        if _datagen_live:
+            from lakebench.deploy.datagen import stop_continuous_datagen
+
+            stop_continuous_datagen(cfg)
         if _driver_log_capturer is not None:
             _driver_log_capturer.close()
             _driver_log_capturer = None
@@ -4801,6 +5074,21 @@ def _run_sustained(
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s continuous"
                             f"{trickle_note(run_metrics)}"
                             f" | {latency_str}ms latency (b/s/g)"
+                        )
+                    if pb.pace_seconds_per_million_rows is not None:
+                        if pb.datagen_ahead is None:
+                            _regime = "regime unknown"
+                        elif not pb.datagen_ahead:
+                            _regime = "steady state: bronze took everything datagen wrote"
+                        elif pb.intake_limit == "bronze_capacity":
+                            _regime = "capacity: datagen stayed ahead of a busy bronze"
+                        else:
+                            _regime = "backlog with bronze not at capacity: not a capacity"
+                        _bp = pb.bronze_pace_seconds_per_million_rows
+                        print_info(
+                            f"Pace: {pb.pace_seconds_per_million_rows:,.1f} s/M rows end to end"
+                            + (f", bronze {_bp:,.1f} s/M rows" if _bp is not None else "")
+                            + f" ({_regime})"
                         )
                     if pb.corpus_drained:
                         _frac = pb.window_arrival_fraction

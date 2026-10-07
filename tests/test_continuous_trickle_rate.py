@@ -362,7 +362,8 @@ def test_report_still_fails_a_stalled_run():
     gen = ReportGenerator(metrics_dir="/tmp/unused-rg")
     stalled = _live_s100(bronze_rows=40 * 774_550, bronze_batches=40)
     _, reasons, _ = gen._compute_overall_status(_metrics(stalled))
-    assert any("pipeline saturated" in r for r in reasons)
+    # A stall leaves bronze idle: named as such, not as saturation.
+    assert any("Ingest ratio" in r and "without being at capacity" in r for r in reasons), reasons
     silver_behind = _live_s100(silver_committed=40_000_000)
     _, reasons, _ = gen._compute_overall_status(_metrics(silver_behind))
     assert any("silver did not keep pace" in r for r in reasons)

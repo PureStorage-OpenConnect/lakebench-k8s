@@ -3182,8 +3182,9 @@ class SparkJobManager:
                     {"name": "CHECKPOINT_LOCATION", "value": checkpoint_location},
                     {
                         "name": "MAX_FILES_PER_TRIGGER",
-                        # Resolved by cli/_sustained.resolve_trickle before submit.
-                        "value": str(sustained.max_files_per_trigger or 50),
+                        # Resolved by cli/_sustained.resolve_trickle before
+                        # submit; None (no limit) is 0.
+                        "value": str(sustained.max_files_per_trigger or 0),
                     },
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
@@ -3221,8 +3222,8 @@ class SparkJobManager:
                             },
                             {
                                 "name": "LB_FINANCIAL_BRONZE_MAX_FILES",
-                                # Resolved by cli/_sustained.resolve_trickle before submit.
-                                "value": str(sustained.max_files_per_trigger or 50),
+                                # Resolved by resolve_trickle; None (no limit) is 0.
+                                "value": str(sustained.max_files_per_trigger or 0),
                             },
                             {
                                 "name": "LB_FINANCIAL_BRONZE_TRIGGER_S",

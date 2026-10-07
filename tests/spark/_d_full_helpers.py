@@ -202,13 +202,13 @@ def build_spark(work_dir, jars):
 
 def bootstrap_catalog(spark):
     """Create the silver namespace and every table ``_merge_batch`` writes:
-    the trimmed copies above, plus silver.entity_profiles and
-    silver.silver_batch_versions from the product's own DDL (the stream
-    maintains both on every micro-batch)."""
+    the trimmed copies above, plus silver.entity_profiles,
+    silver.counterparty_pairs and silver.silver_batch_versions from the
+    product's own DDL (the stream maintains them on every micro-batch)."""
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl in (TXNS_DDL, EDGES_DDL, STATEMENTS_DDL, ACCOUNTS_DDL, ENTITIES_DDL):
         spark.sql(ddl)
-    for ddl in product_ddls("SILVER_PROFILES", "SILVER_BATCH_VERSIONS"):
+    for ddl in product_ddls("SILVER_PROFILES", "SILVER_PAIRS", "SILVER_BATCH_VERSIONS"):
         spark.sql(ddl)
 
 
@@ -219,7 +219,11 @@ def product_ddls(*names):
     catalog-qualified table name is swapped for lh's."""
     import silver_build_financial as sbf
 
-    ddl_attr = {"SILVER_PROFILES": "DDL_PROFILES", "SILVER_BATCH_VERSIONS": "DDL_BATCH_VERSIONS"}
+    ddl_attr = {
+        "SILVER_PROFILES": "DDL_PROFILES",
+        "SILVER_PAIRS": "DDL_PAIRS",
+        "SILVER_BATCH_VERSIONS": "DDL_BATCH_VERSIONS",
+    }
     out = []
     for name in names:
         table = getattr(sbf, name)

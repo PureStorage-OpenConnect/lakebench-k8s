@@ -364,7 +364,7 @@ def main(argv=None) -> int:
         choices=["calibration", "evaluation", "robustness"],
         default=None,
         help="this is the registered gate run for the role: required to score the "
-        "evaluation or robustness seed (each is looked at once, after the freeze); the "
+        "evaluation or robustness seed (each is looked at once); the "
         "report records the look. Spent seeds are always refused",
     )
     ap.add_argument(

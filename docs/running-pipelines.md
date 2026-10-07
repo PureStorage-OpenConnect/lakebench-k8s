@@ -210,25 +210,32 @@ bronze-ingest + silver-stream + gold-refresh  (concurrent)
 - **silver-stream** -- Reads the bronze Iceberg table as a streaming source,
   applies silver transforms, writes to the silver Iceberg table.
 - **gold-refresh** -- Periodically refreshes the gold aggregation table from
-  the silver table.
+  the silver table. Customer 360 recomputes only the dates silver changed on
+  since the last refresh, so a refresh costs the same an hour or a day in.
 
-Datagen starts with the streaming jobs and writes the scale's whole corpus
-at full speed (about 2 minutes for 1 TB at scale 100). This is automatic -- no
+Datagen starts once the three streaming jobs are running, and the window
+opens at its first file. It generates for the whole window: every pod
+writes flat out until the window ends, when the run stops it
+(AML: the 24-month history, then successive 24-month periods of the same
+bank; Customer360: successive time slices). This is automatic -- no
 `--generate` flag is needed. That flag only applies to batch mode.
 
-Bronze reads that corpus as a trickle: at most `max_files_per_trigger` files
-per `bronze_trigger_interval`. That rate is the offered load. By default it is
-derived per run so the corpus keeps arriving for about 1.2 x the window
-(c360 scale 1: 2 files per 30 s, about 2,400 s of arrival; scale 10: 22
-files, about 2,190 s), capped at 50 files per 30 s (about 107 MB/s; a Lakebench-imposed cap, so
-an auto-capped rate measures the cap, not the infrastructure). At the
-cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
-corpus is not a failure: a run the trickle held is recorded in
-`experiment.limits.trickle_bound`, its throughput is labelled the offered
-load, and the scorecard reads `intake_limit: none` (bronze kept up with what
-was released). `intake_limit: trickle_rate` and `corpus_drain_seconds` appear
-when the released rows are unknown or bronze took under 0.95 of them. See
-[Scoring and Benchmarking](benchmarking.md#continuous-mode).
+Bronze reads with no per-trigger limit. The arrival rate is set by
+`workload.datagen.parallelism` and `workload.datagen.cpu`, not by `scale`.
+Unset, they are balanced to the slowest stage with a measured rate: 0.7 x
+stage cores x stage MB/s per core / datagen MB/s per core, in pods of at
+most 8 cores. The rates are n=1 estimates in MB of datagen's files per core:
+AML datagen 31, bronze 6.3, silver 1.4 (silver bounds AML); Customer360
+datagen 105, bronze 65 (its silver kept pace, so it has no measured limit).
+The run prints which stage it balanced to. Above bronze's capacity each
+batch takes in more than the last until one fills the window, and the run
+fails saying so:
+with datagen ahead of the pipeline the run measures its capacity
+(`datagen_ahead: true`, scored by pace in seconds per million rows); with
+fewer pods the pipeline keeps up and the run is a steady-state one, scored
+by freshness. See [Scoring and Benchmarking](benchmarking.md#continuous-mode).
+With `--skip-generate` bronze reads a finite corpus already in the bucket as
+a trickle (`max_files_per_trigger`, derived per run when unset).
 
 The measurement window opens when all three streams are running and lasts
 the configured duration (default: 1800 seconds / 30 minutes). A stream whose
@@ -279,7 +286,7 @@ architecture:
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
       run_duration: 1800              # 30 minutes
-      # max_files_per_trigger: unset   # auto: arrival lasts ~1.2 x run_duration
+      # max_files_per_trigger: unset   # no limit while datagen generates
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Seconds between in-stream rounds
       benchmark_warmup: 300           # Seconds before first round
@@ -298,7 +305,7 @@ lakebench run my-config.yaml --continuous --duration 3600
 | `bronze_trigger_interval` | 30s | How often bronze checks for new files. Lower = fresher data, higher CPU. | Reduce to 10-15s if freshness is critical. Increase to 60s+ for large scales where each batch is already large. |
 | `silver_trigger_interval` | 60s | How often silver reads new bronze rows. Lower = fresher silver, more micro-batches. | Keep at 2x bronze interval. Reducing below bronze interval wastes cycles on empty batches. |
 | `gold_refresh_interval` | 5 min | How often gold re-aggregates from silver. Sets the floor for gold freshness. | Reduce for fresher dashboards, but each cycle reads all of silver -- at large scales a refresh can take 30s+, so don't set the interval below the refresh duration. |
-| `max_files_per_trigger` | auto | Files bronze reads per trigger (c360: 15,491 rows per 64 MB file). With `bronze_trigger_interval` it is the offered load. Auto derives it so data keeps arriving for about 1.2 x `run_duration`, capped at 50 (Lakebench-imposed). | Set it to offer a fixed load across scales, and size bronze-ingest and silver-stream for it. A value that would offer the corpus before the window ends is refused at start with the value to use. A short `ingest_ratio` with `intake_limit: trickle_rate` is not saturation. |
+| `max_files_per_trigger` | none | Max files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit, since the run's datagen generates for the whole window. With `--skip-generate` unset is derived so a finite corpus keeps arriving for about 1.2 x `run_duration`, capped at 50. |
 | `run_duration` | 1800 | Measurement window in seconds. At least 3 x `gold_refresh_interval` (900 s at defaults), or the run is refused: the continuous gate needs two gold refreshes on new data inside it. For 5 benchmark rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | Use 900 s or more for short tests (UAT included); see [Scoring and Benchmarking](benchmarking.md) for a planning table. |
 | `benchmark_warmup` | 300s | Delay before first benchmark round. **Clamped to `gold_refresh_interval`** at runtime -- gold must complete at least one full refresh before benchmark rounds produce valid QpH. | Reduce only if you also reduce `gold_refresh_interval`. |
 | `benchmark_interval` | 300s | Time between benchmark rounds (measured from completion of previous round). **Clamped to `gold_refresh_interval`** at runtime -- intervals shorter than the gold cycle cause Q9 contention as rounds overlap with gold rewrites. | To get more rounds, increase `run_duration` instead of lowering the interval. |

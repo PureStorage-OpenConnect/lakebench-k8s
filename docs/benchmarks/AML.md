@@ -183,7 +183,7 @@ The corpus is produced by the Rust generator in `datagen_rs/`, entered via
 Its identity has two parts:
 
 - `MODEL_VERSION = "datagen-v2-rs-0.3"` (`datagen_rs/src/model.rs`), the AML
-  generator freeze. It is stamped as a `model_version` column in the party,
+  generator model version. It is stamped as a `model_version` column in the party,
   account, manifest and watchlist files, never in pacs.008 rows. A generator
   built from this release's `datagen_rs/` source also writes it into each
   node's completion marker (`_corpus/c<cycle>-node-<node>.json`) and prints
@@ -333,11 +333,10 @@ expected-results corpus id and bronze-verify's in-run refusal. `destroy` and the
 read-only commands skip the load-time seed check, so a deployment that
 generated a registered corpus can still be torn down.
 
-The AML protocol grants each held-out seed exactly one registered look after
-the generator freeze. The freeze covers bronze rows, the manifest,
-`MODEL_VERSION` and the business columns of the six silver tables at a fixed
-seed; any change to that output voids the freeze and needs a
-`MODEL_VERSION` bump, a calibration re-run and a new evaluation seed.
+The AML protocol grants each held-out seed exactly one registered look. The
+look, its calibration and its predictions use one datagen image, named by
+digest; a change to generator output needs a new image and a
+`MODEL_VERSION` bump, and a look on that image needs its calibration re-run.
 Datagen is never tuned to a rule's recall or false-positive rate on any
 seed.
 

@@ -85,14 +85,13 @@ Iceberg compaction and table health tracking run between cycles. See
 In addition to batch processing, Lakebench supports a continuous
 pipeline using Spark Structured Streaming:
 
-- `bronze-ingest` reads new Parquet files as they appear (via `maxFilesPerTrigger`)
+- `bronze-ingest` reads new Parquet files as they appear
 - `silver-stream` incrementally transforms bronze to silver
 - `gold-refresh` periodically recomputes gold aggregations
 
-All three continuous jobs run concurrently. Datagen writes a fixed corpus
-(it does not generate at a paced rate, although the streams can start before
-it finishes), and `bronze-ingest` takes it at a Lakebench-imposed trickle rate (`max_files_per_trigger` files per trigger), so continuous
-intake figures are bounded by that cap. The continuous run duration, trigger
+All three continuous jobs run concurrently with datagen, which generates for
+the whole window (no rate limit; `parallelism` and `cpu` set the arrival
+rate), and `bronze-ingest` reads with no per-trigger limit. The continuous run duration, trigger
 intervals, and checkpoint locations are configurable. AML continuous runs
 detection rules W2, W3, W4 and W17 each tick and records W1, W5, W6, W7 and
 W8 as not run.

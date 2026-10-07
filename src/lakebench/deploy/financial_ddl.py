@@ -398,6 +398,22 @@ TBLPROPERTIES (
     'write.metadata.delete-after-commit.enabled' = 'true',
     'write.metadata.previous-versions-max' = '50'
 )
+"""
+
+SILVER_COUNTERPARTY_PAIRS_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    originator_id   BIGINT NOT NULL,
+    beneficiary_id  BIGINT NOT NULL,
+    _stream_id      STRING NOT NULL,
+    _batch_id       BIGINT NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
+)
 """.strip()
 
 
@@ -712,6 +728,7 @@ FINANCIAL_TABLE_DDLS: dict[str, str] = {
     "silver_counterparty_edges": SILVER_COUNTERPARTY_EDGES_DDL,
     "silver_entity_profiles": SILVER_ENTITY_PROFILES_DDL,
     "silver_batch_versions": SILVER_BATCH_VERSIONS_DDL,
+    "silver_counterparty_pairs": SILVER_COUNTERPARTY_PAIRS_DDL,
     "gold_alerts": GOLD_ALERTS_DDL,
     "gold_risk_scores": GOLD_RISK_SCORES_DDL,
     "gold_entity_clusters": GOLD_ENTITY_CLUSTERS_DDL,

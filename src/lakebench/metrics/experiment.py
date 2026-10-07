@@ -155,18 +155,10 @@ def _batch_retention(cfg: Any) -> str | None:
 
 def effective_trickle(cfg: Any) -> int | None:
     """max_files_per_trigger as a continuous run of *cfg* uses it: the config
-    value, or the auto value for its run_duration (cli/_sustained
-    resolve_trickle). A continuous run resolves it onto the config before
-    anything is recorded; this covers records built from a config directly."""
-    value = cfg.architecture.pipeline.sustained.max_files_per_trigger
-    if value is not None:
-        return value
-    try:
-        from lakebench.cli._sustained import resolve_trickle
-
-        return resolve_trickle(cfg, cfg.architecture.pipeline.sustained.run_duration)["value"]
-    except Exception:  # noqa: BLE001
-        return None
+    value, or None (no limit) under the run's own continuous datagen
+    (cli/_sustained resolve_trickle). A continuous run resolves it onto the
+    config before anything is recorded."""
+    return cfg.architecture.pipeline.sustained.max_files_per_trigger
 
 
 def _stackable_hive(cfg: Any) -> str:

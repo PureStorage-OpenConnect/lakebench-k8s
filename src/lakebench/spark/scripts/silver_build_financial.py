@@ -93,6 +93,10 @@ SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statem
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+# Continuous only: one row per distinct (originator, beneficiary) pair, so
+# silver_stream_financial counts a batch's new counterparties without
+# re-reading the whole history.
+SILVER_PAIRS = env("LB_FINANCIAL_SILVER_PAIRS", "silver.counterparty_pairs")
 STRATEGY = env("spark.lb.silver.strategy", "simple")
 
 # Reference zones the datagen writes next to pacs.008 (party = the reporting
@@ -347,6 +351,16 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_BATCH_VERSIONS} (
     stream_id      STRING NOT NULL,
     batch_id       BIGINT NOT NULL,
     committed_at   TIMESTAMP NOT NULL
+) USING iceberg
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
+"""
+
+DDL_PAIRS = f"""
+CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PAIRS} (
+    originator_id   BIGINT NOT NULL,
+    beneficiary_id  BIGINT NOT NULL,
+    _stream_id      STRING NOT NULL,
+    _batch_id       BIGINT NOT NULL
 ) USING iceberg
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """

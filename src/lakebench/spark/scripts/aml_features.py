@@ -59,6 +59,8 @@ threshold lives in aml_preregistration.json (R7).
 
 from __future__ import annotations
 
+import re
+
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     coalesce,
@@ -541,6 +543,7 @@ def labels_from_participants(manifest: DataFrame, id_map: DataFrame) -> DataFram
 
 _GAMMA = 0x9E3779B97F4A7C15
 _TID_SEED_STRIDE = 100_000_000  # datagen_rs::typology::TID_SEED_STRIDE
+_EPOCH_SALT = 0xE90C_0000_0000_0001  # datagen_seed.EPOCH_SALT
 _SEED_CHECK_ROWS = 200
 _MASK64 = (1 << 64) - 1
 
@@ -861,9 +864,10 @@ def manifest_glob(uri: str) -> str:
     return uri
 
 
-#: The generator's manifest names: manifest.parquet and manifest-cNNN.parquet,
-#: NNN at least three digits (cycle.rs formats {cycle:03}, a minimum width).
-_MANIFEST_NAME = r"(^|/)manifest(-c[0-9]{3,})?\.parquet(/[^/]*)?$"
+#: The generator's manifest names: manifest.parquet, manifest-cNNN.parquet
+#: (cycle.rs formats {cycle:03}, a minimum width) and a continuous run's
+#: manifest-eNNNN.parquet, one per live period (generate.rs, {epoch:04}).
+_MANIFEST_NAME = r"(^|/)manifest(-c[0-9]{3,}|-e[0-9]{4,})?\.parquet(/[^/]*)?$"
 
 
 def read_manifest(spark, uri: str) -> DataFrame:
@@ -907,9 +911,18 @@ def corpus_seed_check(manifest: DataFrame, seed) -> dict:
     )
     hit = 0
     for r in rows:
-        _, tid, j = r["typology_id"].rsplit("_", 2)
+        # A continuous run's epoch e > 0 suffixes ids with -eNNNN and draws
+        # from the epoch's activity seed (datagen_seed.epoch_seed).
+        tid_j, epoch = r["typology_id"], 0
+        m = re.fullmatch(r"(.+)-e([0-9]{4,})", tid_j)
+        if m:
+            tid_j, epoch = m.group(1), int(m.group(2))
+        aseed = int(seed) & _MASK64
+        if epoch:
+            aseed = _splitmix64(aseed ^ _EPOCH_SALT ^ _splitmix64(epoch))
+        _, tid, j = tid_j.rsplit("_", 2)
         inner = _splitmix64((0xF100 + int(tid) * _TID_SEED_STRIDE + int(j)) & _MASK64)
-        hit += _splitmix64((int(seed) & _MASK64) ^ inner) == (int(r["seed"]) & _MASK64)
+        hit += _splitmix64(aseed ^ inner) == (int(r["seed"]) & _MASK64)
     return {"claimed_seed": seed, "matched_share": hit / len(rows) if rows else None}
 
 
