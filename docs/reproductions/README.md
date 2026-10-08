@@ -8,9 +8,9 @@ against your own cluster with:
 lakebench reproduce docs/reproductions/<name>.yaml
 ```
 
-The command destroys any existing deployment of the referenced config, then
-deploys it, generates data, runs the pipeline, destroys the deployment again
-(unless `--keep`), compares actual vs expected, and exits:
+The command refuses if the config's namespace or bucket already exists. It
+deploys, generates data, runs the pipeline, destroys only what it created
+(unless `--keep`), compares actual against expected, and exits:
 
 - **0** -- every metric within its tolerance band
 - **14** -- requirement unmet: performance drift over the recorded band, a
@@ -19,9 +19,15 @@ deploys it, generates data, runs the pipeline, destroys the deployment again
   the package (maintenance policy, sample count, experiment identity or
   benchmark results)
 - **2** -- refused before running: a package that does not parse, a
-  missing config, or a config whose sample count or maintenance policy
-  differs from the package's
+  missing config, a config whose sample count or maintenance policy
+  differs from the package's, or a registered look's package without
+  `--report`
+- **3** -- refused: an existing namespace or bucket, a replaced deployment,
+  or a held-out corpus the package would regenerate
 - **1** -- the pipeline could not run, or its run could not be found
+
+A registered AML look's package is never rerun. Pass `--report` with the
+look's report: a match exits 0, a mismatch 14.
 
 See [docs/deep-dive/reproduce.md](../deep-dive/reproduce.md) for the full
 contract.
@@ -69,7 +75,7 @@ refuses a source run from another policy.
 
 `c360-scale-0-1.yaml` records a run at commit `ead6722` with v1.6-shaped
 keys. It is retained so the honesty test can prove `lakebench reproduce`
-refuses legacy packages, not as a template. Every attempt exits 14 or 2:
-the commit is drift, the config reference resolves to a path that does
-not exist, and the package has neither `maintenance_policy_id` nor
-`experiment_identity`. Re-record from a current run; do not copy from it.
+refuses legacy packages, not as a template. It has no
+`maintenance_policy_id` or `experiment_identity` and its config reference
+does not resolve, so every attempt exits 2 before running. Re-record from a
+current run; do not copy from it.

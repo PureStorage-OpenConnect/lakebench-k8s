@@ -132,7 +132,7 @@ with an explicit version -- incompatible combinations are rejected at config loa
 | Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
 |-------|-------------|-------------|----------------|----------------|----------------|
 | 3.5.x | -- | -- | **Default** (java17 image) | OK (fallback default on a Java 11 image) | -- |
-| 4.0.x (Polaris recipes, hive-delta-spark-thrift) | **Default** | -- | **Default** | OK | OK |
+| 4.0.x (Polaris recipes, hive-delta-spark-thrift, hive-delta-spark-none) | **Default** | -- | **Default** | OK | OK |
 | 4.1.x (Hive recipes) | -- | **Default** | **Default** | OK | OK |
 
 **Default** = auto-selected when no version specified. **OK** = accepted if user overrides. **--** = rejected.
@@ -206,7 +206,7 @@ architecture:
   `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`)
   through Spark. Trino is not affected (different optimizer). lakebench sets
   `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta + Hive on the
-  Thrift server and Spark jobs (LB-148), so these queries run, at the cost of scanning
+  Thrift server and Spark jobs, so these queries run, at the cost of scanning
   instead of answering MIN/MAX/COUNT from the Delta log. A Q2 failure on Delta + Thrift
   is now treated as a regression, not a known failure.
 - **Silver file layout**: before v1.6 the Delta silver build wrote one file per
@@ -230,8 +230,7 @@ architecture:
   `SET SESSION {catalog}.vacuum_min_retention = '0s'`, and it must travel in the
   same `trino --execute` submission as the `CALL`: a session property set in a
   separate submission is gone before the `CALL` runs. Before v1.6 lakebench sent
-  them separately, so no Delta VACUUM ever applied its requested retention
-  (LB-173).
+  them separately, so no Delta VACUUM ever applied its requested retention.
 - **No effective VACUUM in short continuous runs**: while streams are live,
   VACUUM keeps Delta's 7-day default retention so a lagging stream never reads
   a vacuumed file. A continuous run shorter than 7 days therefore removes

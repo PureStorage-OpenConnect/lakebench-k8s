@@ -94,8 +94,9 @@ lakebench deploy test-config.yaml
 Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. The user is `admin`; the chart generates the password per install into the Secret `lakebench-observability-grafana` (key `admin-password`). An install made by 1.6 keeps its `lakebench` password.
 
 One built-in dashboard, **Lakebench Overview**, is provisioned from a single
-ConfigMap in the shared `lakebench-observability` namespace, applied on every
-deploy and left in place by destroy. `namespace` and `run_id` variables select
+ConfigMap in the shared `lakebench-observability` namespace, applied by
+`lakebench admin install --component observability` and left in place by
+destroy. `namespace` and `run_id` variables select
 the deployment and run. Its panels: datagen throughput (MB/s per pod, labelled as capped by the Lakebench-set
 pod resources), datagen rows written by pod, datagen phase seconds,
 bronze/silver stage rows (input vs output), silver per-table row counts,

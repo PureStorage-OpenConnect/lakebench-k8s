@@ -204,10 +204,7 @@ workload.datagen.scale"). Write the nested key in new configs:
 | `endpoint` | `platform.storage.s3.endpoint` | (required) |
 | `access_key` | `platform.storage.s3.access_key` | (required) |
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
-| `secret_ref` | `platform.storage.s3.secret_ref` | (removed in v1.7: set `access_key` and `secret_key`) |
 | `scale` | `workload.datagen.scale` | 10 |
-| `name` | root `name` | (required to change data) |
-| `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
 | `namespace` | `platform.kubernetes.namespace` | same as name |
 | `mode` | `architecture.pipeline.mode` | batch |
 | `cycles` | `architecture.pipeline.cycles` | 1 |
@@ -300,8 +297,9 @@ When you omit optional sections, these defaults apply:
 **What to tune first as you scale up:**
 
 1. `datagen.scale` -- controls data volume
-2. `compute.spark.*_executors` -- per-job executor counts (per-executor
-   sizing is fixed in the job profiles; see [Executor Override Guide](#executor-override-guide))
+2. `compute.spark.*_executors` -- per-job executor counts (batch executor
+   size is fixed in the job profiles; continuous streams also take
+   `*_executor_cores`; see [Executor Override Guide](#executor-override-guide))
 3. `query_engine.trino.worker` -- match replicas/memory to your cluster
 4. `scratch` / `postgres` storage classes -- match to your storage provider
 
@@ -387,7 +385,9 @@ platform:
       # nothing).
 
       # Per-job executor count overrides (null = auto from scale factor).
-      # Per-executor sizing (cores, memory, PVC) is fixed from proven profiles.
+      # Batch per-executor sizing (cores, memory, PVC) is fixed from proven
+      # profiles. Continuous streams take bronze_ingest_executor_cores,
+      # silver_stream_executor_cores and gold_refresh_executor_cores.
       bronze_executors: null
       silver_executors: null
       gold_executors: null
@@ -519,14 +519,14 @@ architecture:
     pre_benchmark_maintenance: true   # Compact + expire before benchmark (recommended)
 
     continuous:
-      bronze_trigger_interval: "30 seconds"
-      silver_trigger_interval: "60 seconds"
-      gold_refresh_interval: "5 minutes"
+      bronze_trigger_interval: "0 seconds"   # back to back (default)
+      silver_trigger_interval: "0 seconds"   # back to back (default)
+      gold_refresh_interval: "0 seconds"     # back to back (default)
       run_duration: 1800              # Seconds (30 min default)
       # max_files_per_trigger: unset = no limit (datagen generates for the whole window)
       checkpoint_base: checkpoints
-      benchmark_interval: 300         # Clamped to gold_refresh_interval at runtime
-      benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
+      benchmark_interval: 300         # 300-3600; raised to a longer gold interval
+      benchmark_warmup: 300           # 300-1800; raised to a longer gold interval
 
   benchmark:
     mode: power                       # power | standard | extended; throughput and composite
@@ -651,6 +651,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count (1--28). Null = auto from scale. |
 | `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count (1--28). Null = auto from scale. |
 | `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count (1--28). Null = auto from scale. |
+| `platform.compute.spark.bronze_ingest_executor_cores` | integer or null | `null` | advanced | Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set. |
+| `platform.compute.spark.silver_stream_executor_cores` | integer or null | `null` | advanced | Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set. |
+| `platform.compute.spark.gold_refresh_executor_cores` | integer or null | `null` | advanced | Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = the profile's; gold-refresh is never grown automatically. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
 | `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 
@@ -676,7 +679,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `architecture.catalog.type` | one of `hive`, `polaris`, `unity`, `none` | `hive` | advanced | Catalog service: `hive`, `polaris`, or `none`. |
+| `architecture.catalog.type` | one of `hive`, `polaris`, `unity`, `none` | `hive` | advanced | Catalog service: `hive` or `polaris`. `unity` and `none` have no supported recipe and are refused. |
 | `architecture.catalog.hive.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the Stackable operators; a cluster admin runs `lakebench admin install --component stackable`. `false` loads as before. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | advanced | Namespace for Stackable operators. |
 | `architecture.catalog.hive.operator.version` | string | `25.7.0` | advanced | Stackable SDP chart version a fresh `admin install` uses. |
@@ -685,12 +688,12 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | advanced | Hive Metastore memory. |
 | `architecture.catalog.polaris.port` | integer | `8181` | advanced | Polaris REST API port. |
 | `architecture.catalog.polaris.client_secret` | string | `""` | advanced | OAuth2 secret of the `lakebench` Polaris client. Empty = deploy generates one and keeps it in the Secret `lakebench-polaris-client`; a value is written there on the first deploy. Use a `${VAR}` reference rather than a literal. |
-| `architecture.catalog.polaris.resources.cpu` | string | `1` | advanced | Polaris CPU request/limit. |
-| `architecture.catalog.polaris.resources.memory` | string | `2Gi` | advanced | Polaris memory. |
+| `architecture.catalog.polaris.resources.cpu` | string | `1` | advanced | Catalog server CPU request/limit. |
+| `architecture.catalog.polaris.resources.memory` | string | `2Gi` | advanced | Catalog server memory. |
 | `architecture.catalog.unity.spark_connector_version` | string | `0.4.0` | advanced | Unity Catalog Spark connector version the Spark jobs load. |
 | `architecture.catalog.unity.port` | integer | `8080` | advanced | Unity Catalog REST API port. |
-| `architecture.catalog.unity.resources.cpu` | string | `1` | advanced | Polaris CPU request/limit. |
-| `architecture.catalog.unity.resources.memory` | string | `2Gi` | advanced | Polaris memory. |
+| `architecture.catalog.unity.resources.cpu` | string | `1` | advanced | Catalog server CPU request/limit. |
+| `architecture.catalog.unity.resources.memory` | string | `2Gi` | advanced | Catalog server memory. |
 
 ### Architecture -- Table Format
 
@@ -739,10 +742,10 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.mode` | one of `batch`, `continuous` | `batch` | advanced | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent jobs over arriving data). `sustained` is accepted as a deprecated alias. The `--continuous` CLI flag overrides this. |
 | `architecture.pipeline.cycles` | integer | `1` | advanced | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
 | `architecture.pipeline.pre_benchmark_maintenance` | boolean | `true` | advanced | Run table maintenance before the benchmark phase so QpH is measured against maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below 24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta `OPTIMIZE` is never run. All statements share one 30-minute budget; the first statement timeout or the deadline stops the rest, and the post-maintenance QpH is then not a measurement. |
-| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `30 seconds` | advanced | Bronze streaming trigger interval. |
-| `architecture.pipeline.continuous.silver_trigger_interval` | string | `60 seconds` | advanced | Silver streaming trigger interval. |
-| `architecture.pipeline.continuous.gold_refresh_interval` | string | `5 minutes` | advanced | Gold refresh trigger interval. |
-| `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; a continuous run refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or more, UAT included. |
+| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `0 seconds` | advanced | Bronze streaming trigger interval. "0 seconds" (the default) starts the next micro-batch as soon as the last one finishes and new files exist; a positive interval holds bronze to that cadence, labelled beside freshness. A whole number and seconds, minutes or hours; anything else is refused at load. |
+| `architecture.pipeline.continuous.silver_trigger_interval` | string | `0 seconds` | advanced | Silver streaming trigger interval. "0 seconds" (the default) starts the next micro-batch as soon as the last one finishes and bronze has committed more; a positive interval is labelled beside freshness. A whole number and seconds, minutes or hours. |
+| `architecture.pipeline.continuous.gold_refresh_interval` | string | `0 seconds` | advanced | Gold refresh trigger interval. "0 seconds" (the default) starts the next refresh as soon as the last one finishes (Customer360: as soon as silver commits); a positive interval holds gold to that cadence, labelled beside freshness. |
+| `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; with gold on an interval a continuous run refuses less than 3 x `gold_refresh_interval`. Use 900 s or more, UAT included. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | advanced | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
@@ -753,8 +756,8 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.continuous.compaction_enabled` | boolean | `true` | advanced | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
 | `architecture.pipeline.continuous.compaction_interval` | integer | `0` | advanced | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
-| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 300--3600. |
-| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 300--1800. |
+| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
+| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before the first in-stream benchmark round, 300--1800. With gold on a longer interval, raised to that interval so gold refreshes once first. |
 
 ### Workload & Datagen
 
@@ -767,12 +770,12 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `workload.datagen.seed` | integer or null | `null` | advanced | Top-level generator seed, which names the corpus. Unset: the AML pre-registration's calibration seed for `financial`, 42 for other schemas. A `financial` seed listed in the pre-registration's `corpora.spent_seeds` is refused at config load, so a retired corpus is never regenerated by accident. The AML reference job reports the seed it scored. The held-out evaluation and robustness seeds are refused unless `corpus_role` declares that role, and even then every command that reads or scores data refuses them: their corpus is generated only by `generate --registered-corpus` and scored only by `scripts/aml_gate.py --registered`. They are known only as salted hashes in `spark/data/aml/heldout_hashes.json`, and the check hashes the configured seed. |
 | `workload.datagen.corpus_role` | one of `calibration`, `evaluation`, `robustness` or null | `null` | advanced | `financial` only: `calibration`, `evaluation` or `robustness`. Declares this deployment as the registered corpus for that role. For `evaluation` and `robustness`, `seed` must be set and must hash to that role's entry in `heldout_hashes.json`; an unset `seed` is refused, `generate --registered-corpus` generates the corpus, and every other data command refuses it; its seed reaches the cluster only through a Secret in the deployment's namespace, never as a Job argument. For `calibration`, an unset `seed` uses the calibration seed. Only set it for the one registered gate run of that role. |
 | `workload.datagen.robustness_perturbation` | boolean | `false` | advanced | `financial` only. Generates the robustness corpus: the pre-registration's `corpora.robustness_perturbation` multipliers shift the nuisance parameters in natural units (median amount x1.2, persona activity and amount log-sds x1.2, dormancy lengths x1.2). Instances, participants and row counts are unchanged. Required with `corpus_role: robustness`, refused with `calibration` or `evaluation`; the generator also refuses the robustness seed without it. Off, the corpus is byte-identical to a run without the option. |
-| `workload.datagen.parallelism` | integer | auto (by scale and cluster) | advanced | Number of parallel datagen pods. A value you set is used exactly, with a warning when the cluster cannot fit it (batch pods queue; a continuous run, whose pods all run beside the streams, is refused at preflight) or it is under 8 for financial above scale 100. Unset, the auto-sizer derives it from the scale, caps it to fit the cluster and raises financial above scale 100 to at least 8 pods. The schema fallback without auto-sizing is 4. |
+| `workload.datagen.parallelism` | integer | auto (by scale and cluster) | advanced | Number of parallel datagen pods. A value you set is used exactly, with a warning when the cluster cannot fit it (batch pods queue; a continuous run, whose pods all run beside the streams, is refused at preflight) or it is under 8 for financial above scale 100. Unset: in batch the auto-sizer derives it from the scale, caps it to fit the cluster and raises financial above scale 100 to at least 8 pods; in continuous, with `cpu` also unset, it is the pods (of up to 8 cores) that offer the scale's load, still raised to the financial floor and capped to fit the cluster (a cap lowers the offered load). The schema fallback without auto-sizing is 4. |
 | `workload.datagen.file_size` | one of `64mb` | `64mb` | advanced | Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps row content identical across delivery modes. |
 | `workload.datagen.dirty_data_ratio` | number | `0.08` | advanced | Fraction of intentionally dirty records (0.0--1.0). Applies to the `customer360` schema only; the `financial` (AML) generator ignores it. |
-| `workload.datagen.cpu` | string | auto (by scale and cluster) | advanced | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
+| `workload.datagen.cpu` | string | auto (by scale and cluster) | advanced | CPU per datagen pod. A value you set is used as given. Unset: 8 in batch, and 8 in continuous when `parallelism` is set; in continuous with both unset, the cores that offer the scale's load (in 100m steps, at least 200m), split over the pods. |
 | `workload.datagen.memory` | string | auto (by workload, scale and cpu) | advanced | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) at the fixed 64mb file size, with a 4Gi floor. |
-| `workload.datagen.generators` | integer | `0` | advanced | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
+| `workload.datagen.generators` | integer | `0` | advanced | Generator threads per pod. 0 = auto: one thread per started core of the pod's CPU (Lakebench sets `CPU_LIMIT`), held to the CPU by its quota. |
 | `workload.datagen.timestamp_start` | string or null | `null` | advanced | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
 | `workload.datagen.timestamp_end` | string or null | `null` | advanced | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`config/c360_run.py` `cycle_windows`, which the datagen deployer and `metrics/c360_correctness.py` both read). See [Timestamp Range Impact](#timestamp-range-impact). |
 
@@ -967,9 +970,9 @@ and use `auto`. The strategy that ran, and why (`auto`, `override` or
 `jobs[].extra_metrics.gold_strategy` and `gold_strategy_source`.
 
 Executor counts auto-scale with the scale factor unless overridden by the
-`bronze_executors`, `silver_executors`, or `gold_executors` fields. Per-executor
-sizing (cores, memory, PVC size) is fixed from proven production profiles and
-does not change with scale.
+`bronze_executors`, `silver_executors`, or `gold_executors` fields. Batch
+per-executor sizing (cores, memory, PVC size) is fixed from proven production
+profiles and does not change with scale.
 
 ## Multi-Cycle Batch
 
@@ -1038,20 +1041,35 @@ The algorithm:
    - In **batch mode** (default), datagen and Spark run sequentially, so
      datagen gets the full remaining budget.
    - Only the deprecated `pipeline.pattern: streaming` gives datagen 40% of
-     it. Continuous mode (`--continuous`) does not change that; the
-     continuous Spark jobs are capped to a concurrent budget when their
+     it.
+   - In **continuous mode**, with `datagen.cpu` and `parallelism` unset,
+     datagen gets the cores that produce the scale's offered load (AML
+     4 MB/s, Customer 360 10 MB/s per scale unit), in pods of up to 8 cores.
+     The continuous Spark jobs are capped to a concurrent budget when their
      manifests are built.
    - A `datagen.parallelism` you set is never cut to this budget: the run
      warns, batch pods that do not fit queue, and a continuous run (whose
      datagen pods all run beside the streams) is refused at preflight.
 3. **Small scales (1--50):** Resources are only capped downward to fit.
-4. **Large scales (51+):** datagen parallelism is scaled up to use
-   available cluster capacity.
+4. **Large scales (51+), batch only:** datagen parallelism is scaled up to
+   use available cluster capacity.
 5. **Trino worker memory** is capped to 85% of the largest node.
 
-Spark executor and driver sizing is not auto-sized: it is the job profiles.
+Batch Spark executor and driver sizing is the job profiles; the auto-sizer
+does not change it.
 
-Per-job executor counts do not come from the auto-sizer. Each job takes a
+Continuous streams are sized for the offered load:
+
+- bronze-ingest and silver-stream get the executors that carry the load with
+  20% headroom, up to the profile's cap.
+- A stage that needs more than the cap grows its executors to 8, then 16
+  cores, within the largest node. The auto-sizer then sets its
+  `*_executor_cores` and says so.
+- A stage that still cannot carry the load is named before the run
+  ("cannot balance").
+- gold-refresh is never grown automatically.
+
+Batch per-job executor counts do not come from the auto-sizer. Each job takes a
 base count from its job profile and adds executors linearly above scale 10,
 up to the profile's maximum (28 at most, a Lakebench-imposed ceiling, not a
 cluster limit). A `platform.compute.spark.*_executors` value replaces the
@@ -1094,7 +1112,7 @@ resources are approximately:
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
 | Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
-| Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial, LB-118) |
+| Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial) |
 | Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
 | Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 300Gi PVC |
 | Trino workers | 4 | 8 cores, 48Gi |

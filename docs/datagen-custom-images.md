@@ -69,11 +69,10 @@ it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
 A custom image is not the AML generator the registered looks use
-(`datagen-v2-rs-0.3`). The default image (tag `2a36ae21`, digest
-`sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`)
-is that image: it is byte-identical to the v1.6 image (tag `1.6.0`) on the
-five byte-compare cases, and the registered looks pin its digest
-(`docs/internal/aml-protocol.md`). The run records the image reference you configured, and AML results from a
+(`datagen-v2-rs-0.3`). The registered v1.7 looks pin `lb-datagen:2a36ae21`
+(digest `sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`),
+which 1.7.0 shipped as its default. The 1.7.1 default `3cb67f92` has no
+lineage row, so its corpora get a corpus id of their own. The run records the image reference you configured, and AML results from a
 modified generator are not comparable with results from the look image.
 
 **Corpus identity of a custom image.** From v1.7 a run records a second
@@ -120,8 +119,10 @@ and update the schema tests in `datagen_rs/src/schema.rs`.
 `datagen_rs/src/customer360_realism.rs`, or the transaction-amount log-normal parameters
 (mu 4.3, sigma 1.2) in `datagen_rs/src/customer360.rs`.
 
-The binary always writes the whole corpus up front; there is no separate
-continuous-mode path and no checkpoint-resume.
+In batch the binary writes the whole corpus once. In continuous mode the
+entrypoint passes `--deliver-until`: the binary keeps writing (AML: 24-month
+epochs; Customer 360: time slices) until that deadline or the `_corpus/stop`
+marker.
 
 A custom image that keeps `entrypoint.py` inherits its strict argument
 parsing: any flag the entrypoint does not declare exits 2, so a new flag

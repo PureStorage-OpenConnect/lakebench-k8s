@@ -79,7 +79,7 @@ with its default value.
 ```yaml
 images:
   spark: "apache/spark:4.1.1-python3"   # Spark 4.1.x (default for the Hive recipes)
-  # spark: "apache/spark:4.0.2-python3" # Spark 4.0.x (default for Polaris, hive-delta-spark-thrift)
+  # spark: "apache/spark:4.0.2-python3" # Spark 4.0.x (default for Polaris, hive-delta-spark-thrift, hive-delta-spark-none)
   # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
 ```
 
@@ -151,8 +151,26 @@ memory to handle Iceberg commit metadata.
 
 ### Executor Resources
 
-Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed per job
-in the job profiles; only the count can be overridden (below). The v1.6
+Per-executor sizing (cores, memory, overhead, scratch PVC) comes from the job
+profiles. Batch jobs take only a count override (below). The continuous
+streams also take a size:
+
+```yaml
+platform:
+  compute:
+    spark:
+      bronze_ingest_executor_cores: null   # 1-16
+      silver_stream_executor_cores: null   # 1-16
+      gold_refresh_executor_cores: null    # 1-16
+```
+
+A set value keeps the profile's memory and scratch per core, and shrinks the
+scale's executor count by the same ratio, so total cores stay the same.
+Unset, bronze-ingest and silver-stream grow to 8 or 16 cores when the offered
+load needs more executors than the cap, unless their `*_executors` count is
+set. gold-refresh is never grown automatically.
+
+The v1.6
 `platform.compute.spark.driver` and `.executor` blocks sized nothing (the
 manifests never read them), so v1.7 removed them: a command that changes
 data refuses a config that sets either, with the fix, and `destroy`,
@@ -176,8 +194,8 @@ platform:
 ```
 
 When set, these values bypass the auto-scaling formula entirely for that job.
-Per-executor sizing (cores, memory, overhead, PVC) is never overridden -- only
-the count changes.
+They change the count only; the continuous `*_executor_cores` keys above
+change the size.
 
 ### Scratch Storage (Shuffle PVCs)
 
@@ -247,8 +265,7 @@ does not.
 
 ## Job Profiles
 
-Per-executor sizing is **fixed** and proven at 1TB+ scale. These values are not
-user-configurable. They live in
+The base profiles, proven at 1TB+ scale, live in
 `_JOB_PROFILES` in `src/lakebench/modules/pipeline_engines/spark/job.py`.
 
 ### Batch Jobs
@@ -259,7 +276,7 @@ user-configurable. They live in
 | `silver-build` | 4 | 48g | 12g | 300Gi | 24g | 32g |
 | `gold-finalize` | 4 | 32g | 8g | 300Gi | 24g | 32g |
 
-For financial workloads (LB-118) `bronze-verify` also overrides executor
+For financial workloads `bronze-verify` also overrides executor
 memory (4g -> 8g), overhead (2g -> 12g), `executors_per_100_scale` (4 -> 8)
 and `max_executors` (20 -> 28), since the CTAS fallback in
 `bronze_verify_financial.py` rewrites the full pacs.008 source above scale 5.
@@ -279,7 +296,7 @@ counts of all three continuous jobs (see the Auto-Scaling section), and set
 base partitions to 80 for `silver-stream` and 96 for `gold-refresh`. Per-executor
 cores, memory and scratch for `silver-stream` and `gold-refresh` are unchanged.
 
-**Why are these fixed?** Adding executors keeps data-per-executor constant, so
+**Why are the batch profiles fixed?** Adding executors keeps data-per-executor constant, so
 per-executor memory and PVC requirements do not change with scale. The silver-build
 job is the bottleneck -- at scale 100 (~1TB) it requests 18 executors at 60g
 each (48g + 12g overhead) plus 300Gi scratch PVCs. Reducing these values causes
@@ -287,8 +304,10 @@ OOM kills or "No space left on device" failures.
 
 ## Auto-Scaling
 
-Executor count is automatically derived from the scale factor unless overridden.
-The formula in `_scale_executor_count()`:
+Executor count is derived from the scale factor unless overridden. In
+continuous mode bronze-ingest and silver-stream take the larger of this count
+and what the offered load needs, up to the maximum. The scale formula in
+`_scale_executor_count()`:
 
 - **Scale <= 10:** Use the base executor count (varies per job).
 - **Scale > 10:** `base + ((scale - 10) * rate) // 100`, capped at a per-job maximum.
@@ -306,9 +325,10 @@ Financial (AML) overrides: `bronze-verify` 4 / 8 / 28, `bronze-ingest`
 5 / 4 / 20, `silver-stream` 10 / 8 / 28, `gold-refresh` 12 / 120 / 28.
 
 In continuous mode, the three jobs share the cluster concurrently with datagen.
-A budget calculation (`_streaming_concurrent_budget()`) proportionally caps each
-job's executor count based on available cluster CPU after subtracting
-Trino, Hive, PostgreSQL, and datagen while it is still running. An explicit
+When the cluster cannot hold every stream (`_streaming_concurrent_budget()`,
+after Trino, the catalog, PostgreSQL and datagen), each executor goes to the
+stream holding the smallest share of what it needs, so the slowest stage keeps
+the largest share the cluster allows. An explicit
 per-job executor override wins over this cap.
 
 To override the auto-derived count for any job:

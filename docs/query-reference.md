@@ -7,8 +7,10 @@ own 12-query set; see [Financial (AML) Queries](#financial-aml-queries).
 
 ## Benchmark Queries
 
-The queries execute in the order listed below during a power run. In
-throughput mode, each stream shuffles the order independently.
+A power run executes them in this order: Q1, Q2, Q4, Q3, Q7, Q5, Q6, Q9 (by
+class: scan, filter/prune, aggregation, analytics, operational). In
+throughput mode, each stream shuffles the order independently. The expected
+row counts below are the ones the Customer 360 correctness check requires.
 
 ### Q1: Full Aggregation Scan
 
@@ -30,7 +32,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | Filters the silver table to the first 3 months of data using a subquery on `MIN(interaction_date)`, then groups by date and interaction type with revenue ordering. |
 | **What it tests** | Predicate pushdown, date-range pruning, and grouped aggregation. The correlated subquery for the date range tests Trino's ability to optimize min-value lookups. |
-| **Expected rows** | Proportional to (dates in 3-month window) x (interaction types). Typically tens to low hundreds of rows. |
+| **Expected rows** | 5 x (days in the first 3 months): one per day per interaction type. Checked when every type appears daily. |
 
 ### Q3: Customer Segmentation
 
@@ -41,7 +43,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | Segments customers by `customer_value_tier` and `channel_preference`. Computes customer count, total spend, average engagement, and average lifetime value per segment. Filters to transactions with `transaction_amount > 0`. |
 | **What it tests** | Hash aggregation on two group-by columns with multiple aggregate functions. The `transaction_amount > 0` filter tests predicate evaluation before grouping. |
-| **Expected rows** | (number of value tiers) x (number of channel preferences). Typically under 50 rows. |
+| **Expected rows** | 12: 3 value tiers x 4 channel preferences. Checked at 5,000 transactions or more. |
 
 ### Q4: Churn Risk Analysis
 
@@ -52,7 +54,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | Filters to high-risk and medium-risk churn indicators, then groups by churn risk level, journey stage, and device category. Applies `HAVING COUNT(DISTINCT customer_id) > 10` to eliminate sparse segments. |
 | **What it tests** | IN-list predicate filtering, three-column GROUP BY, HAVING with COUNT DISTINCT. The HAVING clause tests post-aggregation filtering. |
-| **Expected rows** | Variable. Depends on how many (risk, journey, device) combinations have more than 10 distinct customers. Typically tens of rows. |
+| **Expected rows** | 6: 2 churn risks x retention stage x 3 device categories. Checked at 5,000 support rows or more. |
 
 ### Q5: Revenue Trend MA7
 
@@ -63,7 +65,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | CTE computes daily DAU, revenue, and interaction counts. Outer query applies 7-day moving average window frames for revenue and DAU. Results ordered by date descending, limited to 90 days. |
 | **What it tests** | CTE materialization, window functions with ROWS BETWEEN frame, and ORDER BY with LIMIT. Tests Trino's ability to compute rolling aggregates efficiently. |
-| **Expected rows** | Up to 90 (one per day, limited by LIMIT clause) |
+| **Expected rows** | min(90, gold days) |
 
 ### Q6: Customer RFM Scoring
 
@@ -74,7 +76,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | CTE computes per-customer Recency (days since last interaction), Frequency (distinct interaction dates), and Monetary (total spend). Outer query classifies customers into segments (Champions, Loyal, Potential Loyalists, At Risk, Lost, Casual) using a multi-branch CASE expression, then aggregates per segment. |
 | **What it tests** | CTE with per-customer aggregation, `DATE_DIFF` function, multi-branch CASE classification, and re-aggregation of CTE results. Exercises both hash aggregation and expression evaluation. |
-| **Expected rows** | Up to 6 (one per RFM segment: Champions, Loyal, Potential Loyalists, At Risk, Lost, Casual) |
+| **Expected rows** | 1 to 6 (one per RFM segment present: Champions, Loyal, Potential Loyalists, At Risk, Lost, Casual) |
 
 ### Q7: Channel Conversion Funnel
 
@@ -85,7 +87,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Silver (`customer_interactions_enriched`) |
 | **Description** | Builds a per-channel conversion funnel using conditional `SUM(CASE)` expressions to count awareness, consideration, conversion, and retention interactions. Computes conversion rate as a percentage and total channel revenue. |
 | **What it tests** | Conditional aggregation (4 SUM(CASE) expressions), NULLIF for safe division, CAST for type promotion. Tests aggregation throughput when computing many derived columns per group. |
-| **Expected rows** | One per channel. Typically 4-6 rows (web, mobile, store, call_center, etc.). |
+| **Expected rows** | 5: one per channel. |
 
 ### Q9: Executive Dashboard
 
@@ -96,7 +98,7 @@ throughput mode, each stream shuffles the order independently.
 | **Table** | Gold (`customer_executive_dashboard`) |
 | **Description** | Reads the pre-aggregated gold table and computes day-over-day revenue change and DAU growth percentage using LAG window functions. Returns the most recent 30 days. |
 | **What it tests** | Gold layer read performance. The gold table is small and pre-aggregated, so this tests the "last mile" query path that executive dashboards use. LAG window functions verify that Trino can compute deltas on pre-materialized data. |
-| **Expected rows** | Up to 30 (one per day, limited by LIMIT clause) |
+| **Expected rows** | min(30, gold days) |
 
 ## Query Categories Summary
 

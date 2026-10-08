@@ -5,9 +5,9 @@ alternative to Hive Metastore for Iceberg catalog management. Polaris is an
 open-source REST catalog that provides OAuth2 authentication, fine-grained
 access control, and a standards-based Iceberg REST API.
 
-Switching to Polaris takes one configuration change: the catalog type. The
-rest of the workflow -- deploy, generate, run, destroy -- stays exactly the
-same.
+`lakebench init` writes a Polaris recipe by default. To switch an existing
+config, change its `recipe:` to a `polaris-*` recipe. The rest of the
+workflow (deploy, generate, run, destroy) stays the same.
 
 ---
 
@@ -36,14 +36,15 @@ native S3 file system required for current Trino releases.
 
 ## Configuration
 
-Start from an existing config file (or generate one with `lakebench init`).
-Set the catalog type:
+Start from `lakebench init`, which writes `polaris-iceberg-spark-trino`, or
+set the recipe in an existing config:
 
 ```yaml
-architecture:
-  catalog:
-    type: polaris
+recipe: polaris-iceberg-spark-trino
 ```
+
+Setting only `architecture.catalog.type: polaris` under a `hive-*` recipe is
+refused at load.
 
 `deploy` generates the OAuth2 client secret for this deployment and stores it
 in the Secret `lakebench-polaris-client` in the namespace, where `run` and
@@ -95,8 +96,8 @@ platform:
   storage:
     s3:
       endpoint: http://your-s3-endpoint:80
-      access_key: YOUR_ACCESS_KEY
-      secret_key: YOUR_SECRET_KEY
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
 
 architecture:
   catalog:

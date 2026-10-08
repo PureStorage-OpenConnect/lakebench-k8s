@@ -25,8 +25,10 @@ requires `recipe:`. The 11 recipe names are listed in the table below.
 
 ## Quick Reference
 
-The short names in the first column are the section headings below; the
-`recipe:` value is the second column.
+The `recipe:` value is the second column. The Iceberg recipes have a section
+below. The three Hive Delta recipes have none: they differ from their
+Iceberg twins in the table format and Spark default, and run Customer 360
+only (see [Compatibility Matrix](compatibility-matrix.md)).
 
 | Name | `recipe:` | Catalog | Table Format | Query Engine | Best For | Prerequisites |
 |---|---|---|---|---|---|---|

@@ -32,33 +32,37 @@ engine stops and reports the error.
 
 The deployment engine follows this fixed sequence:
 
-1. **Namespace** -- Creates the Kubernetes namespace (or reuses if it exists). If a
+1. **Namespace** -- Creates the Kubernetes namespace, or reuses one this deployment
+   stamped (any other is refused unless `--force-legacy`). If a
    namespace is in `Terminating` state from a previous destroy, the engine waits
    for it to finish before re-creating.
 2. **Secrets** -- Creates S3 credential secrets and PostgreSQL credential secrets
    from the config's `access_key` and `secret_key` (`secret_ref` is not supported).
    When `s3.ca_cert` is set, also creates a CA certificate secret for HTTPS
    endpoints (used by all components for TLS verification).
-3. **S3 buckets** -- Creates the bronze, silver and gold buckets, or adopts
+3. **Silver state** -- Creates the `lakebench-silver-state` ConfigMap: the
+   silver rebuild counters and bronze's data clock. A redeploy keeps existing
+   values.
+4. **S3 buckets** -- Creates the bronze, silver and gold buckets, or adopts
    existing ones, and records which buckets this deployment created.
-4. **Scratch StorageClass** -- Verifies that the scratch StorageClass for Spark
+5. **Scratch StorageClass** -- Verifies that the scratch StorageClass for Spark
    shuffle volumes exists. Deploy never creates it: it is shared cluster-scoped
    infrastructure. If it is missing, deploy stops and points to
    `lakebench admin install --component scratch-storage-class`, which a
    cluster admin runs once. Skipped when scratch is off (`platform.storage.scratch.enabled` false, or unset below batch scale 50).
-5. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
+6. **PostgreSQL** -- Deploys a PostgreSQL StatefulSet as the metadata backend for
    the catalog service.
-6. **Hive Metastore or Polaris** -- Deploys the catalog selected by
+7. **Hive Metastore or Polaris** -- Deploys the catalog selected by
    `architecture.catalog.type`. If `hive`, deploys a Stackable HiveCluster CRD.
    If `polaris`, deploys an Apache Polaris REST catalog Deployment. The
    non-selected catalog is automatically skipped.
-7. **Spark RBAC** -- Creates the ServiceAccount, Role, and RoleBinding for Spark
+8. **Spark RBAC** -- Creates the ServiceAccount, Role, and RoleBinding for Spark
    job submission. On OpenShift, also grants the `anyuid` SCC to the service
    account (the PostgreSQL step does the same for `lakebench-postgres`); a
    refused grant fails the step.
-8. **Unity Catalog** -- Skipped unless `architecture.catalog.type` is `unity`.
+9. **Unity Catalog** -- Skipped unless `architecture.catalog.type` is `unity`.
    No shipped recipe uses Unity.
-9. **Spark Operator** -- Checks that the shared Spark Operator is running and
+10. **Spark Operator** -- Checks that the shared Spark Operator is running and
    watches the deployment namespace. If the namespace is not watched, deploy
    adds it to `spark.jobNamespaces` with `helm upgrade`, under the
    `lakebench-cluster-lock` lease so concurrent deploys do not overwrite each
@@ -68,7 +72,7 @@ The deployment engine follows this fixed sequence:
    `platform.compute.spark.operator.install: true` is refused by the commands
    that change data. With `observability.enabled`, the deploy preflight stops
    before creating anything when the shared observability stack is missing.
-10. **Dependency server** -- Starts `lb-deps` (a Deployment, a Service and the
+11. **Dependency server** -- Starts `lb-deps` (a Deployment, a Service and the
     5Gi PVC `lb-deps-data`) in the namespace, on the stock Spark image. Its init
     containers resolve the jars (and the AML reference wheels, and the DuckDB
     wheel and extensions when DuckDB is the engine) onto the PVC with a sha256
@@ -84,17 +88,17 @@ The deployment engine follows this fixed sequence:
     pod logs, events and the named StorageClass, and execs into the server
     pod. See
     [Dependency server failures](#dependency-server-failures).
-11. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
+12. **Trino** -- Deploys the Trino coordinator (Deployment) and workers
     (StatefulSet) with the connector configured to point at the catalog.
     Skipped unless `architecture.query_engine.type` is `trino`.
-12. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
+13. **Spark Thrift Server** -- Deployed when the query engine is `spark-thrift`.
     Its init container copies the dependency set from `lb-deps`, checking
     each file's sha256; deploy waits until the rollout is complete and the
     pod runs this deploy's set (Recreate: one pod at a time), and fails at
     once on a fetch that cannot recover by retrying.
-13. **DuckDB** -- Deployed when the query engine is `duckdb`; its wheel and
+14. **DuckDB** -- Deployed when the query engine is `duckdb`; its wheel and
     extensions come from the dependency set the same way.
-14. **Observability** -- Only when `observability.enabled` is true.
+15. **Observability** -- Only when `observability.enabled` is true.
     Prometheus and Grafana come from
     one shared `kube-prometheus-stack` release in the `lakebench-observability`
     namespace, which a cluster admin installs once with `lakebench admin
@@ -160,7 +164,9 @@ lakebench deploy my-config.yaml --yes
 ```
 
 Deploy with the full observability stack: set `observability.enabled: true`
-in the config, then
+in the config. The Pushgateway volume uses StorageClass `px-csi-scratch`
+unless `observability.pushgateway_storage_class` names another; on a cluster
+without Portworx, set it. Then
 
 ```bash
 lakebench deploy my-config.yaml --yes

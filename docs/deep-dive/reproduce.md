@@ -130,8 +130,7 @@ or `ingest_ratio` (continuous).
 7. Compares actual against expected per metric. `scale_ratio` has zero
    tolerance in either direction. `ingest_ratio` is a range guard: the
    run's value must lie in [0.95, 1.05], and the package's value is only
-   a record (honest continuous reruns of one corpus measured 1.0 to
-   1.034). A value that follows the config, which an older package may
+   a record. A value that follows the config, which an older package may
    still carry (continuous stage seconds), is shown as ignored and not
    gated. Performance metrics use the performance band in the
    metric's bad direction. QpH across different query sets is
@@ -155,7 +154,7 @@ Correctness has no tolerance because there is no legitimate reason
 for the pipeline to process a different share of the data than the
 recorded run (`scale_ratio` in batch). Any correctness drift means the
 pipeline has a bug or the config is different. Continuous `ingest_ratio`
-(bronze rows over the rows the trickle had released) moves a few percent
+(bronze rows over the rows that had arrived) moves a few percent
 between honest runs, so it is checked against a fixed range instead.
 
 ## What breaks reproducibility

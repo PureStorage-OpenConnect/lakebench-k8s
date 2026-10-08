@@ -54,7 +54,7 @@ architecture:
         spill_enabled: true            # Enable spill-to-disk for large queries
         spill_max_per_node: "40Gi"     # Max spill data per worker node
         storage: "50Gi"               # PVC size per worker (data + spill)
-        storage_class: ""              # StorageClass (empty = cluster default)
+        storage_class: ""              # StorageClass (empty = emptyDir, no PVC)
       catalog_name: "lakehouse"        # Iceberg catalog name exposed in Trino
 ```
 

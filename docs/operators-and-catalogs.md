@@ -177,7 +177,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Component | Version | Source |
 |-----------|---------|--------|
 | Spark Operator | 2.5.1 | Kubeflow helm chart |
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.1.1 on the Hive recipes, 4.0.2 on Polaris and hive-delta-spark-thrift; 4.2 unsupported) | apache/spark image |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.1.1 on the Hive recipes, 4.0.2 on Polaris, hive-delta-spark-thrift and hive-delta-spark-none; 4.2 unsupported) | apache/spark image |
 | Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | resolved by lb-deps |
 | Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | resolved by lb-deps |
 | Apache Polaris | 1.6.0 | apache/polaris image |

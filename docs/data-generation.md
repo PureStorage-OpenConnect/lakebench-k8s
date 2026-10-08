@@ -66,23 +66,25 @@ questions, and their numbers are not comparable:
   clock and throughput against the full corpus.
 - **Continuous** (`pipeline.mode: continuous`) answers "with data arriving
   at this rate for this long, does my system keep up and how fresh is the
-  result?" The generator paces the same corpus across `run_duration`, and
-  silver and gold run as concurrent streams; the headline is data freshness
-  and whether silver fell behind.
+  result?" Datagen writes at the scale's offered load for the whole
+  `run_duration`, and bronze, silver and gold run as concurrent streams;
+  the headline is data freshness and whether the pipeline stayed balanced.
 
-**Scale sets pressure, not wall clock.** `workload.datagen.scale` sets the
-corpus size (Customer 360 is ~10 GB per scale unit; AML is measured per
-scale, see `src/lakebench/config/scale.py`). In continuous mode that same
-corpus is spread across `pipeline.continuous.run_duration` (default 30 min),
-so a higher scale raises offered load per second, not the length of the
-run. In batch mode a higher scale raises wall clock.
+**Scale sets pressure, not wall clock.** In batch, `workload.datagen.scale`
+sets the corpus size (Customer 360 is ~10 GB per scale unit; AML is
+measured per scale, see `src/lakebench/config/scale.py`), and a higher scale
+raises wall clock. In continuous mode the scale sets the offered load: AML
+4 MB/s and Customer 360 10 MB/s of datagen files per scale unit, for the
+whole `run_duration` (default 30 min). A higher scale raises the load per
+second, not the length of the run.
 
-**The continuous throughput number is the offered load, not system
-capacity.** `sustained_throughput_rps` in the report is the rate the
-generator fed the pipeline (scale divided by window), not how fast the
-system could have gone unbounded. When `intake_limit` reads `trickle_rate`
-the system was never pushed past the configured rate; `pipeline_saturated`
-tells you whether silver kept up with that rate.
+**The continuous throughput number is usually the offered load, not system
+capacity.** `sustained_throughput_rps` is bronze rows ingested in the window
+over `arrival_seconds`. When the pipeline keeps up, that is the rate datagen
+offered. It is a capacity only when datagen stays ahead with bronze busy
+(`datagen_ahead`, `intake_limit: bronze_capacity`). Under `--skip-generate`
+or a set `max_files_per_trigger`, the trickle bounds it
+(`intake_limit: trickle_rate`).
 
 Picking which to run:
 - Compare systems on batch when you want raw throughput on a fixed corpus.
@@ -94,8 +96,15 @@ Picking which to run:
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
+| `--file` | `-f` | `./lakebench.yaml` | Config file, instead of the positional argument |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
+| `--regenerate` | | `false` | Clear the datagen prefix first, on a bucket this deployment owns. Without it a non-empty prefix is refused (exit 3) |
+| `--allow-stale-bronze` | | `false` | Generate over objects already in the prefix of a bucket this deployment did not create; the run records it |
+| `--registered-corpus` | | `false` | Generate the registered evaluation or robustness AML corpus the config names. Needs `--yes` |
+
+On a continuous config, `generate` writes until the datagen lead plus the
+window has passed, as a continuous run's datagen does.
 
 Without `--yes`, the command prompts for confirmation before submitting
 the datagen job. Use `--yes` for scripts and CI/CD pipelines.
@@ -157,8 +166,8 @@ pipeline mode. The two mode fields do not constrain each other.
 | Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent jobs over a corpus that keeps arriving. `sustained` is a deprecated alias for `continuous`. |
 
 The composition `datagen.mode: batch` with `pipeline.mode: continuous` is
-a valid config: all bronze files land in one burst, then the continuous
-pipeline trickle-reads them. Lakebench does not use `streaming` as a mode
+a valid config: datagen still writes for the whole window, but each file
+lands in one PUT instead of a multipart upload. Lakebench does not use `streaming` as a mode
 name; the continuous pipeline uses Spark Structured Streaming internally,
 but the operator-facing name is `continuous`.
 
@@ -185,14 +194,13 @@ A rendered manifest can be replayed by hand through the entrypoint.
 
 ### Per-pod resources
 
-The autosizer sizes datagen pods the same way in both modes, and honours
-values you set in the config:
+The autosizer honours values you set in the config:
 
 | Field | When unset | When set |
 |---|---|---|
-| `cpu` | `8` | Used as given |
+| `cpu` | `8` in batch. In continuous with `parallelism` also unset: the cores that offer the scale's load, in 100m steps (at least 200m), in pods of up to 8 cores | Used as given |
 | `memory` | Derived from the measured peak RSS for the schema, scale, thread count at the fixed 64mb file size, at least `4Gi` | Used as given |
-| `generators` | `0` (auto): one generator thread per pod CPU | Used as the thread count |
+| `generators` | `0` (auto): one generator thread per started core of the pod's CPU (`CPU_LIMIT`; a 1300m pod runs 2) | Used as the thread count |
 
 | `memory` default at 8 CPU | Scale 1 | Scale 100 | Scale 300 | Scale 800 |
 |---|---|---|---|---|
@@ -415,8 +423,7 @@ config load, and there is no IoT schema.
 
 ### Financial bronze layout
 
-With the default path template the financial prefix is `pacs008/`, and
-under `s3://<bronze-bucket>/pacs008/` the generator writes:
+The financial prefix is fixed at `pacs008/`, and under `s3://<bronze-bucket>/pacs008/` the generator writes:
 
 | Key | Contents |
 |---|---|
@@ -427,4 +434,6 @@ under `s3://<bronze-bucket>/pacs008/` the generator writes:
 | `manifest/manifest.parquet` | planted typology ground truth used for scoring |
 
 Cycles after the first in a multi-cycle run add a cycle suffix
-(`part-cNNN-NNNNNN.parquet`, `manifest-cNNN.parquet`).
+(`part-cNNN-NNNNNN.parquet`, `manifest-cNNN.parquet`). A continuous corpus
+adds a 24-month epoch after the history until the run stops it, with an
+epoch suffix (`part-eNNNN-*.parquet`, `manifest-eNNNN.parquet`).

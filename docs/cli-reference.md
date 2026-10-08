@@ -247,7 +247,7 @@ lakebench config recipes [NAME] [OPTIONS]
 
 ### validate
 
-Equivalent to `lakebench config validate`. Validate configuration and test connectivity to S3 and Kubernetes.
+Runs the same checks as `lakebench config validate`: the config, S3 and Kubernetes. The flags differ: `validate` takes `-f/--file` and `-v/--verbose`; `config validate` takes `--local`.
 
 <!-- BEGIN GENERATED: cli validate (scripts/gen_cli_reference.py) -->
 ```
@@ -457,8 +457,8 @@ run is re-run from the start.
 exceeds its wait budget (`--timeout`), `3` (refused) when the bronze datagen
 prefix is non-empty and neither `--regenerate` (on a bucket this deployment
 owns) nor `--allow-stale-bronze` (on one it does not) applies, or
-`--regenerate` was passed for a bucket it does not own or with an empty
-datagen prefix, `2` for a protected AML corpus without `--registered-corpus`
+`--regenerate` was passed for a bucket it does not own or when datagen
+writes at the bucket root (no prefix), `2` for a protected AML corpus without `--registered-corpus`
 (or the flag on a config that names none, without `--yes`, or on a seed with a
 look), and `4` when bronze or its ownership cannot be checked;
 when datagen exceeds its wait budget the datagen Job and any leftover
@@ -519,6 +519,7 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `4` `run.prereq_failed`: a `run` preflight check failed
 - `4` `capacity.shortfall`: free cluster capacity is below the run's floor, or its largest pod fits no node
 - `4` `capacity.unknown`: the run's capacity check could not read the nodes or pods (the check fails closed)
+- `4` `run.no_corpus`: a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds no corpus in bronze: nothing was generated yet
 - `4` `run.deps_missing`: the deployment has no dependency server (deployed by 1.6, or never deployed)
 - `4` `run.deps_stale`: the dependency set is not verified for this config: the deploy did not finish, the request changed since deploy, or the server has no Ready pod
 - `5` `run.namespace_missing_no_yes`: `run` would create a missing namespace and was not given --yes
@@ -907,7 +908,7 @@ through the deployment's Trino or Spark Thrift pod (see
 and that bucket is left as it is unless the table's files are already gone.
 
 `-f` is not accepted on `destroy` or `clean`: it exits 2 and names `--force` / `-y`,
-because `-f` means `--file` everywhere else. `LAKEBENCH_LEGACY_SHORT_F=1` restores the old
+because `-f` means `--file` everywhere else. With `--force` or `-y` also given, `-f` only warns. `LAKEBENCH_LEGACY_SHORT_F=1` restores the old
 meaning (force) with a warning for this release only.
 
 Valid targets:
@@ -999,7 +1000,8 @@ in a directory that cannot name its deployment; `3` a nameless config could
 not prove the deployment is its own, or the namespace was redeployed since
 that check (nothing deleted either way), or a redeploy was found partway
 through (destroy stops there, and the steps before it may have removed
-components); `5` the confirmation prompt was
+components), or any other refusal in the generated list above; `4` the
+kubeconfig did not load; `5` the confirmation prompt was
 declined (no side effects); `6` everything else succeeded but the namespace
 was still terminating at `--namespace-timeout` (usually a PVC or pod
 finalizer; check with `kubectl get ns <namespace>` before re-deploying
@@ -1421,7 +1423,8 @@ Exit paths of this command (the shared ones, such as usage errors, prerequisites
 - `0` `version.ok`: `lakebench version` prints the version
 <!-- END GENERATED: cli version -->
 
-No flags. Prints the installed lakebench version.
+Prints the installed lakebench version. `lakebench --version` (`-V`) does
+the same; `-h` is short for `--help` on every command.
 
 ### Renamed, refused and deprecated commands
 
@@ -1460,14 +1463,14 @@ list is `lakebench.cli._aliases`.
 ### Typical Workflow
 
 ```bash
-lakebench init                        # create config
-lakebench plan                        # what it needs: sizing, prerequisites, egress
-lakebench config validate             # check connectivity
-lakebench deploy --yes                # deploy infrastructure
-lakebench generate --timeout 14400    # generate data (large scales need hours)
-lakebench run --timeout 7200          # run pipeline + benchmark, delivers report.html
-lakebench report                      # print the summary of the delivered report
-lakebench destroy --force             # tear down everything
+lakebench init                              # create lakebench.yaml
+lakebench plan lakebench.yaml               # what it needs: sizing, prerequisites, egress
+lakebench config validate lakebench.yaml    # check connectivity
+lakebench deploy lakebench.yaml --yes       # deploy infrastructure
+lakebench generate lakebench.yaml           # generate data; the timeout grows with scale
+lakebench run lakebench.yaml                # run pipeline + benchmark, delivers report.html
+lakebench report lakebench.yaml             # print the summary of the delivered report
+lakebench destroy lakebench.yaml --force    # tear down what this deployment owns
 ```
 
 ### Re-running the Pipeline

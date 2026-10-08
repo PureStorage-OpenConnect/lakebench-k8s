@@ -169,8 +169,8 @@ Compare two configurations by running each and reading the two reports side
 by side:
 
 ```bash
-lakebench deploy config-hive.yaml && lakebench run config-hive.yaml
-lakebench deploy config-polaris.yaml && lakebench run config-polaris.yaml
+lakebench deploy config-hive.yaml && lakebench run config-hive.yaml --generate --yes
+lakebench deploy config-polaris.yaml && lakebench run config-polaris.yaml --generate --yes
 lakebench report config-hive.yaml
 lakebench report config-polaris.yaml
 ```
@@ -232,10 +232,14 @@ before 1.6, and the v1.7 datagen image changes the corpus. See the
 
 - `kubectl` and `helm` on PATH
 - Kubernetes 1.26+ with room for the minimum below: what must fit at once,
-  for the default recipe (`hive-iceberg-spark-trino`), from the sizing
+  for `hive-iceberg-spark-trino`, from the sizing
   function behind `lakebench config show`, `config recommend` and the `run`
   capacity preflight. Batch datagen pods that do not fit wait their turn, so
-  the batch minimum is the Spark peak plus the always-on pods. See
+  the batch minimum is the Spark peak plus the always-on pods. The continuous
+  figure is what carries the scale's offered load balanced; a smaller cluster
+  runs with fewer executors and a "cannot balance" warning naming the stage,
+  and that run FAILS the balance check, so use the figure or lower the scale.
+  See
   [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
   for what each figure is built from. `lakebench run` fails fast if the
   cluster is too small.
@@ -248,15 +252,17 @@ before 1.6, and the v1.7 datagen image changes the corpus. See the
 | Customer 360 | batch | 1 | 41 cores | 544 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 10 | 48 cores | 572 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 100 | 114 cores | 1,340 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 59 cores | 309 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 82 cores | 345 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 202 cores | 955 GB | 1,700 Gi | 8 cores / 48 GB |
+| Customer 360 | continuous | 1 | 46 cores | 363 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 10 | 54 cores | 391 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 100 | 222 cores | 1,896 GB | 3,220 Gi | 8 cores / 80 GB |
 | AML | batch | 1 | 41 cores | 544 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 10 | 48 cores | 572 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 100 | 114 cores | 1,340 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 139 cores | 1,023 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 162 cores | 1,065 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 340 cores | 2,253 GB | 4,660 Gi | 8 cores / 48 GB |
+| AML | continuous | 1 | 135 cores | 1,254 GB | 2,300 Gi | 4 cores / 40 GB |
+| AML | continuous | 10 | 183 cores | 1,682 GB | 3,200 Gi | 4 cores / 40 GB |
+| AML | continuous | 100 | 817 cores | 7,815 GB | 14,600 Gi | 16 cores / 160 GB |
+
+- AML continuous scale 100 cannot balance at any cluster size: silver-stream needs ~45 executors x 16 cores to carry the offered load; the executor cap allows 28, so its lag will grow and the run will fail the balance check. The minimum is the cluster that runs it at the executor cap.
 
 <!-- END GENERATED: sizing-minimums -->
 
@@ -275,7 +281,7 @@ before 1.6, and the v1.7 datagen image changes the corpus. See the
 | Command | Description |
 |---------|-------------|
 | `init` | Generate a starter config file; `--from OLD` converts an older one |
-| `config validate` | Check config and cluster connectivity |
+| `config validate` | Check config and cluster connectivity (`validate` runs the same checks) |
 | `config storage` | Check the S3 backend supports what lakebench needs |
 | `config show` | Show the resolved configuration and its peak requested resources |
 | `plan` | Show what a config needs (components, sizing, prerequisites) and check the cluster has room; read-only |
@@ -285,13 +291,18 @@ before 1.6, and the v1.7 datagen image changes the corpus. See the
 | `benchmark` | Run the workload's query benchmark standalone |
 | `query` | Execute ad-hoc SQL against the active engine |
 | `status` | Show deployment status |
+| `stop` | Stop every job Lakebench started in the deployment |
+| `logs` | Show logs from a component of the deployment |
+| `journal` | Show the command and execution journal |
 | `report` | Show a run's scorecard in the terminal (`--format` for the stage matrix, `--render` for HTML) |
 | `config recommend` | Recommend a scale factor for the connected cluster |
 | `config recipes` | List recipes and their support state per workload and mode |
 | `admin` | Cluster-admin setup and repair: `install --component`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` (`install-spark-operator` and `install-scratch-storage-class` are aliases of `install --component`) |
 | `financial` | AML operator actions (`score`, `reference-score`, `replay`, `reproduce`) |
 | `reproduce` | Record or verify a reproduction package from a run |
+| `clean` | Empty the silver or gold layer, keeping the deployment |
 | `destroy` | Tear down the resources this deployment owns |
+| `version` | Show the Lakebench version (also `--version`, `-V`) |
 
 See [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md)
 for flags and options.
@@ -300,7 +311,7 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.x, 4.0.x (default on the Polaris recipes and hive-delta-spark-thrift: 4.0.2), 4.1.x (default on the Hive recipes: 4.1.1; 4.2 not supported) |
+| Apache Spark | 3.5.x, 4.0.x (default on the Polaris recipes, hive-delta-spark-thrift and hive-delta-spark-none: 4.0.2), 4.1.x (default on the Hive recipes: 4.1.1; 4.2 not supported) |
 | Spark Operator | 2.5.1 (Kubeflow) |
 | Apache Iceberg | 1.11.0 (1.10.1 with Spark 3.5.4 on its Java 11 image, and in local mode) |
 | Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |

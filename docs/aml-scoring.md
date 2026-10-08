@@ -26,9 +26,10 @@ which a batch `lakebench run` submits after gold-finalize
 `gold.alerts` against the datagen manifest on transaction UETRs, with
 no time window, and writes `recall.parquet` and a `recall.json`
 summary under `s3a://<gold>/scoring/<run_id>/`. The manifest URI is
-passed in on the command line; the default path template is
+passed in on the command line. The prefix is fixed:
 `s3a://<bronze>/pacs008/manifest/manifest*.parquet`, and `lakebench
-run` derives the URI from that template. Recall counts only alerts
+run` derives the URI from it. A continuous corpus has one manifest per
+24-month epoch (`manifest-eNNNN.parquet`), which the glob covers. Recall counts only alerts
 from a typology's designated rules; alerts from other rules are
 reported separately as `incidental_recall`, and the `random` control
 typology's incidental recall is the chance floor. Precision is
@@ -63,7 +64,7 @@ The rule set:
 | Rule | Targets typology | What it detects |
 |---|---|---|
 | W1_connected_components | gather_scatter | multi-entity graph clusters |
-| W2_structuring | micro_structuring | 3+ structuring-band transactions in 24 h, two kinds: per originator (`structuring`, tumbling day) and per beneficiary from 2+ senders (`structuring_beneficiary`, sliding 24 h) |
+| W2_structuring | micro_structuring | 3+ structuring-band transactions in 24 h, two kinds: per originator (`structuring`, tumbling day) and per beneficiary from 3+ senders (`structuring_beneficiary`, sliding 24 h) |
 | W3_round_tripping | cycle | funds returning to the originator through 2-5 transfers within 30 days |
 | W4_risk_propagation | rapid_layering | pass-through of 80%+ within 6 h |
 | W17_layering_chain | stack | open chains of 3+ transfers, each forwarding 80-100% of the previous within 7 days |
@@ -267,7 +268,7 @@ The report's `overall_pass` flag is written into
 `aml_gate_report.json` as `band_leakage_overall_pass` and its rows land
 in `leakage_report.parquet`. Neither value fails the reference-score
 job: only the fidelity gate's own verdict (`error` or `empty_frame`, or
-a `counts_only` mismatch, at `score_financial_reference.py:685-691`)
+a `counts_only` mismatch, checked in `score_financial_reference.py:main`)
 raises `SystemExit`. The band report is a diagnostic on the historical
 shape, kept for backward compatibility; the pre-registered leakage
 caps that actually gate a corpus live in the fidelity gate below.
@@ -486,14 +487,14 @@ the shipped AML example is batch mode.
   release-to-release regression detection on the same config; do not
   compare against numbers from a stack sized differently.
 - **`ingest_ratio`** (continuous mode only) is bronze rows ingested by
-  the window's end divided by `released_rows`, the rows the trickle had
-  made available to bronze by then (`max_files_per_trigger` files per
-  bronze trigger since bronze's first write, at the corpus's mean rows
-  per file, capped at the corpus). 1.0 means bronze kept up with what
-  arrived; it is not the share of the corpus taken, which is
-  `corpus_ingest_ratio` (bronze rows over datagen rows produced) and
-  sits below 1 on a default run, whose trickle is sized to outlast the
-  window. The trickle rate is a Lakebench-imposed cap, so a run the trickle
+  the window's end divided by `released_rows`. With the run's own datagen,
+  `released_rows` is the rows datagen had written one bronze cadence before
+  the window's end, at its mean rate. Under a trickle (`--skip-generate` or
+  a set `max_files_per_trigger`) it is `max_files_per_trigger` files per
+  bronze trigger since bronze's first write, at the corpus's mean rows per
+  file, capped at the corpus. 1.0 means bronze kept up with what arrived;
+  it is not the share of the corpus taken, which is `corpus_ingest_ratio`
+  (bronze rows over datagen rows produced). The trickle rate is a Lakebench-imposed cap, so a run the trickle
   held (`experiment.limits.trickle_bound`, see
   [Scoring and Benchmarking](benchmarking.md#continuous-mode)) measured the
   configured offered load, not the pipeline's capacity, whatever its
@@ -522,17 +523,28 @@ the shipped AML example is batch mode.
   tick. For each new alert, time to detect is the moment its rule's
   INSERT into `gold.alerts` committed minus the newest bronze `ingest_ts`
   among its related transactions, so it runs from the arrival of the
-  last piece of evidence to the alert being visible in gold
+  last piece of evidence (its file landing in the raw zone, which includes
+  the wait for bronze; for a corpus written before the run, when bronze took
+  the file) to the alert being visible in gold. Every rule runs on every
+  pass; the per-rule histograms report each rule's own commit. `detected_ts` is the first
+  pass that wrote the alert's content
   (`spark/scripts/gold_refresh_financial.py`). Each tick logs a
   histogram in 10 s bins, and the collector merges every tick into
   `time_to_detect_seconds` (median), `time_to_detect_p95_seconds` (upper
   edge of the bin that reaches the 95th percentile, capped at the
   maximum), `time_to_detect_max_seconds` and `time_to_detect_alerts`
   (`metrics/collector.py`). `time_to_detect_late_alerts` counts alerts
-  whose evidence was already in silver before the previous pass read it
+  whose evidence was already in silver before the previous pass of their
+  rule read it
   (a re-raise after a rule error, or evidence outside
   `related_txn_ids`); they stay in the percentiles, so they can only
-  lengthen them. `time_to_detect_unmeasured_cycles` counts ticks that
+  lengthen them. An alert whose content changes is a new alert: a W4
+  alert covers every matched pair of its account, so each pass that adds a
+  pair to it raises it again, and `time_to_detect_alerts` counts those
+  re-raises. The lookup of each new alert's evidence reads the
+  transactions of all of silver, so it is the one part of a tick that
+  grows with the run (the tick's `ttd` phase).
+  `time_to_detect_unmeasured_cycles` counts ticks that
   logged no measurement; their alerts are measured one tick late. The
   ticks also log a pass-end histogram (every new alert measured at the
   end of the detection pass, the definition used before per-rule commit
@@ -562,7 +574,8 @@ lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
 lakebench generate examples/polaris-iceberg-spark-financial.yaml
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
 
-# Optional re-score (the manifest path assumes the default path template)
+# Optional re-score of a batch run (the bronze prefix is fixed; a continuous
+# corpus has one manifest-eNNNN.parquet per epoch)
 lakebench financial score \
     examples/polaris-iceberg-spark-financial.yaml \
     --manifest s3a://<bronze-bucket>/pacs008/manifest/manifest.parquet \
@@ -749,12 +762,6 @@ inside time to detect). Their alert set is taken once after the drain
   the dormancy gap signature). The leakage gate still runs, but a
   detector can still score on such a shortcut where no hard negative
   exists to punish it. Planned for v1.7.
-- **AML continuous per-rule recall is not scored.** Stopping the
-  streams can interrupt a gold-refresh tick and leave rule statuses
-  `pending`; post-run scoring refuses them, and the report says "Recall is
-  not scored in continuous mode". Batch recall is unaffected. From v1.7 a
-  continuous run drains the last tick and records `recall_covered`
-  instead; see [Continuous recall over covered instances](#continuous-recall-over-covered-instances).
 - **Stream restarts longer than 1 h are not safe.** Continuous
   Iceberg snapshot expiry is floored at 1 h while streams are live. A
   bronze-ingest driver down for longer can replay a batch and append
@@ -808,7 +815,12 @@ table). They come from the current gold-refresh driver pod's log, so a
 driver that restarted leaves its earlier pod's ticks out
 (`continuous.drain.ticks_scope`), and
 `continuous.drain.log_from_driver_start` is false when log rotation trimmed
-the log's first ticks.
+the log's first ticks. Each tick also logs every rule's status
+(`continuous.ticks[].rule_status`: `ran`, `skipped:<reason>` or `error`).
+The drained driver repeats its last tick's records with each drain line, so
+a log rotated during that tick still yields the snapshots the scorer reads.
+When scoring does not run, the rules gate judges that tick's rule status
+instead of the scored one.
 
 Each tick also records the `silver.transactions` snapshot it read for the
 time-travel read after the window, from the snapshot's metadata only (no
@@ -1002,8 +1014,9 @@ Silver, then bronze, are pinned before the raw files are counted.
 In-flight payments are bounded, not inferred: bronze must hold exactly the
 rows of the raw files its stream's checkpoint log says it took up to the
 pinned snapshot's batch (`spark.sql.streaming.epochId`), so the rest are
-files not yet taken; and rows silver has not taken must be newer than
-silver's ingest watermark. Anything else is `unaccounted` and fails
+files not yet taken; and the bronze rows silver has not taken (by `uetr`)
+must have landed within 900 s before silver's newest landing time, since a
+file can become visible after a later-landed one. Anything else is `unaccounted` and fails
 reconciliation. Freshness samples taken after a pass follow the tick's own
 rule (only while data is moving), so a drained corpus's idle time never
 becomes the score. The continuous reset drops all four tables.
@@ -1109,9 +1122,8 @@ baseline with none configured or none run, and the other way round.
   W-rule patterns for benchmarking pipeline throughput. Treat them as
   representative workload, not as production-ready detectors.
 - **Any typology that does not appear in `RULE_TARGETS` or
-  `UNMAPPED_TYPOLOGIES`.** If the manifest starts emitting a typology
-  string that appears in neither, the test suite fails at build time so
-  the gap is visible before a run.
+  `UNMAPPED_TYPOLOGIES`.** No test checks that every typology the manifest
+  emits is in one of them; add a new typology to one by hand.
 
 ## Where to look next
 

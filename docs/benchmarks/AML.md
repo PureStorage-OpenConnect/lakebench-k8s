@@ -1,6 +1,6 @@
 # AML (financial) Pipeline Benchmark Specification
 
-Workload version `aml-2` (as stamped in `experiment.workload.version`),
+Workload version `aml-3` (as stamped in `experiment.workload.version`),
 generator model `datagen-v2-rs-0.3`, query sets `qs12-910d16a91962` (batch
 with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8), maintenance policy
 `m2-2026-09-26`.
@@ -36,8 +36,8 @@ engine x query engine, on a known system):
   into queryable gold (`time_to_value_seconds`), the data volume and the
   requested compute it used on the way, and how fast its query engine
   answers the query set (`composite_qph`).
-- Continuous mode: how stale gold is while a finite corpus is trickled in at
-  a fixed offered load (`data_freshness_seconds`), how long a planted
+- Continuous mode: how stale gold is while datagen writes at the scale's
+  offered load (`data_freshness_seconds`), how long a planted
   pattern takes to raise an alert after its payments land
   (`time_to_detect_seconds`), the ingest rate bronze holds, and the query
   engine's QpH while the tables are being written.
@@ -59,8 +59,9 @@ What it does not claim:
   corpus and the rules, not of the architecture. It is reported beside a run
   and never decides its verdict. A batch verdict fails an AML run on rule
   errors, skips that are not allowed, expected rules that did not run, or
-  zero alerts; a continuous verdict on a mode-excluded rule that ran or zero
-  alerts (section 5).
+  zero alerts; a continuous verdict on a mode-excluded rule that ran, an
+  expected rule that skipped, errored or did not run on the scored tick, or
+  zero alerts (section 5).
 - Figures bounded by a Lakebench-imposed cap (executor ceilings, rule caps,
   the continuous trickle, the TM per-customer alert cap) measure that cap,
   not the infrastructure (section 7.4).
@@ -141,6 +142,7 @@ bronze-ingest stream.
 | `silver.counterparty_edges` | one (originator, beneficiary) pair (batch); one pair per micro-batch (continuous) | (`source_entity_id`, `target_entity_id`) | `bucket(64, source_entity_id)` | 4,894,537 | 49,005,465 |
 | `silver.entity_profiles` | one entity's behavioural baseline | `entity_id` | `bucket(64, entity_id)` | 113,721 | 1,137,292 |
 | `silver.silver_batch_versions` | one sealed commit marker | (`stream_id`, `batch_id`) | none | one per batch cycle | one per batch cycle |
+| `silver.counterparty_pairs` | one (originator, beneficiary) pair the first time a batch sees it; continuous only | (`originator_id`, `beneficiary_id`) | none | n/a | n/a |
 
 In both published records entities = accounts = profiles, statements = 2 x
 transactions, and edges < transactions. Lakebench records these counts
@@ -191,17 +193,17 @@ Its identity has two parts:
   `experiment.workload.generator_model_version` from a table kept equal to
   `model.rs` by a test (`metrics/experiment.py`), not from the corpus.
 - The image. `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`,
-  built from this release's `datagen_rs/` source (commit `2a36ae210`); the
-  runtime pulls the digest. A five-case byte-compare against the v1.6
-  release image `lb-datagen:1.6.0` (financial seed 43 with and without the
+  `docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9`;
+  the runtime pulls the digest. 1.7.0 shipped `lb-datagen:2a36ae21`
+  (`sha256:0502b700...`), whose five-case byte-compare against the v1.6
+  image `lb-datagen:1.6.0` (financial seed 43 with and without the
   robustness perturbation, Customer 360 seed 42, and both at two cycles;
   markers excluded) is equal
   (`tests/fixtures/datagen_reference/compare-0502b7002999.json`). The
-  generator lineage that enters the
-  corpus identity is the observed image digest, mapped through
-  `config/datagen_lineage.yaml`, so an output-neutral re-pin keeps the same
-  lineage (section 7.3). A registered look does not use a tag:
+  generator lineage that enters the corpus identity is the observed image
+  digest, mapped through `config/datagen_lineage.yaml` (section 7.3).
+  `3cb67f92` has no row there, so its corpora get a corpus id of their own.
+  The registered v1.7 look names `2a36ae21` by digest. A registered look does not use a tag:
   `scripts/aml_gate.py --registered` refuses to start without a
   digest-pinned `--generator-image`, and refuses one that differs from the
   image the committed per-typology predictions were made with.
@@ -244,9 +246,13 @@ population are customers of the reporting institution. Unset, datagen pod
 parallelism follows the scale (2 pods up to scale 5, 4 above 5 up to
 scale 10) and, above scale 50, is raised to what the cluster's CPU allows
 (`config/autosizer.py`), and financial above scale 100 is raised to at least
-8 pods. A value you set is used exactly, with a warning when the cluster
-cannot fit it (a continuous run is then refused at preflight) or it is
-under that floor. Pod memory comes
+8 pods. In continuous mode with `cpu` and `parallelism` both unset, datagen
+instead gets the cores that offer 4 MB/s per scale unit at 28 MB/s per core
+(100m steps, at least 200m), in pods of up to 8 cores, still raised to the
+8-pod floor above scale 100. Every pod runs one generator thread per started
+core (`CPU_LIMIT`). A value you set is used exactly, with a warning when the
+cluster cannot fit it (a continuous run is then refused at preflight) or it
+is under that floor. Pod memory comes
 from an autosizer model. Neither pod count nor memory changes row content,
 but the pod count is passed to the generator as `--total-nodes`, which is
 part of the resolved arguments corpus id v2 hashes. Above scale 50, two
@@ -357,9 +363,14 @@ load.
 
 ### 3.5 Content, time range and dirty data
 
-The corpus window is fixed: 2021-01-01 00:00 to 2026-01-01 00:00 (60
-months, 1,826 days); Lakebench does not pass `--corpus-months`, so every
-Lakebench corpus spans those 60 months. Timestamps are zone-less
+In batch the corpus window is fixed: 2021-01-01 00:00 to 2026-01-01 00:00
+(60 months, 1,826 days); Lakebench does not pass `--corpus-months` in batch.
+In continuous mode Lakebench passes `--corpus-months 24` and
+`--deliver-until`: datagen writes a 24-month history, then successive
+24-month periods (epochs) of the same bank until the run stops it. Each
+epoch has its own seed salt, new planted patterns, `part-eNNNN-*` files and
+a `manifest-eNNNN.parquet` answer key; parties, accounts and the watchlist
+stay the same. Timestamps are zone-less
 (interpreted as UTC by the Spark stages and the query engines) and
 whole-second. Volume follows a weekday, salary-day, quarter-end and intraday
 calendar with per-country holiday roll-forward (`datagen_rs/src/timing.rs`).
@@ -510,6 +521,13 @@ scoring and the verdict read it, never the manifest's coarser `workload`
 category. The cuts are `HIGH_PRIORITY_CUTOFFS` in
 `spark/scripts/detection_rules.py`.
 
+**Hubs in W3 and W17.** An account that sends more than 200 transfers in a
+hop-window week (a payment processor's week) is not an intermediary of a
+round trip or layering chain in that week; in its other weeks it is. Since
+1.7.1 (workload version `aml-3`) the cut is per week. Before, an account was
+excluded everywhere once any week crossed it, so W3 and W17 alerts, recall
+and false positives differ from 1.7.0 runs and the two are not comparable.
+
 **Reason codes** (`spark/scripts/aml_reason_codes.py`). Every alert carries
 `reason_codes`: its rule's base code, then each conditional code whose
 condition holds on the alert. The base code makes a rule's codes cover all
@@ -527,35 +545,36 @@ version listed a prior counterparty. A code that reads the HIGH cut
 `lakebench run` in continuous mode (`pipeline.mode: continuous`;
 `cli/_sustained.py`):
 
-1. Resolves the trickle (`max_files_per_trigger`). Unset, the run derives it
-   so arrival lasts about 1.2 x `run_duration`: int(files x trigger seconds
-   / (1.2 x `run_duration`)), clamped to 1 to 50 (a Lakebench-imposed cap),
-   where files is the nominal corpus size divided by the 64 MB file size. At
-   scale 1 with the default 1,800 s window this is 1 file per trigger
-   (recorded: `run-20260929-205000-ebb26f`, `continuous.trickle`). An
-   explicit value that would offer the whole corpus before the window ends
-   is refused at run start with exit 2, as is a window longer than the corpus
-   can fill at one file per trigger, a window shorter than three gold
-   refresh intervals (900 s at defaults), and an explicit
+1. Checks the window. It refuses (exit 2) a window shorter than three gold
+   refresh intervals when gold is on an interval, and an explicit
    `retention_interval` or `compaction_interval` that cannot fire inside the
-   window unless maintenance is disabled. The resolved value is recorded in
+   window unless maintenance is disabled. With its own datagen, bronze has
+   no per-trigger limit. Under `--skip-generate` it resolves the trickle
+   (`max_files_per_trigger`): unset, derived so arrival lasts about 1.2 x
+   `run_duration` (int(files x trigger seconds / (1.2 x `run_duration`)),
+   clamped to 1 to 50, a Lakebench-imposed cap), and refused when the corpus
+   would run out first. The resolved value is recorded in
    `continuous.trickle` and `experiment.limits.max_files_per_trigger`.
 2. Stops leftover streams, deletes the stream checkpoints, and clears the
    raw datagen prefix unless `--skip-generate`.
-3. Starts datagen, waits up to 300 s for the first Parquet file, and runs a
-   bronze-verify preflight in `schema` mode. It drops bronze (without PURGE,
-   so registered datagen files survive) and recreates it empty with the
-   inferred schema plus `ingest_ts`; drops all seven silver tables; drops
-   and re-registers `bronze.manifest`; and drops the TM operations tables and
-   the five gold tables `alerts`, `risk_scores`, `entity_clusters`,
-   `daily_dashboards` and `detection_status`.
-4. Runs three concurrent jobs for the window (`run_duration`, default
-   1,800 s):
-   - **bronze-ingest**: Structured Streaming over the Parquet prefix, the
-     resolved `max_files_per_trigger` every `bronze_trigger_interval`
-     (default 30 s); appends with `ingest_ts`.
+3. Runs a bronze-verify preflight in `schema` mode, before datagen starts.
+   It drops bronze (without PURGE, so registered datagen files survive) and
+   recreates it empty from the generator's schema (`pacs008_schema.json`)
+   plus `ingest_ts`; drops all eight silver tables (the seven batch ones and
+   `silver.counterparty_pairs`); drops and re-registers `bronze.manifest`;
+   and drops the TM operations tables and the five gold tables `alerts`,
+   `risk_scores`, `entity_clusters`, `daily_dashboards` and
+   `detection_status`. Bronze-ingest exits 2 if datagen's first file does
+   not match that schema.
+4. Starts the three streams, then datagen once they are running. The window
+   (`run_duration`, default 1,800 s) opens at datagen's first data file,
+   with a warning if none arrives within 300 s:
+   - **bronze-ingest**: Structured Streaming over the Parquet prefix, no
+     per-trigger limit unless `max_files_per_trigger` is set, a micro-batch as soon as the last
+     one finishes (`bronze_trigger_interval`, default 0 s); appends with
+     `ingest_ts`.
    - **silver-stream**: Iceberg streaming read of bronze, `foreachBatch`
-     every `silver_trigger_interval` (default 60 s). Per micro-batch:
+     back to back (`silver_trigger_interval`, default 0 s). Per micro-batch:
      transactions (idempotent delete-then-append on replay), edges
      (per-batch aggregates; readers must SUM), dimension MERGE with KYC,
      statements and balances, profile MERGE with the Welford recurrence,
@@ -563,9 +582,12 @@ version listed a prior counterparty. A code that reads the HIGH cut
      from a local checkpoint (`spark/scripts/common.py`,
      `materialised_source`), because on Spark 4.1 with Iceberg a MERGE whose
      source is a temp view over an Iceberg table fails inside Spark.
-   - **gold-refresh**: a timer loop every `gold_refresh_interval` (default
-     5 min). Each tick pins one sealed silver snapshot and runs W4, W2, W17
-     and W3 over the full pinned corpus. W5, W6, W1, W7 and W8 are written
+   - **gold-refresh**: a loop of ticks, back to back by default
+     (`gold_refresh_interval` `0 seconds`). Each tick refreshes the catalog's
+     view of silver, pins one sealed silver snapshot and brings W4, W2, W17
+     and W3 up to date with it, re-detecting only what the rows new since
+     each rule's last pass can change. Every rule runs on every tick. An alert keeps the `detected_ts` of the tick that first wrote its
+     content. W5, W6, W1, W7 and W8 are written
      to `gold.detection_status` as `skipped` with reason `mode-excluded`;
      they do not appear in `experiment.rules.skipped`, and
      `experiment.support.mode_note` names them. The tick then refreshes the
@@ -684,7 +706,7 @@ expected at a fixed seed but are not checked; check them from `metrics.json`
 | A skipped rule whose target typology is in the pre-registered behavioural subset | AML batch gate | no (warning, every run) |
 | Every layer has rows (a continuous layer with no row figure passes on its measured size) | record gate `layer_rows` | yes |
 | Batch: the expected rules ran, none errored, detection alerted, and every skip is an allowed one (W1 `giant-component` or `vertex-cap`; W3 and W17 `path-cap`). A W3 or W17 `edge-cap` skip is not allowed | record gate `aml_rules` | yes; an allowed cap skip passes and is labelled in `verdict.qualifiers.rule_caps` |
-| Continuous: no mode-excluded rule ran, and gold-refresh counted alerts. The rules are taken from the time-to-detect lines, which exist only for rules that alerted, so rule errors, skips and rules that raised no alert are not judged | record gate `aml_rules` | yes |
+| Continuous: no mode-excluded rule ran, gold-refresh counted alerts, and every expected rule ran without a skip (path-cap included) or error on the tick whose alerts were scored, or the drain tick when scoring did not run. With neither status recorded, the rules come from the time-to-detect lines, with a warning | record gate `aml_rules` | yes |
 | Batch bronze reached 95% of the scale's expected volume | record gate `scale_ratio` | yes |
 | No benchmark query outside `allow_empty` returned zero rows | record gate `query_answers` | yes |
 | TM invariants: monitored population, reconciliation (monitored + excluded = source), every alert dispositioned, one row per alert identity, no NULL disposition, non-customer alerts declared, escalated <= alerts, cases <= escalated, SARs <= cases, one open case per customer, funnel monotone, continuing reviews fire, reviews not folded into determined cases, history stable, workflow completed after the TM tables were written | TM verdict (`metrics/tm_ops.py`) | yes, only when the verdict is `fail`; `unknown` (an unchecked invariant, an interrupted pass, an unparsed cycle log), `not_run` and `disabled` only warn |
@@ -695,7 +717,8 @@ expected at a fixed seed but are not checked; check them from `metrics.json`
 | Continuous: data arrived during the window, silver committed and gold refreshed on new data at least twice inside it, gold freshness measured | continuous window gate | yes |
 | Continuous: gold-refresh drained (section 4.3, step 7) | drain check | yes |
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |
-| Continuous: ingest ratio at least 0.95, unless the trickle bounded intake and the pipeline kept pace (then a warning); gold freshness at most half the run's duration | record gates | yes |
+| Continuous: ingest ratio at least 0.95, unless the trickle bounded intake and the pipeline kept pace, or the run is a capacity run with bronze at capacity (then a warning); gold freshness at most half the run's duration (a warning in a capacity run) | record gates | yes |
+| Continuous: balanced, no handoff's lag rose by more than one cadence across the window's second half | balance gate | yes |
 | Continuous: end-of-run result check | not performed; recorded in `experiment.results.not_checked` | n/a |
 
 There are no fixed expected results for any AML query. Query correctness
@@ -844,8 +867,8 @@ Datagen parallelism is not permitted tuning: it is a corpus input (section
 ### 7.3 Prohibited changes (invalidate a result or are refused)
 
 These change the identity, so the runs are not comparable:
-the workload version (`aml-2` in this release; records at `aml-1` are not
-comparable with it); generator `MODEL_VERSION`; workload parameters
+the workload version (`aml-3` in this release; records at `aml-1` or
+`aml-2` are not comparable with it); generator `MODEL_VERSION`; workload parameters
 (`parameters_id` hashes every TM operations setting, `w1_max_vertices`,
 `retention_workload` and `retention_months`); mode; a different query set or
 any differing result fingerprint; the corpus group (corpus id, seed, corpus
@@ -885,7 +908,8 @@ outside the protocol in 3.3.
 | Cap | Value | Effect | How a bound cap is reported |
 |---|---|---|---|
 | Executor ceiling | 28 (`_MAX_EXECUTORS_SAFE`); per AML job: bronze-verify 28, silver-build 28, gold-finalize 28, bronze-ingest 20, silver-stream 28, gold-refresh 28 | per-job executor count is the profile's base at scale <= 10, else min(base + int((scale - 10) x per100 // 100), cap) | `experiment.limits.executors[].cap`, `cap_hit`, `override`, `override_bound`; `limits.bound`, `limits.bound_kinds` |
-| Continuous concurrent budget | 90% of the cluster CPU left after co-resident services and, while it runs, datagen | fewer executors per stream | `limits.executors[].budget_cap` |
+| Continuous concurrent budget | 90% of the cluster CPU (and memory) left after co-resident services, datagen while it runs, and the stream drivers; each executor to the stream with the smallest share of its need | fewer executors per stream; a stream below its need cannot balance and the run fails | `limits.executors[].budget_cap` |
+| Streaming trigger intervals | back to back by default | freshness is measured at each write, so an interval is not in it | `limits.trigger_bound` (not a bound kind) |
 | Auto-sizing cuts to fit the cluster | cluster-derived | smaller resources than requested | `limits.autosize_cuts`, `limits.bound` |
 | `w1_max_vertices` | 8,000,000 (`financial.w1_max_vertices`) | W1 skipped `vertex-cap` | `rules.skipped`; `limits.bound`; verdict `rule_caps` |
 | W1 giant-component share | 0.5 | W1 skipped `giant-component` | `rules.skipped` only; not in `limits.bound`. Recorded at scale 1 and 10 (`run-20260929-221146-9d5345`, `run-20260929-214442-825153`) |
@@ -894,7 +918,7 @@ outside the protocol in 3.3.
 | Per-alert evidence caps | W1 250,000 related payments; W2 beneficiary kind 1,000 (the originator kind is not cut); W4 1,000 related payments and 1,000 related entities; W5 rescreen 200 | truncates `related_txn_ids` (and W4's `related_entity_ids`); W1, W2, W4 and the W5 rescreen record the true count (`txn_total`) and `txns_truncated` in the alert evidence | `financial_scoring.evidence_capped_alerts_by_rule`, `recall_bounded_by_evidence_cap`, per-typology `bounded_by_evidence_cap` |
 | TM `max_alerts_per_customer` | 50,000 | excess alerts dispositioned `over_capacity` | `limits.tm_alerts_over_capacity`, `limits.bound` |
 | Pre-benchmark maintenance budget | 1,800 s | remaining maintenance stopped | `limits.maintenance_stopped`, `limits.bound` |
-| Continuous trickle `max_files_per_trigger` | derived per run (1 to 50) unless set in config | sets the offered load; `sustained_throughput_rps` and `corpus_ingest_ratio` then measure a Lakebench-set arrival rate | `continuous.trickle`, `limits.max_files_per_trigger`, `limits.trickle_bound` and a `trickle:` line in `limits.bound` (never in `bound_kinds`, since every continuous run sets one) |
+| Continuous trickle `max_files_per_trigger` | unset (no limit) with the run's own datagen; derived per run (1 to 50) under `--skip-generate`; or set in config | when set, sets the offered load; `sustained_throughput_rps` and `corpus_ingest_ratio` then measure a Lakebench-set arrival rate | `continuous.trickle`, `limits.max_files_per_trigger`, `limits.trickle_bound` and a `trickle:` line in `limits.bound` (never in `bound_kinds`) |
 | Continuous drain budget | 1,800 s (300 s under `lakebench stop`) | a tick that takes longer fails the run | the drain problem in `verdict.reasons`; `financial_scoring.status: not_scored` |
 | Query timeout | 900 s | query fails, run fails | query error |
 
@@ -914,8 +938,7 @@ means a delta in the metric has no better side. Pipeline scores are in
 `metrics.json` under `pipeline_benchmark.scores`; AML scoring is the
 top-level `financial_scoring` block, TM operations the top-level
 `tm_operations` block, and the storage multiple the top-level
-`storage_multiple` block. `tests/test_benchmark_specs.py` fails when the
-registry gains a financial metric this spec does not name.
+`storage_multiple` block.
 
 ### 8.1 Batch
 
@@ -946,17 +969,21 @@ Primary: `data_freshness_seconds`, lower is better.
 
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
-| `data_freshness_seconds` | s | lower | worst-case gold staleness during the window: the maximum per-stage freshness, using active freshness once the corpus drained; null when unmeasured. Recorded: 202 s (`run-20260929-205000-ebb26f`, scale 1, n=1) |
-| `time_to_detect_seconds`, `time_to_detect_p95_seconds`, `time_to_detect_max_seconds` | s | lower | from the newest bronze ingest of an alert's related payments to the commit of the rule's alerts on the tick that first raised it: median, 95th percentile and maximum. The median and the 95th percentile are both read from a histogram of 10 s bins, at the upper edge of the bin that reaches the quantile, capped at the measured maximum. AML only. Recorded median: 220 s (`run-20260929-205000-ebb26f`, n=1) |
-| `time_to_detect_alerts`, `time_to_detect_late_alerts`, `time_to_detect_unmeasured_cycles` | count | none | alerts measured; alerts whose payments were all in silver before the previous pass (included in the percentiles); gold cycles that logged no time-to-detect line |
+| `data_freshness_seconds` | s | lower | worst-case gold staleness during the window: the maximum per-stage freshness, using active freshness once the corpus drained; null when unmeasured. Recorded under the 1.7.0 definition (from silver, not file landing; not comparable): 202 s (`run-20260929-205000-ebb26f`, scale 1, n=1) |
+| `time_to_detect_seconds`, `time_to_detect_p95_seconds`, `time_to_detect_max_seconds` | s | lower | from the newest arrival (file landing, `ingest_ts`) of an alert's related payments to the commit of the rule's alerts on the tick that first raised it (every rule runs every tick; reported per rule): median, 95th percentile and maximum. The median and the 95th percentile are both read from a histogram of 10 s bins, at the upper edge of the bin that reaches the quantile, capped at the measured maximum. AML only. Recorded median under the 1.7.0 definition (before file landing; not comparable): 220 s (`run-20260929-205000-ebb26f`, n=1) |
+| `time_to_detect_alerts`, `time_to_detect_late_alerts`, `time_to_detect_unmeasured_cycles` | count | none | alerts measured; alerts whose payments were all in silver before the previous pass of their rule (included in the percentiles); gold cycles that logged no time-to-detect line |
 | `sustained_throughput_rps` | rows/s | higher | bronze rows ingested inside the window / `arrival_seconds`. When intake was trickle-bound it is the offered load set by the trickle (a Lakebench cap), not a capacity |
 | `window_seconds` | s | none | the measured window length; follows `run_duration` |
 | `arrival_seconds` | s | none | seconds of the window data was still arriving at bronze |
 | `window_arrival_fraction` | ratio | none | `arrival_seconds / window_seconds` |
 | `pre_window_rows` | rows | none | bronze rows ingested before the window opened; in no window score |
-| `released_rows` | rows | none | rows the trickle had made available to bronze by the window's end |
+| `released_rows` | rows | none | with the run's own datagen: rows datagen had written one bronze cadence before the window's end, at its mean rate. Under a trickle: rows the trickle had made available by the window's end |
+| `backlog_rows` | rows | none | datagen's rows bronze had not taken at the window's end |
+| `datagen_ahead` | bool | none | datagen stayed ahead: bronze took under 0.95 of datagen's rows. True marks a capacity run |
+| `pace_seconds_per_million_rows` | s/M rows | lower | window seconds per million rows that came through silver (end to end) |
+| `bronze_pace_seconds_per_million_rows` | s/M rows | lower | window seconds per million rows bronze took |
 | `ingest_ratio` | ratio | target, guard | bronze rows by the window's end / `released_rows` (falls back to `corpus_ingest_ratio`); should sit inside 0.95 to 1.05 |
-| `corpus_ingest_ratio` | ratio | none | bronze rows / datagen rows. Recorded: 0.4374 in the default 1,800 s window at a trickle of 1 file per trigger (`run-20260929-205000-ebb26f`, scale 1, n=1) |
+| `corpus_ingest_ratio` | ratio | none | bronze rows / datagen rows. Recorded under a trickle of 1 file per trigger, which a default run no longer sets: 0.4374 in a 1,800 s window (`run-20260929-205000-ebb26f`, scale 1, n=1) |
 | `pipeline_saturated` | bool | none | `ingest_ratio < 0.95`; false when the trickle, not the pipeline, bounded intake |
 | `intake_limit` | text | none | `none`, `trickle_rate`, `bronze_capacity`, `below_bronze_capacity` (7.4) |
 | `bronze_busy_fraction` | ratio | none | share of the window bronze spent inside micro-batches |
@@ -1137,7 +1164,7 @@ missing (`metrics/experiment.py`). A published AML result must show:
 
 | Field | Source in metrics.json |
 |---|---|
-| Workload `financial` and version `aml-2`, `parameters_id` and parameters | `experiment.workload` (`parameters` holds the TM operations settings, `w1_max_vertices`, `retention_workload`, `retention_months`) |
+| Workload `financial` and version `aml-3`, `parameters_id` and parameters | `experiment.workload` (`parameters` holds the TM operations settings, `w1_max_vertices`, `retention_workload`, `retention_months`) |
 | Generator model version | `experiment.workload.generator_model_version` |
 | Configured image, observed pod image and digest, seed, corpus role, perturbation, corpus id, corpus id v2 or the reason there is none, and whether the corpus was observed or only declared | `experiment.corpus`, `experiment.corpus.datagen`, `experiment.corpus.id_v2` (or `id_v2_unavailable`), `experiment.corpus.observed` |
 | Recipe, catalog, format, engine and query-engine versions, query access path | `experiment.architecture`, `experiment.architecture.access_paths` |
@@ -1246,8 +1273,12 @@ only.
   seed 43 and on a calibration seed, n=1 each). -->
 - **Continuous runs a different workload slice.** Continuous AML runs W2,
   W3, W4 and W17 every tick; W1 and W5 to W8 are not run in this mode, and
-  their typologies read `mode-excluded`. Each tick re-runs detection over
-  the whole pinned silver corpus, so tick cost grows with the corpus.
+  their typologies read `mode-excluded`. Each tick re-detects only what the
+  rows new since the rule's last pass can change: the rows after a bound set
+  by the rule's own windows (a day for W2, about six weeks for W3 and W17,
+  six hours for W4), merged with the alerts that stand. The alerts equal a
+  full recompute over the same silver, so tick cost follows the arrival rate,
+  not the corpus.
   Continuous results are not comparable with batch.
 - **Continuous AML recall is `recall_covered`** over what the last drained
   tick had read, not the batch `recall`. No published record carries one
@@ -1257,14 +1288,14 @@ only.
   ESTABLISHED at best. In the published continuous record
   (`run-20260929-205000-ebb26f`, scale 1, n=1) bronze took 43.7% of the
   corpus in the default 1,800 s window.
-- **Continuous throughput is an offered load bounded by the trickle.** At
-  scale 1 the derived trickle is one 64 MB file per trigger, so
-  `sustained_throughput_rps` and `corpus_ingest_ratio` measure a
-  Lakebench-set arrival rate, not what the architecture can take in. A
-  continuous record names the trickle in `limits.bound` and
-  `limits.trickle_bound`; label continuous throughput with the resolved
-  trickle whenever it is published. The published continuous record
-  predates that label and shows `bound: []`.
+- **Continuous throughput follows the offered load.** A default run offers
+  4 MB/s per scale unit; when the pipeline keeps up, `sustained_throughput_rps`
+  is that load, not a capacity. It is a capacity only when datagen stays
+  ahead with bronze busy (`datagen_ahead`, `intake_limit: bronze_capacity`).
+  Under `--skip-generate` or a set `max_files_per_trigger` the trickle bounds
+  it; the record names the trickle in `limits.bound` and
+  `limits.trickle_bound`. The published continuous record ran under a
+  trickle, predates that label and shows `bound: []`.
 - **Lakebench names no winner.** Comparing two runs is left to the reader
   (section 10).
 - **No expected results.** Lakebench ships no expected AML query results for
@@ -1282,7 +1313,8 @@ only.
   the series, so read its members' records for the spread.
   Every published AML record is n=1, and any investigator or time-travel
   figure from this release is one run per arm on one system (n=1).
-- **The corpus is fixed in time and zone-less.** 2021-01-01 to 2026-01-01.
+- **The batch corpus is fixed in time and zone-less.** 2021-01-01 to
+  2026-01-01; a continuous corpus adds 24-month epochs (section 3.5).
   The generator ignores the config's timestamp and dirty-data fields, but
   they are recorded and hashed into corpus id v1, `corpus.timestamp_start`
   and `timestamp_end` are the config's values rather than the corpus's

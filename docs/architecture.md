@@ -87,11 +87,14 @@ pipeline using Spark Structured Streaming:
 
 - `bronze-ingest` reads new Parquet files as they appear
 - `silver-stream` incrementally transforms bronze to silver
-- `gold-refresh` periodically recomputes gold aggregations
+- `gold-refresh` recomputes the gold dates (Customer 360) or re-runs the rules (AML) over the new silver rows
 
-All three continuous jobs run concurrently with datagen, which generates for
-the whole window (no rate limit; `parallelism` and `cpu` set the arrival
-rate), and `bronze-ingest` reads with no per-trigger limit. The continuous run duration, trigger
+By default the three jobs run back to back (trigger interval 0 s). They run
+alongside datagen, which writes until the window ends. The scale sets the
+offered load: 4 MB/s per scale unit for AML, 10 MB/s for Customer 360. The
+autosizer gives datagen the cores that produce it. A `parallelism` or `cpu`
+set in the config overrides that. `bronze-ingest` reads with no per-trigger
+limit. The continuous run duration, trigger
 intervals, and checkpoint locations are configurable. AML continuous runs
 detection rules W2, W3, W4 and W17 each tick and records W1, W5, W6, W7 and
 W8 as not run.
@@ -136,8 +139,8 @@ Namespace: lakebench
 ### PostgreSQL
 
 Deployed as a StatefulSet with a persistent volume. Serves as the metadata
-backend for both Hive Metastore and Polaris catalog. Uses a replicated storage
-class (`px-csi-db` or cluster default) for data durability.
+backend for both Hive Metastore and Polaris catalog. Storage
+class: the cluster default unless `platform.compute.postgres.storage_class` is set.
 
 ### Catalog Service (Hive Metastore or Polaris)
 
@@ -205,7 +208,7 @@ zero-copy-register the pacs.008 source once it exceeds the size/file
 thresholds), which rewrites the full source through an Iceberg CTAS and
 spills roughly twice the per-executor input to local disk. The c360
 profile is a thin `add_files` register and never sees that spill. See
-LB-118 and `_SCHEMA_PROFILE_OVERRIDES` in
+`_SCHEMA_PROFILE_OVERRIDES` in
 `modules/pipeline_engines/spark/job.py`.
 
 Per-executor sizing (cores, memory, overhead, PVC) is fixed. What scales with

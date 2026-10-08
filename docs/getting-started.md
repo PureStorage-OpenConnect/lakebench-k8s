@@ -19,7 +19,7 @@ lakebench admin doctor lakebench.yaml                              # confirm eve
 
 `--component all` installs what the config uses: the scratch StorageClass (when `platform.storage.scratch.enabled`, or a batch config at scale 50 and above leaves it unset), the Spark Operator, the Stackable operators (Hive recipes) and the observability stack (when `observability.enabled`). Name components one at a time with `--component spark-operator` and so on. A component that is already installed is left as it is, whatever version the config names (it warns when they differ), so the command is safe to re-run: on a cluster that has everything installed and ready it changes nothing and exits 0. The one thing it refreshes is the shared Grafana dashboard ConfigMap, when it differs from this Lakebench's.
 
-Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges; `deploy` never installs a shared component, and stops with the `admin install` command when one is missing. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; deploys and destroys wait for `admin install` up to 10 minutes, and one that waits longer fails, naming the holder, without changing anything shared; see `lakebench admin --help` for the full subcommand tree.
+Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges; `deploy` never installs a shared component, and stops with the `admin install` command when one is missing. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; a deploy or destroy waits for the lease up to 37.5 minutes (2,250 s, within its `--timeout`), and one that waits longer fails, naming the holder, without changing anything shared; see `lakebench admin --help` for the full subcommand tree.
 
 ### Kubernetes cluster
 
@@ -28,20 +28,24 @@ Any cluster running Kubernetes 1.26+ will work. Lakebench is tested on:
 - **OpenShift 4.x** (bare metal and vSphere)
 - **Vanilla Kubernetes** (kubeadm, EKS, GKE, AKS)
 
-You need admin-level access to the target namespace (or permission to create
-one). On OpenShift, Lakebench grants the `anyuid` Security Context
+You need permission to create a namespace: `deploy` creates its own and
+refuses one it did not create (see [Operations](operations.md)). On OpenShift, Lakebench grants the `anyuid` Security Context
 Constraint to its Spark and PostgreSQL service accounts, and stops the deploy
 if that grant is refused. The checks a cluster must pass, and the fix for
 each, are on the generated [Prerequisites](prerequisites.md) page.
 
 Minimum cluster size depends on the workload, the pipeline mode and the
-scale factor. The table below is the minimum cluster for the default recipe
-(`hive-iceberg-spark-trino`), computed without a cluster by
+scale factor. The table below is the minimum cluster for
+`hive-iceberg-spark-trino`, computed without a cluster by
 `lakebench.config.sizing.plan_requirements`, the function behind
 `lakebench config show`, `lakebench config recommend` and the `run`
 capacity preflight. On a real cluster the preflight sizes datagen and Trino
 against that cluster first, as `run` does, so its datagen figure can differ
-from the default-parallelism column below:
+from the default-parallelism column below. A continuous row is the cluster
+that carries the scale's offered load balanced (see
+[Running Pipelines](running-pipelines.md)); a smaller one runs with fewer
+executors and a "cannot balance" warning naming the stage, and that run FAILS
+the balance check:
 
 <!-- BEGIN GENERATED: sizing-detail -->
 <!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; do not edit by hand. -->
@@ -51,15 +55,17 @@ from the default-parallelism column below:
 | Customer 360 | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 8 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 16 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
 | Customer 360 | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 40 GB | 38 cores / 215 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 59 cores | 309 GB | 38 cores / 282 GB | in always on | 21 cores / 27 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 82 cores | 345 GB | 38 cores / 282 GB | in always on | 44 cores / 63 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 202 cores | 955 GB | 84 cores / 700 GB | in always on | 118 cores / 255 GB | 1,700 Gi | 8 cores / 48 GB |
+| Customer 360 | continuous | 1 | 46 cores | 363 GB | 38 cores / 282 GB | in always on | 6 cores / 23 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 10 | 54 cores | 391 GB | 38 cores / 282 GB | in always on | 13 cores / 51 GB | 640 Gi | 4 cores / 40 GB |
+| Customer 360 | continuous | 100 | 222 cores | 1,896 GB | 158 cores / 1,286 GB | in always on | 48 cores / 223 GB | 3,220 Gi | 8 cores / 80 GB |
 | AML | batch | 1 | 41 cores | 544 GB | 36 cores / 525 GB | 2 pods, 16 cores / 14 GB | 5 cores / 19 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 10 | 48 cores | 572 GB | 36 cores / 525 GB | 4 pods, 32 cores / 28 GB | 12 cores / 47 GB | 2,400 Gi | 8 cores / 60 GB |
 | AML | batch | 100 | 114 cores | 1,340 GB | 76 cores / 1,125 GB | 10 pods, 80 cores / 80 GB | 38 cores / 215 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 139 cores | 1,023 GB | 118 cores / 990 GB | in always on | 21 cores / 33 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 162 cores | 1,065 GB | 118 cores / 990 GB | in always on | 44 cores / 75 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 340 cores | 2,253 GB | 222 cores / 1,958 GB | in always on | 118 cores / 295 GB | 4,660 Gi | 8 cores / 48 GB |
+| AML | continuous | 1 | 135 cores | 1,254 GB | 118 cores / 990 GB | in always on | 6 cores / 26 GB | 2,300 Gi | 4 cores / 40 GB |
+| AML | continuous | 10 | 183 cores | 1,682 GB | 154 cores / 1,350 GB | in always on | 14 cores / 54 GB | 3,200 Gi | 4 cores / 40 GB |
+| AML | continuous | 100 | 817 cores | 7,815 GB | 690 cores / 6,110 GB | in always on | 53 cores / 231 GB | 14,600 Gi | 16 cores / 160 GB |
+
+- AML continuous scale 100 cannot balance at any cluster size: silver-stream needs ~45 executors x 16 cores to carry the offered load; the executor cap allows 28, so its lag will grow and the run will fail the balance check. The minimum is the cluster that runs it at the executor cap.
 
 <!-- END GENERATED: sizing-detail -->
 
@@ -98,22 +104,18 @@ How to read it:
 - Per-job executor overrides (`silver_executors` and the like) are not
   counted in these figures yet; `config show` says so when a config sets one.
 
-AML (`schema: financial`) continuous sizes its three stream jobs from a
-measured scale-10 run: bronze-ingest 5 executors x 4 cores so the corpus
-drains inside a 30-minute window, silver-stream 10 x 4 so a micro-batch
-finishes inside its 60 s trigger, and gold-refresh 12 x 4 so a detection
-tick over the whole scale-10 silver finishes inside the 5-minute refresh
-interval. The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at
-exactly this split. gold-refresh grows with scale to the 28-executor cap
-(reached near scale 23); past that a tick outgrows the interval and time to
-detect grows with it.
+Continuous sizes bronze-ingest and silver-stream to carry the scale's
+offered load with 20% headroom (AML scale 10: silver-stream about 19
+executors x 4 cores; see [Running Pipelines](running-pipelines.md)), and
+gold-refresh from its profile (AML: 12 x 4 at scale 10, growing with scale to
+the 28-executor cap near scale 23).
 
 On a smaller cluster a continuous run caps the stream jobs to what fits and
-warns naming each capped job. Each AML stage keeps at least the cores the
-Customer360 split would give it, and the room above that goes upstream first
-(bronze-ingest, then silver-stream up to the count that keeps pace with
-bronze, then gold-refresh, then the rest of silver-stream), since a stage
-runs no faster than its input arrives. The capacity preflight passes such a
+warns naming each capped job. Every stage that wants one gets an executor,
+then each further executor goes to the stage holding the smallest share of
+what it needs, since the pipeline runs at the pace of its slowest stage
+against its need. A capped stage cannot carry the offered load, so the run
+FAILS the balance check. The capacity preflight passes such a
 cluster with a WARNING naming the capped stages, as long as the capped
 request plus Trino, Hive/Postgres and datagen fits; it fails only when even
 that does not fit, or when a single pod fits no node. An explicit
@@ -168,10 +170,10 @@ your config.
 
 ### CLI tools on PATH
 
-| Tool | Minimum version | Used for |
-|------|----------------|----------|
-| `kubectl` | 1.26+ | All Kubernetes operations |
-| `helm` | 3.12+ | Spark Operator install, namespace detection, and Stackable operators (Hive catalog) |
+| Tool | Used for |
+|------|----------|
+| `kubectl` | All Kubernetes operations |
+| `helm` | Spark Operator install, namespace detection, and Stackable operators (Hive catalog) |
 
 Lakebench runs `kubectl` and `helm`; it does not need `oc`, even on
 OpenShift.
@@ -179,8 +181,8 @@ OpenShift.
 ### Default StorageClass
 
 Your cluster must have a **default StorageClass** (annotated with
-`storageclass.kubernetes.io/is-default-class: "true"`) for PostgreSQL metadata
-storage. Most managed Kubernetes distributions include one by default:
+`storageclass.kubernetes.io/is-default-class: "true"`) for the PostgreSQL
+metadata volume and the `lb-deps-data` volume. Most managed Kubernetes distributions include one by default:
 
 - **EKS** -- `gp2` or `gp3`
 - **GKE** -- `standard` or `premium-rwo`
@@ -188,8 +190,8 @@ storage. Most managed Kubernetes distributions include one by default:
 - **OpenShift** -- varies by platform (typically `thin-csi` or Portworx)
 
 Self-managed clusters (kubeadm, bare metal) may need a StorageClass created
-manually. Alternatively, set `platform.compute.postgres.storage_class`
-explicitly in your YAML config to bypass the default.
+manually. Or set both `platform.compute.postgres.storage_class` and
+`platform.deps.storage_class` in the config.
 
 Trino workers and Spark shuffle use ephemeral storage by default and do **not**
 require a StorageClass. Set their `storage_class` fields if you want
@@ -247,7 +249,7 @@ Which catalog operators you need depends on your recipe choice:
 | `hive-*` | Hive Metastore | Stackable commons, secret, listener, and hive operators |
 | `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
 
-For **Hive** recipes (the default), the Stackable operators are required. A
+For **Hive** recipes, the Stackable operators are required. A
 cluster admin installs all four (commons, listener, secret, hive) once, at the
 config's `architecture.catalog.hive.operator.version` (SDP 25.7.0 by default):
 
@@ -296,8 +298,7 @@ any lakebench already there, if the download fails, the checksum does not
 match or the binary does not run. That catches a corrupted or incomplete
 download; the checksum file comes from the same release, so it does not
 prove who built the binary. `SHA256SUMS` is published from 1.7.0 on: an
-older release, which is what `latest` resolves to until 1.7.0 is out,
-installs unverified, and the script says so on stderr. A release at 1.7.0
+older release installs unverified, and the script says so on stderr. A release at 1.7.0
 or later without `SHA256SUMS` is refused.
 There is no Linux arm64 binary; on that platform install from PyPI.
 
@@ -341,21 +342,23 @@ lakebench version
 ## First Deployment Walkthrough
 
 This section walks through a complete deploy-generate-run cycle at **scale 1**
-(approximately 10 GB of generated data). Scale 1 is small enough to finish in
-minutes on most clusters while still exercising every stage of the pipeline.
+(approximately 10 GB of generated data). Scale 1 exercises every stage of the
+pipeline.
 
 ### First-day workflow at a glance
 
-On a fresh cluster the shortest path is four commands. The two flags on
-`run` are load-bearing: `--yes` lets `run` deploy the namespace and
-components when they do not exist yet (without it `run` refuses and asks
-you to run `lakebench deploy` first), and `--generate` populates the
-bronze bucket before the pipeline (without it, `run` executes against an
-empty bronze).
+On a fresh cluster the shortest path is below. The two flags on `run` are
+load-bearing:
+
+- `--yes` lets `run` deploy the namespace and components. Without it `run`
+  refuses and asks you to run `lakebench deploy` first.
+- `--generate` fills the bronze bucket first. Without it `run` refuses with
+  exit 4 and names `--generate`.
 
 ```bash
-lakebench init                                  # writes lakebench.yaml
+lakebench init --endpoint http://your-s3-endpoint:80   # writes lakebench.yaml
 export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...
+lakebench admin install --component all lakebench.yaml # cluster admin, once per cluster
 lakebench run lakebench.yaml --generate --yes   # deploy + generate + pipeline + benchmark
 lakebench report lakebench.yaml                 # print the scorecard
 lakebench destroy lakebench.yaml --yes          # tear down what this deployment owns
@@ -446,7 +449,7 @@ Alternatively, run each step separately for more control:
 ```bash
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
 lakebench status lakebench.yaml           # verify deployment
-lakebench generate lakebench.yaml  # generate test data (~5 min at scale 1)
+lakebench generate lakebench.yaml         # generate test data
 lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
@@ -491,10 +494,11 @@ the terminal (`--format json` or `csv` for scripts).
 ### 7. Compare two configurations
 
 ```bash
-lakebench deploy lakebench-polaris.yaml --yes
-lakebench run lakebench-polaris.yaml
+lakebench init --recipe hive-iceberg-spark-trino --endpoint http://your-s3-endpoint:80 -o lakebench-hive.yaml
+lakebench deploy lakebench-hive.yaml --yes
+lakebench run lakebench-hive.yaml --generate --yes
 lakebench report lakebench.yaml
-lakebench report lakebench-polaris.yaml
+lakebench report lakebench-hive.yaml
 ```
 
 Read the two HTML reports side by side (`report` prints each path). The
@@ -678,11 +682,11 @@ continuous mode are refused with an actionable error; see
 
 To run at a larger scale, change the `scale` value in your config:
 
-| Scale | Approximate bronze size | Customers | Rows |
-|------:|:-----------------------:|----------:|-----:|
-| 1 | 10 GB | 100K | 2.4M |
-| 10 | 100 GB | 1M | 24M |
-| 100 | 1 TB | 10M | 240M |
+| Scale | Customer 360 bronze | Customers | Rows | AML bronze (batch) | Entities | Transactions |
+|------:|------:|------:|-----:|------:|------:|------:|
+| 1 | 10 GB | 100K | 2.4M | 8.5 GB | 111K | 26.7M |
+| 10 | 100 GB | 1M | 24M | 94 GB | 1.1M | 267M |
+| 100 | 1 TB | 10M | 240M | 936 GB | 11M | 2.7B |
 
 Datagen scale is banded per workload. Customer 360 is supported up to scale
 300 and unverified up to 600; AML (financial) is supported up to 300 and
@@ -692,13 +696,9 @@ config, because a datagen pod would exceed the 16 GiB per-pod memory cap
 support state records the band.
 
 Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
-guidance before scaling up. At scale 100+ you will want to increase the `--timeout` on both generate
-and run commands:
-
-```bash
-lakebench generate lakebench.yaml --timeout 14400
-lakebench run lakebench.yaml --timeout 7200
-```
+guidance before scaling up. The `generate` and `run` timeouts grow with the
+scale (`run`: at least 3,600 s, 120 s per scale unit), so leave `--timeout`
+unset. Pass a larger value only after a job times out.
 
 ---
 
@@ -709,7 +709,7 @@ in the `images` section of your YAML.
 
 | Component | Default version | Image |
 |-----------|----------------|-------|
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.1.1-python3` (default for the Hive recipes), `4.0.2-python3` (default for Polaris and `hive-delta-spark-thrift`), or `3.5.4-python3` |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.1.1-python3` (default for the Hive recipes), `4.0.2-python3` (default for Polaris, `hive-delta-spark-thrift` and `hive-delta-spark-none`), or `3.5.4-python3` |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart |
 | Apache Iceberg | 1.11.0 (1.10.1 on `3.5.4-python3`) | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
@@ -726,7 +726,8 @@ is refused; use a `java17` Spark 3.5 image tag to run 1.11.0 on Spark 3.5.
 
 ## Choosing a Recipe
 
-The default deployment uses Hive + Iceberg + Trino. Lakebench supports 11
+`lakebench init` writes `polaris-iceberg-spark-trino`. A config with no
+recipe falls back to Hive + Iceberg + Trino. Lakebench supports 11
 component combinations ("recipes"); the eight Iceberg ones are below. Use the `recipe:` field for
 quick setup, or set architecture fields individually:
 
@@ -736,11 +737,11 @@ recipe: polaris-iceberg-spark-trino   # one-line setup
 
 | Recipe | `recipe:` value | Use case |
 |--------|----------------|----------|
-| Standard (default) | `hive-iceberg-spark-trino` | Ad-hoc SQL analytics via Trino |
+| Standard | `hive-iceberg-spark-trino` | Ad-hoc SQL analytics via Trino |
 | Spark SQL | `hive-iceberg-spark-thrift` | Spark-native analytics |
 | DuckDB | `hive-iceberg-spark-duckdb` | Lightweight single-pod analytics |
 | Headless | `hive-iceberg-spark-none` | ETL-only, no query engine |
-| Polaris | `polaris-iceberg-spark-trino` | REST catalog API, OAuth2 access control |
+| Polaris (`init` default) | `polaris-iceberg-spark-trino` | REST catalog API, OAuth2 access control |
 | Polaris + Spark SQL | `polaris-iceberg-spark-thrift` | REST catalog with Spark-native analytics |
 | Polaris + DuckDB | `polaris-iceberg-spark-duckdb` | REST catalog with lightweight engine |
 | Polaris headless | `polaris-iceberg-spark-none` | REST catalog, ETL-only |

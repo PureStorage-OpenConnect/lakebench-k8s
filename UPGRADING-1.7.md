@@ -2,7 +2,8 @@
 
 Every change in 1.7 that can break a 1.6 config, command line, script or
 comparison, with what to do. The list is `docs/upgrading/breaking-1.7.yaml`;
-a unit test checks it against the code, this file and the CHANGELOG. The
+`python3.11 scripts/upgrading.py missing` prints any code change the list
+lacks. The
 full exit-code table is [docs/exit-codes.md](docs/exit-codes.md), and the
 renamed and refused commands are listed in
 [docs/cli-reference.md](docs/cli-reference.md#renamed-refused-and-deprecated-commands).
@@ -198,11 +199,11 @@ Customer 360 gold is never silently incremental and a multi-cycle run takes one 
 
 **What to do:** Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental` is refused.
 
-### AML records are workload version aml-2
+### AML records are workload version aml-3
 
-AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
+1.7.0 capped AML alert evidence at 1,000 ids per W4 alert (workload version `aml-2`). 1.7.1 changes the W3 and W17 hub rule (workload version `aml-3`, rule version 1.1.0). Records at `aml-3` do not compare with `aml-1` or `aml-2`.
 
-**What to do:** Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+**What to do:** Re-run an AML baseline under 1.7.1 before comparing; read the bounded-recall labels in the score.
 
 ### System and access path are not execution conditions
 
@@ -236,11 +237,31 @@ The Hive recipes now default to Spark 4.1.1. A config that does not set `images.
 
 **What to do:** Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version: 4.0.0` keeps Spark 4.0.2.
 
-### The default datagen image is the v1.7 look image
+### The default datagen image is lb-datagen:3cb67f92
 
-The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
+The default datagen image is `lb-datagen:3cb67f92`, pinned by digest. 1.7.0 shipped `lb-datagen:2a36ae21`; v1.6 used `lb-datagen:1.6.0`. Neither older tag is in the registry. The new image has no lineage row, so its corpora get a corpus id of their own.
 
-**What to do:** Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.
+**What to do:** Remove any `images.datagen` pin to an older tag.
+
+## Changes in 1.7.1
+
+### Continuous stages run back to back by default
+
+`bronze_trigger_interval`, `silver_trigger_interval` and `gold_refresh_interval` default to `0 seconds` (were 30 s, 60 s and 5 minutes). Freshness now runs from file landing.
+
+**What to do:** Set the intervals in the config to keep 1.7.0 timing. Do not compare continuous freshness with 1.7.0 records.
+
+### A bare "0" trigger interval is refused
+
+The three trigger intervals must be a whole number and a unit (`"0 seconds"`, `"5 minutes"`). A bare `"0"` is refused at load.
+
+**What to do:** Write `"0 seconds"`.
+
+### A set datagen.parallelism is used exactly
+
+The autosizer no longer cuts a configured `datagen.parallelism` to fit the cluster or raises it to the AML 8-pod floor; it warns. A continuous run that cannot place the pods is refused at preflight.
+
+**What to do:** Unset `datagen.parallelism` to let the autosizer size it, or set a count the cluster can run.
 
 ## Changed behaviour and defaults
 

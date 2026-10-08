@@ -99,9 +99,8 @@ Code: `src/lakebench/cli/_run.py`, `src/lakebench/metrics/verdict.py:compute_ver
 
 **Use one namespace and one config per deployment.** Deployments in
 different namespaces share only the cluster-wide pieces above. Changes to
-shared mutable state (the Spark Operator's `spark.jobNamespaces`, the
-observability release, and SCC bindings on older OpenShift) go through one
-lock, held in the `lakebench-cluster-lock` ConfigMap in `lakebench-system`,
+shared mutable state (the Spark Operator's `spark.jobNamespaces` and the
+observability release) go through one lock, held in the `lakebench-cluster-lock` ConfigMap in `lakebench-system`,
 so two deploys or destroys at once cannot lose each other's watch-list
 entry. Code: `src/lakebench/deploy/cluster_lock.py:LOCK_CONFIGMAP_NAME`.
 
@@ -166,8 +165,8 @@ Code: `src/lakebench/deploy/destroy.py:destroy_all`,
 `src/lakebench/deploy/destroy.py:_delete_owned_buckets`.
 
 **Remove data without removing the deployment with `lakebench clean`.** It
-empties buckets or one layer, or deletes local metrics, reports and journal
-files, and leaves the infrastructure up (`src/lakebench/cli/_clean.py`). See
+empties the silver or gold layer and leaves the infrastructure up. Bronze
+regeneration and deleting local evidence are refused (`src/lakebench/cli/_clean.py`). See
 [Deployment](deployment.md#selective-cleanup).
 
 ---
@@ -176,7 +175,7 @@ files, and leaves the infrastructure up (`src/lakebench/cli/_clean.py`). See
 
 Every command writes under `lakebench-output/` in the working directory:
 `runs/run-<id>/` holds each run's `metrics.json` and `report.html`, and
-`journal/` the session provenance logs. Keep that directory: `results`,
-`report` and `reproduce` read the records in it. The root is
+`journal/` the session provenance logs. Keep that directory: `report`
+and `reproduce` read the records in it. The root is
 `src/lakebench/_constants.py:DEFAULT_OUTPUT_DIR`; the layout is described in
 [Benchmarking](benchmarking.md).

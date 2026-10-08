@@ -79,17 +79,32 @@ counted whole logs. Continuous records made before this are not comparable
 with later ones on those scores (their experiment identity and results
 differ, so reproduce refuses them).
 
+Definitions changed in 1.7.1:
+
+- Gold freshness runs from file landing (bronze `ingest_ts`), not from
+  silver's processing time. It now includes the datagen to bronze and bronze
+  to silver lag.
+- The three stages run back to back by default, not on 30 s, 60 s and 5
+  minute triggers.
+- `arrival_seconds`, `ingest_ratio` and silver's kept-pace check use the
+  stage's cadence (its trigger interval, or back to back its median batch
+  time) where they used one trigger.
+
+Do not compare continuous freshness from 1.7.1 with earlier records. The AML
+workload version moved to `aml-3`, so AML identity catches this. The
+Customer 360 version is still `c360-2.dev1`, so its identity does not.
+
 | Score | Formula | Meaning |
 |---|---|---|
 | `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. Above half the window it fails a steady-state run; in a capacity run (`datagen_ahead`) it is a warning, since the slowest stage falls behind by design and pace is the score. |
 | `sustained_throughput_rps` | `bronze rows ingested inside the window / arrival_seconds` | Rows/sec entering bronze while data was arriving. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity. |
 | `window_seconds` | window end - window start | Length of the measurement window. |
-| `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
+| `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze cadence | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
 | `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency (a diagnostic, with no better side). |
-| `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. With the run's own continuous datagen there is no trickle: `released_rows` = the rows datagen had written one bronze trigger before the window's end, at its mean rate (its total also holds rows written after the window, before its pods saw the stop marker). 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
-| `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
+| `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. With the run's own continuous datagen there is no trickle: `released_rows` = the rows datagen had written one bronze cadence (its trigger interval, or back to back its median batch time) before the window's end, at its mean rate (its total also holds rows written after the window, before its pods saw the stop marker). 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
+| `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of everything datagen wrote that bronze took by the window's end. With the run's own datagen, the backlog at the window's end sets it; with `--skip-generate`, the trickle does. Not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
 | `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up: `ingest_ratio >= 0.95`). Whether the trickle held intake is `experiment.limits.trickle_bound`, below. |
 | `pace_seconds_per_million_rows` | `window_seconds / (silver window rows / 1e6)` | End-to-end pace, lower is better: window seconds per million rows that came through silver. A capacity when `datagen_ahead` is true and `intake_limit` is `bronze_capacity`; otherwise the arrival rate. Gold's lag behind silver is `data_freshness_seconds`. |
@@ -130,10 +145,11 @@ the run's limits. The rows that depend on the trickle
 (`sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute
 efficiency and `corpus_drain_seconds`) are capped, with `capped_by` naming
 the trickle, and the run's limits list the trickle line. A record written before 1.7 gets the
-same answer, computed when it is read. `released_rows` counts the trigger at
-the window's edge, so a run whose last batch was still in flight can read up
-to one trigger short (0.983 at an 1800 s window and a 30 s trigger); when the
-shortfall is within one trigger's batch and the lag within one trigger, the
+same answer, computed when it is read. `released_rows` counts the bronze cycle
+at the window's edge (its trigger interval, or back to back its median batch
+time), so a run whose last batch was still in flight can read up to one cycle
+short (0.983 at an 1800 s window and a 30 s cycle); when the
+shortfall is within one cycle's batch and the lag within one cycle, the
 run is labelled with `kept_pace` null ("not shown to keep pace"), not shown
 as a capacity.
 
@@ -198,8 +214,11 @@ stage are:
 - `executor_memory_gb` -- memory per executor (not including overhead)
 
 These come from the job profiles in `spark/job.py` and the scale-derived
-executor count. They do not change between runs at the same scale unless you
-override executor counts in your config.
+executor count. Batch values do not change between runs at the same scale
+unless you override them. Continuous streams are sized for the offered load
+and the cluster budget, so their counts and cores can differ between
+clusters; the record keeps the shape that ran
+(`config_snapshot.spark.streaming_shape`).
 
 ### Maintenance Scoring
 
@@ -213,7 +232,7 @@ cost and value of table maintenance by running the benchmark twice:
    or Delta `VACUUM` on Trino (Delta `OPTIMIZE` is never run). Every
    statement shares one 30-minute budget. The first statement timeout or the
    deadline stops the rest, and the benchmark runs anyway. Before v1.6 the
-   expire and orphan statements always failed (LB-172, LB-174), so v1.5
+   expire and orphan statements always failed, so v1.5
    batch maintenance was compaction only.
 3. **Storage settle wait** -- probes one query until storage has settled
    after the maintenance burst (see below).
@@ -246,7 +265,7 @@ returns, but the object store keeps working off the burst of deletes and
 rewrites afterwards. On FlashBlade at c360 scale 10 the same compacted files
 read QpH 546 about 2 minutes after maintenance, 569 at +15 minutes and 841 at
 +35 minutes, against 828 before maintenance; AML scale 10 read 27% slow
-straight after (LB-150). So between maintenance and the post round,
+straight after. So between maintenance and the post round,
 lakebench times one storage-bound probe query (by default the workload's
 first scan-class query, a full scan of the table compaction rewrote) every
 `interval_seconds` until two consecutive probes agree within
@@ -556,8 +575,8 @@ The final QpH for the continuous pipeline scorecard is the **median** across
 all in-stream rounds.
 
 **Scheduling constraint:** Both `benchmark_warmup` and `benchmark_interval`
-are clamped to `gold_refresh_interval` (default 5 min) at runtime. Gold
-rewrites the entire table each refresh cycle via `createOrReplace()`.
+are clamped up to `gold_refresh_interval` at runtime when it is set (gold
+runs back to back by default, and both keep their 300 s floor).
 Warmup below the gold interval produces inflated QpH from queries against an
 empty or stale gold table. Intervals shorter than the gold cycle cause Q9
 contention as benchmark rounds overlap with gold rewrites, producing
@@ -584,8 +603,8 @@ scale 10 with 3 Trino workers, 60-120s at scale 100 with 10 workers.
 | 60 min | 300s | 300s | 40s | 10 |
 
 For at least 5 rounds (recommended for trend analysis), set
-`run_duration >= warmup + 5 * (interval + round_time)`. With default
-5-minute gold refresh, the shortest practical configuration for 5 rounds is
+`run_duration >= warmup + 5 * (interval + round_time)`. At the defaults,
+the shortest practical configuration for 5 rounds is
 `warmup=300, interval=300, run_duration=1800` (30 min).
 
 **Adaptive end-of-window guard:** Lakebench uses an adaptive guard to decide
@@ -645,8 +664,11 @@ PASSED run shows:
   `path-cap`. A skip on a Lakebench cap is labelled in `limits.bound` and
   in `verdict.qualifiers.rule_caps`; any other skip fails. A batch gold log
   with no per-rule counts is a warning, not a failure. Continuous: no rule
-  ran that the mode leaves out, and detection produced alerts; the
-  continuous record carries no rule errors, so they are not judged there.
+  ran that the mode leaves out, detection produced alerts, and every
+  expected rule ran without a skip or error on the tick whose alerts were
+  scored (the drain tick when scoring did not run). A path-cap skip fails
+  here too. When neither tick recorded a rule status, the gate falls back to
+  the time-to-detect lines and warns.
 - **The scale's data** (`scale_ratio`, batch). The bronze read is at least
   95% of the scale's expected volume, as stored (3 places, never rounded
   up to 0.95); a ratio of 0 (bronze not measured) fails. A multi-cycle run's ratio is its
@@ -750,10 +772,13 @@ do not fail the run; a failed one is also listed in `metrics.json` under
 
 **Data Freshness** (`data_freshness_seconds`) is the gold staleness headline:
 the maximum of the streams' measured freshness inside the window. Each gold
-refresh measures, after its write, the age of the newest silver row it
-read (`current_timestamp` minus the newest silver processing timestamp), so
-the figure tracks the silver trigger and the gold write time rather than
-`gold_refresh_interval`. Lower is better.
+refresh measures, after its write, the age of the newest row it covered
+from that row's file landing (bronze's `ingest_ts`), so the figure is the
+whole pipeline's lag plus the gold write time. A `gold_refresh_interval`
+set in the config is not in it (it is measured at the write) and is
+labelled beside it (`experiment.limits.trigger_bound`). Lower is better.
+With `--skip-generate`, a file written before bronze first started counts
+from when bronze took it; `continuous.freshness.from` says which.
 
 **Continuous Throughput** (`sustained_throughput_rps`, rows/sec) measures the steady-state ingestion rate
 through bronze. This is unique rows only -- gold-stage re-reads of silver data
@@ -768,12 +793,13 @@ whole window: every pod writes flat out until the window ends, when the run
 stops it with the `_corpus/stop` marker. AML writes the 24-month history,
 then successive 24-month periods of the same bank, each with its own answer
 key; Customer360 writes successive time slices. Bronze reads with no
-per-trigger limit. The arrival rate is set by `workload.datagen.parallelism`
-and `workload.datagen.cpu` (about 240 MB/s per 8-core AML pod and 850 MB/s
-per 8-core Customer360 pod, n=1 each, 2026-10-06); `scale` sets the size of
-the data the pipeline works on, not the rate. Unset, the autosizer gives
-datagen its standard 8-core pods, as in batch mode. The rate a run had is in
-its datagen fleet record. Datagen starts once the streams are running and the
+per-trigger limit. Scale sets the offered load: AML 4 MB/s and Customer360
+10 MB/s of datagen files per scale unit, the same on every system, so runs
+at one scale are comparable. Unset, datagen gets the cores that load needs
+and the streaming stages are sized to carry it with 20% headroom
+([running-pipelines.md](running-pipelines.md)); `workload.datagen.cpu` and
+`parallelism` set a different load. The rate a run had is in its datagen
+fleet record. Datagen starts once the streams are running and the
 window opens at its first file.
 
 **Two regimes, one mode.** The record says which one a run was:
@@ -798,9 +824,9 @@ and the earlier trickle rules apply: unset, the run derives the most files
 per trigger, up to 50, whose arrival lasts 1.2 x `run_duration`.
 
 **Continuous gate.** A continuous run passes only on continuous processing
-inside the measurement window. It is refused before it starts when
-`run_duration` is shorter than 3 x `gold_refresh_interval` (two gold
-refreshes cannot be guaranteed inside it). It fails when:
+inside the measurement window. With gold on an interval it is refused before
+it starts when `run_duration` is shorter than 3 x `gold_refresh_interval`
+(two gold refreshes cannot be guaranteed inside it). It fails when:
 
 - a stream never reached RUNNING, was not RUNNING when the window closed, or
   restarted inside it (a new driver pod or another submission);
@@ -815,7 +841,26 @@ refreshes cannot be guaranteed inside it). It fails when:
   silver, or one that read no more silver rows than the cycle before, does
   not count);
 - gold freshness was not measured inside the window;
-- a stream's driver log could not be read.
+- a stream's driver log could not be read;
+- the pipeline was not balanced: a stage's lag, sampled once per batch, rose
+  by more than one cadence across the window's second half (the bottleneck
+  line names the stage and the executor setting to raise; see
+  [Running Pipelines](running-pipelines.md)). With fewer than three samples
+  there, the lag at the end must be no larger than the first half's peak, or
+  within two cadences. A balance that could not be measured does not fail.
+  Datagen to bronze is not judged under `--skip-generate` or with
+  `max_files_per_trigger` set.
+
+The record keeps both measurements:
+
+- `continuous.balance`: `balanced`, `measured`, `bottleneck`, and per
+  handoff (`datagen->bronze`, `bronze->silver`, `silver->gold`) its
+  `samples`, `first_half_max_s`, `end_s`, `cadence_s`,
+  `second_half_growth_s`, `allowance_s`, `keeps_up`, `busy_share` and, when
+  skipped, `not_judged` with the reason.
+- `continuous.freshness`: gold freshness `p50_s`, `p95_s` and `max_s` over
+  the cycles that saw new data, `cycles`, `from` (file landing, or bronze
+  take under `--skip-generate`) and `store_clock_offset_s`.
 
 When the corpus runs out between half and all of the window the run passes
 and says so in `window_arrival_fraction`; freshness then leaves out the gold
@@ -858,8 +903,8 @@ whole corpus; that figure is now `corpus_ingest_ratio`, and a short
   triggers and all but 5% (at least one) of the triggers between its first
   and last batch (so a mid-window stall shows), each batch inside the trigger, with corpus
   left. The trickle, not the pipeline, bounded intake. If silver also kept up
-  (its batches finished inside the silver trigger and it committed all but
-  two silver triggers and one bronze trigger of what bronze took), the run is
+  (it committed all but two silver cadences and one bronze cadence of what
+  bronze took, and, on an interval, each batch finished inside it), the run is
   not saturated, the report shows a warning rather than a failure, and
   `corpus_drain_seconds` gives the window that would drain the corpus. A
   silver that logged batches but no commit is stuck and saturated. If silver
@@ -871,9 +916,10 @@ whole corpus; that figure is now `corpus_ingest_ratio`, and a short
 
 **Pipeline Saturated** is true when `ingest_ratio < 0.95` and the pipeline did
 not keep pace with the load offered to it. When true, add executors to the
-stage that fell behind. To offer more load, raise `max_files_per_trigger` (or
-shorten `bronze_trigger_interval`) and size bronze-ingest and silver-stream for
-it; to drain a larger corpus at the same load, lengthen the window.
+stage that fell behind. To offer more load, raise the scale or set
+`workload.datagen.cpu` and `parallelism`, and size bronze-ingest and
+silver-stream for it; to drain a larger corpus at the same load, lengthen the
+window.
 
 ---
 
@@ -885,16 +931,11 @@ section walks through common patterns and how to fix them.
 ### Reading the Stage Latency Profile
 
 The `stage_latency_profile` shows per-stage micro-batch processing latency
-in milliseconds. Compare each stage's latency to its trigger interval:
-
-| Stage | Trigger Interval | Healthy Latency |
-|---|---|---|
-| bronze | 30 seconds | < 30,000 ms |
-| silver | 60 seconds | < 60,000 ms |
-| gold | 5 minutes | < 300,000 ms |
-
-If a stage's latency exceeds its trigger interval, micro-batches pile up
-and freshness degrades. That stage is the bottleneck.
+in milliseconds. Bronze and silver run back to back by default, so a batch
+holds what arrived while the last one ran: a stage whose batches keep growing
+is falling behind, and that stage is the bottleneck. With a trigger interval
+set, compare each stage's latency to it: a stage whose latency exceeds its
+interval piles up batches.
 
 ### Ingest Ratio Above 1.0
 
@@ -909,106 +950,82 @@ intake.
 
 ### Gold Re-Read Amplification
 
-Gold reads the entire silver table on every refresh cycle. With a 5-minute
-`gold_refresh_interval` and a 30-minute `run_duration`, gold executes 6
-refreshes. If silver has 93M rows, gold's `input_rows` will be
-approximately `93M * 6 = 558M` (or whatever fraction of silver was available
-at each refresh point).
-
-This is expected with `createOrReplace()` -- gold rewrites the whole table
-each cycle for consistency. The gold row count in the scorecard reflects
-total rows read across all refresh cycles, not unique rows.
-
-To reduce gold re-read amplification:
-- Increase `gold_refresh_interval` (fewer rewrites, higher staleness)
-- Decrease `run_duration` (fewer total cycles)
+AML gold re-detects each tick from the silver rows its rules' windows
+reach back to from the new rows. The gold row count in the scorecard is the silver rows each tick
+pinned, summed over ticks: neither the rows gold read nor unique rows.
+Customer360 gold recomputes only the dates each micro-batch touches, but its
+gold row count is counted the same way: the whole pinned silver snapshot per
+cycle, summed over cycles. Both counts, and `total_rows_processed`, grow with
+silver size times cycles.
 
 ### Reducing Data Freshness
 
 `data_freshness_seconds` is the worst gold staleness measured in the
 window. Each gold refresh measures it right after its write, as the age of
-the newest silver row it read, so it is made of the silver trigger delay
-(how long a row waits in silver before gold can see it) plus the time gold
-takes to read silver and write. `gold_refresh_interval` does not bound it:
-the measurement is taken at the write, not between writes. What a consumer
-sees between refreshes can be up to one `gold_refresh_interval` older.
+the newest row it covered from that row's file landing, so it is made of the
+handoff lags (datagen to bronze, bronze to silver, silver to gold) plus the
+time gold takes to read silver and write. A `gold_refresh_interval` is not in
+it: the measurement is taken at the write, not between writes. What a
+consumer sees between refreshes can be up to one interval older.
 
 To lower freshness:
 1. Speed up each gold rewrite: add gold executors
    (`gold_refresh_executors`).
-2. Decrease `silver_trigger_interval`, so silver rows are visible to gold
-   sooner. This adds silver micro-batches and their commit cost.
+2. Leave `silver_trigger_interval` at 0 s (back to back), so silver rows
+   are visible to gold as soon as a batch commits.
 
 ### Stage-by-Stage Tuning
 
-**Bronze latency too high (> trigger interval):**
+**Bronze falls behind datagen:**
 - Increase `bronze_ingest_executors`. Bronze is I/O-bound (reading Parquet
   from S3). More executors = more parallel reads.
-- Reduce `max_files_per_trigger` to process smaller batches (lower latency
-  per batch, more batches total).
-- Check if datagen `parallelism` is too high -- 16 pods writing at full
-  speed can overwhelm 3 bronze executors.
+- A `datagen.parallelism` or `cpu` set in the config can offer more than
+  the scale's load the stages were sized for; unset them.
 
-**Silver latency too high (> trigger interval):**
+**Silver falls behind bronze:**
 - Increase `silver_stream_executors`. Silver applies 5 column transforms
   per micro-batch. It is CPU-bound at large batch sizes.
-- Increase `silver_trigger_interval` to process larger, less frequent
-  batches (better throughput, worse per-batch latency).
+- Back to back, silver's batches grow on their own when it falls behind;
+  a trigger interval only adds waiting.
 
-**Gold latency too high (> refresh interval):**
-- Increase `gold_refresh_executors`. Gold reads the full silver table and
-  aggregates it. At large silver tables this is the slowest stage.
-- Increase `gold_refresh_interval` to give gold more time per cycle.
-  Trade-off: higher data freshness (more stale).
+**Gold latency too high (falls behind silver):**
+- Increase `gold_refresh_executors`. AML gold re-runs each rule over the
+  new rows plus that rule's window; Customer360 gold recomputes only the
+  dates each silver commit touches.
+- Back to back (the default), gold's next refresh starts as its last one
+  ends; an interval only adds waiting.
 
-### Example: Balancing a Scale-50 Continuous Run
+### Example: A Run That Is Not Balanced
 
-Starting point (imbalanced):
-
-```yaml
-# Bronze: 3 executors, 111s/batch latency (trigger: 30s) -- bottleneck
-# Silver: 10 executors, 53s/batch latency (trigger: 60s) -- healthy
-# Gold: 3 executors, 124s/batch latency (refresh: 5 min) -- healthy
-# Freshness: 275s (near the 5-min gold refresh floor)
+```
+Balance: not balanced: silver-stream fell behind bronze-ingest: its lag grew
+412s across the window's second half (one cadence is 95s), to 640s, busy 100%;
+raise platform.compute.spark.silver_stream_executors (has 12, the offered load
+needs ~19) or lower the scale
 ```
 
-Tuned configuration:
-
-```yaml
-platform:
-  compute:
-    spark:
-      bronze_ingest_executors: 6   # was 3 (auto) -- fix bronze bottleneck
-      silver_stream_executors: 10  # keep -- silver is balanced
-      gold_refresh_executors: 4    # slight bump for headroom
-
-architecture:
-  pipeline:
-    continuous:
-      gold_refresh_interval: "3 minutes"   # was 5 min -- lower freshness
-      benchmark_warmup: 300                # must be >= gold interval
-      benchmark_interval: 300              # must be >= gold interval
-      run_duration: 2700                   # 45 min -- more benchmark rounds
-```
-
-Expected result: bronze latency drops to ~55s/batch, data freshness
-improves to ~150--180s, and the longer run duration yields more benchmark
-rounds for trend analysis.
+Silver's lag rose by more than one of its batch times across the second
+half: it cannot keep up with what bronze commits. Give silver the executors
+the line names (or a larger cluster: the preflight's "cannot balance"
+warning names the same stage before the run), or lower the scale. A stage
+that "has" its full need and still falls behind ran below the sizing default
+rate; raise its executors past the need.
 
 ### Diagnostic Checklist
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
-| `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
-| `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
+| `pipeline_saturated: true` | A stage could not keep pace with what arrived (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
+| `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Own datagen: rows written after the window. `--skip-generate`: corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
+| `ingest_ratio` < 0.95 | Bronze fell behind the rows that arrived; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
 | `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Rerun without `--skip-generate`: a continuous run that generates its own data clears the previous raw datagen files and the stream checkpoints before datagen starts (a Customer 360 rerun over existing tables also needs `--force-reset`); the report warns above 1.05 |
-| `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
-| Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
-| Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
-| Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
+| `not balanced: <stage> fell behind` (run FAILED) | That stage cannot carry the offered load on its executors | Raise the executor setting the line names, use a larger cluster, or lower the scale |
+| `cannot balance` before the run | The stage's need is above its executor cap, the cluster's budget, or a count set in config | Larger cluster, or lower the scale; the run will fail balance otherwise |
+| Balance card: `datagen offered X of Y sized ... fell short` | Datagen offered under 90% of the load the stages were sized for | Check datagen pod CPU (throttling, eviction); the run's rates are against a lighter load |
+| `data_freshness` high and balanced | Gold write time, or a `gold_refresh_interval` set in the config | Add `gold_refresh_executors`; leave the interval at `0 seconds` |
+| Gold falls behind silver | Silver table too large for gold executors | Increase `gold_refresh_executors` |
 | QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
-| Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
+| Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `benchmark_interval` |
 | `total_s3_objects` growing unbounded | Maintenance not keeping pace, or failing | Iceberg: check the journal's Iceberg maintenance events for timed-out or failed statements, then decrease `retention_interval`. Lowering `retention_threshold` below `1h` does nothing while streams are live (expiry is floored at 1 h, orphan removal at 24 h 10 min). Tables created before metadata retention was added keep every `metadata.json`; recreate them with a fresh deployment. Delta: continuous mode has no effective table maintenance in v1.6 |
 
 ---
@@ -1246,14 +1263,17 @@ Continuous), Customer360 scale factor, the recipe string
 
 ### Summary Cards
 
-Five primary KPI cards. The cards change with pipeline mode:
+The KPI cards change with pipeline mode:
 
 **Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
 Job Status (pass/fail count).
 
-**Continuous:** Data Freshness, Continuous Throughput (rows/s), Compute
-Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
-CPU-hours.
+**Continuous:** Data Freshness, Balance, Continuous Throughput (rows/s),
+Compute Efficiency (GB/core-hour), In-Stream QpH (median across rounds),
+Total CPU-hours. The Balance card reads balanced, not balanced or not
+measured; it names the bottleneck, each handoff's lag growth over the second
+half against its allowance, and, when datagen fell short, the MB/s datagen
+offered against what the stages were sized for.
 
 Pipeline throughput and compute efficiency are over stage inputs (bronze,
 silver, gold and the query stage each count the data they read), so the card
@@ -1289,7 +1309,8 @@ Green, amber and red status indicators for data quality checks:
   amber above 1.05 (more data than the scale asks for, not shown as
   "Complete"). An ingest ratio is red below 0.95 (amber when the trickle held
   intake rather than the pipeline falling behind) and amber above 1.05,
-  which usually means gold re-read silver across refreshes.
+  which means bronze took more rows than arrived (for example files left by
+  an earlier run).
 - **Job Success** -- counts of passed and failed batch and continuous jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
@@ -1333,11 +1354,12 @@ resources.
 Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
 In continuous mode: rows/s, micro-batch latency, freshness.
 In continuous mode it is followed by the intake cards: the ingest ratio
-(bronze rows over the rows the trickle released, or over the generated
-corpus rows when the record has no released-row count), corpus coverage (the share
-of the generated corpus the window took in, `corpus_ingest_ratio`), the
-window, and the offered load (the trickle rate, a Lakebench-imposed limit,
-not a capacity). For AML, the rules continuous mode does not run are named,
+(bronze rows over the released rows, or over the generated corpus rows
+when the record has no released-row count), corpus coverage (the share of
+the generated corpus the window took in, `corpus_ingest_ratio`), the
+window, and the trickle rate when one was set (a Lakebench-imposed limit,
+not a capacity). On a default run, which has no trickle, that card reads
+"not recorded"; the scale's offered load is in `config_snapshot.offered_load`. For AML, the rules continuous mode does not run are named,
 and the detection table reads "excluded in continuous mode" for them, not
 "no data".
 

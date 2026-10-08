@@ -768,3 +768,59 @@ bucket.
 Code: `src/lakebench/config/schema.py:TableNamesConfig`,
 `src/lakebench/spark/scripts/silver_build_financial.py:SILVER_TRANSACTIONS`,
 `src/lakebench/modules/pipeline_engines/spark/job.py:_build_manifest`.
+
+### A continuous run FAILED "not balanced"
+
+**Symptom:** the run ends `FAILED` with `balance gate: not balanced:
+<stage> fell behind <upstream>: its lag grew Ns across the window's second
+half ...` and the report's Balance card says "not balanced".
+
+**Cause:** that stage could not carry the scale's offered load: the lag of
+the commits waiting for it, sampled once per batch, rose by more than one
+cadence (its trigger interval, or back to back its median batch time in the
+window's first half) across the window's second half. The line gives its
+executors and the count the load needs.
+
+**Fix:** raise the setting the line names (for example
+`platform.compute.spark.silver_stream_executors`), run on a larger cluster
+(the README's continuous minimum carries each scale balanced), or lower the
+scale. A stage that already had its full need ran below the sizing default
+rate: raise it past the need.
+
+### "cannot balance" before a continuous run
+
+**Symptom:** `run` or `config recommend` warns `cannot balance: <stage>
+needs ~N executors x C cores to carry the offered load; <limit> allows M`.
+
+**Cause:** the cluster's concurrent budget, the executor cap, or an
+executor count set in the config holds the stage below what the load needs.
+The run will start, its lag will grow, and it will fail the balance check.
+
+**Fix:** a cluster at least the README's continuous minimum for the scale,
+or a lower scale. AML continuous at scale 100 cannot balance at any size:
+silver-stream needs about 45 executors of 16 cores and the cap is 28.
+
+### bronze-ingest fails with "object store clock probe failed"
+
+**Symptom:** the bronze-ingest driver exits with `object store clock probe
+failed 3 times`.
+
+**Cause:** bronze writes and reads back one small object under the bronze
+bucket at start to measure how far the object store's clock is from the
+cluster's (landing times are moved onto the cluster clock with it). The
+write failed three times, so bronze could not have written its data either.
+
+**Fix:** check the bucket exists and the S3 credentials and endpoint in the
+config can write to it; the driver log has the S3 error.
+
+### The Balance card says datagen fell short
+
+**Symptom:** `datagen offered X MB/s of Y sized ... it fell short`.
+
+**Cause:** datagen wrote less than 90% of the load the stages were sized
+for, so the run's rates and balance are against a lighter load than the
+scale declares. Usually datagen pods were CPU-throttled, evicted or slow to
+start.
+
+**Fix:** check the datagen pods' events and CPU; rerun once they hold their
+CPU. A config that sets `datagen.cpu` or `parallelism` offers what it sets.

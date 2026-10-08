@@ -95,9 +95,10 @@ Two decisions deserve calling out because they took adversarial
 review to get right.
 
 **Cores used vs cores requested.** The image entrypoint
-(`datagen_rs/entrypoint.py`) sizes the rayon pool from the pod's
-cgroup CPU quota, but the pool can still be smaller than the
-request: an explicit `datagen.generators` value overrides it, and the
+(`datagen_rs/entrypoint.py`) sizes the rayon pool from `CPU_LIMIT`,
+which Lakebench sets to the pod's CPU rounded up to whole cores
+(a 1300m pod runs 2 threads, held to its share by the CPU quota). The
+pool can still be smaller than the request: an explicit `datagen.generators` value overrides it, and the
 entrypoint lowers the thread count when the memory limit cannot hold
 that many threads. A pod requesting 16 CPU that runs 8 threads is
 still billed for 16. Cost accounting must use the k8s request (what

@@ -96,10 +96,8 @@ This installs:
   threadpoolctl at exactly the versions the cluster's AML reference detector
   installs (`REFERENCE_PY_DEPS` in
   `src/lakebench/modules/pipeline_engines/spark/job.py`), plus pyarrow.
-  `tests/test_reference_pins.py` fails in CI if the extra and the tuple
-  drift, or if the installed versions differ from them. Outside CI it reports
-  a drifted install as a skip; set `LB_REQUIRE_REFERENCE_PINS=1` to make it
-  fail. The pins have wheels for Python 3.10 to 3.13.
+  Keep the extra and the tuple equal by hand; no test checks them. The pins
+  have wheels for Python 3.10 to 3.13.
 
 ### Running tests
 
@@ -109,8 +107,8 @@ make check-fast
 
 That is ruff, the format check and mypy, then the unit tests in parallel
 (`pytest-xdist`, one test file per worker) without the Spark tier and
-without the AML statistics tests marked `slow`, which CI runs in their own
-job. The tests import `src/` of this checkout, whatever is installed:
+without the AML statistics tests marked `slow`. CI does not run the `slow`
+tests; run `pytest tests/ -m slow` (about 20 minutes) before a release. The tests import `src/` of this checkout, whatever is installed:
 `pyproject.toml` sets pytest's `pythonpath = ["src"]`, so a bare `pytest`
 does too, and `make check-fast` and `make test` also set `PYTHONPATH=src`
 for the subprocesses some tests start. It runs one worker per CPU;
@@ -121,28 +119,13 @@ whole unit suite serially, slow tests included, and stop at the first
 failure:
 
 ```bash
-pytest tests/ -x -v --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+pytest tests/ -x -v --ignore=tests/spark
 ```
 
-End-to-end and integration tests require a live Kubernetes cluster with S3
-storage, a Spark Operator, and a Hive metastore. These are excluded from the
-default test run. To run them when you have a cluster available:
-
-```bash
-pytest tests/ -v -m "integration"    # Integration tests (K8s + S3)
-pytest tests/ -v -m "e2e"            # Full deploy/run/destroy workflow
-```
-
-Tests are organized with pytest markers defined in `pyproject.toml`:
-
-| Marker | Description | Requires Cluster |
-|--------|-------------|------------------|
-| `unit` | Fast, isolated tests with no external dependencies | No |
-| `integration` | Require Kubernetes and S3 connectivity | Yes |
-| `e2e` | Full deploy/run/destroy workflow | Yes |
-| `slow` | Long-running tests | Varies |
-| `extended` | Scale matrix tests (scales 1, 10, 50, 100) | Yes |
-| `stress` | Stress tests at large scales (250, 500, 1000) | Yes |
+There are no cluster tests. `pyproject.toml` still registers the
+`integration`, `e2e`, `extended` and `stress` markers, but no test carries
+them. Cluster behaviour is checked by live runs. The one marker in use is
+`slow`, for tests over 20 s.
 
 A coverage report: `make test-cov`, written to `htmlcov/index.html`.
 
@@ -156,12 +139,10 @@ A coverage report: `make test-cov`, written to `htmlcov/index.html`.
 | `make dev` | Install with the dev extra and set up the pre-commit hooks |
 | `make check-fast` | Ruff and the format check on `src/`, `tests/` and `scripts/`, mypy on `src/lakebench/`, then the unit tests in parallel without `tests/spark` and the `slow` tests |
 | `make test` | The pytest command of `make check-fast` alone |
-| `make test-spark` | The Spark tier on the installed pyspark, with its pinned jars fetched and `LB_REQUIRE_JARS=1` |
-| `make test-unit` | Every test not marked `integration` or `e2e`, serially, `slow` tests included |
-| `make test-integration` | Integration tests (requires K8s and S3) |
-| `make test-e2e` | End-to-end tests (full workflow) |
-| `make test-extended` | Scale matrix tests (scales 1, 10, 50, 100) |
-| `make test-stress` | Stress tests at large scales (250, 500, 1000) |
+| `make test-spark` | The Spark tier on the installed pyspark, with its pinned jars fetched. Read the skip count: a missing jar skips, it does not fail |
+| `make test-unit` | The whole unit suite serially, `slow` tests included |
+| `make test-integration`, `make test-e2e` | No tests carry these markers; they collect nothing |
+| `make test-extended`, `make test-stress` | Broken: they name `tests/test_e2e.py`, which does not exist |
 | `make test-cov` | `pytest tests/` with the default marker filter of `pyproject.toml` (no `e2e` or `integration`) and a coverage report; not in `make help` |
 | `make lint` | Ruff on `src/`, `tests/` and `scripts/`, as CI runs it |
 | `make fmt` | Format `src/`, `tests/` and `scripts/` with ruff and apply auto-fixes |
@@ -245,98 +226,68 @@ with `pytestmark = pytest.mark.usefixtures("load_script")`; while a test
 runs, `import common` resolves to that test's copy. `load_script_module`
 keeps one copy per test module, for module-scoped fixtures that run script
 code. Do not put the scripts directory on `sys.path` or pop script modules
-out of `sys.modules`: `tests/test_script_loader_static.py` fails on it, and
-a teardown hook in `tests/conftest.py` fails the test that leaves the
-scripts directory on `sys.path` or a script module in `sys.modules`.
+out of `sys.modules`: a teardown hook in `tests/conftest.py` fails the test
+that leaves the scripts directory on `sys.path` or a script module in
+`sys.modules`.
 
 ### The Spark tier and its jars
 
-`pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and a Java 17
-runtime. A test that imports pyspark, Delta or py4j, or calls
-`pytest.importorskip` on one, goes under `tests/spark`: the unit legs in CI
-have no pyspark and would skip it, so `tests/test_pyspark_tests_in_spark_tier.py`
-fails on such a test anywhere else under `tests/`. Tests that need Iceberg or Delta read the jars from
-`LB_SPARK_TEST_JARS`, a comma-separated list of jar files for the installed
-Spark line:
+`pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and Java 17.
+CI does not run it; run it locally before a change to the Spark scripts
+lands. Put a test that imports pyspark, Delta or py4j under `tests/spark`:
+the unit suite has no pyspark and would skip it.
+
+Iceberg and Delta tests read the jars from `LB_SPARK_TEST_JARS`, a
+comma-separated list of jar files for the installed Spark line:
 
 | Line | Jars |
 |------|------|
 | pyspark 4.0.1 | `iceberg-spark-runtime-4.0_2.13-1.11.0.jar`, `delta-spark_2.13-4.0.0.jar`, `delta-storage-4.0.0.jar` |
 | pyspark 4.1.1 | `iceberg-spark-runtime-4.1_2.13-1.11.0.jar`, `delta-spark_4.1_2.13-4.1.0.jar`, `delta-storage-4.1.0.jar` |
 
-These are the product defaults in `modules/pipeline_engines/spark/job.py`;
-`tests/test_spark_jars_lock.py` fails when the lock and the defaults differ.
-After a default changes, `python scripts/fetch_test_jars.py --update-lock`
-rebuilds the lock: it confirms each coordinate by its POM, takes
-`delta-storage` from the delta-spark POM, and checks the bytes against
-Central's `.sha1` before writing the sha256 values.
-The harness (`tests/spark/conftest.py`) checks each jar against the
-installed line with the product's own rules, so a jar built for the other
-line, a missing file or a directory fails the tests that need jars instead
-of skipping them. There is no ivy-cache fallback, and `LB_TEST_ICEBERG_JAR`
-is still read but deprecated.
+These match the product defaults in `modules/pipeline_engines/spark/job.py`.
+Keep `tests/spark/jars.lock.json` equal to them by hand; after a default
+changes, `python scripts/fetch_test_jars.py --update-lock` rebuilds the
+lock. It confirms each coordinate by its POM and checks the bytes against
+Central's `.sha1`.
 
-A test declares what it needs with `@pytest.mark.requires_jars("iceberg")`,
-`("delta")` or both. Without the jars it skips with a reason starting
-`LB-JARS missing:`; with `LB_REQUIRE_JARS=1` it fails instead, and the run
-refuses to start if pyspark itself cannot be imported. Under
-`LB_REQUIRE_JARS=1` the run also fails on any skip whose reason mentions
-jars, Iceberg or Delta, on any xfail whose reason mentions jars, and on any
-other skip not listed in `tests/spark/skip_allowance.txt` (which is empty):
-
-`scripts/fetch_test_jars.py` downloads the jars pinned for a line in
-`tests/spark/jars.lock.json` (Maven Central, with the Google mirror as the
-fallback), checks each against its sha256 and caches them in
-`~/.cache/lakebench-test-jars`; `--print-env` prints the variable:
+`scripts/fetch_test_jars.py` downloads the pinned jars, checks their
+sha256 and caches them in `~/.cache/lakebench-test-jars`. `--print-env`
+prints the variable:
 
 ```bash
-make test-spark                      # the fetch below, then the tier with LB_REQUIRE_JARS=1
+make test-spark      # fetch, then the tier
 jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
-LB_REQUIRE_JARS=1 pytest tests/spark -q -rs
-pytest tests/spark -q --lb-reverse   # the same tests in reverse order
-pytest tests/spark -q --lb-shard 1/2 # the test files in shard 1 of 2, as one CI job runs
+pytest tests/spark -q -rs
 ```
 
-Two fixtures give a test a Spark with the jars. The JVM starts once per
-pytest process with the jars and no session settings, and `spark_session`
-is one session per test module on it, stopped at the module's end. It is shaped like the
-product's session for the formats the module's tests declare: the Iceberg
-or Delta SQL extension, and Delta as `spark_catalog` for Delta. A module
-adds static settings with `pytestmark = pytest.mark.spark_static_conf({...})`
-and Iceberg catalogs with the `iceberg_catalog` fixture. A test that needs
-a fresh JVM runs a child with `spark_subprocess(script, *args)`, which
-passes the jars, `PYSPARK_PYTHON` and a `PYTHONPATH` holding the Spark
-scripts and `tests/spark`; on a non-zero exit or a timeout it writes the
-whole output to `spark-subprocess.log` under pytest's temporary directory
-and shows the last 60 lines plus every `Caused by:` line.
+A test declares the jars it needs with `@pytest.mark.requires_jars("iceberg")`,
+`("delta")` or both. Without them it skips with a reason starting
+`LB-JARS missing:` and the run still exits 0. **Read the skip count.**
+
+Fixtures in `tests/spark/conftest.py`:
+
+| Fixture or mark | What it gives |
+|-----------------|---------------|
+| `spark_session` | One local session per test module, stopped at the module's end. It carries the Iceberg or Delta extension the module's tests declare, and Delta as `spark_catalog` for Delta |
+| `spark_static_conf({...})` | Module mark: static settings applied when the session starts |
+| `iceberg_catalog(spark, name, warehouse)` | Registers a Hadoop Iceberg catalog on the session |
+| `spark_jars` | The jar list, with `.classpath` for a child's `--jars` |
+| `spark_subprocess(script, *args)` | Runs a child in a fresh JVM with the jars, `PYSPARK_PYTHON` and a `PYTHONPATH` of the Spark scripts, `tests/spark`, `src` and the repo root. On a non-zero exit it fails with the last 2000 characters of stdout and stderr |
+
 To run such a child by hand, give it the same path:
-`PYTHONPATH=src/lakebench/spark/scripts:tests/spark:src python tests/spark/test_x.py ...`.
+`PYTHONPATH=src/lakebench/spark/scripts:tests/spark:src:. python tests/spark/test_x.py ...`.
+
 A test that calls a stream's micro-batch handler directly wraps the call in
 `foreach_batch_harness(spark, handler, df, batch_id)` from
-`tests/spark/_foreach_batch.py`, which sets the local properties a real
-`foreachBatch` sets (the streaming query id the writers read) and restores
-them afterwards; with several writer threads, each thread enters
-`inside_foreach_batch` itself.
-The four AML batch/stream protocol guards (statements, profiles,
-dimensions, replay idempotency) have a mutation check,
-`tests/spark/test_parity_guard_mutations.py`: it reruns each guard's Spark
-child with `LB_PARITY_MUTATE` set, which makes `tests/spark/_parity_mutation.py`
-null one business column in that MERGE's source, and asserts the guard
-names the failure. A new guard child calls `_parity_mutation.install()`
-before it imports the stream script.
-`--lb-reverse` and `--lb-shard` are defined in `tests/spark/conftest.py`,
-so pass them with `tests/spark` (or a file in it) on the command line.
-`--lb-shard K/N` keeps the test files in shard K of N and deselects the
-rest. Every file is in exactly one shard, and the split depends only on the
-files under `tests/spark` and the recorded seconds per file in
-`tests/spark/shard_weights.json` (heaviest file first, each to the shard
-with the least time so far; a file with no recorded time weighs the
-median). With `--lb-reverse` a shard runs its own tests backwards, so the
-order check pairs a file only with the files of its own shard. The
-weights only balance the shards, so a new test file needs no entry; refresh
-them from the CI jobs' `spark-junit-*` artifacts with
-`python scripts/spark_shard_weights.py --source "<run id>" <reports>` when
-the shard times drift apart.
+`tests/spark/_foreach_batch.py`. It sets the local properties a real
+`foreachBatch` sets and restores them afterwards. With several writer
+threads, each thread enters `inside_foreach_batch` itself.
+
+A batch/stream parity guard child can call `_parity_mutation.install()`
+before it imports the stream script. With `LB_PARITY_MUTATE` set, it nulls
+one business column in that MERGE's source, so the guard can be shown to
+catch the difference.
 
 ## Adding a recipe
 
@@ -421,9 +372,8 @@ Every percentage, total and count the HTML report computes goes through
 the `metrics.json` paths it came from. `tests/test_report_consistency.py`
 recomputes each one from the stored record and fails on any difference, on
 a unit its own table contradicts (a stored percentage scaled as a fraction,
-bytes shown as GiB without the conversion), on a percentage in the page text
-that is neither derived nor a stored string, and on an inline percentage or
-count format in `generator.py` or `scorecard.py`.
+bytes shown as GiB without the conversion), and on a percentage in the page
+text that is neither derived nor a stored string.
 
 Six stored records render into `tests/fixtures/reports/<run>.html`, and the
 test requires today's render to match them exactly. Because the renderer

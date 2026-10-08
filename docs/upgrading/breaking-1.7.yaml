@@ -4,8 +4,8 @@
 # UPGRADING-1.7.md; `text` is its bullet under 1.7.0 "Breaking changes" in
 # CHANGELOG.md; `source` is `path:symbol` of the code it describes. `kind` is one of
 # removed-key, refused-command, alias, exit-code, identity, version-bump,
-# default-change. tests/test_breaking_changes.py checks both directions;
-# `python3.11 scripts/upgrading.py missing` prints a skeleton for each gap.
+# default-change. `python3.11 scripts/upgrading.py missing` prints a skeleton
+# for each code change the list lacks.
 
 - id: config-fields-nothing-read-are-removed
   title: Config fields nothing read are removed
@@ -261,14 +261,14 @@
     records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
   fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
     is refused.
-- id: aml-records-are-workload-version-aml-2
-  title: AML records are workload version aml-2
+- id: aml-records-are-workload-version-aml-3
+  title: AML records are workload version aml-3
   kind: identity
-  subject: workload financial aml-2
+  subject: workload financial aml-3
   source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
-  text: AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version
-    `aml-2` and do not compare with `aml-1`.
-  fix: Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+  text: 1.7.0 capped W4 alert evidence (`aml-2`); 1.7.1 changes the W3 and W17 hub rule (`aml-3`, rule
+    version 1.1.0). Records at `aml-3` do not compare with `aml-1` or `aml-2`.
+  fix: Re-run an AML baseline under 1.7.1 before comparing; read the bounded-recall labels in the score.
 - id: system-and-access-path-are-not-execution-conditions
   title: System and access path are not execution conditions
   kind: identity
@@ -523,13 +523,13 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
-- id: the-default-datagen-image-is-the-v17-look-image
-  title: The default datagen image is the v1.7 look image
+- id: the-default-datagen-image-is-lb-datagen3cb67f92
+  title: The default datagen image is lb-datagen:3cb67f92
   kind: version-bump
-  subject: images.datagen docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
+  subject: images.datagen docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9
   source: src/lakebench/config/schema.py:ImagesConfig
-  text: 'The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.'
-  fix: 'Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.'
+  text: 'The default datagen image is `lb-datagen:3cb67f92`, pinned by digest (1.7.0: `2a36ae21`; v1.6: `1.6.0`; neither is in the registry). It has no lineage row, so its corpora get a corpus id of their own.'
+  fix: Remove any `images.datagen` pin to an older tag.
 - id: a-run-passes-only-when-its-record-shows-it
   title: A run passes only when its record shows it
   kind: default-change
@@ -628,3 +628,26 @@
   source: src/lakebench/exit_codes.py:PATHS
   text: '`financial reproduce` reproduces the alert from the snapshots its run''s gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.'
   fix: 'Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment''s latest.'
+- id: continuous-stages-run-back-to-back-by-default
+  title: Continuous stages run back to back by default
+  kind: default-change
+  subject: continuous trigger intervals 0 seconds
+  source: src/lakebench/config/schema.py:SustainedConfig
+  text: The three continuous trigger intervals default to `0 seconds` (were 30 s, 60 s and 5 minutes);
+    freshness runs from file landing.
+  fix: Set the intervals to keep 1.7.0 timing; do not compare continuous freshness with 1.7.0 records.
+- id: a-bare-0-trigger-interval-is-refused
+  title: A bare "0" trigger interval is refused
+  kind: default-change
+  subject: continuous trigger interval units
+  source: src/lakebench/config/schema.py:SustainedConfig
+  text: A trigger interval must be a whole number and a unit; a bare `"0"` is refused at load.
+  fix: Write `"0 seconds"`.
+- id: a-set-datagenparallelism-is-used-exactly
+  title: A set datagen.parallelism is used exactly
+  kind: default-change
+  subject: datagen.parallelism set in config
+  source: src/lakebench/config/autosizer.py:_apply_datagen_pod_floor
+  text: A configured `datagen.parallelism` is no longer cut to fit the cluster or raised to the AML 8-pod
+    floor; the autosizer warns, and a continuous run that cannot place it is refused at preflight.
+  fix: Unset it to let the autosizer size it, or set a count the cluster can run.
