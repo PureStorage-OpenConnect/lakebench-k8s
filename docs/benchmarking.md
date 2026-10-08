@@ -81,7 +81,7 @@ differ, so reproduce refuses them).
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. Above half the window it fails a steady-state run; in a capacity run (`datagen_ahead`, or `datagen.cpu`/`parallelism` set in the config, recorded as `config_snapshot.datagen_offered: user`) it is a warning, since the slowest stage falls behind by design and pace is the score. |
+| `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. Above half the window it fails a steady-state run; in a capacity run (`datagen_ahead`) it is a warning, since the slowest stage falls behind by design and pace is the score. |
 | `sustained_throughput_rps` | `bronze rows ingested inside the window / arrival_seconds` | Rows/sec entering bronze while data was arriving. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity. |
 | `window_seconds` | window end - window start | Length of the measurement window. |
 | `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
@@ -771,10 +771,9 @@ key; Customer360 writes successive time slices. Bronze reads with no
 per-trigger limit. The arrival rate is set by `workload.datagen.parallelism`
 and `workload.datagen.cpu` (about 240 MB/s per 8-core AML pod and 850 MB/s
 per 8-core Customer360 pod, n=1 each, 2026-10-06); `scale` sets the size of
-the data the pipeline works on, not the rate. Unset, they are balanced to
-bronze-ingest (0.7 of its estimated intake, so the pipeline keeps up); the
-autosizer prints the formula and its inputs. The rate a run had is in its
-datagen fleet record. Datagen starts once the streams are running and the
+the data the pipeline works on, not the rate. Unset, the autosizer gives
+datagen its standard 8-core pods, as in batch mode. The rate a run had is in
+its datagen fleet record. Datagen starts once the streams are running and the
 window opens at its first file.
 
 **Two regimes, one mode.** The record says which one a run was:

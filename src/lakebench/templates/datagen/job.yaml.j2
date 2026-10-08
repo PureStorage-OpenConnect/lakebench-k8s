@@ -46,7 +46,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:3f4729b6@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"

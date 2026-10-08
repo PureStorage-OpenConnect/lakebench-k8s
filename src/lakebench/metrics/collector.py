@@ -1070,9 +1070,8 @@ class PipelineBenchmark:
     bronze_busy_fraction: float | None = None
     # Continuous: per stage (bronze, silver) its busy fraction and the raw
     # MB/s per core it would take busy all window (window rows / busy time x
-    # datagen bytes per row / cores), plus datagen's own MB/s per core: the
-    # units of the autosizer's CONTINUOUS_MB_S_PER_CORE. A measurement, not
-    # a score; a low busy fraction extrapolates further.
+    # datagen bytes per row / cores), plus datagen's own MB/s per core. A
+    # measurement, not a score; a low busy fraction extrapolates further.
     stage_capacity: dict[str, dict[str, float]] | None = None
     # When intake_limit is "trickle_rate": seconds the trickle needs to
     # ingest the whole corpus at the rate it held (datagen rows / rows/s).

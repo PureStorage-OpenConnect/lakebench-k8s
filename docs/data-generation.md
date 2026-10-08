@@ -203,9 +203,9 @@ A datagen pod never requests more than 16Gi. If the CPU you set would need
 more, the request stays at 16Gi and each pod runs fewer generator threads;
 the autosizer says so. The entrypoint also lowers the thread count if a
 memory limit you set cannot hold that many threads, rather than risk an
-OOMKill. Above scale 100, AML datagen runs at least 8 pods: each pod holds
-typology rows only for the files it writes, so fewer pods means more memory
-per pod.
+OOMKill. Above scale 100, AML datagen runs at least 8 pods unless you set
+`datagen.parallelism` lower (the run then warns): each pod holds typology
+rows only for the files it writes, so fewer pods means more memory per pod.
 
 ### Scale limits
 
@@ -374,8 +374,8 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:3f4729b6`, digest
-`sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb`,
+The default image (`docker.io/sillidata/lb-datagen:3cb67f92`, digest
+`sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9`,
 generator version `datagen-v2-rs-0.3`) is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:
 

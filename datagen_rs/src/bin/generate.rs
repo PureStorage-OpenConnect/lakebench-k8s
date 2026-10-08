@@ -630,6 +630,12 @@ fn pacs008_run() {
     }
 }
 
+/// The AML world and watchlist, the same in every epoch of a process.
+static AML_WORLD: std::sync::OnceLock<(
+    datagen_rs::model::World,
+    datagen_rs::screening::Screening,
+)> = std::sync::OnceLock::new();
+
 /// A continuous AML run's metrics: epoch 0's record (sizing and its phase
 /// timings), with every later epoch's files, bytes and rows added.
 static RUN_METRICS: std::sync::Mutex<Option<PodMetrics>> = std::sync::Mutex::new(None);
@@ -896,6 +902,14 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
     }
     maybe_print_resolved_args(&corpus_args);
     let sink = S3Sink::from_env(&bucket, &prefix);
+    // A live epoch starts only while delivery runs: a stop that came during
+    // the previous epoch's last file must not write this epoch's manifest.
+    if epoch > 0 {
+        if let Some(reason) = cont.and_then(|d| d.stop_now(&sink)) {
+            eprintln!("continuous: node={node_id} stopped by {reason} before epoch {epoch}");
+            return EpochEnd::Stopped;
+        }
+    }
     // Paced: an epoch this node finished in an earlier process is skipped;
     // the first epoch of this process resumes after the files there.
     let mut present: HashSet<String> = HashSet::new();
@@ -947,13 +961,19 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
     // A dedicated-bronze pod (writes no reference zones) can skip the
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
-    let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
-    // Screening track: the watchlist and its external
-    // counterparties, from their own salted streams. Attaching them adds
-    // entities above the population and changes no population column.
-    let screening = datagen_rs::screening::build(w.population, seed, hist_start_us, hist_end_us);
-    w.attach_external(screening.external_entities());
-    let w = w;
+    // The world and the watchlist take only the run's arguments and the
+    // history window, never the epoch: built once per process, so a live
+    // epoch starts writing at once instead of rebuilding the same bank.
+    let (w, screening) = AML_WORLD.get_or_init(|| {
+        let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
+        // Screening track: the watchlist and its external
+        // counterparties, from their own salted streams. Attaching them adds
+        // entities above the population and changes no population column.
+        let screening =
+            datagen_rs::screening::build(w.population, seed, hist_start_us, hist_end_us);
+        w.attach_external(screening.external_entities());
+        (w, screening)
+    });
     let t_world = t0.elapsed().as_secs_f64();
     let dims = &w.dims;
     let total_txns = dims.total_txns();
@@ -1222,7 +1242,7 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
     // dormancy window; amounts come from a per-row stream keyed by the row's
     // uid, drawn the way a base row's amount is.
     let (mut planted, negative_rows) = datagen_rs::screening::plant(
-        &screening,
+        screening,
         aseed,
         &gcal,
         start_us,
@@ -1381,6 +1401,14 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
             &build_manifest_x(&mine, seed, salted_uids, &perturb, &screen_extra),
             8 * 1024 * 1024,
         );
+        // Scheduling took a while: a live epoch stopped meanwhile writes no
+        // manifest (nothing of it is written yet).
+        if epoch > 0 {
+            if let Some(reason) = cont.and_then(|d| d.stop_now(&sink)) {
+                eprintln!("continuous: node={node_id} stopped by {reason} before epoch {epoch}");
+                return EpochEnd::Stopped;
+            }
+        }
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
         let man_key = if epoch == 0 {
@@ -1392,7 +1420,7 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
 
         if cycle_n == 0 && epoch == 0 {
             let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
-            write_account_to(&w, &mut acct_mpu);
+            write_account_to(w, &mut acct_mpu);
             let acct_bytes = acct_mpu.bytes_written();
             acct_mpu
                 .finish()
@@ -1403,13 +1431,13 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
             // The watchlist is an input the bank holds (the published list
             // versions), not ground truth: which listed party was paid is only
             // in the manifest. Before party, which silver-stream waits for.
-            let wl_bytes = encode_parquet(&watchlist_batch(&screening), 1024 * 1024);
+            let wl_bytes = encode_parquet(&watchlist_batch(screening), 1024 * 1024);
             ref_bytes += wl_bytes.len() as u64;
             ref_files += 1;
             sink.put("bronze/watchlist.parquet", wl_bytes);
 
             let mut party_mpu = sink.put_multipart("bronze/party.parquet");
-            write_party_to(&w, &instances, &mut party_mpu);
+            write_party_to(w, &instances, &mut party_mpu);
             let party_bytes = party_mpu.bytes_written();
             party_mpu
                 .finish()
@@ -1701,7 +1729,7 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
                 return;
             };
             let tb = std::time::Instant::now();
-            let batch = build_batch(&w, &rows);
+            let batch = build_batch(w, &rows);
             build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
             write_file(fid, &batch);
         };
@@ -2069,10 +2097,22 @@ fn customer360_main() {
             std::process::exit(2);
         }
         if slice_us <= customer360::SESSION_TIMESPAN_US {
+            // A slice is floor(window x pods / files), so the fewest pods
+            // that pass are ceil((span + 1) x files / window); never more
+            // pods than files (a pod would own none).
+            let window = (ts_end_us - ts_start_us) as i128;
+            let need = (customer360::SESSION_TIMESPAN_US as i128 + 1) * total_files as i128;
+            let min_pods = (need + window - 1) / window;
+            let pods = if min_pods <= total_files as i128 {
+                format!("run at least {min_pods} pods (datagen.parallelism), ")
+            } else {
+                String::new()
+            };
             eprintln!(
                 "continuous delivery needs each round's time slice above 30 min (a session's span); \
-                 got {:.1} min: widen --timestamp-start/--timestamp-end or lower --target-tb",
-                slice_us as f64 / 60e6
+                 got {:.1} min: {}widen --timestamp-start/--timestamp-end or lower --target-tb",
+                slice_us as f64 / 60e6,
+                pods
             );
             std::process::exit(2);
         }
@@ -2508,6 +2548,12 @@ impl Delivery {
             return Some("stop marker");
         }
         None
+    }
+
+    /// `stop` without the 10 s throttle on the marker probe.
+    fn stop_now(&self, sink: &S3Sink) -> Option<&'static str> {
+        self.next_check_ms.store(0, Ordering::Relaxed);
+        self.stop(sink)
     }
 
     /// The reason delivery stopped, if it did.

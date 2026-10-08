@@ -2059,27 +2059,9 @@ def _run_once(
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     # Cuts to fit the cluster are shown with their reason, never silent.
-    # The run's mode, which --continuous does not write back to the config:
-    # continuous datagen is balanced to the pipeline.
-    _dg = cfg.architecture.workload.datagen
-    _balanced = _plan.mode == "continuous" and not ({"cpu", "parallelism"} & _dg.model_fields_set)
-    autosize_cuts = [
-        str(c)
-        for c in resolve_auto_sizing(cfg, cluster_cap, continuous=_plan.mode == "continuous") or []
-    ]
+    autosize_cuts = [str(c) for c in resolve_auto_sizing(cfg, cluster_cap) or []]
     for cut in autosize_cuts:
         print_warning(f"Auto-sizing: {cut}")
-    if _balanced:
-        # Continuous datagen is sized to what the pipeline takes in, which sets the
-        # run's arrival rate: shown so the reader can offer more.
-        from lakebench.config.autosizer import continuous_datagen_plan
-
-        _p = continuous_datagen_plan(cfg)
-        print_info(
-            f"Datagen balanced to {_p['stage']} ({_p['stage_cores']} cores): "
-            f"{_dg.parallelism} pod(s) x {_dg.cpu} cores (n=1 estimate); "
-            "set datagen.cpu and parallelism to offer more"
-        )
 
     # Auto-scale timeout if not explicitly set
     if timeout is None:

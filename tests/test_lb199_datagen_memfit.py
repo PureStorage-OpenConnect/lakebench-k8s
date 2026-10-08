@@ -111,14 +111,20 @@ def _cfg(schema, scale, **datagen):
     )
 
 
-def test_financial_above_scale_100_runs_at_least_8_pods():
+def test_financial_above_scale_100_runs_at_least_8_pods_unless_set():
     """Each pod keeps typology payloads for its own files only, so fewer pods
-    means more memory per pod; the model was measured at 8 or more pods."""
-    cfg = _cfg("financial", 300, parallelism=4)
+    means more memory per pod; the model was measured at 8 or more pods. A
+    count set in the config is kept, with a warning."""
+    cfg = _cfg("financial", 300)
+    object.__setattr__(cfg.architecture.workload.datagen, "parallelism", 4)
     changes: list[str] = []
     a._apply_datagen_pod_floor(cfg, changes)
     assert cfg.architecture.workload.datagen.parallelism == a.DATAGEN_MIN_PODS
-    assert changes and changes[0].startswith("datagen.parallelism raised")
+    cfg = _cfg("financial", 300, parallelism=4)
+    changes = []
+    a._apply_datagen_pod_floor(cfg, changes)
+    assert cfg.architecture.workload.datagen.parallelism == 4
+    assert changes
 
 
 @pytest.mark.parametrize(("schema", "scale"), [("financial", 100), ("customer360", 300)])

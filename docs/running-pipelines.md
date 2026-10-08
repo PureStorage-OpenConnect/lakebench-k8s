@@ -222,15 +222,10 @@ bank; Customer360: successive time slices). This is automatic -- no
 
 Bronze reads with no per-trigger limit. The arrival rate is set by
 `workload.datagen.parallelism` and `workload.datagen.cpu`, not by `scale`.
-Unset, they are balanced to the slowest stage with a measured rate: 0.7 x
-stage cores x stage MB/s per core / datagen MB/s per core, in pods of at
-most 8 cores. The rates are n=1 estimates in MB of datagen's files per core:
-AML datagen 31, bronze 6.3, silver 1.4 (silver bounds AML); Customer360
-datagen 105, bronze 65 (its silver kept pace, so it has no measured limit).
-The run prints which stage it balanced to, and its record carries
-`stage_capacity`: per stage (bronze, silver) the share of the window it was
-busy and the MB/s per core it would take busy all window, plus datagen's MB/s
-per core, in the same units as these rates. A low busy share extrapolates
+Unset, the autosizer gives datagen its standard 8-core pods, as in batch
+mode. The run's record carries `stage_capacity`: per stage (bronze, silver)
+the share of the window it was busy and the MB/s per core it would take busy
+all window, plus datagen's MB/s per core. A low busy share extrapolates
 further.
 
 Continuous datagen's files are kept, as a bank keeps its raw payment

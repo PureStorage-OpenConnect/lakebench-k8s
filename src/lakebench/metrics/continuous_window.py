@@ -379,7 +379,7 @@ def window_gate_problems(
                     + (
                         "Either arrival exceeded what bronze takes in (its batches grow until "
                         "one fills the window): offer less with workload.datagen.cpu and "
-                        "parallelism, or unset them to balance datagen to bronze; or datagen "
+                        "parallelism; or datagen "
                         "stopped writing: check the datagen pod logs"
                         if continuous_datagen
                         else "Lower max_files_per_trigger so the trickle lasts the window"

@@ -286,7 +286,7 @@ def test_fallback_is_dropped_with_an_exhausted_carry():
 
 
 def test_stage_capacity_is_in_the_autosizer_units():
-    """Raw MB/s per core at full busy (CONTINUOUS_MB_S_PER_CORE units), from
+    """Raw MB/s per core at full busy, from
     window rows, busy time, datagen bytes per row and the stage's cores."""
 
     def stage(name, batches, ms, cores):

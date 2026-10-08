@@ -417,9 +417,9 @@ def compute_badge_status(
         # A capacity run offers more than the pipeline takes in, so its
         # slowest stage falls behind by design and pace is its score: stale
         # gold is reported, not failed. One is a run whose datagen left a
-        # backlog at bronze, or whose datagen the config sized itself.
-        capacity_run = bool(snap.get("datagen_continuous")) and (
-            bool(getattr(pb, "datagen_ahead", None)) or snap.get("datagen_offered") == "user"
+        # backlog at bronze.
+        capacity_run = bool(snap.get("datagen_continuous")) and bool(
+            getattr(pb, "datagen_ahead", None)
         )
         if freshness_pct > 0.5 and capacity_run:
             warnings.append(

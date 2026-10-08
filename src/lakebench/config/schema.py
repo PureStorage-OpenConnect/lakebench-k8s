@@ -478,15 +478,21 @@ class ImagesConfig(ConfigModel):
     # 2a36ae21: the v1.7 release image and v1.7 look image
     # (sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04);
     # deleted from docker.io with the repository on 2026-10-06.
-    # 3f4729b6: tagged by the git tree of datagen_rs/ it was built from
-    # (`git rev-parse <commit>:datagen_rs` starts with it; pushed
-    # 2026-10-07). Adds continuous delivery (--deliver-until); batch output
-    # is byte-identical to 4274bb67 on the nine A/B cases. The default names
-    # the tag and the digest; the runtime pulls the digest, so a re-push of
-    # the tag cannot move it.
+    # 3f4729b6 (sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb):
+    # adds continuous delivery (--deliver-until); batch output is
+    # byte-identical to 4274bb67 on the nine A/B cases. Never released.
+    # 3cb67f92: the 1.7.1 image, tagged by the git tree of datagen_rs/ it was
+    # built from (`git rev-parse <commit>:datagen_rs` starts with it; pushed
+    # 2026-10-07). Builds the AML world once per pod instead of every
+    # continuous epoch and checks for a stop before an epoch's manifest;
+    # its output is byte-identical to 3f4729b6 (AML continuous and batch
+    # locally, an AML scale-10 batch corpus on the cluster from an earlier
+    # push of this tag built from the same context). The default
+    # names the tag and the digest; the runtime pulls the digest, so a
+    # re-push of the tag cannot move it.
     datagen: str = (
-        "docker.io/sillidata/lb-datagen:3f4729b6"
-        "@sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb"
+        "docker.io/sillidata/lb-datagen:3cb67f92"
+        "@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9"
     )
     """Data generator image, pinned by tag and digest (the digest is what is pulled).
     In continuous mode it generates until the run window ends: AML as successive
@@ -1805,10 +1811,12 @@ class DatagenConfig(ConfigModel):
     option.
     """
     parallelism: int = Field(default=4, ge=1)
-    """Number of parallel datagen pods. A value you set is used as given, except that it is
-    capped to fit the cluster and financial above scale 100 is raised to at least 8 pods;
-    unset, the auto-sizer derives it from the scale. The schema fallback without auto-sizing
-    is 4.
+    """Number of parallel datagen pods. A value you set is used exactly, with a warning when
+    the cluster cannot fit it (batch pods queue; a continuous run, whose pods all run beside
+    the streams, is refused at preflight) or it is under 8 for financial above scale 100.
+    Unset, the auto-sizer derives it from the scale, caps it to fit the cluster and raises
+    financial above scale 100 to at least 8 pods. The schema fallback without auto-sizing is
+    4.
     """
     # Datagen output file size, fixed at 64mb for every workload and mode
     # (owner decision 2026-09-29). c360 rows are drawn per file and truncated

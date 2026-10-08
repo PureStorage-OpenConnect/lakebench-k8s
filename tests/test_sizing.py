@@ -77,9 +77,8 @@ def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> Clust
 # AML continuous s1: bronze-ingest 5 x 4 + 2 = 22, 5 x 16 + 4 x 1.4 = 85.6 -> 86;
 #   silver-stream 10 x 4 + 4 = 44, 10 x 40 + 8 x 1.4 = 411.2 -> 412; gold-refresh
 #   12 x 4 + 4 = 52, 12 x 40 + 8 x 1.4 = 491.2 -> 492; streams 118 / 990. Always
-#   on: Trino 5 / 19 (with lb-deps) plus datagen balanced to its slowest
-#   stage, silver: floor(0.7 x 40 silver cores x 1.4 / 31) = 1 core, one pod,
-#   7 GiB (6.7 rounded up) = 6 / 26. Floor 124 / 1,016.
+#   on: Trino 5 / 19 (with lb-deps) plus datagen 2 x 8 cores, 7 GiB each
+#   (5.36 x 1.25 = 6.7 -> 7) = 21 / 33. Floor 139 / 1,023.
 #   Scratch 5 x 20 + 10 x 100 + 12 x 100 = 2,300.
 # AML batch s100: silver-build 8 + 90 x 12 // 100 = 18 executors, 76 cores,
 #   18 x 60 + 32 x 1.4 = 1,124.8 -> 1,125 GB;
@@ -93,17 +92,15 @@ def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> Clust
 # c360 continuous s100: bronze-ingest 5 x 2 + 2 = 12, 5 x 6 + 4 x 1.4 = 35.6 -> 36;
 #   silver-stream 11 x 4 + 4 = 48, 11 x 40 + 8 x 1.4 = 451.2 -> 452; gold-refresh
 #   5 x 4 + 4 = 24, 5 x 40 + 8 x 1.4 = 211.2 -> 212; streams 84 / 700. Always on:
-#   Trino 38 / 215 (with lb-deps) plus datagen balanced to bronze (C360's
-#   only measured stage): floor(0.7 x 10 bronze cores x 65 / 105) = 4 cores,
-#   one pod, 4 GiB.
-#   Floor 126 / 919.
+#   Trino 38 / 215 (with lb-deps) plus datagen 10 x 8 = 80 cores, 10 x 4 GiB =
+#   40 GB. Floor 202 / 955.
 #   Scratch 5 x 20 + 11 x 100 + 5 x 100 = 1,700.
 HAND_DERIVED = {
     ("customer360", "batch", 1): (41, 544, 2400),
     ("customer360", "batch", 10): (48, 572, 2400),
-    ("financial", "continuous", 1): (124, 1016, 2300),
+    ("financial", "continuous", 1): (139, 1023, 2300),
     ("financial", "batch", 100): (114, 1340, 5500),
-    ("customer360", "continuous", 100): (126, 919, 1700),
+    ("customer360", "continuous", 100): (202, 955, 1700),
 }
 
 
@@ -292,9 +289,6 @@ def test_preflight_sizes_against_the_capacity_run_sized_with():
     capacity) that would be every run. With sizing_capacity the plan
     checked is the one run sized."""
     cfg = default_sizing_config("customer360", "continuous", 50)
-    # A datagen the cluster cuts: balanced continuous datagen is too small to.
-    cfg.architecture.workload.datagen.parallelism = 10
-    cfg.architecture.workload.datagen.cpu = "8"
     cap = _cap(80, 960)
     own = check_capacity(cfg, cap)
     as_run = check_capacity(cfg, cap, sizing_capacity=None)
@@ -543,9 +537,7 @@ def test_continuous_recommend_prints_both_answers():
     first = int(
         re.search(r"Largest scale that fits, corpus generated first: ([\d,]+)", out).group(1)
     )
-    # Balanced continuous datagen is small, so the two can meet at the
-    # search's upper bound.
-    assert 0 < plain <= first
+    assert 0 < plain < first
     assert "run --skip-generate within an hour" in out
     plain_ok = largest_fitting_scale(
         lambda s: (
@@ -557,10 +549,8 @@ def test_continuous_recommend_prints_both_answers():
     )
     assert plain == plain_ok
     cfg = default_sizing_config("customer360", "continuous", 100)
-    # A cluster the run fits only without datagen's cores: the streams and
-    # always-on pods need 122, datagen (balanced to bronze) 4 more.
     with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-        get_client.return_value.get_cluster_capacity.return_value = _cap(124, 4349)
+        get_client.return_value.get_cluster_capacity.return_value = REFERENCE
         _free_from_total(get_client.return_value)
         refused = _check_cluster_capacity(cfg)
         admitted = _check_cluster_capacity(cfg, datagen_runs=False)

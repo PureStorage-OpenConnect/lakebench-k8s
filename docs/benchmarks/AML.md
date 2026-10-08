@@ -243,8 +243,10 @@ about 89% of homes are US; each entity holds 1 to 4 accounts; half the
 population are customers of the reporting institution. Unset, datagen pod
 parallelism follows the scale (2 pods up to scale 5, 4 above 5 up to
 scale 10) and, above scale 50, is raised to what the cluster's CPU allows
-(`config/autosizer.py`); a value you set is capped to fit the cluster, and
-financial above scale 100 is raised to at least 8 pods. Pod memory comes
+(`config/autosizer.py`), and financial above scale 100 is raised to at least
+8 pods. A value you set is used exactly, with a warning when the cluster
+cannot fit it (a continuous run is then refused at preflight) or it is
+under that floor. Pod memory comes
 from an autosizer model. Neither pod count nor memory changes row content,
 but the pod count is passed to the generator as `--total-nodes`, which is
 part of the resolved arguments corpus id v2 hashes. Above scale 50, two

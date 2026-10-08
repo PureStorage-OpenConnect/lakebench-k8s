@@ -2313,12 +2313,12 @@ def _print_rounds_summary(console, rounds: list) -> None:
 
 
 def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
-    """Poll the bronze bucket for the first ``.parquet`` file to land.
+    """Poll the bronze bucket for datagen's first data file (``part-*.parquet``
+    under the prefix bronze reads; AML's manifest, party and account files
+    land first and do not count).
 
-    Called before the AML bronze-verify preflight so
-    ``spark.read.parquet(prefix)`` does not hit AnalysisException on
-    an empty prefix. Returns True when a parquet is visible, False
-    on timeout. Best-effort: falls through (returns True) if the S3
+    The window opens when this returns, so it opens on data bronze can take
+    in. Returns True when a data file is visible, False on timeout. Best-effort: falls through (returns True) if the S3
     client cannot be constructed, so a config with a rotated key
     doesn't wedge the sustained CLI here -- the preflight itself
     will surface any real credential issues.
@@ -2345,7 +2345,12 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
         logger.warning("Could not construct S3 client for preflight wait: %s", e)
         return True
 
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
     bronze = s3_cfg.buckets.bronze
+    data_prefix = bronze_datagen_prefix(cfg).rstrip("/") + "/"
+    if cfg.architecture.workload.schema_type.value == "financial":
+        data_prefix += "bronze/pacs008/"
     raw = client.raw_client
     deadline = _t.time() + timeout_seconds
     interval = 5.0
@@ -2353,20 +2358,14 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
         from lakebench.s3.client import list_user_keys
 
         try:
-            keys = list_user_keys(raw, bronze, limit=50)
+            keys = list_user_keys(raw, bronze, prefix=data_prefix, limit=50)
         except Exception as e:  # noqa: BLE001
             logger.warning("listing s3://%s failed: %s", bronze, e)
             _t.sleep(interval)
             continue
-        if any(key.endswith(".parquet") for key in keys):
+        if any(k.rsplit("/", 1)[-1].startswith("part-") and k.endswith(".parquet") for k in keys):
             return True
         _t.sleep(interval)
-    logger.warning(
-        "No parquet under s3://%s/ after %ds; running preflight anyway (it will "
-        "fail loudly if the prefix is still empty).",
-        bronze,
-        timeout_seconds,
-    )
     return False
 
 
@@ -3440,11 +3439,6 @@ def _run_sustained(
     # This run's datagen generates for the whole window: what it wrote by the
     # window's end is the offered load (metrics/collector.py backlog_rows).
     config_snapshot["datagen_continuous"] = not skip_generate
-    # "user": the config set datagen.cpu or parallelism, so the run offers
-    # the load it chose (a capacity run) instead of the pipeline balance.
-    if not skip_generate:
-        _dg_set = {"cpu", "parallelism"} & cfg.architecture.workload.datagen.model_fields_set
-        config_snapshot["datagen_offered"] = "user" if _dg_set else "balanced"
     collector.start_run(run_id, cfg.name, config_snapshot, config_path=config_file)
     record_deps_provenance(collector.current_run, deps_handle)
     collector.record_preflight(preflight)
@@ -3597,7 +3591,7 @@ def _run_sustained(
         # the continuous jobs, which consume the same prefix as it lands.
         # Skipping is only sensible when bronze is already being populated by
         # another process; otherwise the continuous stages have no input.
-        engine = DeploymentEngine(cfg, continuous=True)
+        engine = DeploymentEngine(cfg)
         # Every continuous run starts clean; see _reset_continuous_state, and
         # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
         # bronze_verify LB_CONTINUOUS_RESET (c360).
@@ -3910,7 +3904,11 @@ def _run_sustained(
                 },
             )
             print_info("Waiting for datagen's first file...")
-            _wait_for_bronze_data(cfg, timeout_seconds=300)
+            if not _wait_for_bronze_data(cfg, timeout_seconds=300):
+                print_warning(
+                    "No datagen data file in bronze after 300s: the window opens anyway, "
+                    "so its first minutes may have no data to take in"
+                )
         # The window in cluster time (pod log clocks), not this host's.
         clock_offset = cluster_clock_offset_seconds()
         from datetime import timedelta as _td

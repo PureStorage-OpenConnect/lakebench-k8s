@@ -304,11 +304,10 @@ class TestAutoSizingClusterAware:
             )
 
 
-class TestDatagenCutIsExplicit:
-    """LB-160: at scale 250 and 500 `lakebench generate` cut a configured
-    43-pod datagen to 38 and 30 with no visible message. The cut itself is
-    real (the Trino tier's workers hold 85 and 165 of 434 cores), so it
-    stays, but it is returned and logged with its arithmetic."""
+class TestDatagenSetInConfigIsKept:
+    """A datagen pod count set in the config is the run's pressure: the
+    autosizer never cuts it to fit the cluster, it warns that the rest will
+    wait Pending (outcome 6, exact override)."""
 
     @staticmethod
     def _cfg(scale):
@@ -325,21 +324,12 @@ class TestDatagenCutIsExplicit:
     def _cap():
         return ClusterCapacity(434_000, 8 * 432 * 1024**3, 8, 54_000, 432 * 1024**3)
 
-    @pytest.mark.parametrize(("scale", "pods"), [(250, 38), (500, 30)])
-    def test_sweep_cut_is_returned_with_its_reason(self, scale, pods, caplog):
+    @pytest.mark.parametrize("scale", [250, 500])
+    def test_a_count_over_the_cluster_is_kept_and_warned(self, scale):
         cfg = self._cfg(scale)
-        with caplog.at_level("WARNING", logger="lakebench.config.autosizer"):
-            cuts = resolve_auto_sizing(cfg, self._cap())
-        assert cfg.architecture.workload.datagen.parallelism == pods
-        dg = [c for c in cuts if c.startswith("datagen.parallelism")]
-        assert len(dg) == 1
-        assert f"43 -> {pods}" in dg[0]
-        assert "434 allocatable cores" in dg[0] and "Trino" in dg[0]
-        # The arithmetic is stated, including the even rounding (LB-160 review).
-        if scale == 250:
-            assert "= 39 pods of 8 cores, rounded down to an even 38" in dg[0]
-        assert "set in config" in dg[0]
-        assert any(f"43 -> {pods}" in r.getMessage() for r in caplog.records)
+        cuts = resolve_auto_sizing(cfg, self._cap())
+        assert cfg.architecture.workload.datagen.parallelism == 43
+        assert [c for c in cuts if c.startswith("datagen.parallelism")]
 
     def test_no_cut_no_warning(self):
         cfg = self._cfg(100)

@@ -1,8 +1,8 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`docker.io/sillidata/lb-datagen:3f4729b6`, digest
-`sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb`) is built from
+The default image (`docker.io/sillidata/lb-datagen:3cb67f92`, digest
+`sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9`) is built from
 `datagen_rs/` (Rust) and produces both the Customer360 schema
 ([datagen-schema.md](datagen-schema.md)) and the Financial `pacs.008` schema,
 dispatched by `--schema`. You can build a custom image to add columns, change
