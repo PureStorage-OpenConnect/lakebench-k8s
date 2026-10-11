@@ -87,7 +87,7 @@ dev = [
     "mypy==1.19.1",
     "types-PyYAML==6.0.12.20250915",
     "types-boto3==1.42.38",
-    "pydantic==2.12.5",
+    "pydantic==2.13.5",
     # scripts/check_version.py
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
