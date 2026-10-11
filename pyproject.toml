@@ -86,7 +86,7 @@ dev = [
     # tree that passed locally.
     "mypy==1.19.1",
     "types-PyYAML==6.0.12.20250915",
-    "types-boto3==1.42.38",
+    "types-boto3==1.43.109",
     "pydantic==2.12.5",
     # scripts/check_version.py
     "packaging>=23.0",
