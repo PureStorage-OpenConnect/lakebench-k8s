@@ -1,8 +1,6 @@
-"""Each benchmark round times every query N times and scores the median (LB-150).
+"""Each benchmark round times every query N times and scores the median.
 
-A single sample per query could not tell a change from noise: a live AML s10
-post-maintenance round read every query 10-80% slower with nothing to judge
-that against.
+A single sample per query could not tell a change from noise.
 """
 
 from __future__ import annotations
@@ -127,19 +125,20 @@ def test_metrics_json_round_trip_keeps_samples_and_reason(tmp_path):
     pb = build_pipeline_benchmark(pm)
     pb.pre_compaction_qph = 1700.0
     pb.post_compaction_qph = 1800.0
-    pb.maintenance_value_reason = "within noise: +5.9% is inside the within-round spread"
+    reason = "within noise: +5.9% is inside the within-round spread"
+    pb.maintenance_value_reason = reason
     pb.pre_compaction_benchmark = {"qph": 1700.0, "queries": []}
     pm.pipeline_benchmark = pb
     path = MetricsStorage(tmp_path).save_run(pm)
     raw = json.loads(path.read_text())
     scores = raw["pipeline_benchmark"]["scores"]
     assert scores["maintenance_value_pct"] is None
-    assert scores["maintenance_value_reason"].startswith("within noise")
+    assert scores["maintenance_value_reason"] == reason
     assert scores["benchmark_samples_per_query"] == 3
     assert scores["qph_spread"]["low"] == pytest.approx(round(3600 / 4, 1))
     assert raw["pipeline_benchmark"]["query_benchmark"]["spread"]["samples_per_query"] == 3
     loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
-    assert loaded.pipeline_benchmark.maintenance_value_reason.startswith("within noise")
+    assert loaded.pipeline_benchmark.maintenance_value_reason == reason
     assert loaded.pipeline_benchmark.pre_compaction_benchmark == {"qph": 1700.0, "queries": []}
 
 

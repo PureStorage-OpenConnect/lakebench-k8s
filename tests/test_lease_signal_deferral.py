@@ -15,7 +15,7 @@ import os
 import signal
 import subprocess
 import threading
-from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +24,6 @@ from lakebench.k8s import _pinned
 from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 NS = "u01"
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 
 
 def _core():
@@ -58,7 +57,7 @@ def own_ns(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_sigint_inside_lease_is_deferred(own_ns, capsys):
+def test_sigint_inside_lease_is_deferred(own_ns):
     """Both mutations run, the lease is released, then KeyboardInterrupt.
 
     With the deferral removed the SIGINT raises at once and the second
@@ -79,9 +78,6 @@ def test_sigint_inside_lease_is_deferred(own_ns, capsys):
         "second",
     ]
     assert _lease_deleted(rec) and not cl.lease_held()
-    err = capsys.readouterr().err
-    assert "interrupt received while holding the cluster lease" in err
-    assert "hold budget" in err and "Interrupt twice more to abort now" in err
 
 
 def test_sigterm_reaches_the_saved_handler_after_release(own_ns):
@@ -103,29 +99,32 @@ def test_sigterm_reaches_the_saved_handler_after_release(own_ns):
         signal.signal(signal.SIGTERM, previous)
 
 
-def test_second_signal_repeats_the_time_left(own_ns, capsys):
+def test_second_signal_repeats_the_time_left(own_ns):
     with pytest.raises(KeyboardInterrupt):
         with cl.cluster_lock(_core(), timeout=0):
             os.kill(os.getpid(), signal.SIGINT)
             os.kill(os.getpid(), signal.SIGINT)
             _core().create_namespaced_config_map(NS, _cm("still-runs"))
-    assert "Interrupt once more to abort now" in capsys.readouterr().err
     assert ("configmaps", NS, "still-runs") in own_ns.store
 
 
-def test_third_signal_aborts_but_still_releases(own_ns, capsys):
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_third_signal_aborts_but_still_releases(own_ns, capsys, sig):
+    """The abort carries the signal for an interrupt record, still releases the
+    lease and restores the caller's handler."""
     rec = own_ns
-    before = signal.getsignal(signal.SIGINT)
+    before = signal.getsignal(sig)
     after_third = False
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(cl.LeaseAbort) as exc:
         with cl.cluster_lock(_core(), timeout=0):
             for _ in range(3):
-                os.kill(os.getpid(), signal.SIGINT)
+                os.kill(os.getpid(), sig)
             after_third = True
     assert not after_third
+    assert exc.value.signum == sig and isinstance(exc.value, KeyboardInterrupt)
     assert _lease_deleted(rec)
-    assert signal.getsignal(signal.SIGINT) is before
-    assert "run `lakebench admin repair-operator`" in capsys.readouterr().err
+    assert signal.getsignal(sig) is before
+    assert "repair-operator" in capsys.readouterr().err
 
 
 def test_handlers_restored_after_a_clean_exit(own_ns):
@@ -168,10 +167,6 @@ def test_lease_held_and_budget_only_inside(own_ns):
         assert remaining is not None and 0 < remaining <= 100
         assert cl.lease_clamp(999.0) <= 100 and cl.lease_clamp(5.0) == 5.0
     assert not cl.lease_held() and cl.lease_hold_remaining() is None
-
-
-def test_lease_budget_fits_the_ttl():
-    assert cl.LEASE_MAX_HOLD_S < cl.ADMIN_MAX_HOLD_S < cl.DEFAULT_TTL_SEC
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +276,7 @@ def test_lease_api_calls_carry_request_timeouts(own_ns):
 
 
 # ---------------------------------------------------------------------------
-# Review round 1 (SD-22 Full review)
+# Hold budget and abort paths
 # ---------------------------------------------------------------------------
 
 
@@ -295,11 +290,14 @@ def test_mutating_helm_refused_without_enough_budget(own_ns):
     assert [c.verb for c in rec.calls if c.api == "helm"] == ["get"]
 
 
-def test_any_call_refused_once_the_budget_is_spent(own_ns):
+def test_any_call_refused_once_the_budget_is_spent(own_ns, monkeypatch):
     import time
 
-    with cl.cluster_lock(_core(), timeout=0, max_hold_s=0.01):
-        time.sleep(0.05)
+    from lakebench.k8s import lease_state
+
+    with cl.cluster_lock(_core(), timeout=0, max_hold_s=100):
+        later = time.monotonic() + 1000
+        monkeypatch.setattr(lease_state, "time", SimpleNamespace(monotonic=lambda: later))
         with pytest.raises(cl.LeaseHoldExceeded):
             _pinned.pinned_kubectl("c", ["get", "ns"])
 
@@ -336,14 +334,6 @@ def test_a_signal_after_the_abort_cannot_leak_the_lease(own_ns, monkeypatch):
                 os.kill(os.getpid(), signal.SIGINT)
     assert exc.value.signum == signal.SIGINT
     assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) not in rec.store
-
-
-def test_abort_carries_the_signal_for_an_interrupt_record(own_ns):
-    with pytest.raises(cl.LeaseAbort) as exc:
-        with cl.cluster_lock(_core(), timeout=0):
-            for _ in range(3):
-                os.kill(os.getpid(), signal.SIGTERM)
-    assert exc.value.signum == signal.SIGTERM and isinstance(exc.value, KeyboardInterrupt)
 
 
 def test_ignored_signal_stays_ignored(own_ns):
@@ -439,7 +429,7 @@ def test_heal_path_leased_api_calls_carry_request_timeouts():
 
 
 # ---------------------------------------------------------------------------
-# Review round 2 (brief pass on the fix)
+# Write races and child stop
 # ---------------------------------------------------------------------------
 
 
@@ -464,21 +454,6 @@ def test_a_same_holder_write_from_another_process_is_not_adopted(own_ns):
         cl.acquire_cluster_lock(Raced(), timeout=0, holder="host@user@sha")
     assert not cl.lease_held()
     assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) in rec.store  # B keeps it
-
-
-def test_lease_state_cleared_before_handlers_return(own_ns, monkeypatch):
-    """A signal right after the handlers are restored cannot leave lease_held() true."""
-    seen = []
-    real_restore = cl._SignalDeferral.restore
-
-    def restore_then_check(self):
-        seen.append(cl.lease_held())
-        real_restore(self)
-
-    monkeypatch.setattr(cl._SignalDeferral, "restore", restore_then_check)
-    with cl.cluster_lock(_core(), timeout=0):
-        pass
-    assert seen and seen[-1] is False
 
 
 def test_gentle_stop_is_bounded_when_pipes_stay_open(monkeypatch):

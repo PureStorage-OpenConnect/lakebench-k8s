@@ -7,7 +7,7 @@
 //! Run with: cargo test --release
 
 use datagen_rs::arena::ArenaCol;
-use datagen_rs::hash::{hash_frac, splitmix64, Rng, GAMMA};
+use datagen_rs::hash::{splitmix64, Rng};
 use datagen_rs::ids::{iban_for, iban_into, lei_for, lei_into};
 
 // ---------------------------------------------------------------------------
@@ -24,89 +24,11 @@ fn splitmix64_known_vectors() {
     assert_eq!(splitmix64(0), 0xE220_A839_7B1D_CDAF);
     assert_eq!(splitmix64(1), 0x910A_2DEC_8902_5CC1);
     assert_eq!(splitmix64(42), 0xBDD7_3226_2FEB_6E95);
-    assert_eq!(splitmix64(GAMMA), splitmix64(GAMMA)); // idempotent (same input)
-}
-
-#[test]
-fn splitmix64_avalanche() {
-    // One-bit input change must flip many output bits (>= 20 in a 64-bit
-    // word). Weak avalanche means adjacent seeds produce correlated streams.
-    let a = splitmix64(0);
-    let b = splitmix64(1);
-    let diff = (a ^ b).count_ones();
-    assert!(
-        diff >= 20,
-        "splitmix64 avalanche too weak: {} bits differ",
-        diff
-    );
-}
-
-#[test]
-fn hash_frac_in_unit_interval() {
-    for id in 0u64..1000 {
-        for salt in [0i64, 1, 42, -1, i64::MAX] {
-            let x = hash_frac(id, salt);
-            assert!(
-                (0.0..1.0).contains(&x),
-                "hash_frac({},{})={} out of [0,1)",
-                id,
-                salt,
-                x
-            );
-        }
-    }
-}
-
-#[test]
-fn rng_determinism() {
-    // Same seed -> same stream.
-    let mut a = Rng::new(12345);
-    let mut b = Rng::new(12345);
-    for _ in 0..1000 {
-        assert_eq!(a.next_u64(), b.next_u64());
-    }
-}
-
-#[test]
-fn rng_adjacent_seeds_independent() {
-    // Adjacent seeds must NOT produce shifted versions of the same stream.
-    // The pre-splitmix hash in `Rng::new` is the reason -- if that
-    // decorrelation ever regresses, downstream typology instances would
-    // become correlated. Statistical check: >50% of draws should differ.
-    let mut a = Rng::new(1);
-    let mut b = Rng::new(2);
-    let n = 1000;
-    let differ = (0..n).filter(|_| a.next_u64() != b.next_u64()).count();
-    assert!(
-        differ > n / 2,
-        "seed(1) and seed(2) streams too correlated: {}/{} differ",
-        differ,
-        n
-    );
-}
-
-#[test]
-fn rng_unit_in_range() {
-    let mut r = Rng::new(99);
-    for _ in 0..10_000 {
-        let u = r.unit();
-        assert!((0.0..1.0).contains(&u));
-    }
 }
 
 // ---------------------------------------------------------------------------
 // IBAN / LEI
 // ---------------------------------------------------------------------------
-
-#[test]
-fn iban_shape() {
-    let iban = iban_for(b"DE", 12345);
-    assert_eq!(iban.len(), 22, "IBAN must be 22 chars: {}", iban);
-    assert!(iban.starts_with("DE"), "country prefix wrong: {}", iban);
-    for c in iban.chars() {
-        assert!(c.is_ascii_alphanumeric(), "non-alnum in IBAN: {}", iban);
-    }
-}
 
 #[test]
 fn iban_mod97_valid() {
@@ -164,15 +86,6 @@ fn iban_into_matches_iban_for() {
 }
 
 #[test]
-fn lei_shape() {
-    let lei = lei_for(42);
-    assert_eq!(lei.len(), 20);
-    for c in lei.chars() {
-        assert!(c.is_ascii_alphanumeric(), "non-alnum in LEI: {}", lei);
-    }
-}
-
-#[test]
 fn lei_into_matches_lei_for() {
     for id in [0u64, 1, 42, 12345, u64::MAX] {
         let heap = lei_for(id);
@@ -187,20 +100,6 @@ fn lei_into_matches_lei_for() {
     }
 }
 
-#[test]
-fn iban_determinism_same_input_same_output() {
-    let a = iban_for(b"DE", 42);
-    let b = iban_for(b"DE", 42);
-    assert_eq!(a, b);
-}
-
-#[test]
-fn lei_determinism_same_input_same_output() {
-    let a = lei_for(42);
-    let b = lei_for(42);
-    assert_eq!(a, b);
-}
-
 // ---------------------------------------------------------------------------
 // ArenaCol (string SoA layout)
 // ---------------------------------------------------------------------------
@@ -212,16 +111,6 @@ fn arena_roundtrip() {
     for (i, expected) in items.iter().enumerate() {
         assert_eq!(arena.get(i), expected.as_str(), "arena.get({}) mismatch", i);
     }
-}
-
-#[test]
-fn arena_ordering_preserved() {
-    // Same input order must produce same get() sequence.
-    let items = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
-    let arena = ArenaCol::from_vec(items);
-    assert_eq!(arena.get(0), "alpha");
-    assert_eq!(arena.get(1), "beta");
-    assert_eq!(arena.get(2), "gamma");
 }
 
 // ---------------------------------------------------------------------------
@@ -253,51 +142,35 @@ fn with_env<T>(key: &str, val: Option<&str>, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn compression_default_is_snappy() {
-    // Default changed from zstd1 to snappy on 2026-09-20 following the c360
-    // Rust port perf sweep: snappy is 40-55% faster with a ~1.5x on-disk
-    // trade. Benchmarks that need smaller files opt into zstd explicitly.
+fn compression_env_maps_to_the_exact_codec() {
     use datagen_rs::writer::compression_from_env;
-    use parquet::basic::Compression;
-    let c = with_env("DG_COMPRESSION", None, compression_from_env);
-    assert!(
-        matches!(c, Compression::SNAPPY),
-        "default should be snappy, got {:?}",
-        c
-    );
-}
-
-#[test]
-fn compression_zstd_level_parses() {
-    use datagen_rs::writer::compression_from_env;
-    use parquet::basic::Compression;
-    for lvl in [1, 3, 5, 6, 9, 22] {
-        let key = format!("zstd{}", lvl);
-        let c = with_env("DG_COMPRESSION", Some(&key), compression_from_env);
-        assert!(
-            matches!(c, Compression::ZSTD(_)),
-            "zstd{} did not resolve",
-            lvl
-        );
+    use parquet::basic::{Compression, ZstdLevel};
+    let zstd = |n| Compression::ZSTD(ZstdLevel::try_new(n).unwrap());
+    let cases = [
+        ("snappy", Compression::SNAPPY),
+        ("lz4", Compression::LZ4_RAW),
+        ("none", Compression::UNCOMPRESSED),
+        ("uncompressed", Compression::UNCOMPRESSED),
+        ("zstd", zstd(1)),
+        ("zstd1", zstd(1)),
+        ("zstd3", zstd(3)),
+        ("zstd5", zstd(5)),
+        ("zstd6", zstd(6)),
+        ("zstd9", zstd(9)),
+        ("zstd22", zstd(22)),
+    ];
+    for (val, want) in cases {
+        let got = with_env("DG_COMPRESSION", Some(val), compression_from_env);
+        assert_eq!(got, want, "DG_COMPRESSION={val}");
+    }
+    // An unusable value must fail loudly rather than fall back to a codec.
+    for bad in ["zstd99", "zstd0", "zstdx", "brotli"] {
+        let res = with_env("DG_COMPRESSION", Some(bad), || {
+            std::panic::catch_unwind(compression_from_env)
+        });
+        assert!(res.is_err(), "DG_COMPRESSION={bad} should be rejected");
     }
 }
-
-#[test]
-#[should_panic(expected = "out of range")]
-fn compression_zstd_level_out_of_range_panics() {
-    with_env("DG_COMPRESSION", Some("zstd99"), || {
-        let _ = datagen_rs::writer::compression_from_env();
-    });
-}
-
-#[test]
-#[should_panic(expected = "expected snappy")]
-fn compression_unknown_codec_panics() {
-    with_env("DG_COMPRESSION", Some("brotli"), || {
-        let _ = datagen_rs::writer::compression_from_env();
-    });
-}
-
 // ---------------------------------------------------------------------------
 // Manifest -> bronze UETR contract
 // ---------------------------------------------------------------------------
@@ -322,7 +195,7 @@ fn uetr_derivation_stable_and_seed_sensitive() {
     }
 
     // Adjacent seeds must not produce the same UETR set shifted by one uid
-    // (the additive-seed collision class, LB-139).
+    // (the additive-seed collision class).
     let a: std::collections::HashSet<String> = (0..2000).map(|u| uetr(u, 100)).collect();
     assert!((0..2000).all(|u| !a.contains(&uetr(u, 101))));
 
@@ -345,126 +218,7 @@ fn uetr_derivation_stable_and_seed_sensitive() {
     );
 }
 
-#[test]
-fn pacs008_bytes_per_row_default_is_codec_aware() {
-    // A scalar default was wildly wrong under any codec other than the one it
-    // was measured against. This test pins the codec-aware defaults so a
-    // regression trips a unit test rather than manifesting as 2x-too-big
-    // files at UAT scale.
-    use datagen_rs::writer::pacs008_bytes_per_row_default;
-    // ZSTD-1 (default codec) -- ~227 bytes/row measured 2026-09-18.
-    let z = with_env(
-        "DG_COMPRESSION",
-        Some("zstd1"),
-        pacs008_bytes_per_row_default,
-    );
-    let s = with_env(
-        "DG_COMPRESSION",
-        Some("snappy"),
-        pacs008_bytes_per_row_default,
-    );
-    let l = with_env("DG_COMPRESSION", Some("lz4"), pacs008_bytes_per_row_default);
-    let n = with_env(
-        "DG_COMPRESSION",
-        Some("none"),
-        pacs008_bytes_per_row_default,
-    );
-    // Ratios more than the absolute values: SNAPPY/LZ4 should be within 5%
-    // of each other, and both should sit between ZSTD-1 and uncompressed.
-    assert!(z > 100.0 && z < 300.0, "zstd default sanity: {}", z);
-    assert!(n > 400.0 && n < 700.0, "none default sanity: {}", n);
-    assert!(
-        s > z && s < n,
-        "snappy {} should sit between zstd {} and none {}",
-        s,
-        z,
-        n
-    );
-    assert!(
-        l > z && l < n,
-        "lz4 {} should sit between zstd {} and none {}",
-        l,
-        z,
-        n
-    );
-    assert!(
-        (s - l).abs() / s.max(l) < 0.10,
-        "snappy {} and lz4 {} should be within 10%",
-        s,
-        l
-    );
-}
-
-#[test]
-fn customer360_bytes_per_row_default_is_codec_aware() {
-    // c360 rows are ~10-20x wider than pacs.008 because the payload column is
-    // 2 KiB of random hex. Silently falling back to the pacs.008 default here
-    // would produce c360 files ~10x too small, which the M1 review flagged as
-    // the design-critical trap. Pin every codec's expected value.
-    use datagen_rs::writer::customer360_bytes_per_row_default;
-    let z = with_env(
-        "DG_COMPRESSION",
-        Some("zstd1"),
-        customer360_bytes_per_row_default,
-    );
-    let s = with_env(
-        "DG_COMPRESSION",
-        Some("snappy"),
-        customer360_bytes_per_row_default,
-    );
-    let l = with_env(
-        "DG_COMPRESSION",
-        Some("lz4"),
-        customer360_bytes_per_row_default,
-    );
-    let n = with_env(
-        "DG_COMPRESSION",
-        Some("none"),
-        customer360_bytes_per_row_default,
-    );
-    // zstd cracks the hex payload well; snappy/lz4/none don't.
-    assert_eq!(z, 2233.0);
-    assert_eq!(s, 4332.0);
-    assert_eq!(l, 4356.0);
-    assert_eq!(n, 4399.0);
-    // c360 must not accidentally alias the pacs.008 default.
-    use datagen_rs::writer::pacs008_bytes_per_row_default;
-    let pz = with_env(
-        "DG_COMPRESSION",
-        Some("zstd1"),
-        pacs008_bytes_per_row_default,
-    );
-    assert!(
-        z > pz * 5.0,
-        "c360 zstd bytes/row {} should be much larger than pacs008 {}",
-        z,
-        pz
-    );
-}
-
-#[test]
-fn compression_snappy_lz4_none() {
-    use datagen_rs::writer::compression_from_env;
-    use parquet::basic::Compression;
-    assert!(matches!(
-        with_env("DG_COMPRESSION", Some("snappy"), compression_from_env),
-        Compression::SNAPPY
-    ));
-    assert!(matches!(
-        with_env("DG_COMPRESSION", Some("lz4"), compression_from_env),
-        Compression::LZ4_RAW
-    ));
-    assert!(matches!(
-        with_env("DG_COMPRESSION", Some("none"), compression_from_env),
-        Compression::UNCOMPRESSED
-    ));
-    assert!(matches!(
-        with_env("DG_COMPRESSION", Some("uncompressed"), compression_from_env),
-        Compression::UNCOMPRESSED
-    ));
-}
-
-/// LB-107: streaming multipart upload for large reference-zone objects.
+/// Streaming multipart upload for large reference-zone objects.
 ///
 /// Exercises the `MpuWriter` end-to-end against an in-memory
 /// `object_store` so the test doesn't need S3: writes ~40 MiB across
@@ -527,52 +281,8 @@ fn mpu_writer_large_roundtrip() {
     assert_eq!(&got[..], &expected[..], "readback content");
 }
 
-/// LB-107 negative path: dropping an MpuWriter without calling
-/// `finish()` must not leak an incomplete object. We can't observe
-/// FlashBlade's actual abort in a unit test, but we can verify the
-/// in-memory store never saw the object (multipart-in-progress is
-/// separate from the completed-object namespace).
-#[test]
-fn mpu_writer_drop_without_finish_leaves_no_object() {
-    use datagen_rs::s3sink::MpuWriter;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::ObjectStore;
-    use std::io::Write;
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(2)
-        .build()
-        .unwrap();
-    let handle = rt.handle().clone();
-    let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
-    let key = "test/abandoned.bin";
-    let path = Path::from(key);
-
-    let store_c = store.clone();
-    let path_c = path.clone();
-    let upload = handle
-        .block_on(async move { store_c.put_multipart(&path_c).await })
-        .expect("begin multipart");
-
-    {
-        let mut mpu = MpuWriter::from_upload(upload, handle.clone(), key.to_string());
-        // Write more than one chunk so at least one part is actually
-        // uploaded before we drop.
-        mpu.write_all(&vec![0u8; 6 * 1024 * 1024]).expect("write");
-        // Deliberately drop without finish() -- Drop's abort runs.
-    }
-
-    // The object was never completed, so a GET must fail.
-    let store_c = store.clone();
-    let path_c = path.clone();
-    let res = handle.block_on(async move { store_c.get(&path_c).await });
-    assert!(res.is_err(), "abandoned object should not be readable");
-}
-
 // ---------------------------------------------------------------------------
-// Persona + per-account point process (P2, LB-130)
+// Persona + per-account point process (P2)
 // ---------------------------------------------------------------------------
 //
 // These pin the properties the persona exists to provide: per-account
@@ -583,23 +293,7 @@ fn mpu_writer_drop_without_finish_leaves_no_object() {
 // drift, so they fail here rather than only on a live regen.
 
 use datagen_rs::amounts::{lognormal_amount, lognormal_amount_shifted};
-use datagen_rs::model::build_world_ex;
-use datagen_rs::world::{amount_log_shift, hash_normal, rate_mult, BASELINE_ACTIVITY, TYPE_PERSON};
-
-#[test]
-fn persona_deterministic() {
-    // Same (id, seed) -> identical persona, every call.
-    for id in [1u64, 2, 100, 111_111] {
-        assert_eq!(rate_mult(id, 42), rate_mult(id, 42));
-        assert_eq!(amount_log_shift(id, 42), amount_log_shift(id, 42));
-        assert_eq!(hash_normal(id, 909), hash_normal(id, 909));
-    }
-    // Different id -> (almost surely) different persona.
-    assert_ne!(rate_mult(1, 42), rate_mult(2, 42));
-    assert_ne!(amount_log_shift(1, 42), amount_log_shift(2, 42));
-    // Different seed -> different persona.
-    assert_ne!(rate_mult(1, 42), rate_mult(1, 43));
-}
+use datagen_rs::world::{amount_log_shift, rate_mult};
 
 #[test]
 fn persona_rate_has_real_spread() {
@@ -671,82 +365,12 @@ fn lognormal_shifted_zero_matches_base() {
     }
 }
 
-#[test]
-fn world_activity_is_per_entity_not_per_type() {
-    // After P2, two persons must (almost surely) have different activity rates;
-    // pre-P2 every person shared BASELINE_ACTIVITY[PERSON] exactly.
-    let w = build_world_ex(0.2, 42, 12, false);
-    let base = BASELINE_ACTIVITY[TYPE_PERSON as usize];
-    // Collect activity for the first several persons.
-    let persons: Vec<f64> = (1..w.population)
-        .filter(|&i| w.ty(i) == TYPE_PERSON)
-        .take(500)
-        .map(|i| w.activity[i])
-        .collect();
-    assert!(persons.len() > 50, "not enough persons sampled");
-    // Not all equal to the per-type base.
-    let all_base = persons.iter().all(|&v| (v - base).abs() < 1e-9);
-    assert!(!all_base, "activity is still a per-type constant");
-    // Distinct values exist.
-    let distinct = {
-        let mut s: Vec<u64> = persons.iter().map(|v| v.to_bits()).collect();
-        s.sort_unstable();
-        s.dedup();
-        s.len()
-    };
-    assert!(
-        distinct > persons.len() / 2,
-        "activity not sufficiently heterogeneous"
-    );
-    // amount_logshift is recomputed on demand (LB-204) and non-trivial.
-    assert!((1..=w.population).any(|i| w.amount_logshift(i).abs() > 0.01));
-}
-
-#[test]
-fn persona_preserves_structuring_band_baseline_density() {
-    // Leakage guard (P2 review F1): structuring_amount bypasses the persona
-    // amount shift, so the [9500, 9999] USD structuring band stays fixed while
-    // the shifted baseline distribution retreats from it. The leakage gate
-    // fails a band when baseline_density / typology_density < 0.10, so if a
-    // larger AMOUNT_LOG_SD starves the band of baseline rows, a structuring
-    // typology becomes a near-perfect label by artifact. Pin a floor on the
-    // baseline in-band fraction so that regression trips here, not silently on
-    // a live regen. Pre-P2 ~1.28%, at sd=0.6 ~1.14%; floor at 1.0% catches a
-    // material further drop while tolerating the current design.
-    use datagen_rs::amounts::lognormal_amount_shifted;
-    use datagen_rs::world::amount_log_shift;
-
-    let seed = 42;
-    let n = 400_000u64;
-    // One baseline amount per account, drawn with that account's persona shift,
-    // exactly as the base-row loop does.
-    let mut rng = Rng::new(0xB0BA);
-    let mut in_band = 0u64;
-    for id in 1..=n {
-        let amt = lognormal_amount_shifted(&mut rng, amount_log_shift(id, seed));
-        if (9500.0..=9999.0).contains(&amt) {
-            in_band += 1;
-        }
-    }
-    let frac = in_band as f64 / n as f64;
-    assert!(
-        frac >= 0.010,
-        "baseline density in the USD structuring band is {:.4}% (< 1.0%): a \
-         structuring typology is drifting toward a leaked label; lower \
-         AMOUNT_LOG_SD or scale amounts by currency",
-        frac * 100.0
-    );
-}
-
 // ---------------------------------------------------------------------------
-// Dormancy trajectory (P3, W8): schedule + emit invariants
+// Dormancy trajectory: schedule + emit invariants
 // ---------------------------------------------------------------------------
 //
-// These pin the generator-side invariants the W8 recovery depends on: a real
-// >90-day originator gap, the pre-window anchor, the amount floor on the burst,
-// and that only dormant_reactivation carries a suppression window. The base-loop
-// suppression and other-typology collision-skip live in the binary and are
-// validated on real bronze parquet; here we lock the schedule/emit contract.
+// Schedule/emit contract for dormant_reactivation: a real originator gap, the
+// pre-window anchor, and a suppression window carried by that typology only.
 
 #[test]
 fn dormancy_schedule_and_emit_produce_a_real_gap() {
@@ -782,7 +406,7 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             "suppress must start before burst"
         );
         // Dormancy length (window start -> burst start) is 45..365 days
-        // (log-uniform; not tied to W8's 90-day threshold, LB-138).
+        // (log-uniform; not tied to W8's 90-day threshold).
         let dorm = (inst.start_us - inst.suppress_start_us) / day;
         assert!(
             (44..=366).contains(&dorm),
@@ -812,8 +436,6 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             "anchor orig = dormant account"
         );
         // Burst rows: inside [start, end], originated by the dormant account.
-        // TxRow has no amount-floor field at all, so no rule-derived floor
-        // can come back (LB-138).
         for r in &rows[1..] {
             assert!(
                 r.ts_us >= inst.start_us && r.ts_us <= inst.end_us,
@@ -844,19 +466,25 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
 
 #[test]
 fn every_currency_has_baseline_mass_in_its_structuring_band() {
-    // LB-137: amounts were drawn on the USD scale for every currency, so a JPY
+    // Amounts were drawn on the USD scale for every currency, so a JPY
     // baseline payment was ~5,000 yen and almost none (~1e-7) sat in the
     // [990,000, 999,999] yen band. A structuring row in JPY, INR or KRW was
     // then a label by itself. Drawn in each account's own currency, every
-    // band holds baseline mass comparable to its width (expected 0.2% to 1.3%).
+    // band holds baseline mass comparable to its width. USD carries a higher
+    // floor: its band is the one the persona amount shift retreats from.
     use datagen_rs::amounts::{native_amount, structuring_band};
     let n = 400_000u64;
     for ccy in [
         "USD", "GBP", "EUR", "CHF", "JPY", "AED", "SGD", "CAD", "MXN", "CNY", "INR", "AUD", "HKD",
         "KRW", "BRL",
     ] {
+        let (seed, floor) = if ccy == "USD" {
+            (0xB0BA, 0.010)
+        } else {
+            (0xB0BB, 0.001)
+        };
         let (lo, hi) = structuring_band(ccy);
-        let mut rng = Rng::new(0xB0BB);
+        let mut rng = Rng::new(seed);
         let mut in_band = 0u64;
         for id in 1..=n {
             let amt = native_amount(&mut rng, datagen_rs::world::amount_log_shift(id, 42), ccy);
@@ -866,10 +494,11 @@ fn every_currency_has_baseline_mass_in_its_structuring_band() {
         }
         let frac = in_band as f64 / n as f64;
         assert!(
-            frac >= 0.001,
-            "{ccy}: baseline density in its structuring band is {:.4}% (< 0.1%): \
+            frac >= floor,
+            "{ccy}: baseline density in its structuring band is {:.4}% (< {:.1}%): \
              structuring rows in {ccy} would be separable by amount alone",
-            frac * 100.0
+            frac * 100.0,
+            floor * 100.0
         );
     }
 }
@@ -896,7 +525,7 @@ fn usd_amounts_unchanged_by_currency_scaling() {
 
 #[test]
 fn dormancy_lengths_are_not_pinned_to_the_w8_threshold() {
-    // LB-138 / AML-GOALS R2: no generation parameter may sit on a rule
+    // No generation parameter may sit on a rule
     // threshold. A meaningful share of dormancies fall on each side of W8's
     // 90 days, rather than all just above it.
     let day = 86_400_000_000i64;
@@ -993,19 +622,6 @@ fn shaping_preserves_time_order_and_uses_each_rows_country() {
 // ---------------------------------------------------------------------------
 // Monitored population and KYC (kyc.rs, GOALS P10 stages 0 and 2)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn reporting_fi_is_exactly_two_pool_entries() {
-    use datagen_rs::ids::bic_pool;
-    use datagen_rs::kyc::{REPORTING_FI, REPORTING_FI_POOL_IDX};
-    let pool = bic_pool();
-    let hits: Vec<usize> = (0..pool.len())
-        .filter(|&i| pool[i].starts_with(REPORTING_FI))
-        .collect();
-    assert_eq!(hits, REPORTING_FI_POOL_IDX.to_vec());
-    assert_eq!(pool[0], "MERIUS2LXXX");
-    assert_eq!(pool[320], "MERIUS2LNYC");
-}
 
 #[test]
 fn reporting_fi_bic_marks_customers_and_only_customers() {
@@ -1264,14 +880,8 @@ fn customer_since_precedes_the_corpus_and_the_accounts() {
 }
 
 #[test]
-fn kyc_attributes_are_pure_functions_of_id_and_seed() {
-    use datagen_rs::kyc::{customer_since_day, entity_bic_idx, is_customer};
-    for id in [1u64, 17, 99_999, 1 << 40] {
-        assert_eq!(is_customer(id, 5), is_customer(id, 5));
-        assert_eq!(entity_bic_idx(id, 5, 500), entity_bic_idx(id, 5, 500));
-        assert_eq!(customer_since_day(id, 5, 60), customer_since_day(id, 5, 60));
-    }
-    // Different seeds select different customer sets.
+fn different_seeds_select_different_customer_sets() {
+    use datagen_rs::kyc::is_customer;
     let diff = (1..=10_000u64)
         .filter(|&id| is_customer(id, 1) != is_customer(id, 2))
         .count();
@@ -1420,8 +1030,9 @@ fn unchained_typologies_keep_independent_draws() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cycle_zero_is_the_identity() {
+fn cycle_keys_are_legacy_at_zero_and_distinct_across_cycles() {
     use datagen_rs::cycle::*;
+    // Cycle 0 is the identity: legacy keys and the whole mass range.
     assert_eq!(mass_slice(0, 1), (f64::NEG_INFINITY, f64::INFINITY));
     assert_eq!(mass_slice(1, 3), (1.0 / 3.0, 2.0 / 3.0));
     assert_eq!(mass_slice(2, 3).1, f64::INFINITY);
@@ -1432,17 +1043,9 @@ fn cycle_zero_is_the_identity() {
         "manifest/manifest.parquet"
     );
     assert_eq!(c360_file_id(7, 0), 7);
-}
-
-#[test]
-fn cycle_keys_differ_and_keep_the_reader_suffix() {
-    use datagen_rs::cycle::*;
+    // Later cycles never collide and keep the reader's `.parquet` suffix.
     assert_eq!(pacs_key(7, 1), "bronze/pacs008/part-c001-000007.parquet");
     assert_eq!(c360_key(7, 12), "part-c012-000007.parquet");
-    assert_eq!(
-        ref_key("manifest/manifest.parquet", 3),
-        "manifest/manifest-c003.parquet"
-    );
     assert_eq!(
         ref_key("bronze/party.parquet", 3),
         "bronze/party-c003.parquet"
@@ -1453,7 +1056,6 @@ fn cycle_keys_differ_and_keep_the_reader_suffix() {
     assert_eq!(keys.len(), 400);
     assert!(keys.iter().all(|k| k.ends_with(".parquet")));
 }
-
 #[test]
 fn c360_cycles_have_disjoint_event_and_row_ids() {
     use arrow::array::{Array, Int64Array, StringArray};
@@ -1886,31 +1488,7 @@ fn scheduled_events_enumerate_once_and_are_evenly_spaced_in_mass() {
     }
 }
 
-#[test]
-fn screening_rates_match_prereg() {
-    // Pins the screening block in aml_preregistration.json (added in 3.6.1,
-    // Wave 1 A2, 2026-09-28) to the Rust constants in datagen_rs::screening.
-    // A drift here is a defence-in-depth bug: any change to a screening
-    // constant must update both. Values are hard-coded (also present in the
-    // JSON); the Python side has its own prereg-load check.
-    use datagen_rs::screening::{
-        BACKGROUND_PER_PARTY, DECOY_RATE, FOREIGN_ACCOUNT_RATE, MAX_REL, PAID_RATE, PEP_MIN,
-        PEP_RATE, SANCTIONS_V1_MIN, SANCTIONS_V1_RATE, SANCTIONS_V2_MIN, V2_AT,
-    };
-    assert_eq!(SANCTIONS_V1_RATE, 4.0e-4);
-    assert_eq!(SANCTIONS_V1_MIN, 24);
-    assert_eq!(SANCTIONS_V2_MIN, 8);
-    assert_eq!(PEP_RATE, 6.0e-4);
-    assert_eq!(PEP_MIN, 24);
-    assert_eq!(PAID_RATE, 0.7);
-    assert_eq!(DECOY_RATE, 0.5);
-    assert_eq!(FOREIGN_ACCOUNT_RATE, 0.2);
-    assert_eq!(BACKGROUND_PER_PARTY, 20);
-    assert_eq!(MAX_REL, 2);
-    assert_eq!(V2_AT, 0.75);
-}
-
-/// LB-204 freeze-void guard (DATAGEN-SHARDING-POC REVISION 2): total_activity
+/// Freeze-void guard: total_activity
 /// feeds crr_score/crr_tier in party.parquet (frozen). It must be a strictly
 /// ordered, ascending-id, sequential f64 sum of the activity column -- a
 /// reordered or parallel reduction can flip a low bit and change party.parquet

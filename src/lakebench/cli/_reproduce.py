@@ -5,7 +5,7 @@ config, and set of expected numbers, so a third party can rerun the pipeline
 on their own cluster and check whether their result falls inside the recorded
 tolerance band.
 
-Design: see docs/deep-dive/reproduce.md. This module implements the two
+Design: see docs/cli-reference.md#reproduce and docs/development.md#reproduction-packages. This module implements the two
 modes documented there:
 
 - ``lakebench reproduce --record RUN_ID --write PATH`` reads a saved
@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import math
-import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -164,18 +163,16 @@ class ReproduceError(Exception):
 
 
 def _current_commit_sha() -> str | None:
-    """Return the current git HEAD short SHA, or None if git is unavailable."""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short=7", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return out.stdout.strip() or None
-    except (FileNotFoundError, subprocess.SubprocessError):
-        return None
+    """The short commit of the lakebench that is running, or None if unknown.
+
+    Read from the package itself (provenance.sample), never from the working
+    directory: run from inside some other git repo, ``git rev-parse HEAD``
+    would report that repo's commit and call a faithful reproduction drifted.
+    """
+    from lakebench.metrics import provenance
+
+    sha = provenance.sample().get("git_sha")
+    return str(sha)[:7] if sha else None
 
 
 def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
@@ -1624,7 +1621,7 @@ def reproduce(
 
         lakebench reproduce path/to/package.yaml [--config CONFIG]
 
-    See docs/deep-dive/reproduce.md for the full contract.
+    See docs/development.md#reproduction-packages for the full contract.
     """
     # Record mode -- --record and --write must both be present.
     if record is not None or write is not None:

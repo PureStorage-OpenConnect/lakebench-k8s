@@ -11,7 +11,7 @@ different workstations cannot race the same Helm upgrade or the same
 cluster-scoped resource rename. Non-mutating commands (``status``,
 ``doctor``) do not take the lease.
 
-See ``docs/design/namespace-isolation.md`` for the design
+See ``docs/internal/namespace-isolation.md`` for the design
 rationale.
 """
 

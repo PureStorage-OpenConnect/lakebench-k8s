@@ -1,18 +1,10 @@
-"""P1.4: every run writes report.html, whatever its schema, mode or exit code.
-
-`run` saved metrics.json and printed "Full report: lakebench report"; the
-report existed only when a runner called `lakebench report` afterwards, so
-AML batch s10/s100 and c360 continuous runs had metrics and no report.
-AML continuous reports also carried no per-rule table; they now show the
-per-rule counts gold-refresh measured, and recall whenever the run carries
-scoring data.
-"""
+"""The AML continuous scorecard shows the per-rule counts gold-refresh measured,
+and per-rule recall whenever the run carries scoring data."""
 
 from __future__ import annotations
 
 import re
 from datetime import datetime
-from pathlib import Path
 
 from lakebench.metrics import PipelineMetrics
 from lakebench.metrics.collector import StreamingJobMetrics
@@ -26,9 +18,6 @@ def _metrics(run_id="20260925-000000-abcdef", **kw):
         end_time=datetime(2026, 9, 25, 0, 30, 0),
         **kw,
     )
-
-
-_SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench" / "cli"
 
 
 def _aml_continuous(scoring=None):

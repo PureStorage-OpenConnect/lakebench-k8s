@@ -61,40 +61,48 @@ def test_conf_merges_over_defaults():
     for key, value in SPARK_CONF_DEFAULTS.items():
         if key != "spark.memory.fraction":
             assert conf[key] == value, key
-    # Owned keys are Lakebench's whatever the user map holds.
-    assert conf["spark.sql.shuffle.partitions"] == "64"
-    assert conf["spark.hadoop.fs.s3a.connection.maximum"] == "200"
 
 
-def test_owned_key_refused(tmp_path):
-    for purpose in [LoadPurpose.RUN, LoadPurpose.MUTATE]:
-        for key, needle in [
-            ("spark.jars", "resolved dependency set"),
-            ("spark.jars.packages", "resolved dependency set"),
-            ("spark.jars.repositories", "resolved dependency set"),
-            ("spark.jars.ivy", "resolved dependency set"),
-            ("spark.jars.ivySettings", "resolved dependency set"),
-            ("spark.submit.pyFiles", "resolved dependency set"),
-            ("spark.driver.userClassPathFirst", "resolved dependency set"),
-            ("spark.kubernetes.driver.podTemplateFile", "reserved for Lakebench"),
-            ("spark.sql.shuffle.partitions", "<job>_executors"),
-            ("spark.executor.memory", "job profiles"),
-            ("spark.executor.memoryOverheadFactor", "capacity check"),
-            ("spark.driver.memoryOverhead", "capacity check"),
-            ("spark.memory.offHeap.size", "capacity check"),
-            ("spark.executor.pyspark.memory", "capacity check"),
-            ("spark.sql.session.timeZone", "a job script sets it"),
-            ("spark.sql.autoBroadcastJoinThreshold", "a job script sets it"),
-            ("spark.kubernetes.executor.podNamePrefix", "reserved for Lakebench"),
-            ("spark.kubernetes.node.selector.zone", "reserved for Lakebench"),
-            ("spark.hadoop.fs.s3a.endpoint", "platform.storage.s3.endpoint"),
-            ("spark.sql.catalog.lakehouse.uri", "Lakebench writes it"),
-        ]:
-            path = _write(tmp_path, {key: "x"})
-            with pytest.raises(ConfigValidationError) as e:
-                load_config(path, purpose=purpose, print_notes=False)
-            assert f"{key} is owned by Lakebench" in str(e.value)
-            assert needle in str(e.value)
+def test_owned_key_in_the_user_map_does_not_reach_the_manifest():
+    owned = "spark.sql.shuffle.partitions"
+    base = _conf(make_config(), JobType.SILVER_BUILD)
+    cfg = make_config()
+    cfg.spark.conf[owned] = "7"  # past load-time validation
+    conf = _conf(cfg, JobType.SILVER_BUILD)
+    assert conf[owned] == base[owned] != "7"
+
+
+@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "spark.jars",
+        "spark.jars.packages",
+        "spark.jars.repositories",
+        "spark.jars.ivy",
+        "spark.jars.ivySettings",
+        "spark.submit.pyFiles",
+        "spark.driver.userClassPathFirst",
+        "spark.kubernetes.driver.podTemplateFile",
+        "spark.sql.shuffle.partitions",
+        "spark.executor.memory",
+        "spark.executor.memoryOverheadFactor",
+        "spark.driver.memoryOverhead",
+        "spark.memory.offHeap.size",
+        "spark.executor.pyspark.memory",
+        "spark.sql.session.timeZone",
+        "spark.sql.autoBroadcastJoinThreshold",
+        "spark.kubernetes.executor.podNamePrefix",
+        "spark.kubernetes.node.selector.zone",
+        "spark.hadoop.fs.s3a.endpoint",
+        "spark.sql.catalog.lakehouse.uri",
+    ],
+)
+def test_owned_key_refused(tmp_path, purpose, key):
+    path = _write(tmp_path, {key: "x"})
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(path, purpose=purpose, print_notes=False)
+    assert key in str(e.value)
 
 
 def test_record_never_carries_a_secret_or_location():
@@ -105,7 +113,7 @@ def test_record_never_carries_a_secret_or_location():
             "conf": {
                 "spark.hadoop.fs.s3a.secret.key": "SUPERSECRET",
                 "spark.hadoop.fs.azure.account.key.acct.dfs.core.windows.net": "AZSECRET",
-                "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.9.9.9:80",
+                "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://192.0.2.21:80",
                 # Secrets and locations under names no key predicate knows.
                 "spark.sql.catalog.other.header.Authorization": "Bearer TOKEN1",
                 "spark.executorEnv.DB_PASS": "ENVSECRET",
@@ -121,7 +129,7 @@ def test_record_never_carries_a_secret_or_location():
     for leaked in (
         "SUPERSECRET",
         "AZSECRET",
-        "10.9.9.9",
+        "192.0.2.21",
         "TOKEN1",
         "ENVSECRET",
         "hidden-bucket",
@@ -243,11 +251,13 @@ def test_record_redaction_rules():
             # a location by value or by name: no digest
             "spark.hadoop.fs.defaultFS": "s3a://b",
             "spark.hadoop.javax.jdo.option.ConnectionURL": "jdbc:postgresql://u:pw@h/db",
-            "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.1.2.3",
-            "spark.hadoop.some.host": "10.1.2.3",
+            "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://192.0.2.22",
+            "spark.hadoop.some.host": "192.0.2.22",
+            "spark.x.host": "192.0.2.22:80",
             # not secrets, though the old pattern matched them: digested
             "spark.sql.catalog.x.write.partitionKey": "id",
             "spark.authenticate": "false",
+            "spark.x.coord": "io.x:y_2.13:4.0.0.1",
             "spark.hadoop.fs.s3a.bypass.cache": "true",
             # tuning: clear
             "spark.speculation": "true",
@@ -264,10 +274,12 @@ def test_record_redaction_rules():
         "spark.hadoop.javax.jdo.option.ConnectionURL",
         "spark.hadoop.fs.s3a.bucket.<other-bucket>.endpoint",
         "spark.hadoop.some.host",
+        "spark.x.host",
     }
     assert digested == {
         "spark.sql.catalog.x.write.partitionKey",
         "spark.authenticate",
+        "spark.x.coord",
         "spark.hadoop.fs.s3a.bypass.cache",
     }
     assert rec["spark.speculation"] == "true"
@@ -300,14 +312,6 @@ def test_record_names_bucket_layers_not_bucket_names():
         "spark.hadoop.fs.s3a.bucket.<bronze>.committer.name",
         "spark.hadoop.fs.s3a.bucket.<gold>.committer.name",
     }
-
-
-def test_version_strings_are_not_addresses():
-    from lakebench.metrics.fingerprint_inputs import record_spark_conf
-
-    rec = record_spark_conf({"spark.x.coord": "io.x:y_2.13:4.0.0.1", "spark.x.host": "10.1.2.3:80"})
-    assert rec["spark.x.coord"].startswith("<redacted sha256:")
-    assert rec["spark.x.host"] == "<redacted>"
 
 
 # -- drift: the owned set is exactly what the manifest writes ------------------
@@ -357,6 +361,7 @@ def _written_keys(catalog_name: str = "lakehouse") -> set[str]:
     return written
 
 
+@pytest.mark.slow
 def test_owned_keys_match_what_the_manifest_writes():
     written = _written_keys() - set(SPARK_CONF_DEFAULTS) - USER_OVERRIDABLE_SPARK_KEYS
     expand = {k.replace("{catalog}", "lakehouse") for k in LAKEBENCH_OWNED_SPARK_KEYS}

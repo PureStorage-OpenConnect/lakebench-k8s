@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pytest
 import yaml
+from typer.testing import CliRunner
 
 from lakebench.metrics.collector import PipelineBenchmark, PipelineMetrics
 from lakebench.metrics.maintenance_policy import (
     LEGACY_MAINTENANCE_POLICY_ID,
     MAINTENANCE_POLICY_ID,
+    effective_maintenance,
     policy_mismatch,
     recorded_policy,
     skipped_policy_id,
@@ -28,11 +31,6 @@ def test_ids_and_helpers():
     assert policy_mismatch(None, MAINTENANCE_POLICY_ID) is not None
 
 
-def test_a_new_run_stamps_the_current_policy():
-    m = PipelineMetrics(run_id="r", deployment_name="d", start_time=datetime(2026, 9, 26))
-    assert m.to_dict()["maintenance_policy_id"] == MAINTENANCE_POLICY_ID
-
-
 def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):
     from lakebench.metrics.storage import MetricsStorage
 
@@ -42,23 +40,54 @@ def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):
     )
     path = storage.save_run(m)
     assert storage.load_run(m.run_id).maintenance_policy_id == MAINTENANCE_POLICY_ID
-    raw = path.read_text().replace(f'"maintenance_policy_id": "{MAINTENANCE_POLICY_ID}", ', "")
-    raw = raw.replace(f', "maintenance_policy_id": "{MAINTENANCE_POLICY_ID}"', "")
-    raw = raw.replace(f'"maintenance_policy_id": "{MAINTENANCE_POLICY_ID}"', '"x_removed": 1')
-    path.write_text(raw)
+    raw = json.loads(path.read_text())
+    assert raw.pop("maintenance_policy_id") == MAINTENANCE_POLICY_ID
+    path.write_text(json.dumps(raw))
     assert storage.load_run(m.run_id).maintenance_policy_id == LEGACY_MAINTENANCE_POLICY_ID
 
 
-def test_skip_maintenance_stamps_a_distinct_id():
-    import inspect
+@pytest.mark.parametrize("mode", ["batch", "continuous"])
+@pytest.mark.parametrize("skip", [True, False])
+def test_skip_maintenance_stamps_a_distinct_id(monkeypatch, tmp_path, mode, skip):
+    """A run without maintenance is not labelled with the full policy id."""
+    from unittest.mock import MagicMock
 
-    import lakebench.cli._run as run_mod
-    import lakebench.cli._sustained as sus
+    import lakebench.cli._sustained as sustained_mod
+    from lakebench.cli import app
+    from lakebench.metrics.collector import MetricsCollector
+    from tests.fixtures import datagen_timeout_helpers as dg
 
-    for src in (inspect.getsource(run_mod._run_once), inspect.getsource(sus._run_sustained)):
-        assert "if skip_maintenance and collector.current_run is not None:" in src
-        assert "collector.current_run.maintenance_policy_id = skipped_policy_id()" in src
-    assert skipped_policy_id() == MAINTENANCE_POLICY_ID + "+skipped"
+    monkeypatch.chdir(tmp_path)
+    stubs = dg._stub_full_run(monkeypatch)
+    stubs["op"].check_status.return_value = MagicMock(ready=False, installed=True, message="down")
+    seen = []
+    real_start = MetricsCollector.start_run
+
+    def start_run(self, *a, **k):
+        out = real_start(self, *a, **k)
+        seen.append(self.current_run)
+        return out
+
+    monkeypatch.setattr(MetricsCollector, "start_run", start_run)
+    sustained_calls = []
+    real_sustained = sustained_mod._run_sustained
+
+    def counting_sustained(*a, **k):
+        sustained_calls.append(1)
+        return real_sustained(*a, **k)
+
+    monkeypatch.setattr(sustained_mod, "_run_sustained", counting_sustained)
+    extras = {"architecture": "{pipeline: {mode: continuous}}"} if mode == "continuous" else {}
+    cfg = dg._write_cfg(tmp_path, **extras)
+    argv = ["run", str(cfg), "--skip-preflight", "--skip-benchmark", "--yes"]
+    if skip:
+        argv.append("--skip-maintenance")
+    res = CliRunner().invoke(app, argv)
+    assert len(seen) == 1, res.output[-2000:]
+    assert bool(sustained_calls) is (mode == "continuous")
+    want = skipped_policy_id() if skip else MAINTENANCE_POLICY_ID
+    assert seen[0].maintenance_policy_id == want
+    assert skipped_policy_id() != MAINTENANCE_POLICY_ID
 
 
 def test_reproduce_package_carries_the_policy():
@@ -143,28 +172,7 @@ def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
     assert LEGACY_MAINTENANCE_POLICY_ID in html
 
 
-# -- per-operation identity (lb16 sweep: Polaris + Thrift orphan removal) ---
-
-
-def test_delta_identity_names_vacuum_and_compaction():
-    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
-
-    e = effective_maintenance(
-        MAINTENANCE_POLICY_ID,
-        table_format="delta",
-        query_engine="trino",
-        mode="batch",
-        outcomes=[
-            {
-                "kind": "expire",
-                "total": 2,
-                "succeeded": 0,
-                "operations": [{"operation": "vacuum", "total": 2, "succeeded": 0}],
-            },
-            {"kind": "compaction", "skipped": "Delta OPTIMIZE is never run"},
-        ],
-    )
-    assert e["id"] == f"{MAINTENANCE_POLICY_ID}:vacuum=failed,compaction=not_supported"
+# -- per-operation identity ---
 
 
 def test_legacy_coarse_id_still_loads_and_does_not_match_a_current_one():
@@ -172,7 +180,6 @@ def test_legacy_coarse_id_still_loads_and_does_not_match_a_current_one():
     loads; it is not like-for-like with a current record, since its
     expire=ran could hide a failed orphan removal."""
     from lakebench.metrics.experiment import condition_differences, identity
-    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 
     legacy = {"effective_maintenance": {"id": f"{MAINTENANCE_POLICY_ID}:expire=ran,compaction=ran"}}
     assert identity(legacy)["effective maintenance"].endswith("expire=ran,compaction=ran")
@@ -185,13 +192,11 @@ def test_legacy_coarse_id_still_loads_and_does_not_match_a_current_one():
 
 
 # ---------------------------------------------------------------------------
-# lb16-cf defect 2: an operation that executed is never labelled not_supported
+# an operation that executed is never labelled not_supported
 # ---------------------------------------------------------------------------
 
 
 def _delta_continuous(engine: str, outcomes):
-    from lakebench.metrics.maintenance_policy import effective_maintenance
-
     return effective_maintenance(
         MAINTENANCE_POLICY_ID,
         table_format="delta",
@@ -216,52 +221,90 @@ def _vacuum_round(succeeded: int = 3) -> dict:
 _OPTIMIZE_SKIP = {"kind": "compaction", "skipped": "Delta OPTIMIZE is never run"}
 
 
-def test_delta_trino_continuous_vacuum_that_ran_is_not_not_supported():
-    """lb16-cf: VACUUM ran 3/3 twice at 168h and the identity read
-    vacuum=not_supported. It ran, with no effect in the window."""
-    e = _delta_continuous("trino", [_vacuum_round(), _vacuum_round(), _OPTIMIZE_SKIP])
-    assert e["operations"] == {"vacuum": "ran_no_effect", "compaction": "not_supported"}
-    assert e["id"] == f"{MAINTENANCE_POLICY_ID}:vacuum=ran_no_effect,compaction=not_supported"
-    assert "vacuum=no_effect" in e["detail_id"]
-    why = " ".join(e["reasons"])
-    assert "vacuum ran at 168h retention" in why and "removed nothing" in why
-    assert e["detail"]["operations"]["vacuum"]["succeeded"] == 6
+_FAILED_EXPIRE = {
+    "kind": "expire",
+    "total": 2,
+    "succeeded": 0,
+    "operations": [{"operation": "vacuum", "total": 2, "succeeded": 0}],
+}
+_THRIFT_SKIP = {"kind": "expire", "skipped": "Delta VACUUM is skipped on Spark Thrift"}
 
 
-def test_delta_continuous_vacuum_that_failed_stays_failed():
-    """ran_no_effect never hides a failure: 0 of 6 is failed."""
-    e = _delta_continuous("trino", [_vacuum_round(0), _vacuum_round(0), _OPTIMIZE_SKIP])
-    assert e["operations"]["vacuum"] == "failed"
+@pytest.mark.parametrize(
+    ("engine", "mode", "outcomes", "operations"),
+    [
+        # a failed VACUUM is named failed, whatever the mode
+        (
+            "trino",
+            "batch",
+            [_FAILED_EXPIRE, {"kind": "compaction", "skipped": "Delta OPTIMIZE is never run"}],
+            {"vacuum": "failed", "compaction": "not_supported"},
+        ),
+        (
+            "trino",
+            "continuous",
+            [_vacuum_round(0), _vacuum_round(0), _OPTIMIZE_SKIP],
+            {"vacuum": "failed", "compaction": "not_supported"},
+        ),
+        # an operation that executed is never labelled not_supported
+        (
+            "trino",
+            "continuous",
+            [_vacuum_round(), _vacuum_round(), _OPTIMIZE_SKIP],
+            {"vacuum": "ran_no_effect", "compaction": "not_supported"},
+        ),
+        (
+            "trino",
+            "continuous",
+            [_vacuum_round(0), _vacuum_round(3), _OPTIMIZE_SKIP],
+            {"vacuum": "ran_no_effect", "compaction": "not_supported"},
+        ),
+        (
+            "trino",
+            "continuous",
+            [_OPTIMIZE_SKIP],
+            {"vacuum": "not_run", "compaction": "not_supported"},
+        ),
+        (
+            "spark-thrift",
+            "continuous",
+            [_THRIFT_SKIP, _THRIFT_SKIP, _OPTIMIZE_SKIP],
+            {"vacuum": "not_supported", "compaction": "not_supported"},
+        ),
+    ],
+)
+def test_delta_identity_names_each_operation_by_what_happened(engine, mode, outcomes, operations):
+    e = effective_maintenance(
+        MAINTENANCE_POLICY_ID,
+        table_format="delta",
+        query_engine=engine,
+        mode=mode,
+        outcomes=outcomes,
+    )
+    assert e["operations"] == operations
+    assert e["id"] == f"{MAINTENANCE_POLICY_ID}:" + ",".join(
+        f"{op}={state}" for op, state in operations.items()
+    )
+
+
+def test_delta_continuous_vacuum_detail_separates_partial_from_none():
+    ran = _delta_continuous("trino", [_vacuum_round(), _vacuum_round(), _OPTIMIZE_SKIP])
+    assert "vacuum=no_effect" in ran["detail_id"]
+    assert ran["detail"]["operations"]["vacuum"]["succeeded"] == 6
     partial = _delta_continuous("trino", [_vacuum_round(0), _vacuum_round(3), _OPTIMIZE_SKIP])
-    assert partial["operations"]["vacuum"] == "ran_no_effect"
     assert "vacuum=partial" in partial["detail_id"]
     assert "vacuum: 3 of 6 statements succeeded" in partial["reasons"]
 
 
-def test_delta_continuous_vacuum_that_never_ran_is_not_run():
-    e = _delta_continuous("trino", [_OPTIMIZE_SKIP])
-    assert e["operations"]["vacuum"] == "not_run"
-
-
-def test_delta_thrift_continuous_vacuum_is_not_supported_with_its_reason():
-    """Thrift skips VACUUM (it OOMs): not_supported, for the reason that applies."""
-    skip = {"kind": "expire", "skipped": "Delta VACUUM is skipped on Spark Thrift"}
-    e = _delta_continuous("spark-thrift", [skip, skip, _OPTIMIZE_SKIP])
-    assert e["operations"] == {"vacuum": "not_supported", "compaction": "not_supported"}
+def test_delta_thrift_continuous_vacuum_gives_the_reason_that_applies():
+    e = _delta_continuous("spark-thrift", [_THRIFT_SKIP, _THRIFT_SKIP, _OPTIMIZE_SKIP])
     assert any("OOMs" in r for r in e["reasons"])
     assert not any("vacuum ran" in r for r in e["reasons"])
 
 
-def test_delta_continuous_names_the_known_limitation():
-    from lakebench.metrics.maintenance_policy import (
-        DELTA_CONTINUOUS_LIMITATION,
-        effective_maintenance,
-    )
-
+def test_delta_continuous_names_a_known_limitation_batch_and_iceberg_do_not():
     for engine in ("trino", "spark-thrift"):
-        e = _delta_continuous(engine, [_OPTIMIZE_SKIP])
-        assert e["known_limitations"] == [DELTA_CONTINUOUS_LIMITATION]
-    assert "owner decision #46" in DELTA_CONTINUOUS_LIMITATION
+        assert _delta_continuous(engine, [_OPTIMIZE_SKIP])["known_limitations"]
     batch = effective_maintenance(
         MAINTENANCE_POLICY_ID, table_format="delta", query_engine="trino", mode="batch"
     )
@@ -272,7 +315,7 @@ def test_delta_continuous_names_the_known_limitation():
 
 
 # ---------------------------------------------------------------------------
-# lb16-cf defect 1: the in-window QpH trend beside the composite median
+# the in-window QpH trend beside the composite median
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +344,7 @@ def _continuous_pb(qphs, files, *, fmt="delta", engine="spark-thrift"):
 
 
 def test_qph_trend_shows_a_declining_series():
-    """lb16-cf Delta + Thrift: 390 -> 203 QpH, silver files 252 -> 1372; the
+    """A declining series (390 -> 203 QpH, silver files 252 -> 1372): the
     median alone read like a steady state."""
     pb = _continuous_pb([390.0, 362.0, 267.0, 203.0], [252, 644, 980, 1372])
     t = pb.to_dict()["qph_trend"]

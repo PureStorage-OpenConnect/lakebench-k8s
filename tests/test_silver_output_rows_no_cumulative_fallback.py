@@ -4,7 +4,7 @@ Before A4 the ``rows_added_by_last_commit`` helper in silver_build.py and
 silver_build_delta.py returned ``spark.table(silver_tbl).count()`` when the
 snapshot / DESCRIBE HISTORY metric was missing. In incremental mode that is
 the whole table (every cycle so far), which masked a zero-write cycle -- the
-exact silent-corruption surface the LB-044 gate exists to catch. A4 changes
+exact silent-corruption surface the zero-row gate exists to catch. A4 changes
 the fallback to return ``None`` and refuses the run rather than publishing
 a misleading ``output_rows`` value.
 

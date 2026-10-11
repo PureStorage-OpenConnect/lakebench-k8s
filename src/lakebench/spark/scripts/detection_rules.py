@@ -93,7 +93,9 @@ _STRUCTURING_THRESHOLDS = {
     "KRW": 10_000_000.0,
 }
 
-RULE_VERSION = "1.0.0"
+# Written into every alert; reproduce refuses an alert another version
+# raised. 1.1.0: W3 and W17 hubs are per week.
+RULE_VERSION = "1.1.0"
 MODEL_ID = "lb-rules"
 MODEL_VERSION = "1.0.0"
 
@@ -298,6 +300,7 @@ def _alert_frame(
     evidence,
     reason_codes=None,
     reason_key: str | None = None,
+    keep: tuple[str, ...] = (),
 ) -> DataFrame:
     """``df`` projected to gold.alerts: every rule returns through here, so
     no rule chooses the column order (the driver's INSERT is positional).
@@ -306,7 +309,9 @@ def _alert_frame(
     and ``run_id`` may also be a str. ``reason_codes`` is the rule's
     conditional codes (aml_reason_codes.reason_expr); the alert's
     ``reason_codes`` column is its rule's base code followed by them, so
-    every alert carries at least one code.
+    every alert carries at least one code. ``keep`` names columns of ``df``
+    carried after the alert columns (continuous gold keeps a rule's own
+    keys with its alerts; they are dropped before any write).
     Keyword-only, so a column left out is a TypeError, which the driver
     records as the rule's error, never as zero alerts. The helper supplies
     ``alert_id`` (a uuid), the rule and model versions, ``status`` OPEN, a
@@ -351,7 +356,8 @@ def _alert_frame(
         "reason_codes": codes,
     }
     return df.select(
-        *[values[name].cast(ddl_type).alias(name) for name, ddl_type, _ in ALERT_COLUMNS]
+        *[values[name].cast(ddl_type).alias(name) for name, ddl_type, _ in ALERT_COLUMNS],
+        *[col(name) for name in keep],
     )
 
 
@@ -419,11 +425,22 @@ def w2_structuring(
     Returns:
         DataFrame with the gold.alerts schema.
     """
-    from pyspark.sql.functions import lag
-    from pyspark.sql.functions import window as window_
-
     customers = _customer_ids(silver_txns.sparkSession, silver_entities, "W2")
-    suspicious = silver_txns.filter(_suspicious_amount_expr()).select(
+    band = w2_band(silver_txns)
+    windowed = w2_originator_windows(band, threshold_count, window_hours)
+    if per_beneficiary:
+        qualifying = w2_qualifying_windows(band, threshold_count, window_hours)
+        windowed = windowed.unionByName(w2_bursts(qualifying, window_hours, max_txns_per_alert))
+    return _customers_only(
+        w2_alert_frame(windowed, threshold_count, window_hours, max_txns_per_alert, run_id),
+        customers,
+    )
+
+
+def w2_band(silver_txns: DataFrame) -> DataFrame:
+    """W2's input: the structuring-band transactions, with ``_t`` (epoch
+    microseconds)."""
+    return silver_txns.filter(_suspicious_amount_expr()).select(
         col("uetr"),
         col("originator_id"),
         col("beneficiary_id"),
@@ -431,10 +448,18 @@ def w2_structuring(
         col("txn_currency"),
         _epoch_micros(silver_txns).alias("_t"),
     )
-    win = window_(col("txn_timestamp"), f"{window_hours} hours")
 
-    by_orig = (
-        suspicious.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win)
+
+def w2_originator_windows(band: DataFrame, threshold_count: int, window_hours: int) -> DataFrame:
+    """W2's originator kind: per (originator, currency, tumbling window of
+    ``window_hours`` from the epoch), the windows holding at least
+    ``threshold_count`` band transactions. A window's rows depend only on
+    the band transactions inside it."""
+    from pyspark.sql.functions import window as window_
+
+    win = window_(col("txn_timestamp"), f"{window_hours} hours")
+    return (
+        band.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win)
         .agg(
             count(lit(1)).alias("suspicious_count"),
             collect_list("uetr").alias("related_txn_ids"),
@@ -460,97 +485,123 @@ def w2_structuring(
             ).alias("_narrative"),
         )
     )
-    windowed = by_orig
-    if per_beneficiary:
-        window_us = int(window_hours) * 3_600_000_000
-        ordered = Window.partitionBy("beneficiary_id").orderBy("_t", "uetr")
-        frame = Window.partitionBy("beneficiary_id").orderBy("_t").rangeBetween(0, window_us - 1)
-        anchored = (
-            suspicious.withColumn("_rn", row_number().over(ordered))
-            .select(
-                col("beneficiary_id").alias("entity_id"),
-                col("_rn"),
-                col("uetr"),
-                col("_t"),
-                count(lit(1)).over(frame).alias("suspicious_count"),
-                collect_list("uetr").over(frame).alias("related_txn_ids"),
-                collect_set("originator_id").over(frame).alias("_related_entity_ids"),
-                col("txn_timestamp").alias("first_ts"),
-                max_("txn_timestamp").over(frame).alias("last_ts"),
-                max_("_rn").over(frame).alias("_last_rn"),
-            )
-            # A window is contained in the previous credit's window exactly
-            # when both end at the same credit.
-            .withColumn(
-                "_prev_last",
-                lag("_last_rn").over(Window.partitionBy("entity_id").orderBy("_rn")),
-            )
-            .filter(col("_prev_last").isNull() | (col("_last_rn") > col("_prev_last")))
+
+
+def w2_qualifying_windows(band: DataFrame, threshold_count: int, window_hours: int) -> DataFrame:
+    """W2's beneficiary kind, before bursts: one candidate window
+    [t, t + window_hours) per credit, kept when it is not contained in the
+    previous credit's window and holds at least ``threshold_count`` credits
+    from as many senders. A window anchored at ``t`` depends only on the
+    credits in [t - window_hours, t + window_hours)."""
+    from pyspark.sql.functions import lag
+
+    window_us = int(window_hours) * 3_600_000_000
+    ordered = Window.partitionBy("beneficiary_id").orderBy("_t", "uetr")
+    frame = Window.partitionBy("beneficiary_id").orderBy("_t").rangeBetween(0, window_us - 1)
+    anchored = (
+        band.withColumn("_rn", row_number().over(ordered))
+        .select(
+            col("beneficiary_id").alias("entity_id"),
+            col("_rn"),
+            col("uetr"),
+            col("_t"),
+            count(lit(1)).over(frame).alias("suspicious_count"),
+            collect_list("uetr").over(frame).alias("related_txn_ids"),
+            collect_set("originator_id").over(frame).alias("_related_entity_ids"),
+            col("txn_timestamp").alias("first_ts"),
+            max_("txn_timestamp").over(frame).alias("last_ts"),
+            max_("_rn").over(frame).alias("_last_rn"),
         )
-        qualifying = anchored.filter(
+        # A window is contained in the previous credit's window exactly
+        # when both end at the same credit.
+        .withColumn(
+            "_prev_last",
+            lag("_last_rn").over(Window.partitionBy("entity_id").orderBy("_rn")),
+        )
+        .filter(col("_prev_last").isNull() | (col("_last_rn") > col("_prev_last")))
+    )
+    return (
+        anchored.filter(
             (col("suspicious_count") >= threshold_count)
             & (size(col("_related_entity_ids")) >= threshold_count)
-        ).withColumn("_end_t", expr(f"_t + {window_us - 1}"))
-        # Overlapping qualifying windows are one burst: a steady stream of
-        # band-sized credits would otherwise raise one alert per credit,
-        # each repeating the previous one's transactions.
-        by_start = Window.partitionBy("entity_id").orderBy("_t", "_rn")
-        bursts = (
-            qualifying.withColumn(
-                "_prev_end",
-                max_("_end_t").over(by_start.rowsBetween(Window.unboundedPreceding, -1)),
-            )
-            .withColumn(
-                "_new", (col("_prev_end").isNull() | (col("_t") > col("_prev_end"))).cast("int")
-            )
-            .withColumn("_burst", sum_("_new").over(by_start))
-            # A burst is cut into window-length chunks of anchors, so a
-            # busy account's months-long stream is not one alert whose
-            # alert_ts (its end) lies weeks after the credits of interest.
-            # Each alert then spans at most two windows.
-            .withColumn(
-                "_chunk",
-                (
-                    (col("_t") - min_("_t").over(Window.partitionBy("entity_id", "_burst")))
-                    / lit(window_us)
-                ).cast("long"),
-            )
-            .groupBy("entity_id", "_burst", "_chunk")
-            .agg(
-                array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
-                    "_all_txns"
-                ),
-                # Sorted before the cut, so the kept senders are the same on
-                # every run.
-                expr(
-                    f"slice(array_sort(array_distinct(flatten(collect_list("
-                    f"_related_entity_ids)))), 1, {int(max_txns_per_alert)})"
-                ).alias("_related_entity_ids"),
-                min_("first_ts").alias("first_ts"),
-                max_("last_ts").alias("last_ts"),
-            )
-            .withColumn("suspicious_count", size(col("_all_txns")))
-            .withColumn("related_txn_ids", expr(f"slice(_all_txns, 1, {int(max_txns_per_alert)})"))
         )
-        by_bene = bursts.select(
-            "entity_id",
-            "suspicious_count",
-            "related_txn_ids",
-            "_related_entity_ids",
-            "first_ts",
-            "last_ts",
-            lit("structuring_beneficiary").alias("_type"),
-            lit("beneficiary").alias("_aggregation"),
-            expr(
-                "concat('Entity ', cast(entity_id as string), ' received ', "
-                "cast(suspicious_count as string), ' structuring-band transactions from ', "
-                "cast(size(_related_entity_ids) as string), ' senders between ', "
-                "cast(first_ts as string), ' and ', cast(last_ts as string))"
-            ).alias("_narrative"),
-        )
-        windowed = windowed.unionByName(by_bene)
+        .withColumn("_end_t", expr(f"_t + {window_us - 1}"))
+        .drop("_rn", "_last_rn", "_prev_last")
+    )
 
-    alerts = _alert_frame(
+
+def w2_bursts(qualifying: DataFrame, window_hours: int, max_txns_per_alert: int) -> DataFrame:
+    """W2's beneficiary alerts' rows from its qualifying windows: overlapping
+    windows are one burst (a steady stream of band-sized credits would
+    otherwise raise one alert per credit, each repeating the previous one's
+    transactions), cut into window-length chunks of anchors from the burst's
+    first, so a busy account's months-long stream is not one alert whose
+    alert_ts (its end) lies weeks after the credits of interest. Each alert
+    then spans at most two windows. An entity's bursts depend on all its
+    qualifying windows."""
+    window_us = int(window_hours) * 3_600_000_000
+    by_start = Window.partitionBy("entity_id").orderBy("_t", "uetr")
+    bursts = (
+        qualifying.withColumn(
+            "_prev_end",
+            max_("_end_t").over(by_start.rowsBetween(Window.unboundedPreceding, -1)),
+        )
+        .withColumn(
+            "_new", (col("_prev_end").isNull() | (col("_t") > col("_prev_end"))).cast("int")
+        )
+        .withColumn("_burst", sum_("_new").over(by_start))
+        .withColumn(
+            "_chunk",
+            (
+                (col("_t") - min_("_t").over(Window.partitionBy("entity_id", "_burst")))
+                / lit(window_us)
+            ).cast("long"),
+        )
+        .groupBy("entity_id", "_burst", "_chunk")
+        .agg(
+            array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
+                "_all_txns"
+            ),
+            # Sorted before the cut, so the kept senders are the same on
+            # every run.
+            expr(
+                f"slice(array_sort(array_distinct(flatten(collect_list("
+                f"_related_entity_ids)))), 1, {int(max_txns_per_alert)})"
+            ).alias("_related_entity_ids"),
+            min_("first_ts").alias("first_ts"),
+            max_("last_ts").alias("last_ts"),
+        )
+        .withColumn("suspicious_count", size(col("_all_txns")))
+        .withColumn("related_txn_ids", expr(f"slice(_all_txns, 1, {int(max_txns_per_alert)})"))
+    )
+    return bursts.select(
+        "entity_id",
+        "suspicious_count",
+        "related_txn_ids",
+        "_related_entity_ids",
+        "first_ts",
+        "last_ts",
+        lit("structuring_beneficiary").alias("_type"),
+        lit("beneficiary").alias("_aggregation"),
+        expr(
+            "concat('Entity ', cast(entity_id as string), ' received ', "
+            "cast(suspicious_count as string), ' structuring-band transactions from ', "
+            "cast(size(_related_entity_ids) as string), ' senders between ', "
+            "cast(first_ts as string), ' and ', cast(last_ts as string))"
+        ).alias("_narrative"),
+    )
+
+
+def w2_alert_frame(
+    windowed: DataFrame,
+    threshold_count: int,
+    window_hours: int,
+    max_txns_per_alert: int,
+    run_id: str,
+) -> DataFrame:
+    """W2's alerts, before the customer filter, from its window rows (both
+    kinds)."""
+    return _alert_frame(
         windowed,
         rule_id="W2_structuring",
         entity_id=col("entity_id"),
@@ -596,7 +647,6 @@ def w2_structuring(
             ),
         ),
     )
-    return _customers_only(alerts, customers)
 
 
 # ---------------------------------------------------------------------------
@@ -986,10 +1036,14 @@ def _search_frames(
     persisted (the caller unpersists it once level 2 is built); ``step`` is
     persisted for the whole search.
 
-    The step frame holds every non-hub transfer. Hubs are accounts sending
-    more than ``max_out_degree`` transfers in any hop-window bucket (payment
-    processors); they are excluded as intermediaries so one processor does
-    not multiply every path. max_out_degree=200 per week is self-chosen.
+    The step frame holds every non-hub transfer. An account is a hub in a
+    hop-window bucket when it sends more than ``max_out_degree`` transfers in
+    that bucket (a payment processor's week); its transfers in that bucket
+    are left out of the step frame, so it is not an intermediary there and
+    one processor does not multiply every path. Hub status is per bucket, so
+    whether a transfer can extend a path depends only on its own bucket's
+    transfers, never on a busy week months away. max_out_degree=200 per week
+    is self-chosen.
 
     Each transfer appears twice, under bucket ``floor(t / hop)`` and the one
     before it. A path ending at time ``t_last`` in bucket ``b`` can only be
@@ -1027,13 +1081,12 @@ def _search_frames(
 
     bucket = (col("t") / lit(bucket_us)).cast("long")
     hubs = (
-        edges.groupBy("src", bucket.alias("_w"))
+        edges.groupBy(col("src").alias("hub"), bucket.alias("_w"))
         .agg(count(lit(1)).alias("_n"))
         .filter(col("_n") > max_out_degree)
-        .select(col("src").alias("hub"))
-        .distinct()
+        .select("hub", "_w")
     )
-    non_hub = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti")
+    non_hub = edges.join(hubs, (edges["src"] == hubs["hub"]) & (bucket == hubs["_w"]), "left_anti")
     renamed = [
         col("uetr").alias("e_uetr"),
         col("src").alias("e_src"),
@@ -1219,9 +1272,9 @@ def w3_round_tripping(
 
     Cost control: paths are extended hop by hop from every transfer, and
     each cycle is found once (starting from its earliest transfer, since hop
-    times strictly increase). Entities sending more than ``max_out_degree``
-    transfers in any hop window are treated as hubs (payment processors)
-    and excluded as intermediaries. The extension join is keyed on (entity,
+    times strictly increase). An entity sending more than ``max_out_degree``
+    transfers in a hop-window bucket is a hub there (a payment processor's
+    week) and is not an intermediary in that bucket. The extension join is keyed on (entity,
     hop-window bucket). Each level is checkpointed and the one before it
     released, so at most two levels are held. Above ``max_edges`` transfers
     the rule raises RuleSkipped("edge-cap"); when a level would take the held
@@ -1416,6 +1469,38 @@ def w17_layering_chain(
     continuity prunes each level to the small share of onward transfers that
     carry the amount.
     """
+    merged = w17_chains(
+        silver_txns,
+        min_hops,
+        max_hops,
+        hop_window_hours,
+        min_forward_ratio,
+        max_forward_ratio,
+        max_out_degree,
+        max_edges,
+        max_paths,
+    )
+    if merged is None:
+        return _empty_alerts_df(silver_txns.sparkSession, run_id)
+    return w17_alert_frame(
+        merged, hop_window_hours, min_forward_ratio, max_forward_ratio, max_out_degree, run_id
+    )
+
+
+def w17_chains(
+    silver_txns: DataFrame,
+    min_hops: int = 3,
+    max_hops: int = 6,
+    hop_window_hours: int = 168,
+    min_forward_ratio: float = 0.8,
+    max_forward_ratio: float = 1.0,
+    max_out_degree: int = 200,
+    max_edges: int = 3_000_000_000,
+    max_paths: int | None = None,
+):
+    """W17's reported chains, one row per alert with its ``ts_last`` (the
+    last transfer), before the alert projection; None when no chain can
+    qualify. See w17_layering_chain."""
     from pyspark.sql.functions import array_contains, concat, element_at
     from pyspark.sql.functions import slice as slice_
 
@@ -1423,7 +1508,7 @@ def w17_layering_chain(
     min_hops = max(2, int(min_hops))
     if max_hops < min_hops:
         print(f"[W17] min_hops={min_hops} > max_hops={max_hops}: no chain can qualify")
-        return _empty_alerts_df(spark, run_id)
+        return None
 
     hop_us = hop_window_hours * 3_600_000_000
     budget, edges, n_edges, step, _, parts = _search_frames(
@@ -1512,8 +1597,22 @@ def w17_layering_chain(
             col("ts_q"),
         )
     )
+    return merged
+
+
+def w17_alert_frame(
+    merged: DataFrame,
+    hop_window_hours: int,
+    min_forward_ratio: float,
+    max_forward_ratio: float,
+    max_out_degree: int,
+    run_id: str,
+    keep: tuple[str, ...] = (),
+) -> DataFrame:
+    """W17's alerts from its reported chains (``w17_chains``)."""
     return _alert_frame(
         merged,
+        keep=keep,
         rule_id="W17_layering_chain",
         entity_id=col("entity"),
         related_txn_ids=col("uetrs"),
@@ -1562,6 +1661,7 @@ def w4_risk_propagation(
     forward_ratio: float = 0.8,
     run_id: str = "unknown",
     max_txns_per_alert: int = 1000,
+    alert_window_hours: int | None = None,
 ) -> DataFrame:
     """Detect rapid pass-through: entity B receives funds from A and
     forwards >= forward_ratio of them to some entity C, all within
@@ -1582,7 +1682,25 @@ def w4_risk_propagation(
     planted transactions against related_txn_ids, so a truncated hub alert
     can miss planted payments past the cut: recall is reported as bounded by
     this cap when any W4 alert was truncated (score_financial).
+
+    ``alert_window_hours`` (continuous gold): one alert per B per window of
+    payments instead, so a tick recomputes only the windows of its new rows.
     """
+    return w4_alert_frame(
+        w4_pairs(silver_txns, velocity_hours, forward_ratio),
+        velocity_hours,
+        forward_ratio,
+        run_id,
+        max_txns_per_alert,
+        alert_window_hours=alert_window_hours,
+    )
+
+
+def w4_pairs(silver_txns: DataFrame, velocity_hours: int = 6, forward_ratio: float = 0.8):
+    """W4's matched pairs: a credit into B (``uetr_in`` from ``a``) and a
+    payment out of B (``uetr_out`` to ``c``) at most ``velocity_hours``
+    later, forwarding at least ``forward_ratio`` of it. A pair depends only
+    on its two transactions."""
     from pyspark.sql.functions import unix_timestamp
 
     incoming = silver_txns.select(
@@ -1611,7 +1729,7 @@ def w4_risk_propagation(
     outgoing = outgoing.withColumn("_bo", out_b).unionByName(
         outgoing.withColumn("_bo", out_b - lit(1))
     )
-    joined = (
+    return (
         incoming.join(outgoing, (col("b") == col("b2")) & (col("_bi") == col("_bo")), "inner")
         .filter(col("ts_out") >= col("ts_in"))
         .filter((unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds)
@@ -1622,7 +1740,23 @@ def w4_risk_propagation(
         # blowing up alert count by cartesian.
         .filter(col("amt_in") > lit(0))
         .filter(col("amt_out") >= col("amt_in") * lit(forward_ratio))
+        .select("uetr_in", "a", "b", "amt_in", "ts_in", "uetr_out", "c", "amt_out", "ts_out")
     )
+
+
+def w4_alert_frame(
+    joined: DataFrame,
+    velocity_hours: int,
+    forward_ratio: float,
+    run_id: str,
+    max_txns_per_alert: int,
+    alert_window_hours: int | None = None,
+) -> DataFrame:
+    """W4's alerts, one per B, from its matched pairs (``w4_pairs``): an
+    alert depends on all of B's pairs. With ``alert_window_hours``
+    (continuous), one per B per window of the pairs' payments (ts_out,
+    tumbling from the epoch), so an alert depends only on its window's
+    pairs."""
     # Group by B (the entity being alerted on) so the alert count is
     # per-entity, not per (uetr_in, uetr_out) pair. Prior design produced
     # N*M rows for an entity with N incoming + M outgoing matches
@@ -1630,7 +1764,16 @@ def w4_risk_propagation(
     # into related_txn_ids and the counterparty ids into
     # related_entity_ids so investigators can trace all txns from a
     # single alert row.
-    per_entity = joined.groupBy("b").agg(
+    keys = ["b"]
+    if alert_window_hours:
+        from pyspark.sql.functions import unix_timestamp
+
+        joined = joined.withColumn(
+            "_w4_window",
+            (unix_timestamp(col("ts_out")) / lit(int(alert_window_hours) * 3600)).cast("long"),
+        )
+        keys.append("_w4_window")
+    per_entity = joined.groupBy(*keys).agg(
         collect_list(col("uetr_in")).alias("uetrs_in"),
         collect_list(col("uetr_out")).alias("uetrs_out"),
         collect_set(col("a")).alias("as_set"),
@@ -1673,6 +1816,8 @@ def w4_risk_propagation(
             "cast(chain_count as string), ' incoming/outgoing chains, first ', "
             "cast(first_ts as string), ' last ', cast(last_ts as string))"
         ),
+        # alert_window_hours, when set (continuous), says the alert covers one
+        # window of the entity's payments, not all of them.
         evidence=map_from_arrays(
             array(
                 lit("rule"),
@@ -1682,6 +1827,7 @@ def w4_risk_propagation(
                 lit("txns_truncated"),
                 lit("entity_total"),
                 lit("entities_truncated"),
+                *([lit("alert_window_hours")] if alert_window_hours else []),
             ),
             array(
                 lit("W4_risk_propagation"),
@@ -1691,6 +1837,7 @@ def w4_risk_propagation(
                 (size(col("_txns")) > lit(cap)).cast("string"),
                 size(col("_entities")).cast("string"),
                 (size(col("_entities")) > lit(cap)).cast("string"),
+                *([lit(str(int(alert_window_hours)))] if alert_window_hours else []),
             ),
         ),
     )
@@ -2423,6 +2570,7 @@ def w5_sanctions_match(
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
     screen_base: DataFrame | None = None,
+    rescreen: bool = True,
 ) -> DataFrame:
     """Sanctions screen: payments to a party on the corpus sanctions list.
 
@@ -2442,6 +2590,9 @@ def w5_sanctions_match(
     Bounded by design (the mission excludes production screening
     completeness): no phonetic keys, no date-of-birth or identifier
     matching, the country as the only secondary identifier.
+
+    ``rescreen=False`` (continuous) runs the transaction screen only: a
+    rescreen alert reads a counterparty's whole payment history.
     """
     spark = silver_txns.sparkSession
     silver_entities = _entities_frame(spark, silver_entities, "W5")
@@ -2463,6 +2614,8 @@ def w5_sanctions_match(
         lit(0.5) + lit(0.45) * col("similarity"),
         "HIGH",
     )
+    if not rescreen:
+        return _customers_only(txn_alerts, customers)
     pre = hits.filter((col("txn_timestamp") < listed_ts) & (col("list_version") > lit(1)))
     grouped = pre.groupBy("entity_id", "beneficiary_id", "list_id").agg(
         collect_list(struct(col("txn_timestamp"), col("uetr"))).alias("_txns"),

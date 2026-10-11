@@ -1,23 +1,15 @@
-"""Deployment-scoped "latest run" lookup (A1: SP-1 interim fix).
+"""Deployment-scoped "latest run" lookup.
 
-Parallel deployments share a single ``lakebench-output/runs/`` tree, so an
-unscoped ``get_latest_run()`` reads whichever deployment happened to finish
-last. Callsites that then rewrite the record (``lakebench benchmark`` and
-``lakebench query``) corrupt another deployment's history.
-
-The interim fix here is ``MetricsStorage.get_latest_run_for_deployment(name)``
-plus a switch of every unscoped callsite to it. SP-2 owns the durable
-deployment_id follow-up.
-
-These tests fix the callsites in place: they exercise ``benchmark`` against
-deployment A and assert deployment B's ``metrics.json`` file is byte-for-byte
-untouched (mtime AND sha256 unchanged); same for ``query``. A separate case
-covers the legacy fallback where a record has no recorded deployment_name.
+Parallel deployments share one ``lakebench-output/runs/`` tree, so an
+unscoped ``get_latest_run()`` reads whichever deployment finished last.
+Covered here: ``MetricsStorage.get_latest_run_for_deployment`` (including
+the legacy fallback for records with no deployment_name) and the report
+generator's deployment scope. The ``benchmark`` and ``query`` callsites are
+not driven by this file.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -71,15 +63,6 @@ def _write_legacy_run(
         )
     )
     return filepath
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _snapshot(path: Path) -> tuple[float, str]:
-    """(mtime, sha256) -- both must be unchanged for a file "not rewritten"."""
-    return (path.stat().st_mtime, _sha256(path))
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +125,7 @@ class TestGetLatestRunForDeployment:
 
 
 # ---------------------------------------------------------------------------
-# Callsite tests: benchmark and query must not rewrite the wrong record
+# Two deployments sharing one runs tree
 # ---------------------------------------------------------------------------
 
 
@@ -197,15 +180,3 @@ class TestGeneratorScope:
         html = report_path.read_text()
         # B is newer, so the unscoped default is B.
         assert "b-001" in html
-
-
-# ---------------------------------------------------------------------------
-# Callsite wire-up guard (LB-safety net)
-#
-# Behavioural tests above cover the helper and the generator. The four
-# unscoped callsites the brief calls out (two in _query.py, one in
-# generator.py, one in cli/__init__.py:report) sit behind heavy CLI plumbing
-# and are impractical to drive end-to-end here. A source-level guard catches
-# a revert of the wire-up itself: if a future patch reintroduces a bare
-# ``get_latest_run()`` at one of these callsites, this test fails.
-# ---------------------------------------------------------------------------

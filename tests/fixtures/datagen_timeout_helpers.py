@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_datagen_timeout_and_regenerate.py (imported by several test files)."""
+"""Fake S3 and stubs for the datagen run, generate and timeout tests."""
 
 from __future__ import annotations
 
@@ -27,10 +27,13 @@ class _FakeS3:
     def raw_client(self):
         from tests.fixtures.memory_s3 import MemoryBoto
 
-        return MemoryBoto(_FakeS3.store)
+        if self._boto is None:
+            self._boto = MemoryBoto(_FakeS3.store)
+        return self._boto
 
     def __init__(self, **_kw: object) -> None:
         self.kw = _kw
+        self._boto = None
         self._init_error = _FakeS3._next_init_error
         self.empty_calls: list[str] = []
         self.prefix_calls: list[tuple[str, str]] = []
@@ -43,7 +46,9 @@ class _FakeS3:
             return BucketInfo(name=bucket, exists=True, object_count=0, size_bytes=0)
         return info
 
-    def get_bucket_size(self, bucket: str, prefix: str = "") -> BucketInfo:
+    def get_bucket_size(
+        self, bucket: str, prefix: str = "", exclude_prefix: str = ""
+    ) -> BucketInfo:
         self.get_calls.append((bucket, prefix))
         return self._info(bucket)
 
@@ -59,7 +64,7 @@ class _FakeS3:
         return 42
 
     def delete_prefix(self, bucket: str, prefix: str, **_kw: object) -> int:
-        # The gate clears only the datagen prefix (SAF-9); recorded as an empty.
+        # The gate clears only the datagen prefix ; recorded as an empty.
         self.empty_calls.append(bucket)
         self.prefix_calls.append((bucket, prefix))
         return 42
@@ -152,6 +157,9 @@ def _stub_full_run(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     if _s3.S3Client.__module__ == "lakebench.s3.client":
         monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
     monkeypatch.setattr(_FakeS3, "store", {})
+    # The stubbed run reuses a corpus that is there (an empty bronze is
+    # refused before any stage: tests/test_exit_codes.py run.no_corpus).
+    monkeypatch.setattr("lakebench.deploy.corpus.bronze_holds_data", lambda cfg, s3: True)
     return {"k8s": k8s_stub, "op": op, "job_manager": job_manager}
 
 

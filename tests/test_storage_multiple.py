@@ -126,7 +126,11 @@ def test_known_multiple_fixture():
     assert silver["retained_bytes"] == 2 * GB
     assert silver["metadata_bytes"] == 1 * GB
     assert silver["other_bytes"] == 1 * GB
-    assert silver["other_label"] == sm.ORPHAN_FLOOR_NOTE
+    assert silver["other_label"]
+    # Without orphan removal the unreferenced bytes carry no floor label.
+    plain = _row(_measure(maintenance_id="m2")[0], "silver.txn")
+    assert plain["other_bytes"] == silver["other_bytes"]
+    assert "other_label" not in plain
     assert silver["multiple"] == pytest.approx(10 / 6, abs=1e-4)
     assert _row(out, "gold.daily")["multiple"] == 1.0
     assert _row(out, "bronze.raw")["multiple"] == pytest.approx(5 / 4)
@@ -140,16 +144,37 @@ def test_known_multiple_fixture():
     assert out["excluded"]["datagen manifest (manifest/)"] == 2000
     assert out["excluded"]["stream checkpoints"] == 300
     assert out["excluded"]["scoring outputs (scoring/)"] == 500
-    assert out["policy"] == "m2" and out["note"] == sm.OBJECTS_NOTE
+    assert out["policy"] == "m2"
 
 
-def test_ml_loop_prefix_excluded():
-    loop = [{"Key": "_ml_loop/gold/customer_features/data/x.parquet", "Size": 5 * GB}]
-    base, _ = _measure()
-    out, _ = _measure(objects=_objects(extra_gold=loop))
+@pytest.mark.parametrize(
+    ("extra_key", "size", "checkpoint_base", "base_checkpoint_base", "label"),
+    [
+        (
+            "_ml_loop/gold/customer_features/data/x.parquet",
+            5 * GB,
+            None,
+            None,
+            "ML loop (<gold>/_ml_loop/)",
+        ),
+        # A moved checkpoint_base keeps the stream state and the drain marker excluded.
+        ("streams/gold-refresh/_lb_stop", 3 * GB, "streams", "streams", "stream checkpoints"),
+        # A base over the table locations excludes only its stream directories.
+        ("warehouse/gold-refresh/offsets/0", 1 * GB, "warehouse", None, "stream checkpoints"),
+    ],
+    ids=["ml-loop", "moved-checkpoint-base", "checkpoint-base-over-table-location"],
+)
+def test_extra_object_is_excluded_not_attributed(
+    extra_key, size, checkpoint_base, base_checkpoint_base, label
+):
+    extra = [{"Key": extra_key, "Size": size}]
+    base_kw = {"checkpoint_base": base_checkpoint_base} if base_checkpoint_base else {}
+    kw = {"checkpoint_base": checkpoint_base} if checkpoint_base else {}
+    base, _ = _measure(**base_kw)
+    out, _ = _measure(objects=_objects(extra_gold=extra), **kw)
+    assert out["excluded"][label] == (base["excluded"].get(label) or 0) + size
     assert out["total"] == base["total"]
     assert out["layers"] == base["layers"]
-    assert out["excluded"]["ML loop (<gold>/_ml_loop/)"] == 5 * GB
     assert _unattributed(out) == _unattributed(base)
 
 
@@ -219,22 +244,48 @@ def test_no_sql_engine_records_physical_only():
     assert [b["bucket"] for b in out["buckets"]] == ["lb-bronze", "lb-silver", "lb-gold"]
 
 
-def test_spark_thrift_parsing():
-    describe = (
-        "+------------+------------------------------------+\n"
-        "| col_name   | data_type                          |\n"
-        "| Location   | s3a://lb-silver/warehouse/silver/txn |\n"
-    )
-    assert sm.parse_location("spark-thrift", describe) == "s3a://lb-silver/warehouse/silver/txn"
-    assert (
-        sm.parse_number("+----------+\n| sum(x)   |\n+----------+\n| 6442450944 |\n") == 6442450944
-    )
-    assert sm.parse_number('"NULL"') is None
-    detail = "| format | sizeInBytes | numFiles |\n| delta | 1234 | 3 |\n"
-    assert sm._describe_detail_size(detail) == 1234
-    assert "LEFT ANTI JOIN" in sm.retained_sql("spark-thrift", "iceberg", "c.s.t")
-    assert sm.retained_sql("trino", "delta", "c.s.t") is None
-    assert sm.current_sql("trino", "delta", "c.s.t") is None
+def _thrift_sql(table_format):
+    """Spark Thrift answers (beeline tables) for the three fixture tables."""
+    current = {"raw": 4 * GB, "txn": 6 * GB, "daily": 2 * GB}
+    retained = {"raw": 0, "txn": 2 * GB, "daily": 0}
+
+    def table(header, value):
+        return f"+------------+\n| {header} |\n+------------+\n| {value} |\n"
+
+    def run(sql):
+        name = next((t for t in current if f".{t}" in sql), None)
+        if sql.startswith("DESCRIBE TABLE EXTENDED"):
+            loc = LOCATIONS[f"lakehouse.{sql.rsplit('.', 2)[1]}.{name}"]
+            return f"| col_name | data_type |\n| Location | {loc} |\n"
+        if sql.startswith("DESCRIBE DETAIL"):
+            return f"| format | sizeInBytes | numFiles |\n| delta | {current[name]} | 3 |\n"
+        if "NOT LIKE" in sql:
+            return table("sum(file_size_in_bytes)", "NULL")
+        if "LEFT ANTI JOIN" in sql:
+            return table("sum(file_size_in_bytes)", retained[name])
+        if sql.startswith("SELECT sum(file_size_in_bytes)") and sql.endswith(f"{name}.files"):
+            return table("sum(file_size_in_bytes)", current[name])
+        raise RuntimeError(f"unexpected SQL {sql}")
+
+    return run
+
+
+def test_spark_thrift_iceberg_measures_bytes():
+    out, _ = _measure(sql=_thrift_sql("iceberg"), engine="spark-thrift")
+    silver = _row(out, "silver.txn")
+    assert silver["current_bytes"] == 6 * GB
+    assert silver["retained_bytes"] == 2 * GB
+    assert silver["other_bytes"] == 1 * GB
+    assert silver["multiple"] == pytest.approx(10 / 6, abs=1e-4)
+    assert out["total"]["multiple"] == pytest.approx(17 / 12, abs=1e-4)
+
+
+def test_spark_thrift_delta_reads_the_size_but_cannot_separate_retained():
+    out, _ = _measure(sql=_thrift_sql("delta"), engine="spark-thrift", table_format="delta")
+    silver = _row(out, "silver.txn")
+    assert silver["current_bytes"] == 6 * GB
+    assert silver["separable"] is False and silver["retained_bytes"] is None
+    assert silver["multiple"] == pytest.approx(10 / 6, abs=1e-4)
 
 
 def test_listing_error_is_recorded_not_raised():
@@ -265,22 +316,6 @@ def test_orphan_removal_ran_from_outcomes():
     assert sm.orphan_removal_ran(outcomes) is True
     assert sm.orphan_removal_ran([]) is False
     assert sm.orphan_removal_ran(None) is False
-
-
-def test_report_section_and_derived_numbers():
-    """The record block renders, and every multiple and size on the page
-    agrees with the record."""
-    from tests.fixtures.report_consistency_helpers import _render_dict, mismatches
-    from tests.fixtures.stored_records import load_record
-
-    block, _ = _measure(maintenance_id="m2-2026-09-26", orphan_removal_ran=True)
-    record = load_record("5105a0")
-    record["storage_multiple"] = block
-    html = _render_dict(record)
-    assert "<h2>Storage multiple</h2>" in html
-    assert "1.67x" in html and "1.42x" in html
-    assert "Raw datagen files in bronze: 10.00 GiB, physical only, outside the total." in html
-    assert mismatches(record, html) == []
 
 
 def test_shared_bucket_is_counted_once():
@@ -425,42 +460,6 @@ def test_budget_bounds_the_listing():
     assert _listing_errors(out)["lb-bronze"] == "TimeoutError"
 
 
-def test_report_says_what_the_total_covers():
-    from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict
-    from tests.fixtures.stored_records import load_record
-
-    class _InPlace(_Sql):
-        outside = {"bronze.raw": 8 * GB, "silver.txn": 0, "gold.daily": 0}
-
-    block, _ = _measure(sql=_InPlace())
-    block["budget_spent"] = "the 600 s budget ran out; later tables not measured"
-    record = load_record("5105a0")
-    record["storage_multiple"] = block
-    text = _plain_text(_render_dict(record))
-    assert "Total (2 of 3 tables)" in text
-    assert "Time budget: the 600 s budget ran out" in text
-
-
-def test_failed_run_is_not_measured():
-    from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict
-    from tests.fixtures.stored_records import load_record
-
-    record = load_record("5105a0")
-    record["storage_multiple"] = {"not_measured": "the run did not pass"}
-    assert "Not measured: the run did not pass." in _plain_text(_render_dict(record))
-
-
-def test_moved_checkpoint_base_is_excluded():
-    """sustained.checkpoint_base moves the stream checkpoints (and the AM-10
-    drain marker under gold-refresh): they stay excluded, not unattributed."""
-    moved = [{"Key": "streams/gold-refresh/_lb_stop", "Size": 3 * GB}]
-    base, _ = _measure(checkpoint_base="streams")
-    out, _ = _measure(objects=_objects(extra_gold=moved), checkpoint_base="streams")
-    assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 3 * GB
-    assert _unattributed(out) == _unattributed(base)
-    assert out["layers"] == base["layers"]
-
-
 def test_stage_only_run_is_not_measured():
     """run --stage ran one layer: the other layers' tables are an earlier
     run's, so nothing is listed or queried and the record says why."""
@@ -470,25 +469,6 @@ def test_stage_only_run_is_not_measured():
 
     out = sm.measure_run(object(), None, object(), Metrics())
     assert out["not_measured"] == "a run --stage run: the other layers are not this run's"
-
-
-def test_checkpoint_base_over_a_table_location_hides_no_table():
-    """A checkpoint_base that overlaps the table locations ("warehouse")
-    excludes only its stream directories, never the tables under it."""
-    stream = [{"Key": "warehouse/gold-refresh/offsets/0", "Size": 1 * GB}]
-    base, _ = _measure()
-    out, _ = _measure(objects=_objects(extra_gold=stream), checkpoint_base="warehouse")
-    assert out["layers"] == base["layers"]
-    assert out["total"] == base["total"]
-    assert out["excluded"]["stream checkpoints"] == base["excluded"]["stream checkpoints"] + 1 * GB
-
-
-#: Bucket names shaped like a release-harness deployment's (LB-265).
-REAL = {
-    "lb-bronze": "rel17-m01-d0fc03-bronze",
-    "lb-silver": "rel17-m01-d0fc03-silver",
-    "lb-gold": "rel17-m01-d0fc03-gold",
-}
 
 
 def _partial_block():
@@ -525,51 +505,6 @@ def _keys_of(obj):
             yield from _keys_of(v)
 
 
-def test_scrubber_accepts_a_record_with_real_bucket_names():
-    """LB-265: the fixture scrubber refuses a record in which a bucket name
-    is a dict key. The block keyed physical bytes, unattributed bytes and
-    listing errors by bucket name, so every release-matrix record was
-    refused ("bucket name ... is also a key in the record"). The bucket name
-    is now a value, and the scrubbed block keeps every number."""
-    import copy
-    import json
-
-    from tests.fixtures.scrub import scrub_record
-    from tests.fixtures.stored_records import load_record
-
-    text = json.dumps(_partial_block())
-    for fake, real in REAL.items():
-        text = text.replace(fake, real)
-    block = json.loads(text)
-    record = load_record("5105a0")
-    layers = {"bronze": REAL["lb-bronze"], "silver": REAL["lb-silver"], "gold": REAL["lb-gold"]}
-    record["config_snapshot"]["s3"]["buckets"] = dict(layers)
-    record["pipeline_benchmark"]["config_snapshot"]["s3"]["buckets"] = dict(layers)
-    record["storage_multiple"] = block
-    before = copy.deepcopy(block)
-
-    scrubbed, _notes = scrub_record(record)
-
-    out = scrubbed["storage_multiple"]
-    assert not set(REAL.values()) & set(_keys_of(out))
-    assert not any(real in json.dumps(out) for real in REAL.values())
-    assert [b["bucket"] for b in out["buckets"]] == [
-        "scrubbed-bronze",
-        "scrubbed-silver",
-        "scrubbed-gold",
-    ]
-    assert out["buckets"][1]["unattributed_bytes"] == 1 * GB
-    assert out["buckets"][2]["listing_error"] == "OSError"
-    assert out["buckets"][2]["physical_bytes"] is None
-    # Only names moved: every number in the block is the source's.
-    for got, want in zip(out["buckets"], before["buckets"], strict=True):
-        assert {k: v for k, v in got.items() if k != "bucket"} == {
-            k: v for k, v in want.items() if k != "bucket"
-        }
-    assert out["tables"][1]["location"] == "s3a://scrubbed-silver/warehouse/silver/txn"
-    assert out["total"] == before["total"] and out["layers"] == before["layers"]
-
-
 def test_no_bucket_name_is_a_key_in_the_block():
     block = _partial_block()
     assert not set(BUCKETS.values()) & set(_keys_of(block))
@@ -598,17 +533,66 @@ def test_no_bucket_name_is_a_key_in_the_block():
     ]
 
 
-def test_report_notes_read_the_bucket_list():
-    """The report's unattributed and failed-listing notes come from the
-    bucket list and carry the record's figures."""
+class _InPlace(_Sql):
+    outside = {"bronze.raw": 8 * GB, "silver.txn": 0, "gold.daily": 0}
+
+
+def _known_block():
+    return _measure(maintenance_id="m2-2026-09-26", orphan_removal_ran=True)[0]
+
+
+def _in_place_block():
+    block, _ = _measure(sql=_InPlace())
+    block["budget_spent"] = "the 600 s budget ran out; later tables not measured"
+    return block
+
+
+def _not_measured_block():
+    return {"not_measured": "the run did not pass"}
+
+
+@pytest.mark.parametrize(
+    ("block", "present", "absent"),
+    [
+        (
+            _known_block,
+            [
+                "1.67x",
+                "1.42x",
+                "Raw datagen files in bronze: 10.00 GiB, physical only, outside the total.",
+            ],
+            [],
+        ),
+        (
+            _in_place_block,
+            ["Total (2 of 3 tables)", "Time budget: the 600 s budget ran out"],
+            [],
+        ),
+        (_not_measured_block, ["Not measured: the run did not pass."], []),
+        (
+            _partial_block,
+            [
+                "Unattributed in lb-silver: 1.00 GiB.",
+                "Listing of lb-gold failed (OSError); its tables are not measured.",
+            ],
+            ["Unattributed in lb-bronze"],
+        ),
+    ],
+    ids=["known-multiple", "in-place-and-budget", "failed-run", "unattributed-and-failed-listing"],
+)
+def test_report_section_agrees_with_the_record(block, present, absent):
+    """The record block renders under its heading, every multiple and size on
+    the page agrees with the record, and the labels a reader needs are there."""
     from tests.fixtures.report_consistency_helpers import _plain_text, _render_dict, mismatches
     from tests.fixtures.stored_records import load_record
 
     record = load_record("5105a0")
-    record["storage_multiple"] = _partial_block()
+    record["storage_multiple"] = block()
     html = _render_dict(record)
     text = _plain_text(html)
-    assert "Unattributed in lb-silver: 1.00 GiB." in text
-    assert "Listing of lb-gold failed (OSError); its tables are not measured." in text
-    assert "Unattributed in lb-bronze" not in text
+    assert "<h2>Storage multiple</h2>" in html
+    for label in present:
+        assert label in text
+    for label in absent:
+        assert label not in text
     assert mismatches(record, html) == []

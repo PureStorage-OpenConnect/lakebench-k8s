@@ -1,36 +1,26 @@
 """
-Gold Refresh (Delta Lake) - Periodic re-aggregation of Silver data into Gold KPIs.
+Gold Refresh (Delta Lake) - Continuous re-aggregation of Silver into Gold KPIs.
 
-Delta Lake variant of gold_refresh.py. Uses Delta write APIs instead of
-Iceberg's DataFrameWriterV2.
+Delta Lake variant of gold_refresh.py: streams the Silver Delta table, pins
+each batch's read at one silver version, recomputes the dates the new rows
+touch, and writes Gold with the Delta write APIs.
 
-Uses a rate source with foreachBatch to periodically read the full Silver
-Delta table, compute daily KPI aggregations, and overwrite the Gold table.
-Each cycle produces a complete, consistent Gold snapshot.
-
-This is the continuous-pipeline equivalent of gold_finalize_delta.py. Where
-gold_finalize runs once as a batch job, gold_refresh re-aggregates on
-a timer (default every 5 minutes) so the Gold layer stays fresh.
+This is the continuous-pipeline equivalent of gold_finalize_delta.py.
 
 Environment variables (set by job.py):
     LB_ICEBERG_CATALOG   - Catalog name (e.g., "lakehouse")
     CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://gold-bucket/checkpoints/gold-refresh/
-    TRIGGER_INTERVAL     - e.g., "5 minutes"
+    TRIGGER_INTERVAL     - "0 seconds" (back to back) or a timer, e.g. "5 minutes"
 """
 
 from __future__ import annotations
 
-import time
-
 from common import (
-    await_stream,
     env,
-    get_daily_kpi_aggregations,
     log,
-    refresh_daily_kpis,
+    run_c360_gold_stream,
     set_utc_session,
-    table_exists,
     write_delta_table,
 )
 from pyspark.sql import SparkSession
@@ -41,7 +31,7 @@ from pyspark.sql import SparkSession
 catalog = env("LB_ICEBERG_CATALOG", "ice")
 gold_uri = env("LB_GOLD_URI", "s3a://lb-gold/")
 checkpoint_location = env("CHECKPOINT_LOCATION")
-trigger_interval = env("TRIGGER_INTERVAL", "5 minutes")
+trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
 
 silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
 gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}"
@@ -53,7 +43,7 @@ spark = SparkSession.builder.appName("lb-gold-refresh-delta").getOrCreate()
 set_utc_session(spark)
 
 log("=" * 60)
-log("Gold Refresh (Delta) (Periodic Re-aggregation)")
+log("Gold Refresh (Delta, continuous re-aggregation)")
 log("=" * 60)
 log(f"Source table: {silver_tbl}")
 log(f"Target table: {gold_tbl}")
@@ -70,158 +60,20 @@ try:
 except Exception as e:
     log(f"Schema creation note: {str(e)}")
 
-# Track refresh cycles and incremental state
-_refresh_count = 0
-_read_failures = 0  # consecutive cycles whose silver lookup errored
-_MAX_READ_FAILURES = 5
-# Incremental: the newest silver_processing_timestamp the last refresh took in.
-_last_ts = None
-_last_silver_max_ts = None  # newest silver_processing_timestamp seen last cycle
-_incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
-if _incremental:
-    log("Incremental gold refresh enabled -- only new/changed partitions per cycle")
-
-
-def _delta_write_props() -> dict[str, str]:
-    """Common Delta table properties for gold writes."""
-    return {
+def _write(df):
+    """Replace gold with *df* in one commit."""
+    opts = {
+        "overwriteSchema": "true",
+        "compression": "snappy",
         "delta.logRetentionDuration": "interval 30 days",
         "delta.deletedFileRetentionDuration": "interval 7 days",
     }
+    write_delta_table(spark, df.coalesce(1), gold_tbl, gold_uri, mode="overwrite", options=opts)
 
 
-# ---------------------------------------------------------------------------
-# foreachBatch writer -- incremental or full re-aggregation each cycle
-# ---------------------------------------------------------------------------
-def refresh_gold(trigger_df, batch_id):
-    """Re-aggregate Silver into Gold KPIs.
-
-    The trigger_df (from rate source) is ignored -- it only drives timing.
-    In incremental mode, only new Silver partitions since the last cycle are
-    read and merged into Gold. In full mode, the entire Silver table is
-    re-aggregated and Gold is overwritten.
-    """
-    global _refresh_count, _last_ts, _read_failures, _last_silver_max_ts
-    _refresh_count += 1
-    cycle_start = time.time()
-
-    log(f"Refresh cycle {_refresh_count} (batch {batch_id})")
-
-    # Read current Silver table. Not-found means "not ready yet". Any other
-    # catalog error skips this cycle (a transient metastore hiccup should not
-    # cost a driver restart), but _MAX_READ_FAILURES in a row fail the stream
-    # instead of leaving gold stale for the whole run.
-    try:
-        ready = table_exists(spark, silver_tbl)
-    except Exception as e:  # noqa: BLE001
-        _read_failures += 1
-        log(
-            f"Cycle {_refresh_count}: Silver table unreadable "
-            f"({_read_failures}/{_MAX_READ_FAILURES}): {e}"
-        )
-        if _read_failures >= _MAX_READ_FAILURES:
-            raise
-        return
-    _read_failures = 0
-    if not ready:
-        log(f"Cycle {_refresh_count}: Silver table not ready yet")
-        return
-    silver_df = spark.table(silver_tbl)
-    silver_all = silver_df  # unfiltered, for the freshness/idle check
-
-    def _write(df):
-        gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
-        opts = {"overwriteSchema": "true", "compression": "snappy"}
-        opts.update(_delta_write_props())
-        write_delta_table(
-            spark, df.coalesce(1), gold_tbl, gold_bucket, mode="overwrite", options=opts
-        )
-
-    silver_count = silver_df.count()
-    if silver_count == 0:
-        log(f"Cycle {_refresh_count}: no new Silver data, skipping")
-        return
-    # The rows of silver this cycle's gold covers (all of it in both modes;
-    # the window gate reads a cycle as new data when this grows).
-    log(f"Cycle {_refresh_count}: aggregating {silver_count:,} Silver records")
-    if _incremental:
-        # Only the dates silver changed on since the last refresh are
-        # recomputed, from all their rows (common.refresh_daily_kpis).
-        existing_gold = None
-        if _last_ts is not None and table_exists(spark, gold_tbl):
-            existing_gold = spark.table(gold_tbl)
-        gold_df, newest_ts, dates = refresh_daily_kpis(silver_df, existing_gold, _last_ts)
-        if gold_df is None:
-            log(f"Cycle {_refresh_count}: no date changed since the last refresh")
-        else:
-            log(
-                f"Cycle {_refresh_count}: "
-                + ("full aggregation" if dates is None else f"recomputed {len(dates)} date(s)")
-            )
-            _write(gold_df)
-            _last_ts = newest_ts
-        kpi_count = spark.table(gold_tbl).count() if table_exists(spark, gold_tbl) else 0
-    else:
-        # Full mode: re-aggregate all of silver and overwrite gold.
-        daily_kpis = (
-            silver_df.groupBy("interaction_date")
-            .agg(*get_daily_kpi_aggregations())
-            .orderBy("interaction_date")
-        )
-        kpi_count = daily_kpis.count()
-        _write(daily_kpis)
-    log(f"Cycle {_refresh_count}: generated {kpi_count:,} daily KPI records")
-
-    # Compute data freshness: how old is the most recent Silver data.
-    # A cycle whose newest silver row is the same as the previous cycle's saw
-    # no new data, so its value only measures wall-clock since silver last
-    # moved. It is tagged "(silver idle)". The collector drops only the
-    # trailing idle run, and only when the corpus was fully ingested and
-    # committed (a drained finite corpus); an idle stretch that new
-    # data later ends is a stall and keeps its staleness.
-    try:
-        from pyspark.sql.functions import col, current_timestamp
-        from pyspark.sql.functions import max as max_
-
-        # Whole table, not the incremental slice: any new row moves silver.
-        freshness_row = silver_all.agg(
-            max_(col("silver_processing_timestamp")).alias("newest_ts"),
-            (
-                current_timestamp().cast("long")
-                - max_(col("silver_processing_timestamp")).cast("long")
-            ).alias("freshness_s"),
-        ).collect()[0]
-        freshness = freshness_row.freshness_s or 0
-        idle = _last_silver_max_ts is not None and freshness_row.newest_ts == _last_silver_max_ts
-        _last_silver_max_ts = freshness_row.newest_ts
-        suffix = " (silver idle)" if idle else ""
-        log(f"Cycle {_refresh_count}: data freshness {freshness:.0f}s{suffix}")
-    except Exception as e:
-        log(f"Cycle {_refresh_count}: could not compute freshness: {e}")
-
-    cycle_time = time.time() - cycle_start
-    log(
-        f"Cycle {_refresh_count}: refreshed {gold_tbl} in {cycle_time:.1f}s ({kpi_count:,} KPI records)"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Streaming query -- rate source drives periodic refresh
-# ---------------------------------------------------------------------------
-# The rate source emits one row per trigger interval. We use it purely
-# as a timer -- the actual data comes from reading the Silver table in
-# the foreachBatch function.
-stream = spark.readStream.format("rate").option("rowsPerSecond", "1").load()
-
-query = (
-    stream.writeStream.foreachBatch(refresh_gold)
-    .option("checkpointLocation", checkpoint_location)
-    .trigger(processingTime=trigger_interval)
-    .start()
+run_c360_gold_stream(
+    spark, silver_tbl, gold_tbl, "delta", _write, checkpoint_location, trigger_interval
 )
-
-log("Streaming query started, awaiting termination...")
-await_stream(spark, query)
 
 spark.stop()

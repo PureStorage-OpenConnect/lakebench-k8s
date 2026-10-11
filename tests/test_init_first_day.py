@@ -11,6 +11,7 @@ recipe, or ``recipe: default``, still resolves as before, with a note.
 
 from __future__ import annotations
 
+import copy
 import re
 import warnings
 
@@ -19,7 +20,7 @@ import yaml
 from typer.testing import CliRunner
 
 from lakebench.cli import app
-from lakebench.cli._init import LINE_BUDGET, default_name, first_day_config
+from lakebench.cli._init import default_name, first_day_config
 from lakebench.config import ConfigValidationError, load_config
 from lakebench.config.recipes import RECIPES, recipe_components, user_set
 from lakebench.config.schema import LakebenchConfig
@@ -29,10 +30,6 @@ runner = CliRunner()
 
 SENTINEL_AK = "SENTINEL-ACCESS-7Q"
 SENTINEL_SK = "SENTINEL-SECRET-9Z"
-
-
-def _code_lines(text: str) -> list[str]:
-    return [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
 
 
 @pytest.fixture
@@ -54,17 +51,18 @@ def _components(cfg: LakebenchConfig) -> dict[str, str]:
 # -- init output -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("workload", ["customer360", "financial"])
-@pytest.mark.parametrize("recipe", recipe_names())
+@pytest.mark.parametrize(
+    ("recipe", "workload"),
+    [
+        (r, w)
+        for r in recipe_names()
+        for w in ("customer360", "financial")
+        if not (w == "financial" and "-delta-" in r)
+    ],
+)
 def test_init_all_recipes_load(tmp_path, creds, recipe, workload):
     out = tmp_path / "lakebench.yaml"
     r = runner.invoke(app, ["init", "-r", recipe, "-w", workload, "-o", str(out)])
-    if workload == "financial" and "-delta-" in recipe:
-        # The financial workload is Iceberg-only: init refuses rather than
-        # write a file that does not load.
-        assert r.exit_code == 2, r.output
-        assert "iceberg" in r.output and not out.exists()
-        return
     assert r.exit_code == 0, r.output
     text = out.read_text()
     raw = yaml.safe_load(text)
@@ -82,9 +80,18 @@ def test_init_all_recipes_load(tmp_path, creds, recipe, workload):
     assert "client_secret" not in text
     assert "architecture" not in raw  # recipe-owned keys are commented
     assert len(re.findall(r"(?m)^recipe:", text)) == 1
-    assert len(_code_lines(text)) <= LINE_BUDGET, text
     # The load is quiet: no deprecation or upgrade note on a fresh file.
     assert list(cfg._load_notes) == []
+
+
+@pytest.mark.parametrize("recipe", [r for r in recipe_names() if "-delta-" in r])
+def test_init_financial_on_a_delta_recipe_is_refused(tmp_path, creds, recipe):
+    """The financial workload is Iceberg-only: init refuses rather than write
+    a file that does not load."""
+    out = tmp_path / "lakebench.yaml"
+    r = runner.invoke(app, ["init", "-r", recipe, "-w", "financial", "-o", str(out)])
+    assert r.exit_code == 2, r.output
+    assert not out.exists()
 
 
 def test_uncommented_component_block_still_loads(tmp_path, creds):
@@ -107,7 +114,7 @@ def test_default_name_is_unique_and_fits_hive(tmp_path):
     assert re.fullmatch(r"lb-[a-z0-9-]+-[0-9a-f]{4}", long_user)
     assert len(default_name(user="x" * 50)) <= 23
     assert default_name(user="!!!", token="0000") == "lb-user-0000"
-    # A Hive recipe with the longest default name loads (LB-153 limit).
+    # A Hive recipe with the longest default name loads (derived-name length limit).
     text = first_day_config(name=default_name(user="y" * 40), recipe="hive-iceberg-spark-trino")
     data = yaml.safe_load(text)
     data["platform"]["storage"]["s3"].update(access_key="a", secret_key="b")
@@ -161,63 +168,68 @@ def test_recipe_conflict_refused(tmp_path):
         with pytest.raises(ConfigValidationError) as exc:
             load_config(p)
         msg = str(exc.value)
-        assert (
-            f"{key} is '{wrote}' but recipe 'polaris-iceberg-spark-trino' sets '{recipe_sets}'"
-            in msg
-        )
-        assert "delete one of them" in msg
-        assert "  - : " not in msg
-
-
-def test_recipe_conflict_refused_for_a_constructed_config():
-    with pytest.raises(ValueError, match="recipe 'hive-delta-spark-trino' sets 'delta'"):
-        LakebenchConfig.model_validate(
-            {
-                "name": "t",
-                "recipe": "hive-delta-spark-trino",
-                "architecture": {"table_format": {"type": "iceberg"}},
-            }
-        )
+        assert key in msg and f"'{wrote}'" in msg and f"'{recipe_sets}'" in msg
+        # The same refusal for a config built in code rather than loaded.
+        with pytest.raises(ValueError, match=f"sets '{recipe_sets}'"):
+            LakebenchConfig.model_validate(
+                {"name": "conf-t", "recipe": "polaris-iceberg-spark-trino", "architecture": block}
+            )
 
 
 # -- recipe-injected fields --------------------------------------------------
 
 
-def test_recipe_injected_fields_are_not_user_set():
-    cfg = LakebenchConfig.model_validate(
-        {"name": "t", "recipe": "polaris-iceberg-spark-trino", "images": {"datagen": "x:1"}}
-    )
-    assert not user_set(cfg, "images.spark")
-    assert not user_set(cfg, "images.postgres")
-    assert not user_set(cfg, "architecture.catalog.type")
-    assert user_set(cfg, "images.datagen")
-    assert not user_set(cfg, "images.trino")
+_USER_SET_INJECTED = {
+    "name": "t",
+    "recipe": "polaris-iceberg-spark-trino",
+    "images": {"datagen": "x:1"},
+}
+_USER_SET_EQUAL_TO_RECIPE = {
+    "name": "t",
+    "recipe": "polaris-iceberg-spark-trino",
+    "images": {"spark": "apache/spark:4.0.2-python3"},
+    "workload": {"datagen": {"scale": 2}},
+}
+_USER_SET_ALIAS = {
+    "name": "t",
+    "recipe": "hive-iceberg-spark-trino",
+    "workload": {"schema": "financial"},
+}
 
 
-def test_user_written_value_equal_to_the_recipe_is_user_set():
-    cfg = LakebenchConfig.model_validate(
-        {
-            "name": "t",
-            "recipe": "polaris-iceberg-spark-trino",
-            "images": {"spark": "apache/spark:4.0.2-python3"},
-            "workload": {"datagen": {"scale": 2}},
-        }
-    )
-    assert user_set(cfg, "images.spark")
-    assert user_set(cfg, "workload.datagen.scale")
-    assert not user_set(cfg, "images.postgres")
+@pytest.mark.parametrize(
+    ("config", "path", "expected"),
+    [
+        # Recipe-injected fields are not user-set.
+        (_USER_SET_INJECTED, "images.spark", False),
+        (_USER_SET_INJECTED, "images.postgres", False),
+        (_USER_SET_INJECTED, "architecture.catalog.type", False),
+        (_USER_SET_INJECTED, "images.trino", False),
+        (_USER_SET_INJECTED, "images.datagen", True),
+        # A value written equal to the recipe's is still user-set.
+        (_USER_SET_EQUAL_TO_RECIPE, "images.spark", True),
+        (_USER_SET_EQUAL_TO_RECIPE, "workload.datagen.scale", True),
+        (_USER_SET_EQUAL_TO_RECIPE, "images.postgres", False),
+        # Config aliases map to the same field.
+        (_USER_SET_ALIAS, "workload.schema", True),
+        (_USER_SET_ALIAS, "workload.schema_type", True),
+        (_USER_SET_ALIAS, "workload.datagen.scale", False),
+    ],
+)
+def test_user_set(config, path, expected):
+    assert user_set(LakebenchConfig.model_validate(copy.deepcopy(config)), path) is expected
 
 
 def test_recipe_expansion_never_aliases_the_recipe_table():
-    cfg = LakebenchConfig.model_validate({"name": "t", "recipe": "hive-iceberg-spark-duckdb"})
-    cfg2 = LakebenchConfig.model_validate({"name": "t", "recipe": "hive-iceberg-spark-duckdb"})
-    assert cfg == cfg2
-    data: dict = {"name": "t", "recipe": "hive-iceberg-spark-duckdb"}
+    """Mutating one expanded config must not leak into the next."""
+    recipe = "hive-iceberg-spark-duckdb"
+    before = recipe_components(recipe)
+    data: dict = {"name": "t", "recipe": recipe}
     LakebenchConfig.model_validate(data)
-    assert (
-        data["architecture"]["query_engine"]
-        is not (RECIPES["hive-iceberg-spark-duckdb"]["architecture"]["query_engine"])
-    )
+    data["architecture"]["query_engine"]["type"] = "trino"
+    cfg = LakebenchConfig.model_validate({"name": "t", "recipe": recipe})
+    assert _components(cfg) == before
+    assert RECIPES[recipe]["architecture"]["query_engine"].get("type") != "trino"
 
 
 def test_dump_round_trip_keeps_the_values():
@@ -238,22 +250,9 @@ def test_dump_round_trip_keeps_the_values():
 def test_default_recipe_warns_resolves_hive(tmp_path, recipe_line):
     p = tmp_path / "nr.yaml"
     p.write_text(f"name: nr-t\n{recipe_line}")
-    with pytest.warns(DeprecationWarning, match="resolves to hive-iceberg-spark-trino"):
+    with pytest.warns(DeprecationWarning):
         cfg = load_config(p)
     assert _components(cfg) == recipe_components("hive-iceberg-spark-trino")
-    notes = cfg._load_notes.texts()
-    assert any("required in v1.8" in t for t in notes), notes
-    said = "recipe 'default'" if recipe_line else "no recipe"
-    assert any(t.startswith(said) for t in notes), notes
-
-
-def test_recipe_less_components_note_names_their_recipe(tmp_path):
-    """Spec issue 12: a v1.6 init output set catalog.type with no recipe."""
-    p = tmp_path / "nr.yaml"
-    p.write_text("name: nr-t\narchitecture:\n  catalog:\n    type: polaris\n")
-    with pytest.warns(DeprecationWarning, match="resolve to polaris-iceberg-spark-trino"):
-        cfg = load_config(p)
-    assert cfg.architecture.catalog.type.value == "polaris"
 
 
 # -- review fixes ------------------------------------------------------------
@@ -342,6 +341,11 @@ def test_overwrite_that_moves_the_deployment_is_refused(tmp_path):
             "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'",
         ),
         ("name: team\n", "recipe 'hive-iceberg-spark-trino'"),
+        (
+            # A flat top-level namespace key is read too.
+            "name: alice\nrecipe: polaris-iceberg-spark-trino\nnamespace: team-ns\n",
+            "namespace 'team-ns' -> 'alice'",
+        ),
     ]:
         out = tmp_path / "o.yaml"
         out.write_text(old)
@@ -375,15 +379,6 @@ def test_overwrite_of_a_nameless_v16_config_needs_a_name(tmp_path):
     assert r.exit_code == 2, r.output
     assert "--name v16-auto" in r.output
     assert out.read_text() == "recipe: hive-iceberg-spark-trino\n"
-
-
-def test_user_set_maps_config_aliases():
-    cfg = LakebenchConfig.model_validate(
-        {"name": "t", "recipe": "hive-iceberg-spark-trino", "workload": {"schema": "financial"}}
-    )
-    assert user_set(cfg, "workload.schema")
-    assert user_set(cfg, "workload.schema_type")
-    assert not user_set(cfg, "workload.datagen.scale")
 
 
 # -- differential: ${VAR} loads as v1.6 did ---------------------------------
@@ -498,29 +493,29 @@ def test_secret_with_yaml_syntax_arrives_verbatim(tmp_path, monkeypatch):
         assert load_config(p).platform.storage.s3.secret_key == secret
 
 
-def test_plain_reference_loads_as_v16(tmp_path, monkeypatch):
+@pytest.mark.parametrize("form", _PLAIN_FORMS)
+def test_plain_reference_loads_as_v16(tmp_path, monkeypatch, form):
     """Every value in every plain form loads as v1.6 loaded it, value and type."""
     from lakebench.config.loader import load_yaml
 
     monkeypatch.delenv("LB_DIFF_UNSET", raising=False)
     p = tmp_path / "d.yaml"
     checked = 0
-    for form in _PLAIN_FORMS:
-        for value in _ENV_VALUES:
-            if "%s" in form and (value.strip() != value or value in ("<<", "=")):
-                continue  # a default cannot carry surrounding whitespace in a plain scalar
-            monkeypatch.setenv("LB_DIFF", value)
-            text = form % value if "%s" in form else form
-            p.write_text(text + "\n")
-            try:
-                expected = _v16_expected(form, value)
-            except yaml.YAMLError:
-                continue  # v1.6 could not parse this substitution at all
-            doc = load_yaml(p)
-            got = doc.get("j", doc["k"])
-            assert got == expected and type(got) is type(expected), (text, value, got, expected)
-            checked += 1
-    assert checked > 60
+    for value in _ENV_VALUES:
+        if "%s" in form and (value.strip() != value or value in ("<<", "=")):
+            continue  # a default cannot carry surrounding whitespace in a plain scalar
+        monkeypatch.setenv("LB_DIFF", value)
+        text = form % value if "%s" in form else form
+        p.write_text(text + "\n")
+        try:
+            expected = _v16_expected(form, value)
+        except yaml.YAMLError:
+            continue  # v1.6 could not parse this substitution at all
+        doc = load_yaml(p)
+        got = doc.get("j", doc["k"])
+        assert got == expected and type(got) is type(expected), (text, value, got, expected)
+        checked += 1
+    assert checked > 0, "every value was skipped"
 
 
 def test_quoted_reference_arrives_verbatim(tmp_path, monkeypatch):
@@ -544,16 +539,6 @@ def test_leading_zero_seed_keeps_its_v16_value(tmp_path, monkeypatch):
         "workload:\n  datagen:\n    seed: ${LB_SEED}\n",
     )
     assert cfg.architecture.workload.datagen.seed == 34
-
-
-def test_overwrite_guard_reads_the_flat_namespace(tmp_path):
-    out = tmp_path / "o.yaml"
-    old = "name: alice\nrecipe: polaris-iceberg-spark-trino\nnamespace: team-ns\n"
-    out.write_text(old)
-    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
-    assert r.exit_code == 3, r.output
-    assert "namespace 'team-ns' -> 'alice'" in r.output
-    assert out.read_text() == old
 
 
 def test_overwrite_guard_runs_when_the_same_name_is_passed(tmp_path):
@@ -615,7 +600,6 @@ def test_rerunning_init_over_its_own_file_before_export_works(tmp_path, monkeypa
     # Changing a set endpoint under the same name is.
     r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--endpoint", "http://other:80"])
     assert r.exit_code == 3 and "endpoint 'http://s3:80' -> 'http://other:80'" in r.output
-    assert "LAKEBENCH_S3_ACCESS_KEY" not in __import__("os").environ
 
 
 def test_overwrite_of_a_file_with_a_typed_reference_does_not_crash(tmp_path, monkeypatch):

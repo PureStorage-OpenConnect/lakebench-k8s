@@ -35,11 +35,16 @@ stops at the first failing step. Python steps run with `PYTHONPATH=src`;
 | `package-guard` | `scripts/package_guard.py --dist <dir> --require-all` |
 | `gate` | `scripts/release_gate.py --tag vX.Y.Z --require-all` |
 
-`scripts/release_gate.py` with no `--only` runs every check: ruff, mypy,
-the unit tests, cargo fmt, clippy and test, gitleaks over the tree and over
-the full history beyond `.gitleaksignore` (`scripts/gitleaks_history.py`),
-the package guard, the installed pre-push hook, examples, version,
-changelog and prose. It needs `cargo` and `gitleaks` on `PATH` and a full
+`scripts/release_gate.py` with no `--only` runs every check:
+
+- ruff, mypy and the unit tests;
+- cargo fmt, clippy and test;
+- gitleaks over the tree and over the full history beyond
+  `.gitleaksignore` (`scripts/gitleaks_history.py`);
+- the package guard and the installed pre-push hook;
+- examples, version, changelog and prose.
+
+It needs `cargo` and `gitleaks` on `PATH` and a full
 clone. The Spark tier and the `slow` AML tests are not in CI; run them
 locally before the release pull request.
 

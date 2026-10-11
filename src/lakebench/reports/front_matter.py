@@ -227,7 +227,7 @@ def provenance_line(metrics) -> str:
     if not isinstance(prov, dict) or not prov:
         return "not recorded (this record predates provenance)"
     version = prov.get("lakebench_version") or "version unknown"
-    sha = str(prov.get("git_sha") or "")[:7] or "commit unknown"
+    sha = str(prov.get("git_sha") or "")[:7] or "unknown"
     dirty = prov.get("git_dirty")
     state = "dirty" if dirty is True else "clean" if dirty is False else "tree state unknown"
     return f"lakebench {version}, commit {sha}, {state}"
@@ -323,12 +323,15 @@ def limits_interpretation(
             f"{esc(', '.join(sorted(errored)))}"
         )
     if (metrics.config_snapshot or {}).get("workload_schema") == "financial":
-        from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+        from lakebench.metrics.verdict import continuous_excluded_rules
 
         pb = metrics.pipeline_benchmark
         if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
             executed = set(rules.get("executed") or [])
-            not_run = [r for r in AML_CONTINUOUS_SKIPPED_RULES if r not in executed]
+            not_run = sorted(
+                (r for r in continuous_excluded_rules(metrics) if r not in executed),
+                key=lambda r: int(r.split("_", 1)[0][1:]),
+            )
             n_not_run = len(not_run)  # a fixed rule list, not a record count
             if not_run:
                 ids = ", ".join(r.split("_", 1)[0] for r in not_run)

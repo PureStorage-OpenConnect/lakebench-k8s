@@ -1,4 +1,4 @@
-"""When two Customer 360 gold tables hold the same gold (LB-267).
+"""When two Customer 360 gold tables hold the same gold.
 
 Not collected by pytest. Spark adds DOUBLEs in the order partial
 aggregates reach the final aggregate, which the plan does not fix (a scan
@@ -11,7 +11,7 @@ anywhere, so a last-bit difference in the sum can cross a ROUND midpoint
 and move the KPI one quantum. Run twice over one silver table,
 ``avg_transaction_value`` and ``avg_estimated_ltv`` landed one cent apart
 on one to five days in 200 and nothing else moved, so an exact hash of gold
-is not stable (LB-267: stream and batch gold over one silver snapshot
+is not stable (stream and batch gold over one silver snapshot
 hashed differently in CI).
 
 Two gold tables match here when they have the same columns and types, the
@@ -28,14 +28,12 @@ perf gate apply to query results; beyond the cell check it catches a bias
 of one quantum in the same direction on many days.
 
 The rows come from ``table_fingerprint.table_rows`` in the Spark child.
-Imported by the parity test modules in the parent and by
-``test_c360_gold_compare.py``; stdlib and ``lakebench`` only.
+Imported by the parity test modules in the parent; stdlib and ``lakebench`` only.
 """
 
 from __future__ import annotations
 
 import math
-from pathlib import Path
 from typing import Any
 
 #: The day key of gold: one row per day.
@@ -50,21 +48,6 @@ ORDER_SENSITIVE = {
     "avg_estimated_ltv": 0.01,
 }
 
-
-def kpi_source() -> str:
-    """The source text of common.get_daily_kpi_aggregations."""
-    src = (
-        Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts/common.py"
-    ).read_text()
-    body = src[src.index("def get_daily_kpi_aggregations") :]
-    return body[: body.index("\n\n\n")]
-
-
-#: The DOUBLE silver columns the KPIs aggregate (every other one they read
-#: is an INT, a string or a boolean; the parity test checks it on silver).
-#: Both hold whole cents, which keeps their sums order-free; a KPI over a
-#: DOUBLE column off the cent grid would make its sums order-sensitive too.
-DOUBLE_SILVER = {"transaction_amount", "lifetime_value_estimate"}
 
 _APPROX_TYPES = frozenset({"double", "float"})
 

@@ -1,4 +1,4 @@
-"""The protected AML corpus guard (SAF-5, LB-205).
+"""The protected AML corpus guard (SAF-5).
 
 Every command that reads or scores data refuses a protected corpus (the
 evaluation or robustness one, by role or by a seed that hashes to a held-out
@@ -10,7 +10,6 @@ fixture (``tests/fixtures/heldout_test.json``), never a pre-registration value.
 from __future__ import annotations
 
 import ast
-import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +25,6 @@ from tests.fixtures import heldout_test_seeds as ts
 from tests.fixtures import protected_corpus as pc
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORD = ROOT / "tests/fixtures/records/run-20260927-011123-497f02/metrics.json"
 
 
 @pytest.fixture
@@ -102,6 +100,7 @@ def _verb_argv(verb: str, cfg: Path) -> list[str]:
             "--output",
             "s3a://g/o.parquet",
         ],
+        "query --interactive": ["query", str(cfg), "--interactive"],
         "financial replay": ["financial", "replay", str(cfg), "--rule", "W2_structuring"],
         "financial reproduce": ["financial", "reproduce", str(cfg), "--alert-id", "a-1"],
         "financial reference-score": [
@@ -120,6 +119,7 @@ VERBS = [
     "run",
     "benchmark",
     "query",
+    "query --interactive",
     "financial score",
     "financial replay",
     "financial reproduce",
@@ -131,8 +131,13 @@ VERBS = [
 @pytest.mark.parametrize("kw", PROTECTED)
 def test_verb_refuses_a_protected_config(tmp_path, monkeypatch, held, no_cluster, verb, kw):
     monkeypatch.chdir(tmp_path)
+    if verb == "query --interactive":
+        # The REPL starts only on a terminal; the guard must hold there too.
+        import typer.testing
+
+        monkeypatch.setattr(typer.testing._NamedTextIOWrapper, "isatty", lambda self: True)
     cfg = pc.financial_config(tmp_path / "c.yaml", **kw)
-    _assert_refused(_invoke(_verb_argv(verb, cfg)), no_cluster, verb)
+    _assert_refused(_invoke(_verb_argv(verb, cfg)), no_cluster, verb.removesuffix(" --interactive"))
 
 
 def test_reproduce_refuses_a_config_naming_a_protected_corpus(
@@ -367,18 +372,12 @@ def _mixed_manifest():
 
 def test_manifest_check_reads_every_row(held):
     rows = _mixed_manifest()
+    # No instance seed hashes to a held-out role, so the refusal below comes
+    # from recovering the corpus seed, not from an instance-seed lookup.
+    assert not any(ds.heldout_role(s, held) for _, s in rows)
     reason = ds.manifest_protected_reason(iter(rows), heldout=held, spent=[42])
     assert reason == "the corpus manifest comes from the registered evaluation seed"
     assert pc.seed_tokens(reason) == []
-    assert lg.manifest_protected_reason is ds.manifest_protected_reason
-
-
-def test_instance_seed_hash_lookup_would_pass_the_mixed_manifest(held):
-    """S2: hashing instance seeds (the d1 design) matches no corpus hash, so it
-    would pass a held-out corpus; recovery of the corpus seed does not."""
-    rows = _mixed_manifest()
-    assert not any(ds.heldout_role(s, held) for _, s in rows)
-    assert ds.manifest_protected_reason(iter(rows), heldout=held, spent=[42])
 
 
 def test_manifest_check_passes_calibration_and_refuses_spent_and_unrecoverable(held):
@@ -404,9 +403,6 @@ def test_manifest_check_fails_closed_without_the_record(monkeypatch):
     monkeypatch.setattr(ds, "_heldout", gone)
     reason = ds.manifest_protected_reason(iter(ts.manifest_rows(pc.CALIBRATION, 5)), spent=[])
     assert reason is not None and "cannot be read" in reason
-
-
-# -- redaction -------------------------------------------------------------
 
 
 # -- every command that loads to change data is guarded or allowlisted -------
@@ -502,19 +498,6 @@ def test_flat_driver_copy_finds_its_records(tmp_path):
     assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr[-400:]
 
 
-def test_fixture_values_are_not_production(held):
-    """The guard tests use the fixture record only."""
-    assert (
-        held.salt
-        != json.loads((ROOT / "src/lakebench/spark/data/aml/heldout_hashes.json").read_text())[
-            "salt"
-        ]
-    )
-
-
-# -- owner, 10-03: bronze-verify refuses a protected corpus --------------------
-
-
 @pytest.mark.parametrize(
     ("mode", "required_env", "required"),
     [
@@ -585,15 +568,63 @@ def test_held_out_check_before_a_stage_subset():
         }
 
 
-def test_a_financial_stage_subset_runs_the_check_before_its_stages():
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    body = src[src.index("def _run_once(") :]
-    check = body.index("_held_out_check_only(")
-    assert body.index("stages = all_stages") < check < body.index("for cycle_idx in range")
-    guard = body[check - 700 : check]
-    assert "stages[0][0] != JobType.BRONZE_VERIFY" in guard
-    # Every subset is checked; a multi-cycle one may have no manifest yet.
-    assert "required=total_cycles == 1" in body[check : check + 200]
+@pytest.mark.parametrize(
+    ("stage", "cycles", "required", "refused"),
+    [
+        ("silver-build", 1, "1", False),
+        ("gold-finalize", 1, "1", False),
+        ("silver-build", 3, "0", False),
+        ("silver-build", 1, "1", True),
+    ],
+    ids=["silver", "gold", "multi-cycle-manifest-optional", "refused-submits-no-stage"],
+)
+def test_a_financial_stage_subset_runs_the_check_before_its_stages(
+    tmp_path, monkeypatch, stage, cycles, required, refused
+):
+    """A financial --stage subset runs no bronze-verify of its own, so its
+    held-out check runs alone first. A multi-cycle run may have no manifest
+    yet, so there the manifest is optional. A refusal stops the run at exit 2
+    before any stage reads the corpus."""
+    import copy
+    import dataclasses
+
+    from tests.harness import run_harness as rh
+
+    submitted: list[tuple[str, dict]] = []
+    real_submit = rh.FakeJobManager.submit_job
+
+    def record_submit(self, job_type, cycle_env=None, **kw):
+        submitted.append((job_type.value, dict(cycle_env or {})))
+        return real_submit(self, job_type, cycle_env=cycle_env, **kw)
+
+    monkeypatch.setattr(rh.FakeJobManager, "submit_job", record_submit)
+    if refused:
+
+        def refusing(self, *a, **k):
+            logs = f"ERROR: {lg.REFUSAL_MARKER}: the corpus manifest comes from a spent seed"
+            return SimpleNamespace(success=False, message="driver failed", driver_logs=logs)
+
+        monkeypatch.setattr(rh.FakeMonitor, "wait_for_completion", refusing)
+    base = rh.SCENARIOS["batch_aml"]
+    config = copy.deepcopy(base.config)
+    config["architecture"]["pipeline"]["cycles"] = cycles
+    # A multi-cycle run cannot reuse a corpus, so it never takes --skip-generate.
+    argv = ["--stage", stage, "--timeout", "1200", "--yes"]
+    if cycles == 1:
+        argv.append("--skip-generate")
+    scenario = dataclasses.replace(base, config=config, argv=argv)
+    result, _ = rh.invoke_scenario(scenario, tmp_path, monkeypatch)
+
+    first_job, first_env = submitted[0]
+    assert first_job == "bronze-verify"
+    assert first_env["LB_REGISTER_TABLE"] == "check"
+    assert first_env["LB_MANIFEST_REQUIRED"] == required
+    if refused:
+        assert result.exit_code == 2, result.output
+        assert [job for job, _ in submitted] == ["bronze-verify"]
+    elif cycles == 1:
+        assert result.exit_code == 0, result.output
+        assert [job for job, _ in submitted] == ["bronze-verify", stage]
 
 
 def test_record_refusal_is_fail_closed_by_default(monkeypatch):

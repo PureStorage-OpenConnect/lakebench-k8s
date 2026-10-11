@@ -1,80 +1,63 @@
-"""Tests for Config Schema v2 features (env vars, flat fields).
-
-Phase 7 of v1.3 modularization.
-"""
+"""Flat top-level config fields and env var substitution load end to end."""
 
 from __future__ import annotations
 
 import textwrap
 
 import pytest
+import yaml
 
-from lakebench.config.loader import (
-    _apply_flat_fields,
-    load_config,
+from lakebench.config.loader import load_config
+
+
+@pytest.mark.parametrize(
+    ("flat", "nested", "read"),
+    [
+        (
+            {"endpoint": "http://flat:9000"},
+            {"platform": {"storage": {"s3": {"endpoint": "http://nested:9000"}}}},
+            lambda c: c.platform.storage.s3.endpoint,
+        ),
+        (
+            {"scale": 50},
+            {"workload": {"datagen": {"scale": 7}}},
+            lambda c: c.architecture.workload.datagen.scale,
+        ),
+    ],
+    ids=["endpoint", "scale"],
 )
-
-# ===========================================================================
-# Env var substitution
-# ===========================================================================
-
-
-# ===========================================================================
-# Flat field mapping
-# ===========================================================================
-
-
-class TestFlatFieldMapping:
-    """Tests for flat top-level field promotion."""
-
-    def test_endpoint_promoted(self):
-        data = {"name": "test", "endpoint": "http://s3:9000"}
-        result = _apply_flat_fields(data)
-        assert result["platform"]["storage"]["s3"]["endpoint"] == "http://s3:9000"
-        assert "endpoint" not in result
-
-    def test_scale_promoted(self):
-        data = {"name": "test", "scale": 50}
-        result = _apply_flat_fields(data)
-        assert result["workload"]["datagen"]["scale"] == 50
-        assert "scale" not in result
-
-    def test_multiple_flat_fields(self):
-        data = {
-            "name": "test",
-            "endpoint": "http://s3:9000",
-            "access_key": "minioadmin",
-            "secret_key": "minioadmin",
-            "scale": 10,
-            "namespace": "lb-test",
-            "mode": "batch",
-        }
-        result = _apply_flat_fields(data)
-        assert result["platform"]["storage"]["s3"]["endpoint"] == "http://s3:9000"
-        assert result["platform"]["storage"]["s3"]["access_key"] == "minioadmin"
-        assert result["platform"]["kubernetes"]["namespace"] == "lb-test"
-        assert result["architecture"]["pipeline"]["mode"] == "batch"
-        assert result["workload"]["datagen"]["scale"] == 10
-
-    def test_flat_overrides_nested(self):
-        data = {
-            "name": "test",
-            "endpoint": "http://flat:9000",
-            "platform": {"storage": {"s3": {"endpoint": "http://nested:9000"}}},
-        }
-        result = _apply_flat_fields(data)
-        assert result["platform"]["storage"]["s3"]["endpoint"] == "http://flat:9000"
-
-    def test_spark_image_promoted(self):
-        data = {"name": "test", "spark_image": "apache/spark:4.1.1-python3"}
-        result = _apply_flat_fields(data)
-        assert result["images"]["spark"] == "apache/spark:4.1.1-python3"
-        assert "spark_image" not in result
+def test_flat_field_overrides_nested(tmp_path, flat, nested, read):
+    data = {
+        "name": "test",
+        "endpoint": "http://minio:9000",
+        "access_key": "minioadmin",
+        "secret_key": "minioadmin",
+    }
+    data.update(nested)
+    data.update(flat)
+    cfg_file = tmp_path / "lakebench.yaml"
+    cfg_file.write_text(yaml.safe_dump(data))
+    assert read(load_config(cfg_file)) == next(iter(flat.values()))
 
 
-# ===========================================================================
-# Integration: flat config file loads correctly
-# ===========================================================================
+@pytest.mark.parametrize(
+    ("key", "value", "read"),
+    [
+        ("namespace", "lb-flat", lambda c: c.platform.kubernetes.namespace),
+        ("mode", "continuous", lambda c: c.architecture.pipeline.mode.value),
+        ("spark_image", "apache/spark:3.5.4-python3", lambda c: c.images.spark),
+        ("access_key", "flat-ak", lambda c: c.platform.storage.s3.access_key),
+        ("secret_key", "flat-sk", lambda c: c.platform.storage.s3.secret_key),
+    ],
+)
+def test_flat_field_is_promoted(tmp_path, key, value, read):
+    cfg_file = tmp_path / "lakebench.yaml"
+    cfg_file.write_text(
+        yaml.safe_dump({"name": "test", "recipe": "hive-iceberg-spark-trino", key: value})
+    )
+    with pytest.warns(DeprecationWarning):
+        cfg = load_config(cfg_file)
+    assert read(cfg) == value
 
 
 class TestFlatConfigIntegration:
@@ -130,8 +113,8 @@ class TestFlatConfigIntegration:
             load_config(cfg_file)
         assert not (tmp_path / ".lakebench").exists()
 
-    def test_nameless_read_refuses_v16_state_name_without_writing(self, tmp_path):
-        """A read-only load names the v1.6 state.json name, refuses, writes nothing."""
+    def test_nameless_read_writes_nothing_and_refuses_when_state_holds_a_name(self, tmp_path):
+        """A read-only load writes nothing, and refuses once state.json holds a name."""
         import json
 
         from lakebench.config.loader import ConfigNameRequired, LoadPurpose
@@ -144,13 +127,12 @@ class TestFlatConfigIntegration:
             secret_key: minioadmin
             """)
         )
-        config = load_config(cfg_file, purpose=LoadPurpose.READ)
-        assert config.name.startswith("lb-")
+        load_config(cfg_file, purpose=LoadPurpose.READ)
         assert not (tmp_path / ".lakebench").exists()
 
         state_file = tmp_path / ".lakebench" / "state.json"
         state_file.parent.mkdir()
         state_file.write_text(json.dumps({"name": "lb-20260101-120000", "created": "x"}))
-        with pytest.raises(ConfigNameRequired, match="name: lb-20260101-120000"):
+        with pytest.raises(ConfigNameRequired):
             load_config(cfg_file, purpose=LoadPurpose.READ)
         assert sorted(p.name for p in (tmp_path / ".lakebench").iterdir()) == ["state.json"]

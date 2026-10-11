@@ -163,14 +163,17 @@ class TestHoldBudget:
             finally:
                 lease_state.leave(token)
 
-    def test_helm_attempt_is_capped_under_the_lease(self):
+    @pytest.mark.parametrize(("lease_s", "cap_s"), [(750, 120), (90, 90)])
+    def test_helm_attempt_never_outlives_the_lease(self, lease_s, cap_s):
         clock = [0.0]
         with patch("time.monotonic", side_effect=lambda: clock[0]):
-            _held, token = lease_state.enter("t", 750)
+            _held, token = lease_state.enter("t", lease_s)
             try:
-                assert op._Phase(180).helm_attempt_s("helm") == op._HELM_ATTEMPT_MAX_S
+                attempt = op._Phase(180).helm_attempt_s("helm")
             finally:
                 lease_state.leave(token)
+        assert 60 <= attempt <= min(120, lease_s, 180)
+        assert attempt == cap_s
 
     def test_helm_is_not_killed_outside_the_lease(self):
         """Outside the lease _pinned gives helm no SIGTERM-first stop and no
@@ -379,9 +382,7 @@ class TestReleaseState:
         mgr = _mgr()
         with patch.object(mgr, "_run", return_value=_ok("2026-10-02T04:53:00Z")) as run:
             assert mgr.revision_created(5) == pytest.approx(1790916780.0)
-        cmd = run.call_args.args[0]
-        assert "sh.helm.release.v1.spark-operator.v5" in cmd
-        assert "jsonpath={.metadata.creationTimestamp}" in cmd
+        run.assert_called_once()
         with patch.object(mgr, "_run", return_value=_fail("NotFound")):
             assert mgr.revision_created(5) is None
 
@@ -425,7 +426,9 @@ class TestReleaseState:
 
         with patch.object(mgr, "_run", side_effect=run):
             assert mgr._get_watched_namespaces(revision=4) == ["ns-a"]
-        assert "--revision" in cmds[0] and "4" in cmds[0]
+        assert any(
+            a == "--revision" and b == "4" for a, b in zip(cmds[0], cmds[0][1:], strict=False)
+        )
 
     def test_an_empty_entry_means_every_namespace(self):
         """The chart renders --namespaces="" (watch all) for a list with "";

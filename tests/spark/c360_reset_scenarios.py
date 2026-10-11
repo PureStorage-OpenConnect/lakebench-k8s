@@ -1,4 +1,4 @@
-"""Continuous-reset scenarios for c360 (LB-142), run in a fresh JVM.
+"""Continuous-reset scenarios for c360, run in a fresh JVM.
 
 Not collected by pytest (no ``test_`` prefix). ``test_c360_reset_spark`` runs
 it as a subprocess because the Iceberg and Delta jars must be on the driver

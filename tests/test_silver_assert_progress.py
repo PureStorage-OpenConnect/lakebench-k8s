@@ -1,4 +1,4 @@
-"""A1 (LB-044 gate): assert_progress refuses exit-0 on zero silver rows.
+"""A1 (zero-row gate): assert_progress refuses exit-0 on zero silver rows.
 
 The gate lands in common.py and is called at end-of-main by every silver
 script (three batches + three streams). These unit tests exercise the

@@ -184,6 +184,16 @@ def _where(cfg: Any) -> tuple[str, str]:
     return bucket, bronze_datagen_prefix(cfg)
 
 
+def bronze_holds_data(cfg: Any, s3: Any) -> bool | None:
+    """Whether the datagen prefix in bronze holds any object of the corpus
+    (Lakebench's own keys aside); None when it cannot be listed."""
+    bucket, prefix = _where(cfg)
+    try:
+        return bool(s3.bucket_exists(bucket) and s3.has_user_objects(bucket, prefix))
+    except Exception:  # noqa: BLE001 -- the caller then reuses as before
+        return None
+
+
 def read_series(cfg: Any, s3: Any) -> SeriesRead:
     """One listing of the datagen scope through
     ``corpus_digest.read_corpus_markers`` (*s3* is an ``S3Client``). A

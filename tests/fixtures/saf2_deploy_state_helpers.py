@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_saf2_deploy_state.py (imported by several test files)."""
+"""A fake CoreV1 namespace store and deploy-state file writers."""
 
 from __future__ import annotations
 

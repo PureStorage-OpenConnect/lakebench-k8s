@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lakebench.deploy import deadline
-from lakebench.deploy.engine import DeploymentEngine
 from lakebench.k8s import wait as wait_mod
-
-SRC = Path(__file__).resolve().parent.parent / "src" / "lakebench"
 
 
 class FakeClock:
@@ -54,24 +50,23 @@ def test_no_deadline_outside_deploy():
 # --- waits ------------------------------------------------------------------------
 
 
-def _engine():
-    eng = DeploymentEngine.__new__(DeploymentEngine)
-    eng.results = []
-    return eng
-
-
 def test_post_upgrade_rollout_is_not_cut_by_the_deadline(clock):
     from lakebench.modules.pipeline_engines.spark import operator as op
 
     m = op.SparkOperatorManager.__new__(op.SparkOperatorManager)
     m.namespace = "spark-operator"
-    m._run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+
+    def slow_rollout(*a, **k):
+        clock.sleep(20)  # each rollout outlives the deadline
+        return MagicMock(returncode=0, stderr="")
+
+    m._run = MagicMock(side_effect=slow_rollout)
     with deadline.deploy_deadline(5):
-        clock.sleep(10)
         assert m._rollout_status_after_upgrade()
-    args = [c.args[0] for c in m._run.call_args_list]
-    # Bounded by its phase (and the lease hold), never by the deploy deadline.
-    assert len(args) == 2 and all(f"--timeout={op.WATCH_ROLLOUT_PHASE_S}s" in a for a in args)
+        assert deadline.expired()
+    # Bounded by its phase (and the lease hold), never by the deploy deadline:
+    # both Deployments are awaited although the deadline passed during the first.
+    assert m._run.call_count == 2
 
 
 # --- the shared watch list: gate before the mutation, never after ------------------
@@ -234,6 +229,3 @@ def test_operator_scc_check_is_not_cut_after_a_shared_change(clock, monkeypatch)
         clock.sleep(4)
         mgr._assign_openshift_scc()  # logs the SCCGrantError, no DeployTimeout
     assert calls == [False, False]
-
-
-# --- static guard -------------------------------------------------------------------

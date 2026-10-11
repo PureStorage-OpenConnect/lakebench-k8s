@@ -61,16 +61,21 @@ def _exists(spark, t):
     return spark.catalog.tableExists(f"{CAT}.{t}")
 
 
-def test_reset_drops_every_silver_table_the_stream_writes(spark, load_script, monkeypatch):
+@pytest.mark.parametrize("kind", ["silver", "gold"])
+def test_reset_drops_every_table_the_continuous_run_writes(spark, load_script, monkeypatch, kind):
     monkeypatch.setenv("LB_CATALOG_TYPE", "polaris")  # no explicit bronze location
     bvf = load_script("bronze_verify_financial")
-    # The script's own set, so a table added there is populated and checked
-    # too; it must still name the seven the stream writes today.
-    tables = tuple(bvf.CONTINUOUS_SILVER_TABLES)
-    assert set(STREAM_SILVER) <= set(tables)
+    if kind == "silver":
+        # The script's own set, so a table added there is populated and
+        # checked too; it must still name the seven the stream writes today.
+        tables = tuple(bvf.CONTINUOUS_SILVER_TABLES)
+        assert set(STREAM_SILVER) <= set(tables)
+    else:
+        # Until gold-refresh's first tick, the previous run's alerts and
+        # detection status would read as this run's.
+        tables = STREAM_GOLD
     _populate(spark, tables)
-    bronze = spark.createDataFrame([("x",)], "msg_id string")
-    bvf._continuous_reset(spark, bronze)
+    bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
     left = [t for t in tables if _exists(spark, t)]
     assert left == [], f"the continuous reset left {left}"
 
@@ -84,14 +89,3 @@ def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script,
     _populate(spark, [table])
     with pytest.raises(common.SilverAbort):
         ssf.refuse_reused_silver(spark, str(tmp_path / "fresh-ckpt"))
-
-
-def test_reset_drops_the_gold_tables_gold_refresh_writes(spark, load_script, monkeypatch):
-    """Until gold-refresh's first tick, the previous run's alerts and
-    detection status would read as this run's."""
-    monkeypatch.setenv("LB_CATALOG_TYPE", "polaris")
-    bvf = load_script("bronze_verify_financial")
-    _populate(spark, STREAM_GOLD)
-    bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
-    left = [t for t in STREAM_GOLD if _exists(spark, t)]
-    assert left == [], f"the continuous reset left {left}"

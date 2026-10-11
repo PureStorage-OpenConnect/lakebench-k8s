@@ -98,7 +98,7 @@ SECTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "Advanced workload overrides. Most users should leave these at defaults and "
         "control volume via `datagen.scale`. The AML TM operations layer "
         "(`workload.tm_operations.*`) is described in "
-        "[aml-scoring.md](aml-scoring.md#the-transaction-monitoring-operations-layer).",
+        "[TM operations](benchmarks/aml/tm-operations.md#85-tm-operations).",
     ),
     ("Architecture -- Benchmark", ("architecture.benchmark.",), ""),
     (

@@ -22,44 +22,13 @@ from typing import Any
 
 import pytest
 
-from tests.fixtures.report_consistency_helpers import _COUNT as _COUNT
-from tests.fixtures.report_consistency_helpers import _FRACTION_UNITS as _FRACTION_UNITS
-from tests.fixtures.report_consistency_helpers import _GIB as _GIB
-from tests.fixtures.report_consistency_helpers import _HOUR as _HOUR
-from tests.fixtures.report_consistency_helpers import _PERCENT_UNITS as _PERCENT_UNITS
-from tests.fixtures.report_consistency_helpers import _TOKEN as _TOKEN
-from tests.fixtures.report_consistency_helpers import DerivedSpan as DerivedSpan
-from tests.fixtures.report_consistency_helpers import PathError as PathError
-from tests.fixtures.report_consistency_helpers import _is_number as _is_number
-from tests.fixtures.report_consistency_helpers import _num as _num
-from tests.fixtures.report_consistency_helpers import _plain_text as _plain_text
-from tests.fixtures.report_consistency_helpers import _render_dict as _render_dict
-from tests.fixtures.report_consistency_helpers import _SpanParser as _SpanParser
-from tests.fixtures.report_consistency_helpers import _split as _split
-from tests.fixtures.report_consistency_helpers import _tokens as _tokens
-from tests.fixtures.report_consistency_helpers import _unit_key as _unit_key
-from tests.fixtures.report_consistency_helpers import derived_spans as derived_spans
-from tests.fixtures.report_consistency_helpers import expr_value as expr_value
-from tests.fixtures.report_consistency_helpers import formatted as formatted
-from tests.fixtures.report_consistency_helpers import mismatches as mismatches
-from tests.fixtures.report_consistency_helpers import recompute as recompute
-from tests.fixtures.report_consistency_helpers import resolve as resolve
-from tests.fixtures.report_consistency_helpers import term_value as term_value
-from tests.fixtures.report_consistency_helpers import unit_problems as unit_problems
+from tests.fixtures.report_consistency_helpers import (
+    _render_dict,
+    derived_spans,
+    mismatches,
+)
 from tests.fixtures.report_goldens import GOLDEN_RUNS, golden_path, page_text, render
 from tests.fixtures.stored_records import load_record, record_ids
-
-# ---------------------------------------------------------------------------
-# Page parsing
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Recomputation from the record, by path. Deliberately written apart from
-# lakebench.reports.derived: the renderer only names paths; this resolves
-# them.
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -137,16 +106,6 @@ def test_record_change_fails():
     record["pipeline_benchmark"]["scores"]["scale_ratio"] = 0.5
     bad = mismatches(record, golden_path("5105a0").read_text())
     assert bad and all("scale_ratio" in b for b in bad)
-
-
-_ALLOWED: dict[str, str] = {
-    # The bottleneck shares are kept as floats to pick the dominant stage;
-    # the page text renders them through derived.pct.
-    'd["weight"] / total_weight * 100': "ordering",
-    'd["cpu_sec"] / total_cpu * 100 if total_cpu and d["cpu_sec"] is not None else 0.0': "ordering",
-    # A direct unit call of the TM section has no record to name.
-    'return f"{float(v) * 100:.1f}%"': "no record path",
-}
 
 
 def test_quoted_rule_key_still_renders_the_scorecard():

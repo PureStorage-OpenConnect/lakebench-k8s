@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from lakebench.config import LakebenchConfig
     from lakebench.deps.manifest import DepsHandle
     from lakebench.k8s import K8sClient
@@ -102,7 +105,12 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         # (28) means data-per-executor stops decreasing with scale.
         # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
         # only costs bare block storage. Do not shrink.
+        # scratch_size is the per-executor ceiling; scratch_executor_size
+        # gives each executor its share of scratch_gib_per_scale x scale.
+        # 60 GiB per scale unit is 2.2x the failed 18 x 150Gi at scale 100
+        # and reaches the 300Gi ceiling there.
         "scratch_size": "300Gi",
+        "scratch_gib_per_scale": 60,
         "base_executors": 8,  # scale <= 10
         "executors_per_100_scale": 12,  # add 12 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
@@ -119,7 +127,10 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         # losing 5 tasks (recovered, but marginal). Raised to 300Gi, matching
         # the proven silver-build scratch, so the spill-heavy detection DAG
         # has headroom at scale 100. Portworx px-csi-scratch is thin-provisioned.
+        # 33 GiB per scale unit is 3.3x the ~1,000 GiB the 11 executors held at
+        # scale 100 and reaches the 300Gi ceiling there.
         "scratch_size": "300Gi",
+        "scratch_gib_per_scale": 33,
         "base_executors": 4,  # scale <= 10
         "executors_per_100_scale": 8,  # add 8 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
@@ -318,7 +329,9 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
     "financial": {
         "bronze-verify": {
+            # 50 GiB per scale unit is 2.5x the failed 4 x 50Gi at scale 10.
             "scratch_size": "500Gi",
+            "scratch_gib_per_scale": 50,
             "executors_per_100_scale": 8,
             "max_executors": 28,
             "executor_memory": "8g",
@@ -368,12 +381,8 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         # base 32 shuffle partitions would leave 8 of the 40 cores idle in
         # every shuffle stage (43 s, the 8-executor case), so base_partitions
         # is 2x the cores, as _scale_partitions uses above scale 10.
-        # keep_up_executors (7 x 4 cores hold 390K rows/s, 1.2x bronze intake)
-        # is what the concurrent budget gives silver before gold on a cluster
-        # too small for all three: beyond it silver's cores mostly wait.
         "silver-stream": {
             "base_executors": 10,
-            "keep_up_executors": 7,
             "executors_per_100_scale": 8,
             "max_executors": _MAX_EXECUTORS_SAFE,
             "base_partitions": 80,
@@ -501,8 +510,308 @@ def executor_count(profile: dict[str, Any], scale: float, *, capped: bool = True
     return min(base + extra, profile["max_executors"]) if capped else base + extra
 
 
+#: Smallest scratch PVC an executor of a scaled-scratch profile gets.
+_SCRATCH_MIN_GIB = 50
+
+
+def scratch_executor_size(profile: dict[str, Any], scale: float, executors: int) -> str:
+    """Each executor's scratch PVC: its share of the stage's
+    ``scratch_gib_per_scale`` x *scale*, between ``_SCRATCH_MIN_GIB`` and the
+    profile's ``scratch_size``. A profile without a per-scale need keeps
+    ``scratch_size``."""
+    import math
+
+    per_scale = profile.get("scratch_gib_per_scale")
+    if not per_scale:
+        return str(profile["scratch_size"])
+    ceiling = int(str(profile["scratch_size"]).removesuffix("Gi"))
+    need = math.ceil(per_scale * scale / max(1, executors))
+    return f"{min(ceiling, max(_SCRATCH_MIN_GIB, need))}Gi"
+
+
 def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     return executor_count(profile, scale)
+
+
+#: The streaming jobs the balance formula sizes, and their stage rate key.
+_BALANCE_STAGES = {"bronze-ingest": "bronze", "silver-stream": "silver"}
+
+
+def _scale_and_schema(
+    config: Any | None, scale: float | None = None, schema: str | None = None
+) -> tuple[float, str | None]:
+    """(scale, schema) from *config*, or the ones given when there is none."""
+    if config is not None:
+        wl = config.architecture.workload
+        return float(wl.datagen.scale), getattr(getattr(wl, "schema_type", None), "value", None)
+    return float(scale or 1), schema
+
+
+def balance_executor_need(
+    job_type: str,
+    profile: dict[str, Any],
+    config: Any | None = None,
+    *,
+    scale: float | None = None,
+    schema: str | None = None,
+) -> int:
+    """Executors a continuous stage needs to carry the offered load with
+    headroom: load / (stage MB/s per core x BALANCE_HEADROOM) / executor
+    cores (DESIGN-CONTINUOUS 4). The load follows scale and schema only, so
+    *scale* and *schema* stand in for a config. 0 for a stage with no rate
+    (gold-refresh)."""
+    import math
+
+    stage = _BALANCE_STAGES.get(job_type)
+    if stage is None or (config is None and scale is None):
+        return 0
+    from lakebench.config.autosizer import (
+        BALANCE_HEADROOM,
+        CONTINUOUS_LOAD_MB_S_PER_SCALE,
+        DATAGEN_MIN_CPU_M,
+        STAGE_MB_S_PER_CORE,
+        datagen_offered_mb_s,
+    )
+
+    sc, sch = _scale_and_schema(config, scale, schema)
+    sch = sch if sch in STAGE_MB_S_PER_CORE else "customer360"
+    rate = STAGE_MB_S_PER_CORE[sch].get(stage)
+    if not rate:
+        return 0
+    # What datagen offers (whole CPU steps, or the config's datagen), not
+    # the declared load it rounds up from.
+    if config is not None:
+        offered = datagen_offered_mb_s(config)
+    else:
+        dg_m = math.ceil(
+            CONTINUOUS_LOAD_MB_S_PER_SCALE[sch] * sc / STAGE_MB_S_PER_CORE[sch]["datagen"] * 10
+        )
+        offered = max(DATAGEN_MIN_CPU_M / 100, dg_m) / 10 * STAGE_MB_S_PER_CORE[sch]["datagen"]
+    cores = offered / (rate * BALANCE_HEADROOM)
+    return math.ceil(cores / int(profile["executor_cores"]))
+
+
+#: Executor sizes a balance stage grows to, in order, when its need at the
+#: profile's size is above the executor cap (fewer, larger pods put less load
+#: on the Kubernetes API; DESIGN-CONTINUOUS 4b).
+_EXECUTOR_CORE_STEPS = (8, 16)
+#: The streaming jobs whose executor size the config may set.
+_EXECUTOR_STAGE_JOBS = ("bronze-ingest", "silver-stream", "gold-refresh")
+
+
+def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
+    if config is None:
+        return None
+    spark = config.platform.compute.spark
+    value = {
+        "bronze-ingest": spark.bronze_ingest_executor_cores,
+        "silver-stream": spark.silver_stream_executor_cores,
+        "gold-refresh": spark.gold_refresh_executor_cores,
+    }.get(job_type)
+    return int(value) if value is not None else None
+
+
+def _reshape_executors(
+    profile: dict[str, Any], cores: int, *, keep_count: bool = False
+) -> dict[str, Any]:
+    """*profile* with *cores* per executor: memory keeps the per-core share,
+    and the scale counts shrink so the total cores stay the same, unless
+    *keep_count* (cores set in the config change the size only)."""
+    import math
+
+    from lakebench.config.schema import parse_spark_memory
+
+    old = int(profile["executor_cores"])
+    if cores == old:
+        return dict(profile)
+    ratio = cores / old
+    gib = 1024**3
+    out = dict(profile)
+    out["executor_cores"] = cores
+    for key in ("executor_memory", "executor_memory_overhead"):
+        out[key] = f"{math.ceil(parse_spark_memory(profile[key]) * ratio / gib)}g"
+    if str(profile.get("scratch_size", "")).endswith("Gi"):
+        out["scratch_size"] = f"{math.ceil(int(profile['scratch_size'][:-2]) * ratio)}Gi"
+    for key in ("base_executors", "executors_per_100_scale"):
+        if key in profile and not keep_count:
+            out[key] = max(1, math.ceil(profile[key] / ratio))
+    return out
+
+
+def kubernetes_client_conf(executors: int) -> dict[str, str]:
+    """Spark's Kubernetes client settings for a job of *executors*: pod lists
+    from the API server cache, polling that slows as the job grows, and pod
+    requests in bounded waves (DESIGN-CONTINUOUS 4b)."""
+    import math
+
+    batch = max(5, min(20, math.ceil(executors / 3)))
+    return {
+        "spark.kubernetes.executor.enablePollingWithResourceVersion": "true",
+        "spark.kubernetes.executor.apiPollingInterval": "30s" if executors <= 20 else "60s",
+        "spark.kubernetes.allocation.batch.size": str(batch),
+        "spark.kubernetes.allocation.batch.delay": "1s",
+        "spark.kubernetes.allocation.maxPendingPods": str(2 * batch),
+    }
+
+
+def stage_profile(
+    job_type: str,
+    config: Any | None,
+    *,
+    scale: float | None = None,
+    schema: str | None = None,
+) -> dict[str, Any] | None:
+    """The resolved profile of *job_type* with its executor size: the cores
+    set in the config, else, for a balance stage whose need is above the
+    executor cap at the profile's size, the smallest larger size that fits.
+    Without a config, *scale* and *schema* size it."""
+    sc, sch = _scale_and_schema(config, scale, schema)
+    profile = _resolve_job_profile(job_type, sch)
+    if profile is None:
+        return None
+    forced = _executor_cores_override(job_type, config)
+    if forced is not None:
+        # A value the config sets is exact; one the autosizer capped keeps
+        # the total cores.
+        return _reshape_executors(profile, forced, keep_count=_cores_set(job_type, config))
+    return _auto_shape(job_type, profile, config, sc, sch)
+
+
+def _cores_set(job_type: str, config: Any | None) -> bool:
+    """Whether the config itself sets *job_type*'s ``*_executor_cores``."""
+    field = f"{job_type.replace('-', '_')}_executor_cores"
+    return config is not None and field in config.platform.compute.spark.model_fields_set
+
+
+def _auto_shape(
+    job_type: str, profile: dict[str, Any], config: Any | None, sc: float, sch: str | None
+) -> dict[str, Any]:
+    """*profile* as the autosizer sizes it: a balance stage whose need is
+    above the executor cap grows to the smallest larger size that fits."""
+    if job_type not in _BALANCE_STAGES or executor_override(job_type, config) is not None:
+        return profile
+    cap = int(profile.get("max_executors", _MAX_EXECUTORS_SAFE))
+    shaped = profile
+    for cores in _EXECUTOR_CORE_STEPS:
+        if balance_executor_need(job_type, shaped, config, scale=sc, schema=sch) <= cap:
+            break
+        if cores > int(shaped["executor_cores"]):
+            shaped = _reshape_executors(profile, cores)
+    return shaped
+
+
+#: Share of the largest node one executor pod may take (kubelet reserve and
+#: co-scheduled pods), matching the autosizer's per-pod memory headroom.
+_EXECUTOR_NODE_SHARE = 0.85
+
+
+def _fits_node(profile: dict[str, Any], node_cpu_m: int, node_mem_b: int) -> bool:
+    from lakebench.config.schema import parse_spark_memory
+
+    mem = parse_spark_memory(profile["executor_memory"]) + parse_spark_memory(
+        profile["executor_memory_overhead"]
+    )
+    share = _EXECUTOR_NODE_SHARE
+    return int(profile["executor_cores"]) * 1000 <= node_cpu_m * share and mem <= node_mem_b * share
+
+
+def fit_executor_cores(config: Any, node_cpu_m: int, node_mem_b: int) -> list[str]:
+    """Hold each balance stage's grown executor to the largest size that fits
+    the largest node, by setting its ``*_executor_cores`` (never one the
+    config sets). Returns the autosizer change lines."""
+    spark = config.platform.compute.spark
+    fields = {
+        "bronze-ingest": "bronze_ingest_executor_cores",
+        "silver-stream": "silver_stream_executor_cores",
+    }
+    out: list[str] = []
+    for job_type, field in fields.items():
+        if field in spark.model_fields_set:
+            continue
+        shaped = stage_profile(job_type, config)
+        if shaped is None or _fits_node(shaped, node_cpu_m, node_mem_b):
+            continue
+        base = _resolve_job_profile(job_type, _scale_and_schema(config)[1]) or shaped
+        fit = int(base["executor_cores"])
+        for cores in _EXECUTOR_CORE_STEPS:
+            if cores > fit and _fits_node(_reshape_executors(base, cores), node_cpu_m, node_mem_b):
+                fit = cores
+        object.__setattr__(spark, field, fit)
+        out.append(
+            f"{field} capped at {fit}: a {shaped['executor_cores']}-core executor does not "
+            "fit the largest node"
+        )
+    return out
+
+
+def streaming_executor_count(
+    job_type: str,
+    profile: dict[str, Any],
+    config: Any | None,
+    *,
+    scale: float | None = None,
+    schema: str | None = None,
+) -> int:
+    """A continuous stage's executors: the scale count, raised to what the
+    offered load needs, within the profile's maximum. Cores the config sets
+    change the size only: the count is the one the stage runs without them."""
+    sc, sch = _scale_and_schema(config, scale, schema)
+    if _cores_set(job_type, config):
+        base = _resolve_job_profile(job_type, sch)
+        if base is not None:
+            profile = _auto_shape(job_type, base, config, sc, sch)
+    need = balance_executor_need(job_type, profile, config, scale=sc, schema=sch)
+    n = max(_scale_executor_count(profile, sc), need)
+    return min(n, int(profile.get("max_executors", _MAX_EXECUTORS_SAFE)))
+
+
+def streaming_shape(config: Any) -> dict[str, dict[str, Any]]:
+    """Each continuous stage's executor shape and planned count (before the
+    concurrent budget), and the balance need: what the run record keeps, so a
+    grown executor is reported as the shape that ran."""
+    out: dict[str, dict[str, Any]] = {}
+    for jt in _STREAMING_JOB_TYPES:
+        profile = stage_profile(jt.value, config) or _JOB_PROFILES[jt.value]
+        out[jt.value] = {
+            "executor_cores": int(profile["executor_cores"]),
+            "executor_memory": profile["executor_memory"],
+            "executors": executor_override(jt.value, config)
+            or streaming_executor_count(jt.value, profile, config),
+            "balance_need": balance_executor_need(jt.value, profile, config),
+            # Before the executor cap, which the run record compares it with.
+            "uncapped": max(
+                executor_count(
+                    profile, float(config.architecture.workload.datagen.scale), capped=False
+                ),
+                balance_executor_need(jt.value, profile, config),
+            ),
+        }
+    return out
+
+
+def unbalanced_stages(config: Any, budget: dict[JobType, int] | None = None) -> list[str]:
+    """Stages that cannot carry the offered load: the need is above the
+    executor cap, the cluster's concurrent *budget*, or an executor count set
+    in the config."""
+    out: list[str] = []
+    for job_type in _BALANCE_STAGES:
+        profile = stage_profile(job_type, config) or _JOB_PROFILES[job_type]
+        need = balance_executor_need(job_type, profile, config)
+        have = executor_override(job_type, config)
+        cap = int(profile.get("max_executors", _MAX_EXECUTORS_SAFE))
+        fits = (budget or {}).get(JobType(job_type), cap)
+        limit = have if have is not None else min(cap, fits)
+        if need > limit:
+            if have is not None:
+                why = "set in config"
+            else:
+                why = "the cluster" if fits < cap else "the executor cap"
+            out.append(
+                f"{job_type} needs ~{need} executors x {profile['executor_cores']} cores to "
+                f"carry the offered load; {why} allows {limit}, so its lag will grow and the run "
+                "will fail the balance check"
+            )
+    return out
 
 
 class MissingSizingProfile(LookupError):
@@ -742,7 +1051,11 @@ def _job_requirement(
     baseline. With *config*, the driver is the one the manifest builds
     (``effective_driver``).
     """
-    profile = _resolve_job_profile(job_type, schema_type)
+    profile = (
+        stage_profile(job_type, config, scale=scale, schema=schema_type)
+        if job_type in _EXECUTOR_STAGE_JOBS
+        else _resolve_job_profile(job_type, schema_type)
+    )
     if not profile:
         return None
 
@@ -750,7 +1063,11 @@ def _job_requirement(
     # import here would be circular.
     from lakebench.config.schema import parse_spark_memory
 
-    executors = _scale_executor_count(profile, scale)
+    executors = (
+        streaming_executor_count(job_type, profile, config, scale=scale, schema=schema_type)
+        if job_type in _BALANCE_STAGES
+        else _scale_executor_count(profile, scale)
+    )
     override = executor_override(job_type, config)
     if override is not None:
         executors = override
@@ -763,7 +1080,9 @@ def _job_requirement(
 
     gib = 1024**3
     memory_bytes = executors * exec_total_bytes + driver_mem
-    scratch_gb = executors * int(str(profile["scratch_size"]).rstrip("Gi") or 0)
+    scratch_gb = executors * int(
+        scratch_executor_size(profile, scale, executors).removesuffix("Gi") or 0
+    )
 
     return JobRequirement(
         job_type=job_type,
@@ -860,12 +1179,13 @@ def _streaming_concurrent_budget(
     cluster_cpu_millicores: int | None,
     *,
     datagen_running: bool = True,
+    cluster_memory_bytes: int | None = None,
 ) -> dict[JobType, int]:
     """Compute max executor count per streaming job for concurrent execution.
 
-    In sustained mode, datagen + 3 streaming jobs share the cluster.
-    Divides the available CPU (after Trino + infra + datagen) among
-    streaming jobs proportionally to their uncapped demand.
+    In sustained mode, datagen + 3 streaming jobs share the cluster. The
+    CPU left after Trino, infra, datagen and the stream drivers is split by
+    ``_fair_caps``.
 
     ``datagen_running=False`` drops the datagen reservation: the continuous
     corpus is finite and usually written before the streams start, and a
@@ -878,94 +1198,122 @@ def _streaming_concurrent_budget(
     """
     if cluster_cpu_millicores is None:
         return {}
+    x = _BudgetInputs.of(config, datagen_running=datagen_running)
+    return _fair_caps(x.want, x.cores, x.budget_m(cluster_cpu_millicores, cluster_memory_bytes))
 
-    scale = config.architecture.workload.datagen.scale
-    # Schema overrides change streaming profiles too (AML bronze-ingest); the
-    # budget must see the profile the manifest deploys, or it caps the job
-    # back to the base count.
-    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
 
-    # Co-resident pods (Trino + Hive + Postgres). Use the shared parser so
-    # Kubernetes-idiomatic CPU strings ("500m", "1.5") don't crash mid-run.
-    from lakebench.config.autosizer import _parse_cpu_millicores
+@dataclass(frozen=True)
+class _BudgetInputs:
+    """What the continuous concurrent budget is computed from."""
 
-    trino = config.architecture.query_engine.trino
-    co_resident_m = (
-        _parse_cpu_millicores(trino.coordinator.cpu)
-        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
-        + 1000  # Hive + Postgres
+    #: Trino, Hive and Postgres, and datagen while its Job runs.
+    reserved_m: int
+    driver_m: int
+    #: The streams' largest executor memory (heap + overhead) per core.
+    per_core_b: float
+    #: Memory the always-on pods and the stream drivers hold.
+    reserved_b: int
+    want: dict[JobType, int]
+    cores: dict[JobType, int]
+
+    @classmethod
+    def of(cls, config: LakebenchConfig, *, datagen_running: bool) -> _BudgetInputs:
+        # Schema overrides change streaming profiles too (AML bronze-ingest);
+        # the budget must see the profile the manifest deploys.
+        from lakebench.config.autosizer import _parse_cpu_millicores
+        from lakebench.config.schema import parse_spark_memory
+        from lakebench.config.sizing import co_resident_request
+
+        trino = config.architecture.query_engine.trino
+        datagen = config.architecture.workload.datagen
+        resolved = {
+            jt: stage_profile(jt.value, config) or _JOB_PROFILES[jt.value]
+            for jt in _STREAMING_JOB_TYPES
+        }
+        drivers = {jt: effective_driver(jt.value, resolved[jt], config) for jt in resolved}
+        co_b = co_resident_request(config, True, datagen_runs=datagen_running).memory_gb * 1024**3
+        return cls(
+            reserved_m=_parse_cpu_millicores(trino.coordinator.cpu)
+            + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
+            + 1000  # Hive + Postgres
+            + (datagen.parallelism * _parse_cpu_millicores(datagen.cpu) if datagen_running else 0),
+            driver_m=sum(int(d[0] * 1000) for d in drivers.values()),
+            per_core_b=max(
+                (
+                    parse_spark_memory(p["executor_memory"])
+                    + parse_spark_memory(p["executor_memory_overhead"])
+                )
+                / int(p["executor_cores"])
+                for p in resolved.values()
+            ),
+            reserved_b=co_b + sum(_driver_pod_bytes(d[1]) for d in drivers.values()),
+            want={jt: streaming_executor_count(jt.value, resolved[jt], config) for jt in resolved},
+            cores={jt: int(resolved[jt]["executor_cores"]) for jt in resolved},
+        )
+
+    def budget_m(self, cpu_m: int, mem_b: int | None) -> int:
+        """Millicores the streams' executors share: 90% of what the
+        always-on pods and the stream drivers leave, CPU and (when known)
+        memory at the largest per-core memory, whichever is smaller."""
+        budget = int(max(0, cpu_m - self.reserved_m - self.driver_m) * 0.90)
+        if mem_b is not None:
+            budget = min(
+                budget, int(max(0, mem_b - self.reserved_b) * 0.90 / self.per_core_b * 1000)
+            )
+        return budget
+
+    @property
+    def need_m(self) -> int:
+        return sum(self.want[jt] * self.cores[jt] * 1000 for jt in self.want)
+
+
+def uncut_cluster(config: LakebenchConfig, *, datagen_running: bool) -> tuple[int, int]:
+    """(cores, GiB): the smallest cluster whose concurrent budget gives
+    every stream all its executors, CPU and memory found apart."""
+    x = _BudgetInputs.of(config, datagen_running=datagen_running)
+    gib = 1024**3
+
+    def least(ok: Callable[[int], bool], guess: int) -> int:
+        n = max(1, guess)
+        while not ok(n):
+            n += 1
+        while n > 1 and ok(n - 1):
+            n -= 1
+        return n
+
+    cores = least(
+        lambda c: x.budget_m(c * 1000, None) >= x.need_m,
+        math.ceil((x.need_m / 0.9 + x.reserved_m + x.driver_m) / 1000),
     )
-
-    # Datagen runs concurrently with streaming while its Job is unfinished
-    datagen = config.architecture.workload.datagen
-    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu) if datagen_running else 0
-
-    # Budget for all streaming jobs combined (90% of remaining after co-resident + datagen)
-    remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
-    streaming_budget_m = int(remaining_m * 0.90)
-
-    base_caps = _proportional_caps(
-        {jt: dict(_JOB_PROFILES[jt.value]) for jt in _STREAMING_JOB_TYPES},
-        scale,
-        streaming_budget_m,
+    memory = least(
+        lambda g: x.budget_m(10**18, g * gib) >= x.need_m,
+        math.ceil((x.need_m / 1000 * x.per_core_b / 0.9 + x.reserved_b) / gib),
     )
-    if not base_caps:
-        return {}
-    resolved: dict[JobType, dict[str, Any]] = {
-        jt: _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
-        for jt in _STREAMING_JOB_TYPES
-    }
-    overridden = [jt for jt in _STREAMING_JOB_TYPES if resolved[jt] != _JOB_PROFILES[jt.value]]
-    if not overridden:
-        return base_caps
+    return cores, memory
 
-    # A schema override must not take cores from the stages it does not
-    # touch: they keep the split they had on the base profiles. Each
-    # overridden job first gets a floor, the whole executors that fit in the
-    # cores its base allocation had (at least one); rounding down, because
-    # rounding up to whole larger executors would request more than the base
-    # split did. The headroom above the kept stages and the floors then goes
-    # upstream first, bronze before silver before gold: a stage runs no
-    # faster than its input arrives, so cores given to silver while bronze
-    # sits at its floor idle (AML at scale 10 on 60-80 cores: bronze at one
-    # executor is the intake the bronze override was sized to fix, and
-    # silver's extra cores would wait on it). Silver is filled first only to
-    # its keep-up count, then gold, then silver's surplus, so gold is not left
-    # at its floor behind a silver that outruns bronze. Granting floors before
-    # sharing also keeps the total inside the budget when a schema overrides
-    # several stages.
-    caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
-    kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
-    want = {jt: _scale_executor_count(resolved[jt], scale) for jt in overridden}
-    for jt in overridden:
-        floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
-        floor = max(1, floor_cores // resolved[jt]["executor_cores"])
-        caps[jt] = min(want[jt], floor)
-    used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
-    # The base split leaves the drivers to the 10% slack, which the larger
-    # overridden stages outgrow: take the drivers out before sharing, or a
-    # capped AML run asks for a few cores more than the cluster has (100
-    # cores at scale 10: 101 with Trino and datagen).
-    driver_m = sum(
-        effective_driver(jt.value, resolved[jt], config)[0] * 1000 for jt in _STREAMING_JOB_TYPES
-    )
-    override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
-    headroom_m = max(0, override_budget_m - used_m)
-    # A stage with ``keep_up_executors`` is filled only to that count on the
-    # first pass (enough to keep pace with its input), so the stages after it
-    # are not left at their floor; its surplus comes last.
-    first = [
-        (jt, min(want[jt], resolved[jt].get("keep_up_executors", want[jt])))
-        for jt in _STREAMING_PIPELINE_ORDER
-        if jt in overridden
-    ]
-    second = [(jt, want[jt]) for jt in _STREAMING_PIPELINE_ORDER if jt in overridden]
-    for jt, target in first + second:
-        exec_cpu_m = resolved[jt]["executor_cores"] * 1000
-        add = max(0, min(target - caps[jt], headroom_m // exec_cpu_m))
-        caps[jt] += add
-        headroom_m -= add * exec_cpu_m
-    return caps
+
+def _fair_caps(
+    want: dict[JobType, int], cores: dict[JobType, int], budget_m: int
+) -> dict[JobType, int]:
+    """Executors per stage within *budget_m* millicores: every stage that
+    wants one starts with one, then each further executor goes to the stage
+    holding the smallest share of what it wants (upstream first on a tie)
+    while one fits. The pipeline runs at the pace of its slowest stage
+    against its need, so this keeps that share as high as the budget allows;
+    a split by the stages' sizes would give a large timer stage (gold) cores
+    the stage that binds (silver) needs."""
+    if sum(want[jt] * cores[jt] * 1000 for jt in want) <= budget_m:
+        return dict(want)
+    caps = {jt: min(1, want[jt]) for jt in want}
+    left = budget_m - sum(caps[jt] * cores[jt] * 1000 for jt in caps)
+    order = {jt: i for i, jt in enumerate(_STREAMING_PIPELINE_ORDER)}
+    while True:
+        open_ = [jt for jt in caps if caps[jt] < want[jt] and cores[jt] * 1000 <= left]
+        if not open_:
+            return caps
+        jt = min(open_, key=lambda j: (caps[j] / want[j], order.get(j, len(order))))
+        caps[jt] += 1
+        left -= cores[jt] * 1000
 
 
 @dataclass(frozen=True)
@@ -977,10 +1325,16 @@ class BudgetedStreamingRequest:
     memory_gb: int
     # "silver-stream 10 -> 6" for each stage the budget cut below its profile.
     capped: tuple[str, ...]
+    #: The executors per stream the budget allows.
+    budget: dict[JobType, int]
 
 
 def streaming_request_under_budget(
-    config: LakebenchConfig, cluster_cpu_millicores: int, *, datagen_running: bool = True
+    config: LakebenchConfig,
+    cluster_cpu_millicores: int,
+    *,
+    datagen_running: bool = True,
+    cluster_memory_bytes: int | None = None,
 ) -> BudgetedStreamingRequest:
     """Continuous-mode request after ``_streaming_concurrent_budget`` caps it.
 
@@ -994,18 +1348,19 @@ def streaming_request_under_budget(
     """
     from lakebench.config.schema import parse_spark_memory
 
-    scale = config.architecture.workload.datagen.scale
-    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
     budget = _streaming_concurrent_budget(
-        config, cluster_cpu_millicores, datagen_running=datagen_running
+        config,
+        cluster_cpu_millicores,
+        datagen_running=datagen_running,
+        cluster_memory_bytes=cluster_memory_bytes,
     )
     explicit = {jt: executor_override(jt.value, config) for jt in _STREAMING_PIPELINE_ORDER}
     gib = 1024**3
     cores_m = mem = 0
     capped: list[str] = []
     for jt in _STREAMING_PIPELINE_ORDER:
-        prof = _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
-        full = _scale_executor_count(prof, scale)
+        prof = stage_profile(jt.value, config) or _JOB_PROFILES[jt.value]
+        full = streaming_executor_count(jt.value, prof, config)
         forced = explicit[jt]
         if forced is not None:
             n = int(forced)
@@ -1030,27 +1385,8 @@ def streaming_request_under_budget(
         cpu_cores=-(-cores_m // 1000) + co.cpu_cores,
         memory_gb=int(-(-mem // gib)) + co.memory_gb,
         capped=tuple(capped),
+        budget=budget,
     )
-
-
-def _proportional_caps(
-    profiles: dict[JobType, dict[str, Any]], scale: float, budget_m: int
-) -> dict[JobType, int]:
-    """Split ``budget_m`` among jobs in proportion to their uncapped CPU
-    demand, at least 2 executors each and never above the uncapped count."""
-    demands = {
-        jt: _scale_executor_count(p, scale) * p["executor_cores"] * 1000
-        for jt, p in profiles.items()
-    }
-    total = sum(demands.values())
-    if total == 0:
-        return {}
-    caps: dict[JobType, int] = {}
-    for jt, p in profiles.items():
-        job_budget_m = budget_m * demands[jt] / total
-        max_executors = max(2, int(job_budget_m // (p["executor_cores"] * 1000)))
-        caps[jt] = min(max_executors, _scale_executor_count(p, scale))
-    return caps
 
 
 def _scale_partitions(
@@ -1280,28 +1616,14 @@ def _read_silver_state_epoch(namespace: str, key: str) -> int:
 
 def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
-    ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
-    input rather than raising, since this feeds a env-var value that the
-    AML sustained scripts use as a trigger period; a bad parse should
-    default to their previous hard-coded fallback rather than blow up
-    the manifest build. Kept alongside the mirror constant so the two
-    small stringy helpers live together instead of drifting into
-    separate modules."""
+    ``"1 hour"``) to an integer seconds value, for the AML scripts' trigger
+    env vars. The config validates the intervals at load; anything else
+    raises rather than guessing a period."""
     parts = interval.strip().lower().split()
-    if len(parts) != 2:
-        return 10
-    try:
-        value = int(parts[0])
-    except ValueError:
-        return 10
-    unit = parts[1].rstrip("s")
-    if unit == "second":
-        return value
-    if unit == "minute":
-        return value * 60
-    if unit == "hour":
-        return value * 3600
-    return 10
+    units = {"second": 1, "minute": 60, "hour": 3600}
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].rstrip("s") in units:
+        return int(parts[0]) * units[parts[1].rstrip("s")]
+    raise ValueError(f"trigger interval {interval!r} is not a whole number and a unit")
 
 
 # Spark version -> the first Iceberg version publishing a native runtime for it.
@@ -1351,12 +1673,29 @@ def iceberg_requires_java17(iceberg_version: str) -> bool:
     return _version_tuple(iceberg_version)[:2] >= _ICEBERG_MIN_JAVA17_VERSION
 
 
+def _image_tag(image: str) -> str:
+    """The tag of *image*: a ``@sha256:...`` digest and a registry port are
+    not part of it (``reg:5000/spark:4.1.1-python3@sha256:ab`` -> ``4.1.1-python3``)."""
+    name = image.split("@", 1)[0]
+    last = name.rsplit("/", 1)[-1]
+    return last.split(":", 1)[1] if ":" in last else ""
+
+
+def _spark_version_parts(image: str) -> list[str]:
+    tag = _image_tag(image)
+    # Strip known suffixes so "3.5.4-python3" becomes "3.5.4"
+    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+        tag = tag.replace(suffix, "")
+    return tag.split(".")
+
+
 def _parse_spark_major(image: str) -> int:
     """Parse and validate the Spark version from an image tag.
 
-    Accepts tags like ``apache/spark:3.5.4-python3``, ``apache/spark:4.0.2-python3``,
-    or custom registries like ``my-registry/spark:3.5.4-python3``.  The ``-python3``
-    suffix is required -- PySpark scripts need a Python-enabled image.
+    Accepts tags like ``apache/spark:4.1.1-python3``, a custom registry
+    (``my-registry:5000/spark:4.1.1-python3``) and a digest-pinned image
+    (``apache/spark:4.1.1-python3@sha256:...``). The version comes from the
+    tag, so a digest with no tag is refused.
 
     Only tested minor versions are accepted (see ``_SUPPORTED_SPARK_VERSIONS``).
 
@@ -1364,31 +1703,17 @@ def _parse_spark_major(image: str) -> int:
         3 or 4
 
     Raises:
-        ValueError: If the image tag cannot be parsed, the version is not
-            supported, or the ``-python3`` suffix is missing.
+        ValueError: If the image tag cannot be parsed or the version is not
+            supported.
     """
-    tag = image.split(":")[-1]
-
-    # Require -python3 suffix (PySpark scripts need Python in the image)
-    if "-python3" not in tag:
-        raise ValueError(
-            f"Spark image '{image}' must use a '-python3' tag "
-            f"(e.g., 'apache/spark:3.5.4-python3'). "
-            f"PySpark scripts require a Python-enabled image."
-        )
-
-    # Strip known suffixes so "3.5.4-python3" becomes "3.5.4"
-    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
-        tag = tag.replace(suffix, "")
-
-    parts = tag.split(".")
+    parts = _spark_version_parts(image)
     try:
         major = int(parts[0])
         minor = int(parts[1]) if len(parts) > 1 else -1
     except (ValueError, IndexError):
         raise ValueError(
             f"Cannot parse Spark version from image '{image}'. "
-            f"Expected a tag like '3.5.4-python3' or '4.0.2-python3'."
+            f"Expected a tag like '4.1.1-python3', optionally pinned with '@sha256:...'."
         ) from None
 
     if (major, minor) in _SUPPORTED_SPARK_VERSIONS:
@@ -1406,10 +1731,7 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
 
     Returns (major, minor) tuple, e.g. (4, 1) for ``apache/spark:4.1.1-python3``.
     """
-    tag = image.split(":")[-1]
-    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
-        tag = tag.replace(suffix, "")
-    parts = tag.split(".")
+    parts = _spark_version_parts(image)
     try:
         return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
     except (ValueError, IndexError):
@@ -1552,7 +1874,7 @@ def validate_iceberg_java_runtime(spark_image: str, iceberg_version: str) -> Non
     if key != (3, 5):
         return
 
-    tag = spark_image.split(":")[-1]
+    tag = _image_tag(spark_image)
     if "java17" in tag or "java21" in tag:
         return
 
@@ -1749,6 +2071,9 @@ class SparkJobManager:
         self.namespace = config.get_namespace()
         # Streaming jobs the concurrent budget capped, for the CLI to show.
         self.budget_warnings: list[str] = []
+        # The executor count each streaming job was last submitted with,
+        # after the concurrent budget and any override: what the run had.
+        self.ran_executors: dict[str, int] = {}
         # Whether the streaming budget reserves datagen's cores. The
         # continuous CLI clears it once the datagen Job has finished.
         self.datagen_running: bool = True
@@ -1764,9 +2089,11 @@ class SparkJobManager:
         try:
             cap = k8s.get_cluster_capacity()
             self._cluster_cpu_m: int | None = cap.total_cpu_millicores if cap else None
+            self._cluster_mem_b: int | None = cap.total_memory_bytes if cap else None
         except Exception as e:
             logger.warning("Could not get cluster capacity for streaming budget: %s", e)
             self._cluster_cpu_m = None
+            self._cluster_mem_b = None
 
     def _polaris_client_secret(self) -> str:
         """The Polaris client secret, read once per manager."""
@@ -2044,17 +2371,28 @@ class SparkJobManager:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
         # the CTAS fallback path.
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
-        profile = _resolve_job_profile(job_type.value, _schema)
+        profile = (
+            stage_profile(job_type.value, cfg)
+            if job_type in _STREAMING_JOB_TYPES
+            else _resolve_job_profile(job_type.value, _schema)
+        )
         if profile is None:
             raise MissingSizingProfile(job_type.value)
         scale = cfg.architecture.workload.datagen.scale
-        executor_count = _scale_executor_count(profile, scale)
+        executor_count = (
+            streaming_executor_count(job_type.value, profile, cfg)
+            if job_type in _STREAMING_JOB_TYPES
+            else _scale_executor_count(profile, scale)
+        )
 
         # Streaming: cap to concurrent budget (all 3 jobs + datagen share cluster)
         capped_from = executor_count
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
             budget = _streaming_concurrent_budget(
-                cfg, self._cluster_cpu_m, datagen_running=self.datagen_running
+                cfg,
+                self._cluster_cpu_m,
+                datagen_running=self.datagen_running,
+                cluster_memory_bytes=getattr(self, "_cluster_mem_b", None),
             )
             if job_type in budget and budget[job_type] < executor_count:
                 logger.warning(
@@ -2083,6 +2421,8 @@ class SparkJobManager:
                 executor_count,
             )
             executor_count = override
+        if job_type in _STREAMING_JOB_TYPES:
+            self.ran_executors[job_type.value] = int(executor_count)
 
         shuffle_partitions = _scale_partitions(
             profile,
@@ -2209,7 +2549,7 @@ class SparkJobManager:
         spark_conf["spark.default.parallelism"] = shuffle_partitions
 
         # Parse Spark version from image tag (e.g., apache/spark:3.5.4 -> 3.5)
-        spark_image_tag = cfg.images.spark.split(":")[-1]
+        spark_image_tag = _image_tag(cfg.images.spark)
 
         # Catalog type needed for packages and catalog config
         catalog_name = cfg.architecture.query_engine.trino.catalog_name
@@ -2428,6 +2768,7 @@ class SparkJobManager:
                 "spark.kubernetes.driver.service.deleteOnTermination": "true",
             }
         )
+        spark_conf.update(kubernetes_client_conf(executor_count))
 
         # Dynamic maxResultSize -- scales with executor count.
         # Respect user override from spark.conf if already set.
@@ -2704,9 +3045,7 @@ class SparkJobManager:
         scratch = cfg.platform.storage.scratch
         if scratch.enabled and scratch.storage_class:
             # Dynamic PVC for executor local storage
-            # Use per-job profile PVC size -- silver-build and
-            # gold-finalize need 300Gi, bronze-verify needs 50Gi.
-            pvc_size = profile["scratch_size"]
+            pvc_size = scratch_executor_size(profile, scale, executor_count)
             spark_conf.update(
                 {
                     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.claimName": "OnDemand",

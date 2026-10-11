@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_scripts_maps.py (imported by several test files)."""
+"""A fake K8s client holding a legacy scripts ConfigMap, and the config it is owned by."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ from typing import Any
 from lakebench.config import LakebenchConfig
 
 LEGACY = "lakebench-spark-scripts"
+#: The deployment name and the legacy map owner; FakeK8s and _cfg agree on it.
+OWNER = "sd8"
 
 
 class FakeK8s:
@@ -19,7 +21,7 @@ class FakeK8s:
         self,
         fail_apply_of: str | None = None,
         overrides: dict | None = None,
-        legacy_owner: str | None = "sd8",
+        legacy_owner: str | None = OWNER,
     ):
         self.applied: list[dict[str, Any]] = []
         self.deleted: list[str] = []
@@ -61,7 +63,7 @@ class FakeK8s:
 
 def _cfg(schema: str = "customer360", fmt: str = "iceberg") -> LakebenchConfig:
     return LakebenchConfig(
-        name="sd8",
+        name=OWNER,
         workload={"schema": schema},
         architecture={"table_format": {"type": fmt}},
     )

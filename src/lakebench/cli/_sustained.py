@@ -45,7 +45,7 @@ from lakebench.k8s import (
     pinned_kubectl,
     pinned_kubectl_popen,
 )
-from lakebench.metrics.continuous_window import parse_events, utc_naive
+from lakebench.metrics.continuous_window import committed_writes, parse_events, utc_naive
 from lakebench.metrics.verdict import apply_save_gate
 
 logger = logging.getLogger(__name__)
@@ -712,6 +712,7 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
         svc_name = _find_prometheus_svc(prom_ns, context=ctx)
         if not svc_name:
             console.print("  [yellow]Could not find Prometheus service[/yellow]")
+            _platform_not_collected(run_metrics, "no Prometheus service found")
             return
 
         # Try in-cluster DNS first (fast path when running inside K8s)
@@ -751,6 +752,7 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
             else:
                 pf_proc.kill()
                 console.print("  [yellow]Could not establish port-forward to Prometheus[/yellow]")
+                _platform_not_collected(run_metrics, "could not reach Prometheus")
                 return
 
             prometheus_url = f"http://127.0.0.1:{local_port}"
@@ -779,6 +781,20 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
             pf_proc.kill()
             pf_proc.wait()
         console.print(f"  [yellow]Could not collect platform metrics: {e}[/yellow]")
+        _platform_not_collected(run_metrics, f"collection failed: {e}")
+
+
+def _platform_skipped(cfg, run_metrics, why: str) -> None:
+    """Record a skipped collection, so a run with observability on does not
+    read as one with it off."""
+    if cfg.observability.enabled:
+        _platform_not_collected(run_metrics, f"skipped because {why}")
+
+
+def _platform_not_collected(run_metrics, reason: str) -> None:
+    """Record why platform metrics are absent, so the report says so."""
+    if getattr(run_metrics, "platform_metrics", None) is None:
+        run_metrics.platform_metrics = {"pods": [], "collection_error": reason}
 
 
 def _find_free_port() -> int:
@@ -1131,7 +1147,7 @@ def maintained_tables(cfg) -> list[str]:
     layers: tuple[str, ...] = ("bronze", "silver", "gold")
     if schema != "financial" and not continuous:
         layers = ("silver", "gold")
-    return cfg.architecture.tables.workload_tables(schema, layers=layers)
+    return cfg.architecture.tables.workload_tables(schema, layers=layers, continuous=continuous)
 
 
 def _note_outcome(outcomes: list | None, kind: str, **details) -> None:
@@ -1524,7 +1540,11 @@ def _run_iceberg_compaction(
     layers: tuple[str, ...] = ("silver", "gold")
     if live_streams and schema == "financial":
         layers = ("silver",)
-    names = tables.workload_tables(schema, layers=layers)
+    names = tables.workload_tables(
+        schema,
+        layers=layers,
+        continuous=cfg.architecture.pipeline.mode.value in ("sustained", "continuous"),
+    )
     if live_streams and schema == "financial":
         merged = {
             tables.silver_entities,
@@ -2379,13 +2399,9 @@ def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
     anchors it on its first driver's start (persisted in its checkpoint), not
     on the CLI's clock at submit, which precedes the driver-ready wait.
     """
-    # LB_GOLD_INCREMENTAL: c360 gold-refresh recomputes only the dates silver
-    # changed on (common.refresh_daily_kpis, exact), so its cost does not
-    # grow with the corpus. The AML gold job does not read it.
     return {
         "LB_RUN_ID": run_id,
         "LB_CONTINUOUS_WINDOW_S": str(int(run_duration)),
-        "LB_GOLD_INCREMENTAL": "true",
     }
 
 
@@ -2734,7 +2750,9 @@ def _settle_financial_scoring(cfg, collector, pipeline_success: bool, abort) -> 
         run.financial_scoring = not_scored("the run failed its gates")
 
 
-def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_write=None):
+def drain_gold_refresh(
+    cfg, k8s, run_id, collector, *, window_end=None, before_write=None, kept_log=None
+):
     """Drain gold-refresh at window end and record it.
 
     Returns ``(drain, tick, tick_reason, problem)``: the DrainResult, the
@@ -2755,7 +2773,9 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     (``drain.ticks_scope``), and ``drain.log_from_driver_start`` is False
     when its first tick is not cycle 1 (the log was trimmed). *window_end* (naive UTC on the cluster
     clock, as the window record) gives the scored tick's
-    ``pinned_after_window_end_s``.
+    ``pinned_after_window_end_s``. *kept_log* returns the log kept since the
+    driver started (the capture), which the drain's pod log continues; a log
+    that still does not reach the first tick is a problem.
     """
     from lakebench.cli._aml_post import DRAIN_BUDGET_S, request_drain
     from lakebench.metrics.tick_records import (
@@ -2775,6 +2795,10 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
     ticks = None
     tt_ticks = None
     if drain.state == "drained":
+        if kept_log is not None:
+            from lakebench.cli._driver_log_capture import merge_logs
+
+            drain.logs = merge_logs(kept_log(), drain.logs)
         parsed = parse_tick_records(drain.logs, run_id)
         tick, reason = scored_tick(parsed)
         ticks = tick_list(parsed["ticks"])
@@ -2784,6 +2808,12 @@ def drain_gold_refresh(cfg, k8s, run_id, collector, *, window_end=None, before_w
         # trimmed by log rotation); it does not say no restart happened.
         record["ticks_scope"] = "current driver pod log"
         record["log_from_driver_start"] = bool(ticks) and ticks[0]["cycle"] == 1
+        if ticks and not record["log_from_driver_start"] and drain.last_cycle:
+            problem = (
+                "driver log incomplete: the gold-refresh log does not reach its first "
+                f"tick (starts at cycle {ticks[0]['cycle']}), so its figures cover part "
+                "of the run"
+            )
         if drain.last_cycle == 0:
             problem = (
                 "gold drain found a restarted gold-refresh driver; its last tick may have "
@@ -2883,9 +2913,9 @@ def _record_failure(collector, problem: str) -> None:
         run.failure_reasons.append(problem)
 
 
-def _measure_bucket_sizes(cfg, collector) -> int:
+def _measure_bucket_sizes(cfg, collector) -> int | None:
     """Record the bronze/silver/gold bucket sizes on the run; the total
-    object count, 0 when they cannot be measured."""
+    object count, None when it cannot be measured."""
     try:
         from lakebench.s3 import S3Client
 
@@ -2905,13 +2935,17 @@ def _measure_bucket_sizes(cfg, collector) -> int:
         )
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
-        return 0
+        return None
 
 
 #: Auto trickle: aim for this many window lengths of arrival, and never more
 #: than this many files per trigger (the pre-v1.6 fixed default).
 AUTO_ARRIVAL_MARGIN = 1.2
 AUTO_TRICKLE_CEILING = 50
+#: The trickle's cadence when bronze runs back to back (no interval): a
+#: trickle offers N files per trigger, so it needs one. Part of the trickle,
+#: a labelled Lakebench cap.
+TRICKLE_TRIGGER_S = 30
 
 
 #: Seconds of window a continuous maintenance or compaction round needs left
@@ -3018,7 +3052,7 @@ def resolve_trickle(cfg, run_duration: int, *, continuous_datagen: bool = False)
             "arrival_seconds": None,
             "problem": None,
         }
-    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval)
+    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval) or TRICKLE_TRIGGER_S
     try:
         dims = cfg.get_scale_dimensions()
         file_mb = _size_mb(cfg.architecture.workload.datagen.file_size)
@@ -3169,20 +3203,30 @@ def short_window_problem(cfg, run_duration: int) -> str | None:
 SETTLE_MAX_SECONDS = 1800
 
 
-def settle_budget_seconds(cfg, datagen_rows: int, bronze_rows: int, rows_per_s: float) -> float:
+def settle_budget_seconds(
+    cfg, datagen_rows: int, bronze_rows: int, rows_per_s: float, silver_batch_s: float = 0.0
+) -> float:
     """Seconds the remaining corpus needs to reach gold: the rows the stage
     still has to take in (*datagen_rows* less *bronze_rows*; a drain passes
     bronze's rows and silver's committed ones) at the rate it held, plus two
-    silver triggers and two gold refreshes, plus a minute."""
+    silver cycles (its trigger, or back to back its median batch time
+    *silver_batch_s*, at least two minutes) and two gold refreshes, plus a
+    minute."""
     sustained = cfg.architecture.pipeline.sustained
     remaining = max(0, datagen_rows - bronze_rows)
     intake = remaining / rows_per_s if rows_per_s > 0 else (0.0 if remaining == 0 else float("inf"))
     return (
         intake
-        + 2 * _parse_spark_interval(sustained.silver_trigger_interval)
+        + 2 * max(_parse_spark_interval(sustained.silver_trigger_interval), silver_batch_s, 120)
         + 2 * _parse_spark_interval(sustained.gold_refresh_interval)
         + 60
     )
+
+
+def _silver_batch_s(silver) -> float:
+    """Silver's median micro-batch seconds from its parsed stage, 0 unknown."""
+    ms = silver.median_batch_duration_ms if silver is not None else None
+    return float(ms) / 1000.0 if ms else 0.0
 
 
 def wait_for_settle(
@@ -3219,6 +3263,41 @@ def wait_for_settle(
         time.sleep(poll_s)
         if probe is not None:
             probe()
+
+
+def _stage_intervals(cfg) -> dict[str, float | None]:
+    """Each stream's trigger interval in seconds (None or 0: back to back)."""
+    from lakebench.metrics.collector import _interval_seconds
+
+    sus = cfg.architecture.pipeline.sustained
+    return {
+        "bronze-ingest": _interval_seconds(sus.bronze_trigger_interval),
+        "silver-stream": _interval_seconds(sus.silver_trigger_interval),
+        "gold-refresh": _interval_seconds(sus.gold_refresh_interval),
+    }
+
+
+#: Seconds between the live lag lines inside the window.
+LIVE_LAG_SECONDS = 120.0
+
+
+def _live_lag_line(monitor, submitted: list) -> str:
+    """Each handoff's lag now, from the streams' driver logs (the window
+    line; DESIGN-CONTINUOUS 6). Never raises: a log that cannot be read
+    leaves its handoff out."""
+    from lakebench.metrics.continuous_window import handoff_lags, lag_line
+
+    events = {}
+    for _, name in submitted:
+        try:
+            logs = monitor._get_driver_logs(f"lakebench-{name}", tail_lines=None)
+        except Exception:  # noqa: BLE001
+            logs = None
+        events[name] = parse_events(logs, name)
+    try:
+        return lag_line(handoff_lags(events, utc_naive(datetime.now(timezone.utc))))
+    except Exception as e:  # noqa: BLE001
+        return f"not measured ({e})"
 
 
 def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
@@ -3264,8 +3343,10 @@ def _retry_transient_results(bench_runner, results: list) -> list[str]:
     so a retried answer is never silent). A dead engine pod is not retried:
     its error is not transient."""
     repeat = getattr(bench_runner, "_repeat_query", None)
+    if repeat is None:
+        return []
     fingerprint = getattr(bench_runner, "fingerprint_results", None)
-    if repeat is None or fingerprint is None:
+    if fingerprint is None:
         return []
     retried: list[str] = []
     for i, r in enumerate(results):
@@ -3364,6 +3445,10 @@ def _run_sustained(
     )
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
+    # The auto silver wait for bronze scales with this run's window, which
+    # --duration sets; resolved here, as the job reads only the config.
+    _sus = cfg.architecture.pipeline.sustained
+    _sus.silver_bronze_wait_seconds = _sus.effective_silver_bronze_wait_seconds(run_duration)
 
     # The trickle this run offers: derived from the corpus and the window
     # unless the config sets it, and refused when data would stop arriving
@@ -3373,6 +3458,16 @@ def _run_sustained(
         print_error(trickle["problem"])
         raise typer.Exit(ExitCode.USAGE)
     cfg.architecture.pipeline.sustained.max_files_per_trigger = trickle["value"]
+    if trickle["value"] is not None and not _parse_spark_interval(
+        cfg.architecture.pipeline.sustained.bronze_trigger_interval
+    ):
+        # A trickle is N files per trigger: back to back has no cadence, so
+        # the trickle brings its own (recorded with the run's config).
+        cfg.architecture.pipeline.sustained.bronze_trigger_interval = f"{TRICKLE_TRIGGER_S} seconds"
+        print_info(
+            f"Bronze trigger: every {TRICKLE_TRIGGER_S} s, the trickle's cadence "
+            "(back to back has none)"
+        )
     _arrival = trickle["arrival_seconds"]
     if trickle["value"] is None:
         print_info("Bronze intake: no per-trigger limit (datagen generates for the whole window)")
@@ -3474,6 +3569,10 @@ def _run_sustained(
     _datagen_live = False
     k8s = None
     _total_s3_objects: int | None = None
+    # Whether the window-end listing ran: a listing that ran and could not
+    # count every bucket is not repeated after settle, whose micro-batches
+    # would then be counted as the window's.
+    _sizes_listed = False
     # The gold-refresh drain at window end (financial only); None
     # until it has run.
     _drain = None
@@ -4009,8 +4108,10 @@ def _run_sustained(
             from lakebench.config.loader import retention_floor_advisory
 
             floor_msg = retention_floor_advisory(cfg)
-            if floor_msg and not is_continuous_mode(cfg.architecture.pipeline.mode):
-                # Continuous configs already warned at load.
+            _pipeline = cfg.architecture.pipeline
+            if floor_msg and not is_continuous_mode(_pipeline._configured_mode or _pipeline.mode):
+                # Continuous configs already warned at load; a batch config
+                # run with --continuous did not.
                 print_warning(floor_msg)
 
         # Compaction scheduling (v1.1.0); Delta OPTIMIZE never runs.
@@ -4060,6 +4161,7 @@ def _run_sustained(
         sessions_requested: int | None = cfg.architecture.benchmark.investigator_sessions
         sessions_pending = sessions_requested is not None and bench_runner_instream is not None
 
+        next_lag_at = 0.0
         while time.time() - start < run_duration:
             elapsed = time.time() - start
             remaining = run_duration - elapsed
@@ -4224,6 +4326,10 @@ def _run_sustained(
                 f"  [{elapsed:.0f}s / {run_duration}s] "
                 f"Streaming jobs running... ({remaining:.0f}s remaining)"
             )
+            if elapsed >= next_lag_at:
+                # Whole driver logs are read, so not on every line.
+                console.print(f"    lag: {_live_lag_line(monitor, submitted)}")
+                next_lag_at = elapsed + LIVE_LAG_SECONDS
 
             _journal_safe(
                 j.record,
@@ -4318,6 +4424,12 @@ def _run_sustained(
                     f"lakebench-{job_name}",
                     tail_lines=None,
                 )
+                if _driver_log_capturer is not None:
+                    # The kept copy runs from the driver's start; the pod log
+                    # alone loses its front to kubelet rotation.
+                    from lakebench.cli._driver_log_capture import merge_logs
+
+                    logs = merge_logs(_driver_log_capturer.text(f"lakebench-{job_name}"), logs)
                 driver_logs[job_name] = logs
                 # Diagnostic: report log capture status
                 if logs is None:
@@ -4368,6 +4480,60 @@ def _run_sustained(
                 window_stats_by_job, window_seconds, continuous_datagen=not skip_generate
             )
         )
+        # Balance (DESIGN-CONTINUOUS 6): every stage's handoff lag stayed
+        # flat through the window, or the run failed and the bottleneck line
+        # names the stage and the knob. Overrun is a failure mode, and a
+        # growing backlog makes freshness and pace not steady-state numbers.
+        from lakebench.metrics.continuous_window import balance as _balance
+
+        _snapshot = getattr(collector.current_run, "config_snapshot", None) or {}
+        balance_record = _balance(
+            {name: parse_events(driver_logs.get(name), name) for _, name in submitted},
+            window_start,
+            window_end,
+            shape=(_snapshot.get("spark") or {}).get("streaming_shape"),
+            ran=(
+                job_manager.ran_executors
+                if isinstance(getattr(job_manager, "ran_executors", None), dict)
+                else None
+            ),
+            intervals=_stage_intervals(cfg),
+            # Datagen to bronze shows the stage only when this run's datagen
+            # writes while bronze takes files without a cap.
+            unjudged=(
+                {"datagen->bronze": "the corpus was written before the run"}
+                if skip_generate
+                else (
+                    {"datagen->bronze": "max_files_per_trigger caps bronze's intake"}
+                    if trickle.get("value")
+                    else None
+                )
+            ),
+        )
+        console.print(f"  Balance: {balance_record['bottleneck']}")
+        from lakebench.metrics.continuous_window import freshness_summary, store_clock_offset
+
+        freshness_record = {
+            **freshness_summary(
+                parse_events(driver_logs.get("gold-refresh"), "gold-refresh"),
+                window_start,
+                window_end,
+            ),
+            # Where gold's freshness clock starts: bronze stamps each row with
+            # its arrival (ingest_ts: its file's landing time, or when bronze
+            # took a file written before the run), and gold measures from it.
+            "from": (
+                "bronze intake (corpus written before the run)" if skip_generate else "file landing"
+            ),
+            # Landing times are corrected by this offset (object store clock
+            # minus the bronze pod's).
+            "store_clock_offset_s": store_clock_offset(driver_logs.get("bronze-ingest")),
+        }
+        # The streams' own problems: a stage that fell behind still ran the
+        # window, so the balance gate fails the run without failing a stream.
+        stream_problems = list(window_problems)
+        if balance_record["measured"] and not balance_record["balanced"]:
+            window_problems.append(f"balance gate: {balance_record['bottleneck']}")
         # The verdict names what failed instead of "crashed or was
         # interrupted".
         if collector.current_run is not None:
@@ -4395,6 +4561,8 @@ def _run_sustained(
                 ),
             },
             "gate_problems": list(window_problems),
+            "balance": balance_record,
+            "freshness": freshness_record,
             "trickle": trickle,
             # Applied retention (expiry floored while streams are live), so a
             # default below the floor is recorded as what ran.
@@ -4447,22 +4615,25 @@ def _run_sustained(
         # Bucket sizes and object counts as of the window, before any settle
         # micro-batches add files.
         _total_s3_objects = _measure_bucket_sizes(cfg, collector)
+        _sizes_listed = True
         if bench_runner is None:
             result_check = {
                 "not_checked": (
                     "no query engine in this recipe"
                     if cfg.architecture.query_engine.type.value == "none"
                     else "no benchmark (--skip-benchmark)"
-                )
+                ),
+                "cause": "declared",
             }
         elif not pipeline_success:
-            result_check = {"not_checked": "the run failed its gates"}
+            result_check = {"not_checked": "the run failed its gates", "cause": "declared"}
         elif cfg.architecture.workload.schema_type.value == "financial":
             result_check = {
                 "not_checked": (
                     "AML continuous results depend on when detection and TM passes ran "
                     "relative to arrival, so they are not a function of the corpus alone"
-                )
+                ),
+                "cause": "declared",
             }
         elif not skip_generate:
             # Drain at shutdown: this run's datagen generated for the whole
@@ -4477,7 +4648,9 @@ def _run_sustained(
                 if _silver is not None and window_seconds > 0
                 else 0.0
             )
-            _need = settle_budget_seconds(cfg, _b_rows, _s_done, _s_rps)
+            _need = settle_budget_seconds(
+                cfg, _b_rows, _s_done, _s_rps, _silver_batch_s(parsed.get("silver-stream"))
+            )
             if _b_rows <= 0:
                 result_check = {"not_checked": "bronze took no rows, so there is nothing to drain"}
             elif _need > SETTLE_MAX_SECONDS:
@@ -4485,7 +4658,8 @@ def _run_sustained(
                     "not_checked": (
                         f"silver needs about {_need:,.0f}s to finish the rows bronze took, over "
                         f"the {SETTLE_MAX_SECONDS}s settle limit"
-                    )
+                    ),
+                    "cause": "declared",
                 }
                 settle = {"settled": False, "reason": result_check["not_checked"]}
             else:
@@ -4496,7 +4670,7 @@ def _run_sustained(
                 except Exception:  # noqa: BLE001 -- the window's count stands
                     _b_log = None
                 _b_now = sum(
-                    e.rows or 0 for e in parse_events(_b_log, "bronze-ingest") if e.kind == "write"
+                    e.rows or 0 for e in committed_writes(parse_events(_b_log, "bronze-ingest"))
                 )
                 if _b_now > _b_rows:
                     _need += (_b_now - _b_rows) / _s_rps if _s_rps > 0 else 0.0
@@ -4540,13 +4714,15 @@ def _run_sustained(
                 _datagen_output_rows,
                 _bronze.total_rows_processed if _bronze is not None else 0,
                 _rps,
+                _silver_batch_s(parsed.get("silver-stream")),
             )
             if _need > SETTLE_MAX_SECONDS:
                 result_check = {
                     "not_checked": (
                         f"the rest of the corpus needs about {_need:,.0f}s to reach gold, over "
                         f"the {SETTLE_MAX_SECONDS}s settle limit"
-                    )
+                    ),
+                    "cause": "declared",
                 }
                 settle = {"settled": False, "reason": result_check["not_checked"]}
             else:
@@ -4586,6 +4762,11 @@ def _run_sustained(
                 collector,
                 window_end=window_end,
                 before_write=lambda: _ns_watch.check(time.time() - start),
+                kept_log=(
+                    (lambda: _driver_log_capturer.text("lakebench-gold-refresh"))
+                    if _driver_log_capturer is not None
+                    else None
+                ),
             )
             if _drain_problem:
                 print_error(_drain_problem)
@@ -4652,6 +4833,9 @@ def _run_sustained(
             if collector.current_run.continuous is None:
                 collector.current_run.continuous = {}
             collector.current_run.continuous["settle"] = settle
+            if result_check.get("not_checked") and "cause" not in result_check:
+                # Not a declared skip: the answers are not established.
+                result_check["cause"] = "failed"
             collector.current_run.continuous["result_check"] = result_check
 
         # Honest continuous runner. A continuous AML run whose gold stage
@@ -4779,7 +4963,7 @@ def _run_sustained(
             streaming_metrics.requested_executors = requested_executors.get(job_name)
             # The stream's own outcome: it ran the window without a window
             # problem. A failed gate is named in the verdict by itself.
-            streaming_metrics.success = not window_problems
+            streaming_metrics.success = not stream_problems
             _rows = streaming_metrics.window_input_rows
             if streaming_metrics.elapsed_seconds > 0 and _rows:
                 streaming_metrics.throughput_rps = _rows / streaming_metrics.elapsed_seconds
@@ -5006,7 +5190,7 @@ def _run_sustained(
             _driver_log_capturer.close()
             _driver_log_capturer = None
         _ns_watch.close()
-        if _total_s3_objects is None and _interrupted is None and _abort is None:
+        if not _sizes_listed and _interrupted is None and _abort is None:
             # Not after an interrupt: partial data, and a long listing would
             # hold the record back from a user who has just pressed Ctrl-C.
             # Not after the namespace went: its buckets may be a redeployment's.
@@ -5040,9 +5224,21 @@ def _run_sustained(
             run_metrics.abort_reason = _abort
             if _run_fleet is not None:
                 run_metrics.datagen_fleet = _run_fleet
+            elif skip_generate:
+                # The corpus was written before the run: its fleet record
+                # prices the rows each stage took in (bytes per row).
+                from lakebench.cli._run import _load_latest_datagen_fleet
+
+                run_metrics.datagen_fleet = _load_latest_datagen_fleet(cfg.get_namespace())
             # Collect platform metrics from Prometheus (best-effort)
             if _interrupted is None and _abort is None:
                 _collect_platform_metrics(cfg, run_metrics)
+            else:
+                _platform_skipped(
+                    cfg,
+                    run_metrics,
+                    "the run was interrupted" if _interrupted else "the run aborted",
+                )
 
             # Build pipeline benchmark (stage-matrix view)
             try:
@@ -5054,9 +5250,8 @@ def _run_sustained(
                     datagen_output_rows=_datagen_output_rows,
                     datagen_output_files=_datagen_output_files,
                 )
-                # 0 when not measured (an interrupted run), as before for a
-                # failed listing.
-                pb.total_s3_objects = _total_s3_objects or 0
+                # None when not measured (an interrupted run, a failed listing).
+                pb.total_s3_objects = _total_s3_objects
                 run_metrics.pipeline_benchmark = pb
                 if is_continuous_mode(pb.pipeline_mode):
                     if pb.sustained_throughput_rps > 0:

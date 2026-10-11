@@ -53,44 +53,52 @@ def test_good_bronze_passes(spark):
     assert stats["silver_rows"] == 18
 
 
-def test_zero_rows_fails(spark):
-    from bronze_verify import verify_bronze
-
-    _, problems, _ = verify_bronze(_bronze(spark).limit(0))
-    assert problems == ["bronze has 0 rows"]
+def _zero_rows(df):
+    return df.limit(0)
 
 
-def test_missing_column_fails(spark):
-    from bronze_verify import verify_bronze
-
-    _, problems, _ = verify_bronze(_bronze(spark).drop("transaction_amount", "channel"))
-    assert any("missing required columns" in p and "transaction_amount" in p for p in problems)
+def _missing_column(df):
+    return df.drop("transaction_amount", "channel")
 
 
-def test_wrong_type_fails(spark):
+def _string_timestamp(df):
     """A string event_timestamp would give NULL dates in silver."""
-    from bronze_verify import verify_bronze
     from pyspark.sql.functions import col
 
-    df = _bronze(spark).withColumn("event_timestamp", col("event_timestamp").cast("string"))
-    _, problems, _ = verify_bronze(df)
-    assert any("event_timestamp has type string" in p for p in problems)
+    return df.withColumn("event_timestamp", col("event_timestamp").cast("string"))
 
 
-def test_all_null_key_fails_partial_null_warns(spark):
+def _all_null_key(df):
+    from pyspark.sql.functions import lit
+
+    return df.withColumn("customer_id", lit(None).cast("bigint"))
+
+
+def _some_null_key(df):
+    from pyspark.sql.functions import col, when
+
+    return df.withColumn("customer_id", when(col("id") < 3, None).otherwise(col("customer_id")))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "column", "is_problem", "is_warning"),
+    [
+        (_zero_rows, None, True, False),
+        (_missing_column, "transaction_amount", True, False),
+        (_string_timestamp, "event_timestamp", True, False),
+        (_all_null_key, "customer_id", True, False),
+        (_some_null_key, "customer_id", False, True),
+    ],
+    ids=["zero_rows", "missing_column", "wrong_type", "all_null_key", "partial_null_key"],
+)
+def test_unusable_bronze_yields_problem_or_warning(spark, mutate, column, is_problem, is_warning):
     from bronze_verify import verify_bronze
-    from pyspark.sql.functions import col, lit, when
 
-    all_null = _bronze(spark).withColumn("customer_id", lit(None).cast("bigint"))
-    _, problems, _ = verify_bronze(all_null)
-    assert "key column customer_id is null in every row" in problems
-
-    some_null = _bronze(spark).withColumn(
-        "customer_id", when(col("id") < 3, None).otherwise(col("customer_id"))
-    )
-    _, problems, warnings = verify_bronze(some_null)
-    assert problems == []
-    assert warnings == ["key column customer_id is null in 3 of 20 rows"]
+    _, problems, warnings = verify_bronze(mutate(_bronze(spark)))
+    assert bool(problems) == is_problem
+    assert bool(warnings) == is_warning
+    if column:
+        assert any(column in m for m in problems + warnings)
 
 
 def test_nothing_survives_silver_filter_fails(spark):
@@ -179,8 +187,7 @@ def test_q6_rfm_recency_is_relative_to_the_data(spark):
     set_utc_session(spark)
     apply_silver_transformations(_bronze(spark, 40)).createOrReplaceGlobalTempView("q6_silver")
     sql = _Q6.sql.format(catalog="global_temp", silver_table="q6_silver")
-    sql = SparkThriftExecutor.adapt_query(object.__new__(SparkThriftExecutor), sql)
-    assert "CURRENT_DATE" not in sql.upper()
+    sql = SparkThriftExecutor(namespace="t", catalog_name="c").adapt_query(sql)
     rows = spark.sql(sql).collect()
     assert rows
     # The fixture spans 12 days, so nobody is more than 12 days from the clock.

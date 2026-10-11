@@ -324,12 +324,24 @@ class FinancialScorecardBlock:
         fp_by_rule: dict = {}
         chance_by_rule: dict = {}
         txn_prec_by_rule: dict = {}
+        # Typology -> its designated rules with an alert cut by the evidence
+        # cap (max_txns_per_alert): that typology's recall is bounded by a
+        # Lakebench cap, never the detector's own.
+        evidence_capped: dict[str, list[str]] = {}
         if scoring:
+            capped_map = scoring.get("recall_bounded_by_evidence_cap")
+            if isinstance(capped_map, dict):
+                for k, v in capped_map.items():
+                    if v:
+                        evidence_capped[str(k)] = [str(r) for r in v]
             for ti, t in enumerate(scoring.get("typologies", []) or []):
                 tt = t.get("typology_type")
                 if tt:
                     recall_by_typology[tt] = t
                     typology_index[tt] = ti
+                    bounded = t.get("bounded_by_evidence_cap")
+                    if bounded and tt not in evidence_capped:
+                        evidence_capped[tt] = [str(r) for r in bounded]
             covered = scoring.get("covered") if scoring.get("mode") == "covered" else None
             for ci, t in enumerate((covered or {}).get("typologies") or []):
                 if isinstance(t, dict) and t.get("typology_type"):
@@ -348,10 +360,10 @@ class FinancialScorecardBlock:
         extra = sorted((set(alerts_by_rule) | set(rules_skipped) | set(rule_errors)) - set(known))
         rules = known + extra
 
-        from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+        from lakebench.metrics.verdict import continuous_excluded_rules
 
         continuous_run = not source_jobs and bool(getattr(metrics, "streaming", None))
-        continuous_excluded = frozenset(AML_CONTINUOUS_SKIPPED_RULES)
+        continuous_excluded = continuous_excluded_rules(metrics)
 
         # A batch rule with no count ran and emitted nothing; a continuous
         # rule missing from the histogram is unknown, not zero.
@@ -422,6 +434,18 @@ class FinancialScorecardBlock:
                             else "n/a"
                         )
                     )
+                    if crow.get("rescreen_only_excluded"):
+                        # Continuous W5 screens a payment as it arrives: an
+                        # instance only a rescreen finds is left out of
+                        # recall, and counted here.
+                        recall_cell += (
+                            "; "
+                            + dv.total(
+                                int(crow["rescreen_only_excluded"]),
+                                paths=f"{base}.rescreen_only_excluded",
+                            )
+                            + " rescreen-only instances left out (no rescreen in continuous)"
+                        )
                     status = '<span style="color: var(--success, green);">scored (covered)</span>'
             elif typ is None:
                 # A rule with no planted typology to score recall against.
@@ -456,9 +480,15 @@ class FinancialScorecardBlock:
                 else:
                     status = "ran" if alerts is not None else "no data"
                     recall_cell = "-"
+            if typ is not None and typ in evidence_capped and recall_cell not in ("n/a", "-"):
+                recall_cell += (
+                    ' <span style="color: var(--danger);">bounded by evidence cap (rules '
+                    + escape(", ".join(evidence_capped[typ]))
+                    + ")</span>"
+                )
             typ_cell = typ if typ is not None else "-"
             body_rows.append(
-                f"<tr><td>{rule}</td><td>{typ_cell}</td>"
+                f"<tr><td>{escape(str(rule))}</td><td>{escape(str(typ_cell))}</td>"
                 f"<td>{alerts_cell}</td><td>{recall_cell}</td>"
                 f"<td>{chance_cell}</td><td>{incidental_cell}</td>"
                 f"<td>{fp_cell}</td><td>{txn_cell}</td><td>{status}</td></tr>"
@@ -1252,8 +1282,7 @@ def get_scorecard_block(schema_name: str | None) -> ScorecardBlock:
 
 def _continuous_recall_note(scoring) -> str:
     """The continuous footer's recall sentence. A covered score is
-    not the batch recall and is not rendered in the table yet; a covered
-    record that holds no score says why."""
+    not the batch recall; a covered record that holds no score says why."""
     import html
 
     if not scoring:
@@ -1267,6 +1296,6 @@ def _continuous_recall_note(scoring) -> str:
         return (
             " Recall is scored over the instances the last drained tick covered "
             "(recall_covered in financial_scoring.covered); it is not the batch "
-            "recall and the table does not show it."
+            "recall."
         )
     return " Recall is not scored: " + html.escape(str(scoring.get("reason") or "no reason")) + "."

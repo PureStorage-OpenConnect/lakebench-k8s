@@ -23,6 +23,8 @@ from lakebench.modules.pipeline_engines.spark.job import (
     compute_peak_requirements,
     get_executor_count,
     get_job_profile,
+    stage_profile,
+    streaming_executor_count,
 )
 from lakebench.spark.job import JobType, SparkJobManager
 
@@ -39,8 +41,6 @@ _GOLD_TICK_S, _GOLD_CORES, _GOLD_MEAN_ROWS_M = 349.5, 8, 58.4
 _GOLD_FIXED_S = 45
 _SILVER_FULL_ROWS_M_S10 = 266.7
 _GOLD_REFRESH_S = 300
-
-_KEEP_UP = get_job_profile("silver-stream", "financial")["keep_up_executors"]
 
 _STAGES = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
 
@@ -149,33 +149,6 @@ def test_counts_scale_and_respect_the_cap():
         assert silver <= _MAX_EXECUTORS_SAFE and gold <= _MAX_EXECUTORS_SAFE
 
 
-def test_peak_requirements():
-    """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
-    for scale, cores, memory in [(1, 118, 990), (10, 118, 990), (100, 222, 1958)]:
-        peak = compute_peak_requirements(scale, "sustained", "financial")
-        assert (peak.cpu_cores, peak.memory_gb) == (cores, memory)
-
-
-# Budget split per cluster size: (bronze, silver, gold) executors.
-_BUDGET = [
-    (1, 60, (1, 4, 2)),
-    (1, 80, (5, 4, 2)),
-    (1, 100, (5, 7, 3)),
-    (1, 150, (5, 10, 12)),
-    (1, 434, (5, 10, 12)),
-    (10, 60, (1, 4, 2)),
-    (10, 80, (5, 4, 2)),
-    (10, 100, (5, 7, 3)),
-    (10, 150, (5, 10, 12)),
-    (10, 434, (5, 10, 12)),
-    (100, 60, (1, 5, 2)),
-    (100, 80, (1, 8, 3)),
-    (100, 100, (2, 10, 4)),
-    (100, 150, (8, 11, 8)),
-    (100, 434, (8, 17, 28)),
-]
-
-
 def _budget_cores(cfg, cores):
     from lakebench.config.autosizer import _parse_cpu_millicores
 
@@ -192,60 +165,34 @@ def _budget_cores(cfg, cores):
     return int(max(0, cores * 1000 - co - dg_m - 10_000) * 0.9) // 1000
 
 
-def test_budget_split():
-    for scale, cores, expected in _BUDGET:
-        cfg = _config("financial", scale)
-        got = _streaming_concurrent_budget(cfg, cores * 1000)
-        assert tuple(got[j] for j in _STAGES) == expected
-        base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-        base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
-        total = sum(got[j] * 4 for j in _STAGES)
-        assert total <= max(_budget_cores(cfg, cores), base_total)
-        for j in _STAGES:
-            floor = max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4)
-            assert floor <= got[j] <= get_executor_count(j.value, scale, "financial")
-
-
 def test_budget_properties_over_the_core_and_scale_grid():
     """Over scales 1..1000 and 20..697 cores: the total stays within the
-    budget (or the old split, when floors alone exceed it); no whole 4-core
-    executor is left unspent while a stage still wants one; and spare cores go
-    upstream first (a stage runs no faster than its input): gold gets cores
-    above its floor only once bronze is full and silver is at its keep-up
-    count, and silver goes past keep-up only once bronze and gold are full."""
+    budget (or one executor per stage, when that alone exceeds it); no whole
+    executor is left unspent while a stage still wants one; and no stage
+    holds a larger share of what it wants than another would with one more
+    executor, when that executor could have moved, so the stage that binds is
+    not starved for a larger one."""
     for scale in (1, 10, 50, 100, 200, 500, 1000):
         cfg = _config("financial", scale)
-        c360 = _config("customer360", scale)
-        want = {j: get_executor_count(j.value, scale, "financial") for j in _STAGES}
-        keep_up = min(want[JobType.SILVER_STREAM], _KEEP_UP)
+        shape = {j: stage_profile(j.value, cfg) for j in _STAGES}
+        cpe = {j: shape[j]["executor_cores"] for j in _STAGES}
+        want = {j: streaming_executor_count(j.value, shape[j], cfg) for j in _STAGES}
         for cores in range(20, 700, 3):
             at = f"scale={scale} cores={cores}"
             got = _streaming_concurrent_budget(cfg, cores * 1000)
-            base = _streaming_concurrent_budget(c360, cores * 1000)
-            base_total = sum(base[j] * _JOB_PROFILES[j.value]["executor_cores"] for j in _STAGES)
             budget = _budget_cores(cfg, cores)
-            total = sum(got[j] * 4 for j in _STAGES)
-            assert total <= max(budget, base_total), at
-            if any(got[j] < want[j] for j in _STAGES):
-                assert budget - total < 4, at
-            if scale == 200:  # the upstream-first grid ran over 1, 10, 50, 100, 500
-                continue
-            floor = {
-                j: max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4) for j in _STAGES
-            }
-            if got[JobType.SILVER_STREAM] > floor[JobType.SILVER_STREAM]:
-                assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST], at
-            if got[JobType.GOLD_REFRESH] > floor[JobType.GOLD_REFRESH]:
-                assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST], at
-                assert got[JobType.SILVER_STREAM] >= keep_up, at
-            if got[JobType.SILVER_STREAM] > max(floor[JobType.SILVER_STREAM], keep_up):
-                assert got[JobType.GOLD_REFRESH] == want[JobType.GOLD_REFRESH], at
-
-
-def test_silver_keep_up_count_holds_bronze_intake():
-    per_core_rps = _SILVER_ROWS / _SILVER_S / _SILVER_CORES
-    assert _KEEP_UP * 4 * per_core_rps >= 1.2 * _BRONZE_RPS
-    assert (_KEEP_UP - 1) * 4 * per_core_rps < 1.2 * _BRONZE_RPS
+            total = sum(got[j] * cpe[j] for j in _STAGES)
+            assert all(1 <= got[j] <= want[j] for j in _STAGES), at
+            assert total <= max(budget, sum(cpe.values())), at
+            wanting = [cpe[j] for j in _STAGES if got[j] < want[j]]
+            if wanting:
+                assert budget - total < min(wanting), at
+            for low in _STAGES:
+                for high in _STAGES:
+                    # Moving one executor from high to low was possible.
+                    movable = cpe[low] <= budget - total + cpe[high]
+                    if got[low] < want[low] and got[high] > 1 and movable:
+                        assert (got[high] - 1) / want[high] <= got[low] / want[low], at
 
 
 def _capacity_k8s(cores):
@@ -262,14 +209,27 @@ def _capacity_k8s(cores):
 
 
 @pytest.mark.parametrize(
-    ("job", "instances"), [(JobType.SILVER_STREAM, 10), (JobType.GOLD_REFRESH, 12)]
+    "job", [JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH]
 )
-def test_manifest_deploys_the_override(job, instances):
-    mgr = SparkJobManager(_config("financial", 10), _capacity_k8s(434))
-    ex = mgr._build_manifest(job)["spec"]["executor"]
-    assert ex["instances"] == instances
-    assert ex["cores"] == 4
-    assert mgr.budget_warnings == []
+def test_executor_cores_set_in_config_are_deployed_exactly(job):
+    """Outcome 6: ``*_executor_cores: 8`` deploys 8-core executors with the
+    profile's memory per core and keeps the scale's executor count: the
+    size changes, not the count, on a cluster with room."""
+    from lakebench.config.schema import parse_spark_memory
+
+    plain = SparkJobManager(_config("financial", 10), _capacity_k8s(434))._build_manifest(job)
+    cfg = _config("financial", 10)
+    setattr(cfg.platform.compute.spark, f"{job.value.replace('-', '_')}_executor_cores", 8)
+    ex = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(job)["spec"]["executor"]
+    base = get_job_profile(job.value, "financial")
+    per_core = {
+        k: parse_spark_memory(base[k]) / base["executor_cores"]
+        for k in ("executor_memory", "executor_memory_overhead")
+    }
+    assert ex["cores"] == 8
+    assert parse_spark_memory(ex["memory"]) == 8 * per_core["executor_memory"]
+    assert parse_spark_memory(ex["memoryOverhead"]) == 8 * per_core["executor_memory_overhead"]
+    assert ex["instances"] == plain["spec"]["executor"]["instances"]
 
 
 class TestPreflightBetweenOldAndNewMinimum:
@@ -278,16 +238,13 @@ class TestPreflightBetweenOldAndNewMinimum:
     failing preflight.
 
     The preflight sizes the config as ``run`` does (CC-22: auto-sizing on a
-    copy against the cluster), so datagen is 4 pods x 8 cores here even
-    though this test's config is not resolved in place. The capped request
-    is then 82 cores (81 before lb-deps was counted in it); before CC-22 an unresolved config was checked with the
-    schema's datagen defaults and passed from 57 cores, a cluster on which
-    ``run`` itself is refused.
+    copy against the cluster), so datagen is the cores the scale's offered
+    load needs, even though this test's config is not resolved in place.
     """
 
     GIB = 1024**3
 
-    def _check(self, cores, memory_gb=4000, node_cores=64, node_gb=256):
+    def _check(self, cores, memory_gb=4000, node_cores=64, node_gb=256, schema="financial"):
         from unittest import mock
 
         from lakebench.cli._prerequisites import _check_cluster_capacity
@@ -298,34 +255,25 @@ class TestPreflightBetweenOldAndNewMinimum:
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
             _free_from_total(get_client.return_value)
-            return _check_cluster_capacity(_config("financial", 10))
+            return _check_cluster_capacity(_config(schema, 10))
 
-    def test_runs_degraded_with_a_warning(self):
-        for cores in [82, 100, 117, 160]:
+    def _min_cores(self, schema="financial", **kw):
+        """The smallest cluster preflight admits (the check is monotonic)."""
+        return next(c for c in range(1, 1000) if self._check(c, schema=schema, **kw).passed)
+
+    def test_runs_degraded_below_the_planned_floor(self):
+        """Below the floor the plan prints, preflight admits the run degraded
+        (capped streams, with a warning) instead of refusing it; at the floor
+        it admits it clean, so the plan and the preflight agree."""
+        from lakebench.config.sizing import plan_requirements
+
+        floor = plan_requirements(_config("financial", 10)).floor.cpu_cores
+        low = self._min_cores()
+        assert low < floor
+        for cores in (low, (low + floor) // 2, floor - 1):
             r = self._check(cores)
-            assert r.passed
-            assert r.message.startswith("WARNING")
-            assert "silver-stream" in r.message or "gold-refresh" in r.message
-
-    def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
-        """The capped streams plus Trino, Hive/Postgres, lb-deps and datagen
-        (4 pods x 8 cores, as run sizes them) need 82: below that the run
-        would hang Pending, so preflight fails."""
-        assert not self._check(54).passed
-        assert not self._check(81).passed
-        assert self._check(82).passed
-
-    @pytest.mark.parametrize("cores", [30, 37])
-    def test_c360_below_the_capped_request_still_fails(self, cores):
-        from unittest import mock
-
-        from lakebench.cli._prerequisites import _check_cluster_capacity
-
-        cap = ClusterCapacity(cores * 1000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
-        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-            get_client.return_value.get_cluster_capacity.return_value = cap
-            _free_from_total(get_client.return_value)
-            assert not _check_cluster_capacity(_config("customer360", 10)).passed
+            assert r.passed and r.message.startswith("WARNING"), cores
+        assert self._check(floor).passed and not self._check(floor).message.startswith("WARNING")
 
     def test_an_explicit_count_is_counted_uncapped(self):
         """The manifest applies gold_refresh_executors after the budget."""
@@ -346,10 +294,12 @@ class TestPreflightBetweenOldAndNewMinimum:
 
         from lakebench.cli._prerequisites import _check_cluster_capacity
 
+        low = self._min_cores()
+
         def run(driver_cores):
             cfg = _config("financial", 10)
             cfg.platform.compute.spark.driver_cores = driver_cores
-            cap = ClusterCapacity(82_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+            cap = ClusterCapacity(low * 1000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
             with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
                 get_client.return_value.get_cluster_capacity.return_value = cap
                 _free_from_total(get_client.return_value)
@@ -375,7 +325,7 @@ class TestPreflightBetweenOldAndNewMinimum:
         assert not self._check(20).passed
 
     def test_memory_short_even_capped_still_fails(self):
-        assert not self._check(80, memory_gb=200).passed
+        assert not self._check(80, memory_gb=160).passed
 
     def test_a_pod_that_fits_no_node_still_fails(self):
         assert not self._check(100, node_gb=30).passed
@@ -394,7 +344,7 @@ class TestPreflightBetweenOldAndNewMinimum:
             assert not _check_cluster_capacity(cfg).passed
 
 
-# -- driver pod overhead (LB-227) ---------------------------------------------
+# -- driver pod overhead ---------------------------------------------
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ current code departs from the model, the departure is recorded in
 with the package) rather than hidden in the model.
 
 Detail lives elsewhere: `docs/architecture.md` (modules, deploy order),
-`docs/design/namespace-isolation.md` (ownership), `docs/benchmarking.md`
+`docs/internal/namespace-isolation.md` (ownership), `docs/benchmarking.md`
 (scores), `docs/aml-scoring.md` (the AML workload), `docs/recipes.md`.
 
 ## 1. Product model
@@ -20,15 +20,16 @@ a known system and records what happened. The model is:
 workload x architecture x system x execution conditions -> evidence
 ```
 
-The **system** (Kubernetes, compute, network, storage) is known for every
-experiment and held constant across a controlled comparison unless the
-system itself is the variable under test. The **architecture** is a
-composition of a catalog, table format, pipeline engine and query engine,
-together with the access paths between them. The **workload** is real
-business work: a generated corpus, a pipeline over it, a definition of the
-correct answer and measurements; Customer 360 and AML today. The
-**execution conditions** are scale, mode, seed, maintenance policy and any
-limit Lakebench imposes.
+- The **system** (Kubernetes, compute, network, storage) is known for every
+  experiment. It is held constant across a controlled comparison unless the
+  system itself is the variable under test.
+- The **architecture** is a composition of a catalog, table format, pipeline
+  engine and query engine, together with the access paths between them.
+- The **workload** is real business work: a generated corpus, a pipeline over
+  it, a definition of the correct answer and measurements. Customer 360 and
+  AML today.
+- The **execution conditions** are scale, mode, seed, maintenance policy and
+  any limit Lakebench imposes.
 
 A controlled comparison holds every factor but one constant and attributes
 the difference to that one:
@@ -74,13 +75,13 @@ An enum value is a name the config accepts, not a promise of support;
 catalog: query engine -> catalog -> table metadata -> storage. DuckDB reads
 table metadata and storage directly, without the catalog. The access path is
 part of the architecture actually instantiated and is recorded in the
-evidence (for example `query_access_path=direct_storage`). Two whole
-compositions are comparable when their workload results match; any
+evidence (for example `query_access_path=direct_storage`).
+
+Two whole compositions are comparable when their workload results match. Any
 difference in effective execution conditions, such as maintenance policy, is
-shown alongside the comparison and it is not labelled like-for-like
-(section 6.5).
-Attributing a difference to one component in isolation is not valid when the
-access paths differ.
+shown alongside the comparison, and it is not labelled like-for-like
+(section 6.5). Attributing a difference to one component in isolation is not
+valid when the access paths differ.
 
 `_SUPPORTED_COMBINATIONS` (`config/schema.py`) lists the structurally valid
 architecture compositions. It is enforced at load by
@@ -123,26 +124,28 @@ preserve the workload's meaning and pass the same correctness contract.
    `*_delta.py`, a per-format adapter, for Customer 360). AML adds scoring and
    TM operations stages.
 3. **Correctness contract.** What a correct run produces, and the gates that
-   fail a run that did not produce it. Existing gates: non-empty guards in
-   the Customer 360 stage scripts; `_benchmark_gate_problems` (failed
-   queries) and, for AML, `_aml_batch_gate_problems` (crashed rules, zero
-   alerts) and `_aml_tm_verdict` (TM operations invariants) in `cli/_run.py`;
-   in continuous mode `_c360_continuous_gate_problems` (zero rows) and the
-   AML continuous gate (no gold-refresh logs or zero alerts) in
-   `cli/_sustained.py`. AML also scores recall and precision against planted
-   ground truth and has a reference detector and leakage gate (`aml/`).
-   Customer 360 expected results are derived by the implementation; the owner
-   approves their meaning before they gate a run.
+   fail a run that did not produce it. Existing gates:
+   - non-empty guards in the Customer 360 stage scripts;
+   - in `cli/_run.py`: `_benchmark_gate_problems` (failed queries) and, for
+     AML, `_aml_batch_gate_problems` (crashed rules, zero alerts) and
+     `_aml_tm_verdict` (TM operations invariants);
+   - in continuous mode, in `cli/_sustained.py`:
+     `_c360_continuous_gate_problems` (zero rows) and the AML continuous gate
+     (no gold-refresh logs or zero alerts).
+
+   AML also scores recall and precision against planted ground truth and has
+   a reference detector and leakage gate (`aml/`). Customer 360 expected
+   results are derived by the implementation; the owner approves their
+   meaning before they gate a run.
 4. **Measurements.** Stage timings and throughput, the query set and its QpH
    (`benchmark/queries.py`, `get_benchmark_queries` keyed by workload, with a
    `query_set_id` per set), and workload-specific scores such as AML recall.
 5. **Modes.** The execution modes the workload supports (section 5).
 
-The workload is a top-level config key. Today it is read from
-`architecture.workload.schema` (`WorkloadSchema` in `config/schema.py`); the
-owner has decided it moves to the top level, with the old location accepted
-under a deprecation warning, and that `custom` is rejected in v1.6. There is
-no Workload object yet; dispatch is by string comparison.
+The workload is the top-level `workload.schema` config key (`WorkloadSchema`
+in `config/schema.py`). The old `architecture.workload` location loads with a
+deprecation warning. `custom` is refused at load. There is no Workload object
+yet; dispatch is by string comparison.
 
 ### 2.4 Experiment
 
@@ -175,13 +178,18 @@ Every run writes under `lakebench-output/` (`_constants.py`
 - `runs/run-<id>/report.html` (`reports/generator.py`, `reports/scorecard.py`).
 - `journal/session-<name>.jsonl` (`journal/`): what was done, in order.
 
-A result must identify, where applicable: workload and workload version;
-generator identity and seed; recipe, component versions and access paths;
-system identity; scale; mode; effective maintenance policy; stages and rules
-executed or skipped; caps that applied and whether they bound; the support
-state of the combination (section 6.5); and the number of repetitions behind
-any figure that claims repeatability. A result that cannot say what produced
-it is not evidence.
+A result must identify, where applicable:
+
+- workload and workload version;
+- generator identity and seed;
+- recipe, component versions and access paths;
+- system identity, scale, mode and effective maintenance policy;
+- stages and rules executed or skipped;
+- caps that applied and whether they bound;
+- the support state of the combination (section 6.5);
+- the number of repetitions behind any figure that claims repeatability.
+
+A result that cannot say what produced it is not evidence.
 
 ## 3. Boundaries
 
@@ -190,15 +198,15 @@ conditions; orchestration (`deploy/`, `cli/`) executes them; evidence
 (`metrics/`, `reports/`, `journal/`) records the outcome.
 
 - **Workload semantics do not depend on the architecture.** A workload states
-  what it requires of an architecture (for example a table format with
-  snapshot retention for replay, or a query engine that can express its query
-  set), and the compatibility check uses those requirements.
-- **Adapters may be component-specific; meaning may not.** Where a workload
-  needs a per-component implementation (a stage script per table format, a
-  resource profile for a workload's spill behaviour), the adapter is declared
-  data owned by the workload, looked up by (workload, component), and must
-  pass the workload's correctness contract. It is not an if/elif in engine
-  code.
+  what it requires of an architecture, and the compatibility check uses those
+  requirements. Examples: a table format with snapshot retention for replay,
+  or a query engine that can express its query set.
+- **Adapters may be component-specific; meaning may not.** A workload may
+  need a per-component implementation (a stage script per table format, a
+  resource profile for a workload's spill behaviour). That adapter is
+  declared data owned by the workload, looked up by (workload, component). It
+  must pass the workload's correctness contract. It is not an if/elif in
+  engine code.
 - **A component module does not know which workload runs through it.** It
   deploys its component, supplies its Spark and client configuration,
   translates SQL dialect where needed, and exposes its maintenance
@@ -220,9 +228,9 @@ alone changes them.
 1. **Correctness before comparison.** Performance results are valid only when
    the workload completed correctly, and a performance comparison is invalid
    when the compared runs produced different workload results.
-   Every run's report shows the evidence (a result fingerprint per query,
-   and for an AML batch run its alert set), so a reader can see whether two
-   runs produced the same results; `reproduce` refuses a
+   Every run's report shows the evidence: a result fingerprint per query,
+   and for an AML batch run its alert set. A reader can see whether two
+   runs produced the same results. `reproduce` refuses a
    run whose query results differ from their reference.
 2. **Non-degenerate pass.** A successful exit is not evidence if the output
    is empty, degenerate, skipped or otherwise invalid. Every stage and every
@@ -239,7 +247,7 @@ alone changes them.
 6. **Destroy isolation.** Destroying deployment A never affects deployment B.
    The four ownership categories (per-deployment, shared read-only
    infrastructure, shared operators, shared mutable state) are defined in
-   `docs/design/namespace-isolation.md` and enforced by `deploy/ownership.py`
+   `docs/internal/namespace-isolation.md` and enforced by `deploy/ownership.py`
    (identity stamps, bucket tags, deploy nonce), `deploy/cluster_lock.py` and
    `deploy/destroy.py` (UID and nonce re-check). Destroy deletes only
    category 1 resources it can prove it owns.
@@ -268,11 +276,10 @@ alone changes them.
 - **Datagen mode** (`DatagenMode`: batch, continuous, auto) is the S3
   delivery pattern for the corpus: `batch` = one PUT per Parquet file,
   `continuous` = S3 multipart upload as row-groups close, `auto` =
-  `continuous` at every scale (owner D18, 2026-09-28). Row content is
-  byte-identical across modes at a fixed seed. Pod CPU and memory are
-  sized by scale via the autosizer independently of delivery mode; the
-  pre-2026-09-28 role of this enum as a resource-profile tier was
-  removed in v1.6 and moved into scale-based sizing.
+  `continuous` at every scale (owner, 2026-09-28).
+  - Row content is byte-identical across modes at a fixed seed.
+  - Pod CPU and memory are sized by scale via the autosizer, independently of
+    delivery mode. This enum is not a resource-profile tier.
 - **Workload schema** is the config name (`customer360`, `financial`);
   "financial" and "AML" name the same workload.
 - **Support states**: supported, unverified, unsupported (section 6.5).

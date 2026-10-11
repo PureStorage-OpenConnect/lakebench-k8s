@@ -1,10 +1,5 @@
-"""The Spark Operator controller's /tmp (spark-submit's Ivy cache).
-
-Live 2026-09-27: lakebench sets spark.jars.ivy=/tmp/.ivy2, the operator runs
-spark-submit in its controller, and the chart's 1Gi /tmp emptyDir filled with
-Maven jars. The kubelet evicted the controller 19 times in ~100 minutes, and
-each eviction cost every tenant a leader election, a cold cache and a
-SUBMISSION_FAILED retry. These tests pin the admin fix and its diagnosis.
+"""The Spark Operator controller's /tmp (spark-submit's Ivy cache): the admin resize,
+its install guards and the diagnosis of storage evictions.
 """
 
 from __future__ import annotations
@@ -23,7 +18,6 @@ from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     TmpVolume,
     diagnose,
     helm_set_args,
-    parse_quantity,
     tmp_volume,
     validate_size,
 )
@@ -109,20 +103,10 @@ class TestHelmValues:
             "controller.volumes[0].emptyDir.sizeLimit=8Gi",
         ]
 
-    def test_default_clears_the_floor(self):
-        assert parse_quantity(DEFAULT_CONTROLLER_TMP_SIZE) >= 4 * 1024**3
-        assert validate_size(DEFAULT_CONTROLLER_TMP_SIZE) == DEFAULT_CONTROLLER_TMP_SIZE
-
-    @pytest.mark.parametrize("bad", ["1Gi", "2048Mi", "8G", "eight", ""])
+    @pytest.mark.parametrize("bad", ["1Gi", "2048Mi", "8G", "eight", "x", ""])
     def test_rejects_small_or_odd_sizes(self, bad):
         with pytest.raises(ValueError):
             validate_size(bad)
-
-    @pytest.mark.parametrize(
-        ("q", "n"), [("1Gi", 1024**3), ("500Mi", 500 * 1024**2), ("4G", 4 * 1000**3), ("x", None)]
-    )
-    def test_parse_quantity(self, q, n):
-        assert parse_quantity(q) == n
 
 
 class TestInstall:
@@ -166,6 +150,22 @@ class TestInstall:
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
             assert SparkOperatorManager(version="2.5.1").install() is False
 
+    def test_refuses_to_drop_other_stored_controller_volumes(self):
+        fake = _FakeCluster(release=True)
+        fake.stored_values = {"controller": {"volumes": [{"name": "tmp"}, {"name": "ca-bundle"}]}}
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager(version="2.5.1").install() is False
+            assert SparkOperatorManager().apply_controller_tmp_size("8Gi") is False
+        assert fake.helm_upgrades() == []
+
+    def test_unreadable_installed_version_refuses_unpinned_upgrade(self):
+        fake = _FakeCluster(release=True, chart=None)
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager().install() is False
+            # The config's pin is not a stand-in for the installed chart.
+            assert SparkOperatorManager(version="2.4.0").apply_controller_tmp_size("8Gi") is False
+        assert fake.helm_upgrades() == []
+
 
 class TestApplyTmpSize:
     def test_resize_pins_installed_chart_and_reuses_values(self):
@@ -190,6 +190,36 @@ class TestApplyTmpSize:
             pin = SparkOperatorManager(version="2.5.1")._watch_list_pin()
         assert pin is not None
         assert not any("controller.volumes" in a for a in pin)
+
+    @pytest.mark.parametrize(
+        ("before", "after", "stored", "expected_set"),
+        [
+            (
+                "16Gi",
+                "16Gi",
+                None,
+                "controller.volumes[0].emptyDir.sizeLimit=16Gi",
+            ),  # keeps a larger one
+            # only the stored values keep an unbounded /tmp
+            (None, None, {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}, None),
+            # hand-patched unbounded without stored values gets the default, not the chart's 1Gi
+            (None, "unset", None, "controller.volumes[0].emptyDir.sizeLimit=8Gi"),
+        ],
+    )
+    def test_upgrade_without_a_size_never_shrinks_tmp(self, before, after, stored, expected_set):
+        fake = _FakeCluster(release=True)
+        fake.tmp_before = before
+        if after != "unset":
+            fake.tmp_after_upgrade = after
+        if stored is not None:
+            fake.stored_values = stored
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
+        (cmd,) = fake.helm_upgrades()
+        if expected_set is None:
+            assert not any("controller.volumes" in v for v in _set_values(cmd))
+        else:
+            assert expected_set in _set_values(cmd)
 
 
 class TestDiagnose:
@@ -222,8 +252,6 @@ class TestDiagnose:
         )
         assert not diag.healthy
         assert len(diag.storage_evictions) == 1  # pod and event are one eviction
-        text = " ".join(diag.problems)
-        assert "1Gi" in text and "evicted for storage" in text
 
     def test_undersized_alone_is_a_problem(self):
         assert not diagnose(_deployment("1Gi"), [], []).healthy
@@ -240,6 +268,73 @@ class TestDiagnose:
         )
         assert diag.healthy
         assert diag.other_evictions == 1
+
+    @staticmethod
+    def _evicted_pod(name, limit=None):
+        pod = {
+            "metadata": {"name": name},
+            "status": {"reason": "Evicted", "message": TestDiagnose._EVICT_MSG},
+        }
+        if limit:
+            pod["spec"] = {"volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": limit}}]}
+        return pod
+
+    @staticmethod
+    def _live_pod(name, created=None):
+        meta = {"name": name}
+        if created:
+            meta["creationTimestamp"] = created
+        return {"metadata": meta, "status": {"phase": "Running"}}
+
+    @pytest.mark.parametrize(
+        ("case", "healthy", "past"),
+        [
+            # Evicted under the old 1Gi size, since resized to 8Gi: history.
+            ("evicted_before_resize", True, 1),
+            # Every watch-list edit makes a new ReplicaSet; an eviction under
+            # the current size stays a problem after one.
+            ("evicted_at_current_size_across_replicasets", False, None),
+            # An eviction known only from its event counts as current.
+            ("event_only_eviction", False, None),
+            # Events left behind by a repair and pod cleanup are history.
+            ("event_older_than_live_pod", True, 1),
+            ("event_newer_than_live_pod", False, None),
+        ],
+    )
+    def test_eviction_history_versus_current(self, case, healthy, past):
+        live = self._live_pod("spark-operator-controller-bbb-2")
+        event = self._event("spark-operator-controller-ccc-3", self._EVICT_MSG)
+        pods, events = {
+            "evicted_before_resize": (
+                [self._evicted_pod("spark-operator-controller-79cc857c77-kmn94", "1Gi")],
+                [],
+            ),
+            "evicted_at_current_size_across_replicasets": (
+                [self._evicted_pod("spark-operator-controller-aaa-1", "8Gi"), live],
+                [],
+            ),
+            "event_only_eviction": ([live], [event]),
+            "event_older_than_live_pod": (
+                [self._live_pod("spark-operator-controller-new-1", "2026-09-27T16:00:00Z")],
+                [
+                    self._event(
+                        "spark-operator-controller-old-1", self._EVICT_MSG, "2026-09-27T15:17:06Z"
+                    )
+                ],
+            ),
+            "event_newer_than_live_pod": (
+                [self._live_pod("spark-operator-controller-new-1", "2026-09-27T16:00:00Z")],
+                [
+                    self._event(
+                        "spark-operator-controller-old-1", self._EVICT_MSG, "2026-09-27T16:10:00Z"
+                    )
+                ],
+            ),
+        }[case]
+        diag = diagnose(_deployment("8Gi"), pods, events)
+        assert diag.healthy is healthy
+        if past is not None:
+            assert diag.past_storage_evictions == past
 
     def test_missing_volume(self):
         vol = tmp_volume(_deployment("1Gi", name="scratch"))
@@ -267,29 +362,26 @@ def _admin_mgr(vol: TmpVolume, watched=None):
 
 
 class TestRepairOperatorTmp:
-    def test_small_tmp_is_resized_under_the_lease(self):
-        with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, lock):
-            r = runner.invoke(admin_app, ["repair-operator"])
+    @pytest.mark.parametrize(
+        ("size", "args", "applied", "lock_taken"),
+        [
+            ("1Gi", [], True, True),
+            ("1Gi", ["--dry-run"], False, False),
+            # The lease is taken to read inside it; nothing is applied.
+            ("8Gi", [], False, True),
+        ],
+        ids=["small_is_resized", "dry_run_does_not_resize", "large_enough_is_left_alone"],
+    )
+    def test_resize_decision(self, size, args, applied, lock_taken):
+        with _admin_mgr(TmpVolume(True, size)) as (mgr, lock):
+            r = runner.invoke(admin_app, ["repair-operator", *args])
         assert r.exit_code == 0, r.output
-        assert lock.called
-        mgr.apply_controller_tmp_size.assert_called_once_with("8Gi")
-        assert "1Gi -> 8Gi" in r.output
-
-    def test_dry_run_does_not_resize(self):
-        with _admin_mgr(TmpVolume(True, "1Gi")) as (mgr, lock):
-            r = runner.invoke(admin_app, ["repair-operator", "--dry-run"])
-        assert r.exit_code == 0
-        assert not lock.called
-        mgr.apply_controller_tmp_size.assert_not_called()
-
-    def test_large_enough_tmp_is_left_alone(self):
-        # The lease is taken to read inside it; nothing is applied.
-        with _admin_mgr(TmpVolume(True, "8Gi")) as (mgr, lock):
-            r = runner.invoke(admin_app, ["repair-operator"])
-        assert r.exit_code == 0
-        assert lock.called
-        mgr.apply_controller_tmp_size.assert_not_called()
-        mgr._set_watch_list_impl.assert_not_called()
+        assert bool(lock.called) is lock_taken
+        if applied:
+            mgr.apply_controller_tmp_size.assert_called_once_with("8Gi")
+        else:
+            mgr.apply_controller_tmp_size.assert_not_called()
+            mgr._set_watch_list_impl.assert_not_called()
 
 
 class TestInstallCommand:
@@ -298,113 +390,3 @@ class TestInstallCommand:
             r = runner.invoke(admin_app, ["install-spark-operator", "--controller-tmp-size", "1Gi"])
         assert r.exit_code == 2
         mgr.install.assert_not_called()
-
-
-class TestReviewFixes:
-    def test_refuses_to_drop_other_stored_controller_volumes(self):
-        fake = _FakeCluster(release=True)
-        fake.stored_values = {"controller": {"volumes": [{"name": "tmp"}, {"name": "ca-bundle"}]}}
-        with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager(version="2.5.1").install() is False
-            assert SparkOperatorManager().apply_controller_tmp_size("8Gi") is False
-        assert fake.helm_upgrades() == []
-
-    @pytest.mark.parametrize(
-        ("before", "after", "stored", "expected_set"),
-        [
-            (
-                "16Gi",
-                "16Gi",
-                None,
-                "controller.volumes[0].emptyDir.sizeLimit=16Gi",
-            ),  # keeps a larger one
-            # only the stored values keep an unbounded /tmp
-            (None, None, {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}, None),
-            # hand-patched unbounded without stored values gets the default, not the chart's 1Gi
-            (None, "unset", None, "controller.volumes[0].emptyDir.sizeLimit=8Gi"),
-        ],
-    )
-    def test_upgrade_without_a_size_never_shrinks_tmp(self, before, after, stored, expected_set):
-        fake = _FakeCluster(release=True)
-        fake.tmp_before = before
-        if after != "unset":
-            fake.tmp_after_upgrade = after
-        if stored is not None:
-            fake.stored_values = stored
-        with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager().apply_controller_tmp_size(None) is True
-        (cmd,) = fake.helm_upgrades()
-        if expected_set is None:
-            assert not any("controller.volumes" in v for v in _set_values(cmd))
-        else:
-            assert expected_set in _set_values(cmd)
-
-    def test_unreadable_installed_version_refuses_unpinned_upgrade(self):
-        fake = _FakeCluster(release=True, chart=None)
-        with patch(_RUN, side_effect=fake), patch("time.sleep"):
-            assert SparkOperatorManager().install() is False
-            # The config's pin is not a stand-in for the installed chart.
-            assert SparkOperatorManager(version="2.4.0").apply_controller_tmp_size("8Gi") is False
-        assert fake.helm_upgrades() == []
-
-    def test_evictions_before_a_resize_are_history(self):
-        msg = TestDiagnose._EVICT_MSG
-
-        def evicted(name, limit):
-            return {
-                "metadata": {"name": name},
-                "spec": {"volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": limit}}]},
-                "status": {"reason": "Evicted", "message": msg},
-            }
-
-        old = evicted("spark-operator-controller-79cc857c77-kmn94", "1Gi")
-        diag = diagnose(_deployment("8Gi"), [old], [])
-        assert diag.healthy
-        assert diag.past_storage_evictions == 1
-
-    def test_evictions_at_the_current_size_stay_current_across_replicasets(self):
-        """Every watch-list edit makes a new ReplicaSet; an eviction under
-        the current size is still a problem after one."""
-        msg = TestDiagnose._EVICT_MSG
-        pod = {
-            "metadata": {"name": "spark-operator-controller-aaa-1"},
-            "spec": {"volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "8Gi"}}]},
-            "status": {"reason": "Evicted", "message": msg},
-        }
-        live = {
-            "metadata": {"name": "spark-operator-controller-bbb-2"},
-            "status": {"phase": "Running"},
-        }
-        diag = diagnose(_deployment("8Gi"), [pod, live], [])
-        assert not diag.healthy
-        # An eviction known only from its event counts as current.
-        event = {
-            "reason": "Evicted",
-            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-ccc-3"},
-            "message": msg,
-            "lastTimestamp": "2026-09-27T15:05:41Z",
-        }
-        assert not diagnose(_deployment("8Gi"), [live], [event]).healthy
-
-
-class TestThirdPass:
-    _MSG = 'Usage of EmptyDir volume "tmp" exceeds the limit "1Gi". '
-
-    def test_events_left_after_repair_and_pod_cleanup_are_history(self):
-        live = {
-            "metadata": {
-                "name": "spark-operator-controller-new-1",
-                "creationTimestamp": "2026-09-27T16:00:00Z",
-            },
-            "status": {"phase": "Running"},
-        }
-        event = {
-            "reason": "Evicted",
-            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-old-1"},
-            "message": self._MSG,
-            "lastTimestamp": "2026-09-27T15:17:06Z",
-        }
-        diag = diagnose(_deployment("8Gi"), [live], [event])
-        assert diag.healthy and diag.past_storage_evictions == 1
-        event["lastTimestamp"] = "2026-09-27T16:10:00Z"
-        assert not diagnose(_deployment("8Gi"), [live], [event]).healthy

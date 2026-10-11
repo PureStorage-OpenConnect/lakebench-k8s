@@ -1,13 +1,13 @@
 # Configuration Reference
 
-Lakebench uses a single YAML file to describe the entire deployment: platform
-resources, data architecture, workload parameters, and observability settings.
-The configuration is validated at load time by Pydantic v2. Any invalid field
-or unsupported combination produces a clear error before anything touches your
-cluster.
+Reference: every config key, its default, and how a config loads.
 
-The default config path is `./lakebench.yaml`. All commands accept an explicit
-path as the first positional argument:
+- One YAML file describes the whole deployment: platform resources, data
+  architecture, workload and observability.
+- Pydantic v2 validates it at load. An invalid field or an unsupported
+  combination fails with an error before anything touches the cluster.
+- The default path is `./lakebench.yaml`. Every command takes an explicit
+  path as its first positional argument:
 
 ```bash
 lakebench deploy my-config.yaml
@@ -16,135 +16,42 @@ lakebench run my-config.yaml
 
 ## Minimum viable config
 
-The smallest working config:
-
 ```yaml
 name: my-lakehouse
+recipe: hive-iceberg-spark-trino
 platform:
   storage:
     s3:
       endpoint: http://your-s3-endpoint:80
-      access_key: YOUR_KEY
-      secret_key: YOUR_SECRET
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
 workload:
   datagen:
     scale: 10
 ```
 
-Recipe defaults to `hive-iceberg-spark-trino`.
+- Export the two variables before you run a command:
+  `export LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...`.
+  `lakebench init` writes the same references.
+- Without `recipe:` the config resolves to `hive-iceberg-spark-trino` and
+  loads with a deprecation note (see
+  [Recipes and components](#recipes-and-components)).
+- `name` is required by every command that changes data: `deploy`,
+  `generate`, `run`, `benchmark`, `query`, `clean`, `reproduce`, `financial`
+  and `validate` refuse a config without one, and the error offers a name to
+  add.
+- There is no `config upgrade` command (removed in 1.7; see the CHANGELOG).
 
-The name is required by every command that changes data: `deploy`,
-`generate`, `run`, `benchmark`, `query`, `clean`, `reproduce`,
-`financial` and `validate` refuse a config without one, and the error
-offers a name to add. (`config upgrade` is removed in v1.7 for every
-config; see the CHANGELOG.)
+## Removed keys
 
-Before v1.7 a nameless config got a time-based name (`lb-YYYYMMDD-HHMMSS`)
-written to `.lakebench/state.json` in the config's directory, which every
-nameless config in that directory shared. That file is now only read, and
-nothing ties the name in it to any one config. The teardown commands
-(`destroy`, `stop`, `admin`) and the read-only commands that look at a
-deployment (`status`, `logs`, `report`) therefore refuse a
-nameless config in a directory that has the file, unless `--name NAME` is
-given to `destroy`, `stop`, `status` or `logs`, which then check the
-namespace's own stamps (check 3 under "Deploy state and nameless teardown"
-below). The error gives the v1.6 name and lists the other nameless `*.yaml`
-and `*.yml` configs beside it. To inspect or tear down a deployment v1.6
-made, pass `--name` with that name, or add `name:` with that name to the
-config that deployed it and use that config. `info`, `config show`,
-`config storage` and `config recommend` look at no deployment, so they
-still load a nameless config under the v1.6 name.
+A key an earlier release accepted that now does nothing (for example
+`images.pull_secrets` or `platform.storage.scratch.create_storage_class`):
 
-Without the file, `destroy`, `stop` and `admin` refuse a nameless config
-with no `--name`, because no deployment can be its own, and the read-only
-commands use a suggested name, `lb-<user>-<6 hex>`, which the error for the
-other commands also offers. No command writes `.lakebench/state.json` any
-more, and the read-only commands create no files.
-
-The v1.6 name is read from `.lakebench/state.json` beside the path given,
-as v1.6 read it, with symbolic links not followed; `--name` is checked
-against that name. When a nameless config is reached through a link and the
-directory of the file it points to records a different v1.6 name (or the
-link's directory records none), every command that may look at a
-deployment refuses it without `--name`, so one config cannot act on, or
-report, the other directory's deployment. `info`, `config show`, `config
-storage` and `config recommend` load it under the link directory's name (a
-suggested name when it records none) with a note. Because both directories
-share the one file, the fix is not to add `name:` to it: pass `--name`
-(when the link's directory records a name, only that name is accepted
-through the link; reach the other deployment through the file's own path;
-otherwise the namespace's stamps decide), or replace the link with a
-copy and name each copy. `init --overwrite` without `--name` refuses such a
-file when either directory records a v1.6 name, and `relocate` refuses to
-run through a link when either directory records one. The v1.7 deploy
-state (`.lakebench/<name>.json`, below) stays with the file the link points
-to.
-
-### Deploy state and nameless teardown
-
-Every `deploy` (named configs included) records the per-deploy nonce it is
-about to stamp on the namespace in `.lakebench/<name>.json` beside the
-config, before the namespace gets it, under a lock file
-`.lakebench/<name>.lock`. The file keeps the last five nonces; the one the
-namespace carries is never dropped, and the next deploy confirms it. A
-`deploy --dry-run` writes no state, lock or `.lakebench/` directory (the
-command journal is written as for any command). The directory must be on a
-local disk, or deployed from one host only: the lock is host-local, and a
-deploy waits at most 120 s for another deploy from the same directory. If
-the state cannot be written or read, deploy stops before changing the
-cluster (exit 4). A state written for another directory or host (a copied
-directory, including a `cp -r` copy at the same path) stops deploy with
-exit 3 (`deploy.state_copied`): if the directory was only renamed with
-`mv`, run `relocate` (below) from it; if the copy is meant to be a new
-deployment directory, remove only its `.lakebench/<name>.json` (the other
-files there may be the only record of other deployments). When the config's
-`platform.kubernetes.namespace` changes, the next deploy starts a fresh
-nonce list for the new namespace. Deployment names that are not plain file
-names, and the name `state`, cannot be recorded (exit 4).
-
-`destroy`, `stop`, `status` and `logs` with a nameless config act only on a
-deployment the directory can prove is its own, and refuse otherwise
-(exit 3), pointing at `lakebench init --from`:
-
-1. It is the only nameless config in its directory, or `--name NAME` is
-   given.
-2. If `.lakebench/<name>.json` exists, it was written for this directory
-   (the same directory, not a copy at the same path) on this host, for the
-   config's namespace, has not been moved, and the namespace carries one of
-   its nonces. A copied directory, or a namespace redeployed from elsewhere,
-   is refused.
-3. Otherwise (a v1.6 directory, at most `.lakebench/state.json`): `--name`
-   is required and must equal the name in `state.json` when there is one;
-   the namespace must carry `lakebench.deployment/name: NAME`, must not
-   carry the v1.7 `lakebench.deployment/state-schema` annotation, and its
-   `lakebench.deployment/created-buckets` record (or each bucket's ownership
-   tag) must name all three of the config's buckets.
-
-Destroy then acts only on the namespace incarnation the check proved; a
-redeploy in between stops it before any delete (exit 3,
-`destroy.incarnation_mismatch`). For `status` and `logs` a namespace that
-does not exist passes the check, and the command reports what it finds as
-for any missing deployment. Named configs skip these checks and rely on the
-ownership stamps alone.
-
-To move a deployment's config to another directory without breaking check
-2, use `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR`
-(add `--name NAME` for a nameless config). It copies the config (and a v1.6
-`state.json`), writes the state for the new directory and marks the old one
-as moved, so only the new directory is accepted from then on. Only the
-directory that wrote the state, or that directory renamed with `mv`, can
-move it: a copy, or a move to another host, is refused. A v1.6 directory has no v1.7 state to move, so after
-relocate both directories can still tear the deployment down with
-`--name` through the namespace's own stamps (check 3).
-
-### Removed keys
-
-A key that an earlier release accepted and that now does nothing (for
-example `images.pull_secrets` or `platform.storage.scratch.create_storage_class`)
-is refused by the commands that change data (the list above), with what
-to do instead. `destroy`, `stop`, `status`, `logs`, `report`, `info`,
-`config show` and `admin` drop it and print an "Upgrade notes" block on
-stderr, so an old config can still be inspected, stopped and torn down.
+- is refused, with what to do instead, by the commands that change data
+  (the list above);
+- is dropped by `destroy`, `stop`, `status`, `logs`, `report`, `info`,
+  `config show` and `admin`, which print an "Upgrade notes" block on
+  stderr. An old config can still be inspected, stopped and torn down.
 
 The removed keys, with what to do instead (generated from each model's
 `_removed_keys`):
@@ -174,7 +81,7 @@ The removed keys, with what to do instead (generated from each model's
 | `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
 | `platform.storage.scratch.create_storage_class` | lakebench no longer creates StorageClasses; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
-| `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build 300Gi). |
+| `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi). |
 | `secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead. |
 | `version` | there is one config schema and nothing read the number; a removed key is named in the upgrade notes instead. |
 | `workload.customer360.channels` | The customer360 generator never read it; removed in v1.5. |
@@ -185,19 +92,19 @@ The removed keys, with what to do instead (generated from each model's
 | `workload.datagen.uploaders` | Never forwarded to the Rust generator; removed 2026-09-28. Uploader concurrency is fixed inside the S3 sink. |
 <!-- END GENERATED: config-removed -->
 
-A config that still carries one of them at its old default
-(for `description` any text, for `images.hive` any value naming 3.1.3) is
-inert and loads under every command with a note; another value is refused as
-above. The bronze layout is
-fixed (`customer/interactions/`, `pacs008/` for the financial workload), so a
-`path_template` naming another layout is refused.
+- A removed key still at its old default is inert and loads under every
+  command with a note. For `description` that is any text; for
+  `images.hive`, any value naming 3.1.3. Another value is refused as above.
+- The bronze layout is fixed (`customer/interactions/`, `pacs008/` for the
+  financial workload), so a `path_template` naming another layout is
+  refused.
 
-### Flat Fields (deprecated)
+## Flat Fields (deprecated)
 
-v1.3 added flat top-level fields that map to nested locations. They still
-load in v1.7, and each one adds a deprecation note naming the nested key to
-write instead (for example "flat 'scale' is deprecated; write
-workload.datagen.scale"). Write the nested key in new configs:
+Flat top-level fields map to nested keys. They still load, and each adds a
+deprecation note naming the nested key to write instead (for example "flat
+'scale' is deprecated; write workload.datagen.scale"). Write the nested key
+in new configs.
 
 | Field | Maps to | Default |
 |-------|---------|---------|
@@ -210,36 +117,38 @@ workload.datagen.scale"). Write the nested key in new configs:
 | `cycles` | `architecture.pipeline.cycles` | 1 |
 | `spark_image` | `images.spark` | from recipe |
 
-If both flat and nested are present for the same setting, flat takes
-precedence and the note says so.
+If a flat and a nested key set the same thing, the flat one wins and the
+note says so.
 
-### Error messages
+## Error messages
 
-An unknown key names the key it is closest to, first among the keys of its
-own section and then among every key in the schema, so a key written in the
-wrong section is pointed at the right one:
+- An unknown key names the key it is closest to: first among the keys of
+  its own section, then among every key in the schema. A key in the wrong
+  section is pointed at the right one:
 
 ```text
   - platform.compute.spark.silver_executor: unknown key; did you mean `silver_executors`?
   - platform.storage.scale: unknown key; did you mean `workload.datagen.scale`?
 ```
 
-An unknown recipe names the nearest recipe, or lists them all; a name whose
-every part is a real component (`unity-delta-spark-trino`) is reported as a
-combination that is not a recipe, not corrected to a different one. Counts
-are bounded (for example `trino.worker.replicas` 1 to 256,
-`datagen.generators` 0 to 1024, ports 1 to 65535, every core count at
-least 1). A setting that belongs to the other workload,
-such as `customer360.unique_customers` or `dirty_data_ratio` under `schema:
-financial`, or `tm_operations` or `w1_max_vertices` under `schema:
-customer360`, loads with a note saying the workload does not read it. Under
-`financial` the note does not ask you to delete it: the corpus id still
-hashes the `customer360` fields and `dirty_data_ratio`, so removing one
-changes the id of an otherwise identical corpus. `datagen.timestamp_*` gets
-no note: the financial generator ignores it, but it sets the silver data
-clock for every workload.
+- An unknown recipe names the nearest recipe, or lists them all. A name
+  whose every part is a real component (`unity-delta-spark-trino`) is
+  reported as a combination that is not a recipe, not corrected to another
+  one.
+- Counts are bounded: for example `trino.worker.replicas` 1 to 256,
+  `datagen.generators` 0 to 1024, ports 1 to 65535, every core count at
+  least 1.
+- A setting that belongs to the other workload loads with a note saying
+  the workload does not read it. Examples: `customer360.unique_customers`
+  or `dirty_data_ratio` under `schema: financial`; `tm_operations` or
+  `w1_max_vertices` under `schema: customer360`.
+- Under `financial` the note does not ask you to delete it: the corpus id
+  still hashes the `customer360` fields and `dirty_data_ratio`, so removing
+  one changes the id of an otherwise identical corpus.
+- `datagen.timestamp_*` gets no note. The financial generator ignores it,
+  but it sets the silver data clock for every workload.
 
-### Environment Variable Substitution
+## Environment Variable Substitution
 
 Use `${VAR}` or `${VAR:-default}` in any YAML value:
 
@@ -256,34 +165,31 @@ workload:
     scale: ${LAKEBENCH_SCALE:-10}
 ```
 
-Unresolved variables without defaults produce one error naming all of them.
-Substitution runs value by value, not on the file text. An unquoted value
-is trimmed and, unless it carries a tag such as `!!str`, typed as YAML types
-it (`0042` is octal 34, `true` a bool, an empty value null), as in v1.6. The
-environment value itself is never parsed as YAML: ` #`, quotes or `a: b`
-inside it stay text, and its line breaks are not folded. A quoted value
-(`"${S3_SECRET}"`) arrives verbatim as a string unless it carries a tag
-such as `!!int`, so quote every credential reference. A block scalar keeps the
-substituted text inside its own line breaks. A `${VAR}` in a comment is not
-read. An unclosed `${VAR:-default` (a default cut short by ` #`) is an
-error, and inside flow syntax (`[${A}, ${B}]`) each reference must be
-quoted.
+- Unresolved variables without defaults produce one error naming all of
+  them.
+- Substitution runs value by value, not on the file text.
+- An unquoted value is trimmed and typed as YAML types it, unless it
+  carries a tag such as `!!str`: `0042` is octal 34, `true` a bool, an empty
+  value null.
+- The environment value itself is never parsed as YAML: ` #`, quotes or
+  `a: b` inside it stay text, and its line breaks are not folded.
+- A quoted value (`"${S3_SECRET}"`) arrives verbatim as a string, unless it
+  carries a tag such as `!!int`. Quote every credential reference.
+- A block scalar keeps the substituted text inside its own line breaks.
+- A `${VAR}` in a comment is not read.
+- An unclosed `${VAR:-default` (a default cut short by ` #`) is an error.
+- Inside flow syntax (`[${A}, ${B}]`) each reference must be quoted.
 
-### Nested Config (v1.2 Compatible)
+## Deploy state and nameless teardown
 
-The full nested structure still works unchanged:
+Every deploy records the nonce it stamps on the namespace in
+`.lakebench/<name>.json` beside the config. A nameless config can read or
+tear down only a deployment its directory proves is its own, and
+`--name NAME` names one. The rules, the v1.6 `.lakebench/state.json` and
+moving a deployment's directory are in
+[UPGRADING-1.7.md](../UPGRADING-1.7.md#nameless-configs-and-deploy-state).
 
-```yaml
-name: my-lakehouse
-platform:
-  storage:
-    s3:
-      endpoint: http://your-s3-endpoint:80
-      access_key: YOUR_KEY
-      secret_key: YOUR_SECRET
-```
-
-When you omit optional sections, these defaults apply:
+## Defaults for omitted sections
 
 | Section | Default | Effect |
 |---------|---------|--------|
@@ -292,22 +198,23 @@ When you omit optional sections, these defaults apply:
 | `catalog.type` | hive | Stackable Hive Metastore |
 | `query_engine.type` | trino | Trino coordinator + 2 workers |
 | `observability.enabled` | false | No Prometheus/Grafana |
-| `scratch.enabled` | false (on for batch at scale 50+) | emptyDir for shuffle below that |
+| `scratch.enabled` | unset ([when it is on](operations.md#installing-the-shared-pieces)) | emptyDir for shuffle when off |
 
-**What to tune first as you scale up:**
+What to tune first as you scale up:
 
-1. `datagen.scale` -- controls data volume
-2. `compute.spark.*_executors` -- per-job executor counts (batch executor
+1. `datagen.scale` -- the data volume.
+2. `compute.spark.*_executors` -- per-job executor counts. Batch executor
    size is fixed in the job profiles; continuous streams also take
-   `*_executor_cores`; see [Executor Override Guide](#executor-override-guide))
-3. `query_engine.trino.worker` -- match replicas/memory to your cluster
-4. `scratch` / `postgres` storage classes -- match to your storage provider
+   `*_executor_cores`. See [Executor Override Guide](#executor-override-guide).
+3. `query_engine.trino.worker` -- match replicas and memory to the cluster.
+4. `scratch` and `postgres` storage classes -- match them to the storage
+   provider.
 
 ## Annotated Example
 
-Below is a complete configuration with every section annotated. Only `name`
-and `platform.storage.s3.endpoint` plus S3 credentials are strictly required;
-everything else has sensible defaults.
+A complete config with every section annotated. Only `name`,
+`platform.storage.s3.endpoint` and the S3 credentials are required;
+everything else has a default.
 
 ```yaml
 # REQUIRED: Unique name for this deployment. Also used as the default
@@ -328,7 +235,7 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9
+  datagen: docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc
   spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -347,8 +254,8 @@ platform:
   storage:
     s3:
       # REQUIRED: S3-compatible endpoint URL.
-      # FlashBlade HTTP:  http://10.0.0.1:80
-      # FlashBlade HTTPS: https://10.0.0.1:443
+      # FlashBlade HTTP:  http://10.0.1.50:80
+      # FlashBlade HTTPS: https://10.0.1.50:443
       # MinIO:            http://minio.minio.svc:9000
       # AWS S3:           https://s3.us-east-1.amazonaws.com
       endpoint: ""
@@ -410,73 +317,6 @@ platform:
     pypi_index: ""                    # Empty = https://pypi.org/simple/
     duckdb_extension_repository: ""   # Empty = http://extensions.duckdb.org
     storage_class: ""                 # PVC lb-deps-data; empty = cluster default
-```
-
-### Executor Override Guide
-
-The per-job executor overrides (`silver_executors`, `gold_executors`, etc.)
-replace the auto-scaling formula for one job. Each takes 1 to 28 (the
-proven executor ceiling); a larger value is refused by the commands that
-change data, and `destroy`, `status` and the read-only commands drop it with
-a note. The capacity check, `deploy`, `config show` and `info` count the
-override, so a config sized past the cluster is refused before it runs.
-
-An override changes what a run measures:
-
-- It enters the experiment record (`architecture.spark_executor_overrides`;
-  the driver overrides as `architecture.spark_driver_overrides`) and the
-  identity, as an architecture difference: two runs with different
-  overrides differ in architecture. They are like-for-like
-  only when no override binds one run and not the other (below).
-- An override below what the profile asks for at the run's scale binds the
-  run. It is labelled in `limits.bound` ("silver-build: executor override 4
-  (profile asks 8)") and enters "Lakebench limits that bound".
-- A run with any override that differs from the profile's count, or with a
-  driver override, is not the proven sizing: it cannot be release evidence or
-  a perf-gate baseline, and a pinned perf-gate config must pin each count at
-  the profile's count (or leave it unset).
-
-Higher executor counts increase driver memory pressure because the Spark
-driver manages per-executor K8s API watches and aggregates serialized task
-results. The table below shows tested boundaries:
-
-Profile driver defaults are 4g for bronze-verify and 32g for silver-build
-and gold-finalize on Spark 4 (24g on Spark 3). `driver_memory` overrides
-all jobs at once, so setting it below 24g shrinks the silver and gold
-drivers. Lakebench logs a warning when a job has more than 24 executors and a driver
-below 24g.
-
-The capacity check, `config show` and `info` count the driver each job
-requests: these overrides, the Spark 3 size, and the overhead Spark adds
-to a Python driver pod (40% of the heap).
-
-| Executors | Driver Memory | Status |
-|:---------:|:------------:|--------|
-| 1--12     | 4g           | Proven stable |
-| 13--20    | 4--24g       | Stable; driver_memory override may be needed |
-| 21--24    | 24g          | Proven stable with 24g driver |
-| 25--28    | 24g          | Safe range; recommended maximum (the job profiles cap auto counts at 28, a Lakebench-imposed ceiling) |
-| 29+       | --           | Refused: K8s API polling storms from 32 up |
-
-`spark.driver.maxResultSize` is set automatically based on the effective
-executor count: `min(16, max(8, count // 2))` GiB on Spark 4 and
-`min(16, max(4, count // 3))` GiB on Spark 3. Override it in `spark.conf`
-if needed.
-
-Recommended overrides by cluster size:
-
-| Cluster Cores | Silver Executors | Gold Executors |
-|:------------:|:----------------:|:--------------:|
-| 32           | 4--6             | 3--4           |
-| 64           | 8--12            | 6--8           |
-| 128          | 16--20           | 12--16         |
-| 256+         | 24--28           | 20--28         |
-
-These assume per-executor sizing from the proven profiles: silver uses
-4 cores + 60g (48g + 12g overhead) per executor, gold uses 4 cores +
-40g (32g + 8g overhead) per executor.
-
-```yaml
     postgres:
       storage: 10Gi
       storage_class: ""               # Empty = cluster default
@@ -510,14 +350,14 @@ architecture:
   pipeline:
     mode: batch                       # batch | continuous
 
-    # Continuous pipeline tuning (active when mode: continuous or the --continuous flag).
-    # Iterative batch cycles (v1.1.0). Runs N batch iterations where cycle 1
+    # Iterative batch cycles. Runs N batch iterations where cycle 1
     # is full overwrite and cycles 2-N are incremental append/merge. Simulates
     # multi-day lakehouse table growth. Datagen timestamp range is split evenly
     # across cycles so each cycle adds new data.
     cycles: 1                         # 1 = single batch (default). 2-50 = multi-cycle.
     pre_benchmark_maintenance: true   # Compact + expire before benchmark (recommended)
 
+    # Continuous pipeline tuning (active when mode: continuous or the --continuous flag).
     continuous:
       bronze_trigger_interval: "0 seconds"   # back to back (default)
       silver_trigger_interval: "0 seconds"   # back to back (default)
@@ -569,14 +409,83 @@ spark:
     # spark.memory.fraction: "0.8"     # a default; set to change it
 ```
 
+### Executor Override Guide
+
+A per-job executor override (`silver_executors`, `gold_executors` and the
+rest) replaces the scaling formula for one job.
+
+- Each takes 1 to 28, the Lakebench cap. A larger value is
+  refused by the commands that change data; `destroy`, `status` and the
+  read-only commands drop it with a note.
+- The capacity check, `deploy`, `config show` and `info` count the
+  override, so a config sized past the cluster is refused before it runs.
+
+An override changes what a run measures:
+
+- It enters the experiment record (`architecture.spark_executor_overrides`;
+  driver overrides as `architecture.spark_driver_overrides`) and the
+  identity, as an architecture difference. Two runs with different
+  overrides differ in architecture. They are like-for-like only when no
+  override binds one run and not the other.
+- An override below what the profile asks for at the run's scale binds the
+  run. It is labelled in `limits.bound` ("silver-build: executor override 4
+  (profile asks 8)") and enters "Lakebench limits that bound".
+- A run with any override that differs from the profile's count, or with a
+  driver override, is not the proven sizing. It cannot be release evidence
+  or a perf-gate baseline, and a pinned perf-gate config must pin each count
+  at the profile's count (or leave it unset).
+
+Driver memory:
+
+- More executors raise driver memory pressure: the Spark driver manages
+  per-executor K8s API watches and aggregates serialized task results.
+- Profile driver defaults are 4g for bronze-verify, and 32g for
+  silver-build and gold-finalize on Spark 4 (24g on Spark 3).
+- `driver_memory` overrides all jobs at once, so a value below 32g shrinks
+  the silver and gold drivers on Spark 4 (below 24g on Spark 3).
+- Lakebench logs a warning when a job has more than 24 executors and a
+  driver below 24g. It does not warn about 24g to 31g on Spark 4.
+- The capacity check, `config show` and `info` count the driver each job
+  requests: these overrides, the Spark 3 size, and the overhead Spark adds
+  to a Python driver pod (40% of the heap).
+
+Tested boundaries (the 24g rows are Spark 3; see the Spark 4 note below):
+
+| Executors | Driver Memory | Status |
+|:---------:|:------------:|--------|
+| 1--12     | 4g           | Proven stable |
+| 13--20    | 4--24g       | Stable; driver_memory override may be needed |
+| 21--24    | 24g          | Proven stable with 24g driver |
+| 25--28    | 24g          | Safe range; recommended maximum (the job profiles cap auto counts at 28, a Lakebench cap) |
+| 29+       | --           | Refused: K8s API polling storms from 32 up |
+
+On Spark 4, `silver-build` and `gold-finalize` default to a 32g driver: 24g
+ran both out of memory there. Above 20 executors the 4g `bronze-verify`
+driver may also run out of memory. `driver_memory` applies to every job, so
+set it to 32g or more (for example `"32g"`).
+
+`spark.driver.maxResultSize` follows the effective executor count:
+`min(16, max(8, count // 2))` GiB on Spark 4 and
+`min(16, max(4, count // 3))` GiB on Spark 3. Override it in `spark.conf`
+if needed.
+
+Recommended overrides by cluster size, with the per-executor sizes of the
+[batch job profiles](component-spark.md#batch-jobs):
+
+| Cluster Cores | Silver Executors | Gold Executors |
+|:------------:|:----------------:|:--------------:|
+| 32           | 4--6             | 3--4           |
+| 64           | 8--12            | 6--8           |
+| 128          | 16--20           | 12--16         |
+| 256+         | 24--28           | 20--28         |
+
 ## Complete Field Reference
 
-Every field accepted in the YAML is listed below, organized by section.
-Fields marked **(required)** must be provided; everything else has a default.
-**first day** marks the keys `lakebench init` writes; the rest are
-advanced. This reference is generated from the schema
-(`scripts/gen_config_reference.py`); edit a field's description in
-`src/lakebench/config/schema.py`, then regenerate.
+Every field the YAML accepts, by section. Fields marked **(required)** must
+be set; every other field has a default. **first day** marks the keys
+`lakebench init` writes; the rest are advanced. This reference is generated
+from the schema (`scripts/gen_config_reference.py`): edit a field's
+description in `src/lakebench/config/schema.py`, then regenerate.
 
 <!-- BEGIN GENERATED: config-reference (scripts/gen_config_reference.py) -->
 ### Root
@@ -592,7 +501,7 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
@@ -600,7 +509,7 @@ Container images for every deployed component. Override for air-gapped registrie
 | `images.unity` | string | `unitycatalog/unitycatalog:main` | advanced | Unity Catalog server image (Unity catalog only; no recipe uses it). |
 | `images.trino` | string | `trinodb/trino:483` | advanced | Trino query engine image. |
 | `images.duckdb` | string | `python:3.11-slim` | advanced | Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by `architecture.query_engine.duckdb.version`. |
-| `images.jmx_exporter` | string | `bitnami/jmx-exporter:latest` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. |
+| `images.jmx_exporter` | string | `bitnami/jmx-exporter:latest@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. |
 | `images.pull_policy` | one of `Always`, `IfNotPresent`, `Never` | `Always` | advanced | `Always`, `IfNotPresent`, or `Never`. |
 
 ### Platform -- Kubernetes
@@ -651,9 +560,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count (1--28). Null = auto from scale. |
 | `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count (1--28). Null = auto from scale. |
 | `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executor_cores` | integer or null | `null` | advanced | Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set. |
-| `platform.compute.spark.silver_stream_executor_cores` | integer or null | `null` | advanced | Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set. |
-| `platform.compute.spark.gold_refresh_executor_cores` | integer or null | `null` | advanced | Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share, and the scale's executor count shrinks by the same ratio, so total cores stay the same. Null = the profile's; gold-refresh is never grown automatically. |
+| `platform.compute.spark.bronze_ingest_executor_cores` | integer or null | `null` | advanced | Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set. |
+| `platform.compute.spark.silver_stream_executor_cores` | integer or null | `null` | advanced | Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set. |
+| `platform.compute.spark.gold_refresh_executor_cores` | integer or null | `null` | advanced | Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
 | `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 
@@ -742,7 +651,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.mode` | one of `batch`, `continuous` | `batch` | advanced | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent jobs over arriving data). `sustained` is accepted as a deprecated alias. The `--continuous` CLI flag overrides this. |
 | `architecture.pipeline.cycles` | integer | `1` | advanced | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
 | `architecture.pipeline.pre_benchmark_maintenance` | boolean | `true` | advanced | Run table maintenance before the benchmark phase so QpH is measured against maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below 24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta `OPTIMIZE` is never run. All statements share one 30-minute budget; the first statement timeout or the deadline stops the rest, and the post-maintenance QpH is then not a measurement. |
-| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `0 seconds` | advanced | Bronze streaming trigger interval. "0 seconds" (the default) starts the next micro-batch as soon as the last one finishes and new files exist; a positive interval holds bronze to that cadence, labelled beside freshness. A whole number and seconds, minutes or hours; anything else is refused at load. |
+| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `0 seconds` | advanced | Bronze streaming trigger interval. "0 seconds" (the default) starts the next micro-batch as soon as the last one finishes and new files exist; a positive interval holds bronze to that cadence, labelled beside freshness. With a trickle (`max_files_per_trigger`, `--skip-generate`), "0 seconds" becomes 30 seconds, the trickle's cadence, and the run says so. A whole number and seconds, minutes or hours; anything else is refused at load. |
 | `architecture.pipeline.continuous.silver_trigger_interval` | string | `0 seconds` | advanced | Silver streaming trigger interval. "0 seconds" (the default) starts the next micro-batch as soon as the last one finishes and bronze has committed more; a positive interval is labelled beside freshness. A whole number and seconds, minutes or hours. |
 | `architecture.pipeline.continuous.gold_refresh_interval` | string | `0 seconds` | advanced | Gold refresh trigger interval. "0 seconds" (the default) starts the next refresh as soon as the last one finishes (Customer360: as soon as silver commits); a positive interval holds gold to that cadence, labelled beside freshness. |
 | `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; with gold on an interval a continuous run refuses less than 3 x `gold_refresh_interval`. Use 900 s or more, UAT included. |
@@ -750,9 +659,9 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
 | `architecture.pipeline.continuous.silver_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for silver writes (MB) |
-| `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): run_duration / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
+| `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Customer360 only: seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): the run's window (`--duration` or run_duration) / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
 | `architecture.pipeline.continuous.gold_target_file_size_mb` | integer | `128` | advanced | Target Iceberg file size for gold writes (MB) |
-| `architecture.pipeline.continuous.retention_interval` | integer or null | auto | advanced | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: `run_duration / 3`, within 300--7200, resolved at run start (600 s for the default 1800 s window), so a default run maintains inside its window. An explicit value too long for the first round to run inside the window is refused at run start unless `--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so continuous Delta has no effective table maintenance in v1.6. Range: 300--7200. |
+| `architecture.pipeline.continuous.retention_interval` | integer or null | auto | advanced | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: `run_duration / 3`, within 300--7200, resolved at run start (600 s for the default 1800 s window), so a default run maintains inside its window. An explicit value too long for the first round to run inside the window is refused at run start unless `--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so a continuous Delta run shorter than 7 days removes no files. Range: 300--7200. |
 | `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.continuous.compaction_enabled` | boolean | `true` | advanced | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
 | `architecture.pipeline.continuous.compaction_interval` | integer | `0` | advanced | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
@@ -781,7 +690,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 
 ### Workload -- Customer 360 and AML
 
-Advanced workload overrides. Most users should leave these at defaults and control volume via `datagen.scale`. The AML TM operations layer (`workload.tm_operations.*`) is described in [aml-scoring.md](aml-scoring.md#the-transaction-monitoring-operations-layer).
+Advanced workload overrides. Most users should leave these at defaults and control volume via `datagen.scale`. The AML TM operations layer (`workload.tm_operations.*`) is described in [TM operations](benchmarks/aml/tm-operations.md#85-tm-operations).
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
@@ -810,7 +719,7 @@ Advanced workload overrides. Most users should leave these at defaults and contr
 | `architecture.benchmark.streams` | integer | `4` | advanced | Concurrent query streams for `lakebench benchmark` throughput mode. Range: 1--64. `lakebench run` uses one stream and refuses an explicit value above 1. |
 | `architecture.benchmark.cache` | string | `hot` | advanced | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). `lakebench run` measures a hot cache and refuses `cold`; use `lakebench benchmark --cold`. |
 | `architecture.benchmark.iterations` | integer | `3` | advanced | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
-| `architecture.benchmark.maintenance_settle.enabled` | boolean | `true` | advanced | Batch mode: probe until storage settles between maintenance and the post-maintenance round. See [benchmarking.md](benchmarking.md). |
+| `architecture.benchmark.maintenance_settle.enabled` | boolean | `true` | advanced | Batch mode: probe until storage settles between maintenance and the post-maintenance round. See [Storage settle wait](benchmarking/maintenance.md#storage-settle-wait). |
 | `architecture.benchmark.maintenance_settle.max_seconds` | integer | `2700` | advanced | Longest wait. When reached, the post round still runs and `maintenance_value_pct` is null. Range: 60--14400. |
 | `architecture.benchmark.maintenance_settle.interval_seconds` | integer | `60` | advanced | Seconds between the starts of consecutive probes. Range: 5--3600. |
 | `architecture.benchmark.maintenance_settle.tolerance_pct` | number | `10.0` | advanced | Settled when two consecutive probes differ by at most this percent and neither is slower than the pre-maintenance time by more. Range: above 0, up to 100. |
@@ -869,59 +778,71 @@ How `spark.conf` layers over the job defaults and what it refuses: see [Spark Co
 ## Dependency server
 
 `deploy` starts one dependency server, `lb-deps`, in the deployment's
-namespace. It resolves the Maven jars (and, for the AML workload, the
-reference detector's Python wheels; for DuckDB, its wheel and extension
-files) onto the PVC `lb-deps-data`, records a sha256 for every file, and
-serves the set read-only inside the namespace. The set is resolved again
-only when the request changes: the Spark or DuckDB image tag, the table
-format or its version, the workload (AML adds the reference wheels), the
-query engine or the DuckDB version, a mirror key, or the resolver shipped
-with Lakebench. The request names images by tag; the manifest records the
-digest each container actually ran.
+namespace. What it resolves, how deploy checks it and what fails are in
+[Deployment](deployment.md#deployment-order), step 11. In addition:
 
-Mirrors are read anonymously, over plain HTTP or over HTTPS with a publicly
-trusted certificate. A mirror that serves the same bytes yields the same
-dependency set hash.
+- The set is resolved again only when the request changes. That is the
+  Spark or DuckDB image tag, the table format or its version, the workload
+  (AML adds the reference wheels), the query engine or the DuckDB version, a
+  mirror key, or the resolver shipped with Lakebench.
+- The request names images by tag. The manifest records the digest each
+  container actually ran.
+- Mirrors are read anonymously, over plain HTTP or over HTTPS with a
+  publicly trusted certificate. A mirror that serves the same bytes yields
+  the same dependency set hash.
 
 ## Spark Configuration Overrides
 
-`spark.conf` holds your own Spark keys. Each job's conf is built in three
-layers, later ones winning: the job defaults below, then `spark.conf`, then
-the keys Lakebench sets for the job (per-job shuffle partitions and result
-size, the catalog and S3A connection settings, jars, adaptive execution, UI
-and Kubernetes settings). A `spark.conf` key Lakebench sets for the job is
-refused at load by the commands that change data, naming the setting that
-controls it instead (for example `spark.sql.shuffle.partitions` follows the
-executor count, `platform.compute.spark.<job>_executors`); `destroy`, `status`
-and the read-only commands drop it with a note. `spark.driver.maxResultSize`
-is the one Lakebench-set key a user value replaces. Also refused: keys a
-job script sets (`spark.sql.session.timeZone` and others), and the reserved
-`spark.kubernetes.*`, `spark.jars.*` and pod-sizing keys (executor and
-driver memory, overhead, cores, off-heap, PySpark memory). The jar keys
-are all Lakebench's, because every job takes its jars, in order, from the
-deployment's dependency set: `spark.jars`, `spark.jars.*`,
-`spark.submit.pyFiles`, `spark.files`, `spark.driver.extraClassPath`,
-`spark.executor.extraClassPath`, `spark.driver.userClassPathFirst` and
-`spark.executor.userClassPathFirst`. The full set is in
-`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`. `spark.conf`
-reaches the pipeline's Spark jobs only, not the Spark Thrift server or
-`--local` runs. The run record keeps it as `architecture.spark_conf_user`:
-every key is named, but only tuning keys (SQL execution, shuffle, memory,
-speculation and the like) keep their values. A key that names a
-credential, a secret, an endpoint, a location or an environment variable
-(`spark.executorEnv.*`), or whose value names a location (a URI or an IP
-address), is recorded as `<redacted>`. Any other value is recorded as
-`<redacted sha256:...>`, a digest of the value, which a short value does
-not protect: put secrets under a secret-named key or an environment
-variable. A per-bucket S3A key records its bucket's layer (`<bronze>`,
-`<silver>`, `<gold>`) or `<other-bucket>` instead of its name. The
-recorded map is the `spark conf` key of the experiment identity, so two
-runs whose recorded maps differ differ in architecture,
-while two deployments that differ only in buckets and endpoints do not
-differ there. A difference
-in a value recorded as `<redacted>` (an environment variable's value, for
-example) is not in the identity.
+`spark.conf` holds your own Spark keys. Each job's conf has three layers,
+later ones winning:
 
+1. the job defaults (`SPARK_CONF_DEFAULTS`, below);
+2. `spark.conf`;
+3. the keys Lakebench sets for the job: per-job shuffle partitions and
+   result size, the catalog and S3A connection settings, jars, adaptive
+   execution, UI and Kubernetes settings.
+
+Refused keys:
+
+- A `spark.conf` key Lakebench sets for the job is refused at load by the
+  commands that change data, naming the setting that controls it instead.
+  For example `spark.sql.shuffle.partitions` follows the executor count,
+  `platform.compute.spark.<job>_executors`. `destroy`, `status` and the
+  read-only commands drop it with a note.
+- `spark.driver.maxResultSize` is the one Lakebench-set key a user value
+  replaces.
+- Also refused: keys a job script sets (`spark.sql.session.timeZone` and
+  others), and the reserved `spark.kubernetes.*`, `spark.jars.*` and
+  pod-sizing keys (executor and driver memory, overhead, cores, off-heap,
+  PySpark memory).
+- The jar keys are all Lakebench's, because every job takes its jars, in
+  order, from the deployment's dependency set: `spark.jars`,
+  `spark.jars.*`, `spark.submit.pyFiles`, `spark.files`,
+  `spark.driver.extraClassPath`, `spark.executor.extraClassPath`,
+  `spark.driver.userClassPathFirst` and `spark.executor.userClassPathFirst`.
+- The full set is in
+  `src/lakebench/modules/pipeline_engines/spark/conf_keys.py`.
+
+`spark.conf` reaches the pipeline's Spark jobs only, not the Spark Thrift
+server or `--local` runs.
+
+The run record keeps it as `architecture.spark_conf_user`:
+
+- Every key is named. Only tuning keys (SQL execution, shuffle, memory,
+  speculation and the like) keep their values.
+- A key that names a credential, a secret, an endpoint, a location or an
+  environment variable (`spark.executorEnv.*`), or whose value names a
+  location (a URI or an IP address), is recorded as `<redacted>`.
+- Any other value is recorded as `<redacted sha256:...>`, a digest of the
+  value. A short value is not protected by the digest: put secrets under a
+  secret-named key or an environment variable.
+- A per-bucket S3A key records its bucket's layer (`<bronze>`, `<silver>`,
+  `<gold>`) or `<other-bucket>` instead of its name.
+- The recorded map is the `spark conf` key of the experiment identity. Two
+  runs whose recorded maps differ differ in architecture. Two deployments
+  that differ only in buckets and endpoints do not differ there. A
+  difference in a value recorded as `<redacted>` (an environment
+  variable's value, for example) is not in the identity.
 
 Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 
@@ -935,153 +856,136 @@ Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 | `spark.memory.fraction` | `0.8` | Fraction of heap for execution + storage. |
 | `spark.memory.storageFraction` | `0.3` | Fraction of `memory.fraction` for storage. |
 
-Before v1.7 these defaults were the schema default of `spark.conf`, so
-setting any key there dropped all of them; they now stay. A config that still
-carries the v1.6 default map loads with a note for the Lakebench-set keys in
-it (they were overwritten then too).
+How 1.6 handled these defaults is in
+[UPGRADING-1.7.md](../UPGRADING-1.7.md#sparkconf-defaults-before-17).
 
 ## Scale Factors
 
-The `datagen.scale` field is an abstract multiplier: one scale unit is about
-10 GB of bronze Parquet. What a scale unit generates is per workload: for
-Customer 360 the customer id space, file count and row count at each scale
-are in [the Customer 360 spec, section 3](benchmarks/C360.md#3-data-generation),
-and [Data Generation](data-generation.md) covers the `generate` command and
-both workloads.
-
-Datagen scale is banded per workload. Customer 360 is supported up to scale
-300 and unverified up to 600; AML (financial) is supported up to 300 and
-unverified up to 800. Above the ceiling `deploy` and `generate` refuse the
-config, because a datagen pod would exceed the 16 GiB per-pod memory cap
-(a Lakebench-imposed cap); in the unverified range they warn. The run's
-support state records the band.
+`datagen.scale` is an abstract multiplier: one scale unit is about 10 GB of
+bronze Parquet. What a unit generates is per workload. For Customer 360 the
+customer id space, file count and row count at each scale are in
+[the Customer 360 spec, section 3](benchmarks/c360/generation.md#3-data-generation).
+[Data Generation](data-generation.md) covers the `generate` command and
+both workloads. Supported, unverified and refused scales:
+[Scale limits](data-generation.md#scale-limits).
 
 `spark.lb.gold.strategy` picks how Customer 360 gold-finalize aggregates
-silver: `auto` (the default: `simple_agg` below 500 GB of silver, else
-`two_phase_agg`), `simple_agg` or `two_phase_agg`. Both rebuild every gold
-day from all of silver. `incremental` and any other value are refused
-when a command that changes data (`deploy`, `run` and the others) loads a
-Customer 360 config: incremental gold runs only for cycles 2 and later of
-a multi-cycle run (see [Multi-Cycle Batch](#multi-cycle-batch)), and those
-cycles use it whatever the key says. The key is read by batch
-gold-finalize on the cluster only; `--local` runs do not pass `spark.conf`
-and use `auto`. The strategy that ran, and why (`auto`, `override` or
-`cycle`), is recorded per gold-finalize job in `metrics.json` as
-`jobs[].extra_metrics.gold_strategy` and `gold_strategy_source`.
+silver:
 
-Executor counts auto-scale with the scale factor unless overridden by the
-`bronze_executors`, `silver_executors`, or `gold_executors` fields. Batch
-per-executor sizing (cores, memory, PVC size) is fixed from proven production
-profiles and does not change with scale.
+- `auto` (the default): `simple_agg` below 500 GB of silver, else
+  `two_phase_agg`. Or set `simple_agg` or `two_phase_agg`.
+- Both rebuild every gold day from all of silver.
+- `incremental` and any other value are refused when a command that changes
+  data (`deploy`, `run` and the others) loads a Customer 360 config.
+  Incremental gold runs only for cycles 2 and later of a multi-cycle run
+  (see [Multi-Cycle Batch](#multi-cycle-batch)), and those cycles use it
+  whatever the key says.
+- Only batch gold-finalize on the cluster reads the key. `--local` runs do
+  not pass `spark.conf` and use `auto`.
+- The strategy that ran, and why (`auto`, `override` or `cycle`), is
+  recorded per gold-finalize job in `metrics.json` as
+  `jobs[].extra_metrics.gold_strategy` and `gold_strategy_source`.
+
+Executor counts are covered under [Auto-Sizing](#auto-sizing).
 
 ## Multi-Cycle Batch
 
 `architecture.pipeline.cycles` (1 to 50) runs a batch run as N cycles, each
-over its own slice of the event window, to model a table that receives daily
-loads. It is refused with continuous mode, and `run --generate` (except with
-`--local`), `run --generate-only` and `lakebench generate` are refused with
-it, because each cycle generates its own slice; `run --skip-generate` reuses a finished
-multi-cycle corpus of the same config (checked against its corpus series
-marker), except for AML. Cycle 1 creates silver
-and gold; cycles 2 and later append to silver and run gold-finalize
-incrementally (`LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL`), the only
-case in which gold-finalize runs incrementally. Table health is probed after
-each cycle and recorded in `cycles[].table_health` as
-`silver_data_file_count`, `gold_data_file_count`, `silver_snapshot_count`
-and `gold_snapshot_count`. Delta records the file counts only; the record
-is empty on DuckDB, with no query engine, or where the engine cannot count
-Delta files, and a probe query that fails leaves its key out. How a multi-cycle run proceeds and what it records
-is in [Running Pipelines](running-pipelines.md#multi-cycle-batch); what it
-does to the corpus is in
-[the Customer 360 spec, section 3](benchmarks/C360.md#3-data-generation).
+over its own slice of the event window, to model a table that receives
+daily loads.
+
+- It is refused with continuous mode.
+- `run --generate` (except with `--local`), `run --generate-only` and
+  `lakebench generate` are refused with it, because each cycle generates its
+  own slice.
+- Cycles 2 and later set `LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL`.
+  This is the only case in which gold-finalize runs incrementally.
+- Table health is probed after each cycle and recorded in
+  `cycles[].table_health` as `silver_data_file_count`,
+  `gold_data_file_count`, `silver_snapshot_count` and
+  `gold_snapshot_count`. Delta records the file counts only. The record is
+  empty on DuckDB, with no query engine, or where the engine cannot count
+  Delta files. A probe query that fails leaves its key out.
+
+How a multi-cycle run proceeds and what it records:
+[Running Pipelines](running-pipelines.md#multi-cycle-batch). What it does to
+the corpus:
+[the Customer 360 spec, section 3](benchmarks/c360/generation.md#3-data-generation).
 
 ## Timestamp Range Impact
 
-The `timestamp_start` and `timestamp_end` fields control the range of
-`event_timestamp` values in generated data. This range directly affects
-Iceberg partition count because the silver table is partitioned by
-`interaction_date` (derived from `event_timestamp` via `to_date()`).
-
-**In continuous mode, use a narrow range (days to weeks).** Each streaming
-micro-batch writes small files across every date partition that appears in
-its data. A wide range (e.g., 3 years = ~1,095 date partitions) causes
-massive small-file proliferation -- each micro-batch creates a tiny file
-per date partition, leading to hundreds of thousands of data files within
-hours. This degrades Iceberg metadata operations and query planning.
-
-**In batch mode, wider ranges are fine.** Compaction runs once after the
-pipeline completes, consolidating small files.
-
-The range also sets the data clock for the `customer_recency_score` derived
-column: `30 - days between the event date and the last day of the range`.
-The last day is the day before `timestamp_end` (the end is exclusive), so
-an event on the newest day scores 30 and one 30 days older scores 0. When
-`timestamp_end` is unset, the clock is the newest event date in the data.
-The score no longer depends on the date the pipeline runs, so reruns of the
-same corpus reproduce it.
+`timestamp_start` and `timestamp_end` set the range of `event_timestamp`
+values in generated data. The silver table is partitioned by
+`interaction_date` (`to_date(event_timestamp)`), so the range sets the
+Iceberg partition count.
 
 | Mode | Recommended Range | Reason |
 |------|-------------------|--------|
 | Continuous | Days to weeks | Fewer partitions per micro-batch, larger files |
 | Batch | Months to years | Single compaction pass handles small files |
 
+- **Continuous: use a narrow range.** Each micro-batch writes a small file
+  into every date partition in its data. A 3-year range is about 1,095 date
+  partitions, which reaches hundreds of thousands of data files within
+  hours and slows Iceberg metadata operations and query planning.
+- **Batch: wider ranges are fine.** Compaction runs once after the pipeline
+  and merges the small files.
+
+The range also sets the data clock for the `customer_recency_score`
+column: `30 - days between the event date and the last day of the range`.
+
+- The last day is the day before `timestamp_end` (the end is exclusive). An
+  event on the newest day scores 30, and one 30 days older scores 0.
+- With `timestamp_end` unset, the clock is the newest event date in the
+  data.
+- The score does not depend on the date the pipeline runs, so reruns of the
+  same corpus reproduce it.
+
 ## Auto-Sizing
 
-When connected to a Kubernetes cluster, Lakebench auto-sizes compute resources
-to fit available capacity. This happens transparently during `deploy`, `info`,
-and `validate`.
+When connected to a cluster, Lakebench sizes compute to fit the available
+capacity during `deploy`, `info` and `validate`.
 
-The algorithm:
-
-1. **Always-on pods** (Trino coordinator + workers, Hive/Polaris, PostgreSQL,
-   and the `lb-deps` dependency server at its 1 CPU / 2 GiB reservation)
-   are sized from tier guidance and capped to fit the cluster. They are never
-   boosted beyond the tier recommendation.
+1. **Always-on pods** (Trino coordinator and workers, Hive or Polaris,
+   PostgreSQL, and `lb-deps` at its 1 CPU / 2 GiB reservation) are sized
+   from tier guidance and capped to fit the cluster. They are never raised
+   above the tier recommendation.
 2. **Datagen** gets the remaining CPU budget.
-   - In **batch mode** (default), datagen and Spark run sequentially, so
-     datagen gets the full remaining budget.
+   - Batch mode (the default) runs datagen and Spark one after the other,
+     so datagen gets the full remaining budget.
    - Only the deprecated `pipeline.pattern: streaming` gives datagen 40% of
      it.
-   - In **continuous mode**, with `datagen.cpu` and `parallelism` unset,
-     datagen gets the cores that produce the scale's offered load (AML
-     4 MB/s, Customer 360 10 MB/s per scale unit), in pods of up to 8 cores.
-     The continuous Spark jobs are capped to a concurrent budget when their
+   - Continuous mode, with `datagen.cpu` and `parallelism` unset: datagen
+     gets the cores that produce the scale's offered load (AML 4 MB/s,
+     Customer 360 10 MB/s per scale unit), in pods of up to 8 cores. The
+     continuous Spark jobs are capped to a concurrent budget when their
      manifests are built.
-   - A `datagen.parallelism` you set is never cut to this budget: the run
+   - A `datagen.parallelism` you set is never cut to this budget. The run
      warns, batch pods that do not fit queue, and a continuous run (whose
      datagen pods all run beside the streams) is refused at preflight.
-3. **Small scales (1--50):** Resources are only capped downward to fit.
-4. **Large scales (51+), batch only:** datagen parallelism is scaled up to
-   use available cluster capacity.
-5. **Trino worker memory** is capped to 85% of the largest node.
+3. **Scales 1 to 50:** resources are only capped downward to fit. Above
+   scale 50: [Sizing](sizing.md#reading-the-table).
+4. **Trino worker memory** is capped to 85% of the largest node.
 
-Batch Spark executor and driver sizing is the job profiles; the auto-sizer
-does not change it.
+Batch Spark executor and driver sizes come from the job profiles; this
+sizing does not change them. Counts: [Auto-Scaling](component-spark.md#auto-scaling).
+Overrides: [Executor Override Guide](#executor-override-guide).
 
-Continuous streams are sized for the offered load:
+Continuous streams ([Continuous sizing](sizing.md#continuous-sizing)):
 
-- bronze-ingest and silver-stream get the executors that carry the load with
-  20% headroom, up to the profile's cap.
-- A stage that needs more than the cap grows its executors to 8, then 16
-  cores, within the largest node. The auto-sizer then sets its
+- A stage that needs more than the profile's cap grows its executors to 8,
+  then 16 cores, within the largest node. Lakebench then sets its
   `*_executor_cores` and says so.
-- A stage that still cannot carry the load is named before the run
-  ("cannot balance").
 - gold-refresh is never grown automatically.
 
-Batch per-job executor counts do not come from the auto-sizer. Each job takes a
-base count from its job profile and adds executors linearly above scale 10,
-up to the profile's maximum (28 at most, a Lakebench-imposed ceiling, not a
-cluster limit). A `platform.compute.spark.*_executors` value replaces the
-computed count for that job (e.g., `spark.bronze_executors: 4`). Use
-`lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) to see the resolved per-job counts.
+`lakebench info <config>` prints the resolved per-job counts. It is hidden
+and deprecated, but the only command that prints them.
 
 ## Example: Scale 100 (~1 TB)
 
-A production-scale config for 1 TB benchmarking. The cluster it needs is
-the scale-100 row of the sizing table in
-[Getting Started](getting-started.md#kubernetes-cluster) (`lakebench config show`
-prints it for your config):
+A config for 1 TB benchmarking. The cluster it needs is the scale-100 row
+of the sizing table in [Sizing](sizing.md); `lakebench config show` prints
+it for your config.
 
 ```yaml
 name: lakebench-1tb
@@ -1095,8 +999,8 @@ platform:
   storage:
     s3:
       endpoint: http://<flashblade-data-vip>:80
-      access_key: <key>
-      secret_key: <secret>
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
     scratch:
       enabled: true
       storage_class: px-csi-scratch
@@ -1105,16 +1009,16 @@ platform:
       storage_class: px-csi-db
 ```
 
-No executor tuning needed: the job profiles scale executor counts with the
-data, and the auto-sizer sizes datagen and Trino. At scale 100 the resolved
-resources are approximately:
+No executor tuning is needed: the job profiles scale executor counts with
+the data, and Lakebench sizes datagen and Trino to the cluster. At scale
+100 the resolved resources are about:
 
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
 | Datagen pods | 10+ | 8 CPU, 4Gi (c360) / 8Gi (financial) |
-| Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 500Gi PVC (financial) |
-| Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC |
-| Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 300Gi PVC |
+| Bronze-verify executors | 7 (c360) / 11 (financial) | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 2 cores, 8g+12g overhead, 455Gi PVC (financial: 50 GiB x 100 / 11) |
+| Silver-build executors | 18 | 4 cores, 48g+12g overhead, 300Gi PVC (the cap) |
+| Gold-finalize executors | 11 | 4 cores, 32g+8g overhead, 300Gi PVC (33 GiB x 100 / 11) |
 | Trino workers | 4 | 8 cores, 48Gi |
 
 Recommended timeouts:
@@ -1124,14 +1028,14 @@ lakebench generate lakebench.yaml --timeout 14400  # 4 hours
 lakebench run lakebench.yaml --timeout 7200               # 2 hours
 ```
 
-Use `lakebench config recommend lakebench.yaml` to verify your cluster can handle
-this scale before deploying.
+Check that the cluster can hold this scale with
+`lakebench config recommend lakebench.yaml` before deploying.
 
 ## Example: HTTPS Endpoint with Self-Signed CA
 
-When your S3 endpoint uses HTTPS with a self-signed or private CA certificate
-(common with FlashBlade, MinIO, and on-prem object stores), provide the CA
-certificate PEM file:
+For an HTTPS endpoint with a self-signed or private CA (common with
+FlashBlade, MinIO and other on-prem object stores), give the CA certificate
+PEM file:
 
 ```yaml
 name: lakebench-https
@@ -1141,8 +1045,8 @@ platform:
   storage:
     s3:
       endpoint: https://10.0.1.50:443
-      access_key: <key>
-      secret_key: <secret>
+      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
+      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
       ca_cert: ./flashblade-ca.pem
       # verify_ssl: true  # default; set false only for dev
 
@@ -1151,24 +1055,26 @@ platform:
 Polaris recipes need no `client_secret`: `deploy` generates one per
 deployment (see [Polaris](component-polaris.md)).
 
-**How it works:** At deploy time, lakebench reads the PEM file and creates a
-Kubernetes Secret (`lakebench-ca-certificate`) containing the certificate.
-Each JVM component (Spark, Trino, Polaris, Hive) gets an init container that
-imports the CA into a JKS truststore. Python components (datagen, S3 client)
-receive the PEM path via environment variables for boto3.
+How it works:
 
-**Obtaining the certificate:** For self-signed endpoints, extract the CA
-certificate using `openssl`:
+- At deploy time, Lakebench reads the PEM file and creates the Kubernetes
+  Secret `lakebench-ca-certificate` holding the certificate.
+- Each JVM component (Spark, Trino, Polaris, Hive) gets an init container
+  that imports the CA into a JKS truststore.
+- Python components (datagen, the S3 client) get the PEM path through
+  environment variables for boto3.
+
+To get the certificate of a self-signed endpoint:
 
 ```bash
 openssl s_client -connect 10.0.1.50:443 -showcerts </dev/null 2>/dev/null \
   | openssl x509 -outform PEM > flashblade-ca.pem
 ```
 
-For corporate CAs, your infrastructure team can provide the PEM file.
+For a corporate CA, your infrastructure team can provide the PEM file.
 
-**AWS S3 and public endpoints** use well-known CAs that are already trusted
-by the system CA bundle. No `ca_cert` is needed; set the HTTPS endpoint:
+AWS S3 and other public endpoints use well-known CAs that the system CA
+bundle already trusts. They need no `ca_cert`; set the HTTPS endpoint:
 
 ```yaml
 platform:
@@ -1180,96 +1086,54 @@ platform:
 ## Supported Component Combinations
 
 Config load refuses a catalog, table format and query engine combination
-that is not supported. The valid recipes are in [Recipes](recipes.md), and
-each one's support state per workload and mode, with the refused
-combinations and why, is in the
-[Compatibility Matrix](compatibility-matrix.md).
+that is not supported. The valid recipes are in [Recipes](recipes.md). Each
+one's support state per workload and mode, with the refused combinations
+and why, is in the [Compatibility Matrix](compatibility-matrix.md).
 
 ## Image Overrides
 
-Every image is set under `images` (see the [field reference](#images));
-the limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
-[Overriding Versions](supported-components.md#overriding-versions).
+Every image is set under `images` (see the [field reference](#images)).
+The limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
+[Overriding Versions](compatibility-matrix.md#overriding-versions).
 
 ## Generating a Starter Config
 
 `lakebench init` writes a starter config: see
-[Getting Started, step 1](getting-started.md#1-generate-a-configuration-file) for what it writes and
-[CLI Reference](cli-reference.md#init) for the flags. Every key it leaves
-out keeps its default and is described on this page.
+[Getting Started, step 1](getting-started.md#1-generate-a-configuration-file)
+for what it writes and [CLI Reference](cli-reference.md#init) for the flags.
+Every key it leaves out keeps its default and is described on this page.
 
 ### Converting an older config
 
 `lakebench init --from OLD.yaml -o NEW.yaml` rewrites a 1.6 config in the
-current format. It reads OLD as text, so a `${VAR}` reference is copied as
-written (quoted or not) and never expanded, and it never writes over OLD
-(`-o` naming OLD, or a link to it, exits 2). It:
+current format:
 
-- keeps the deployment's name: OLD's `name:`, or for a nameless config the
-  name 1.6 recorded in `.lakebench/state.json` beside the path given, where
-  1.6 read it. For a link, the file beside its target is read too: two
-  different names, or a name only beside the target, exit 3, as `destroy`
-  and `status` refuse that config without `--name`. When other nameless configs share that directory, 1.6 gave all
-  of them that name, so it exits 3 until `--name` says which deployment
-  this file made. A `--name` that differs from the recorded name is
-  printed with it. With neither, the new file gets a new name, and the
-  output says to convert again with `--name` if the config deployed
-  something;
-- writes out the bucket names 1.6 and 1.7 derive from the name
-  (`<name>-bronze` and so on), so a later rename cannot move them. A config
-  last deployed by 1.5 or earlier, with no buckets set, used
-  `lakebench-bronze`, `-silver` and `-gold`: set those in NEW to keep them;
-- moves the old spellings to the current keys: flat top-level keys
-  (`endpoint:`, `scale:` and the rest), `architecture.workload` to
-  `workload`, `architecture.processing` to `architecture.pipeline`,
-  `pipeline.sustained` to `pipeline.continuous` and `mode: sustained` to
-  `continuous`. A recipe that contradicts the components written becomes
-  the recipe of those components, which is what 1.6 deployed, and a config
-  with no recipe gets the one it resolves to, unless that recipe's
-  defaults would change a setting;
-- drops every removed key, both `operator.install` keys and the
-  `spark.conf` keys at the 1.6 defaults Lakebench overwrote anyway, each
-  with what to do instead, and drops `benchmark.streams` when it holds the
-  default 4 (1.6 saved configs wrote it, and `run` refuses it written out).
-  A `medallion` block that moved the bronze layout is kept: 1.6 read it,
-  1.7 cannot, and `deploy` and `run` refuse it;
-- replaces a plaintext credential (`access_key`, `secret_key`,
-  `client_secret`, or a `spark.conf` password, token or key) with a
-  `${VAR}` reference: `${LAKEBENCH_S3_ACCESS_KEY}` and
-  `${LAKEBENCH_S3_SECRET_KEY}` for the S3 keys (`--credentials-env`
-  renames them) and `${LAKEBENCH_POLARIS_CLIENT_SECRET}` for Polaris. The
-  value is never printed, and NEW is no more readable than OLD. When one
-  of those variables is already set in the shell, the output says so.
+- It keeps the name and buckets.
+- It moves plaintext secrets to `${VAR}` references.
+- It lists every moved or dropped key.
+- It writes nothing unless the new file loads to the same settings.
 
-Before writing, it loads OLD (under the name above) and the new file the
-way `status` would, every referenced variable set to its own placeholder
-(or, when that cannot load, to its value in this shell), and writes nothing
-(exit 3) unless the two give the same settings and the same planned
-experiment, apart from the moved secrets. This checks the rewrite, not the
-name it chose. It prints every moved, dropped or derived key, and then
-anything `run` still refuses in the new file (an executor override above
-28, `benchmark.mode: throughput`; `deploy` refuses all but the benchmark
-settings), which it leaves for you to change. `--overwrite` replaces an
-existing NEW, and refuses (exit 3) when that file resolves to the same
-deployment in another namespace, bucket, endpoint or recipe, or is a
-nameless config in a directory 1.6 recorded a name for. Comments in OLD
-are not carried over.
+The full rules are in
+[UPGRADING-1.7.md](../UPGRADING-1.7.md#converting-a-16-config-with-init---from).
 
 ### Recipes and components
 
 A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,
-`architecture.pipeline_engine` and `architecture.query_engine.type`. A
-config may leave them out or write the value the recipe sets; any other
-value is refused at load with both keys named, for example
-`architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
-sets 'polaris'; delete one of them`. The message also names the recipe a
-v1.6 deployment from that file used (v1.6 let the written value win), so a
-deployment made from it can be kept by writing that recipe. `deploy`, `run`
-and the other commands that change data refuse such a config; `destroy`,
-`status`, `report` and the inspect commands load it as v1.6 did, with a
-note. Images and engine resources stay overridable under a recipe.
+`architecture.pipeline_engine` and `architecture.query_engine.type`.
 
-A config with no `recipe:`, or `recipe: default`, resolves as in v1.6: to
+- A config may leave them out or write the value the recipe sets.
+- Any other value is refused at load with both keys named, for example
+  `architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
+  sets 'polaris'; delete one of them`.
+- The message also names the recipe a 1.6 deployment from that file used
+  (1.6 let the written value win). Write that recipe to keep that
+  deployment.
+- `deploy`, `run` and the other commands that change data refuse such a
+  config. `destroy`, `status`, `report` and the inspect commands load it
+  with the written value winning, with a note.
+- Images and engine resources stay overridable under a recipe.
+
+A config with no `recipe:`, or `recipe: default`, resolves to
 `hive-iceberg-spark-trino` when it sets no component, otherwise to the
 components it sets. It loads with a deprecation note naming the recipe to
-write; v1.8 requires `recipe:`.
+write. v1.8 requires `recipe:`.

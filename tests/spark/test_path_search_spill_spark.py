@@ -83,18 +83,18 @@ def _sig(df):
 
 def _w3_brute_force(rows, max_hops=5, hop_h=168, total_d=30, max_out_degree=200):
     """Every simple temporal cycle of 2..max_hops transfers, found from its
-    first transfer; hubs (more than max_out_degree sends in a hop bucket) do
-    not forward."""
+    first transfer; an account does not forward in a hop bucket where it
+    sends more than max_out_degree transfers (a hub that week)."""
     hop_us, total_us = hop_h * HOUR_US, total_d * 24 * HOUR_US
     epoch0 = int(T0.timestamp()) * 1_000_000
     edges = [(u, a, b, epoch0 + int(h * HOUR_US)) for u, a, b, h, _ in rows]
     per_bucket = {}
     for _, a, _, t in edges:
         per_bucket[(a, t // hop_us)] = per_bucket.get((a, t // hop_us), 0) + 1
-    hubs = {a for (a, _), n in per_bucket.items() if n > max_out_degree}
+    hub_weeks = {k for k, n in per_bucket.items() if n > max_out_degree}
     out_by = {}
     for e in edges:
-        if e[1] not in hubs:
+        if (e[1], e[3] // hop_us) not in hub_weeks:
             out_by.setdefault(e[1], []).append(e)
     found = set()
 
@@ -151,44 +151,34 @@ def test_w17_spill_mode_matches_local_checkpoint(spark, tmp_path, monkeypatch):
     assert not any(root.glob("*/*"))
 
 
-def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch):
+def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch, capsys):
     """A budget that holds level 2 but not level 3 skips on the level-3
-    estimate: level 3 is never written, and the files the search did write
+    estimate: level 3 is never built, and the files the search did write
     are removed with the skip."""
+    import re
+
     import detection_rules as dr
 
     monkeypatch.setenv("LB_GOLD_URI", f"file://{tmp_path}/gold/")
     rows = _rows(4, 4000, 200, hubs=10, hub_in=0.15, hub_out=0.1)
     df = _df(spark, rows).cache()
-    written = []
-    cut = dr._PathBudget.cut
-
-    def spy(self, frame, label, **kw):
-        written.append(label)
-        return cut(self, frame, label, **kw)
-
-    monkeypatch.setattr(dr._PathBudget, "cut", spy)
-    checks = {}
-    check = dr._PathBudget.check
-
-    def record(self, estimate, label):
-        checks[label] = (self.live, estimate)
-        return check(self, estimate, label)
-
-    monkeypatch.setattr(dr._PathBudget, "check", record)
     dr.w3_round_tripping(df, max_hops=4, run_id="r").count()
     dr.cleanup_path_search_spill(spark)
-    live2, est2 = checks["level 2"]
-    live3, est3 = checks["level 3"]
+    lines = re.findall(r"\[W3\] (.+?) rows=\d+ estimate=(\S+) held=(\d+)", capsys.readouterr().out)
+    at = [label for label, _, _ in lines].index("level 3")
+    est3 = int(lines[at][1])
     assert est3 > 0
-    budget = int(live3 + est3) - 1  # level 3 alone does not fit
-    assert live2 + est2 <= budget  # level 2 does
-    written.clear()
+    before3 = max(int(held) for _, _, held in lines[:at])
+    # Everything before level 3 fits; level 3 on top of the level 2 rows it
+    # extends (at least that frame's own count) does not.
+    budget = before3 + est3 // 2
+
+    capsys.readouterr()
     with pytest.raises(dr.RuleSkipped) as exc:
         dr.w3_round_tripping(df, max_hops=4, max_paths=budget, run_id="r")
     assert exc.value.reason == "path-cap"
-    assert "estimates level 3" in exc.value.detail
-    assert "level 3" not in written and "level 2" in written
+    built = capsys.readouterr().out
+    assert "level 2 rows=" in built and "level 3 rows=" not in built
     assert not any((tmp_path / "gold/_checkpoints/paths").glob("*/W3-*"))
 
 
@@ -226,11 +216,30 @@ def test_sweep_removes_only_stale_foreign_spill(spark, tmp_path, monkeypatch):
     assert (base / "spark-starting").exists()
 
 
-def test_cut_touches_the_liveness_file(spark, tmp_path, monkeypatch):
+def test_sweep_spares_a_searching_drivers_spill_until_its_liveness_file_goes_stale(
+    spark, tmp_path, monkeypatch
+):
+    """The liveness file a real search writes is what keeps another driver's
+    sweep from deleting that search's old level files."""
+    import time
+
     import detection_rules as dr
 
     monkeypatch.setenv("LB_GOLD_URI", f"file://{tmp_path}/gold/")
     dr.w3_round_tripping(_df(spark, _rows(6, 300, 30)), run_id="r").count()
     root = Path(dr._path_spill_root(spark).removeprefix("file://"))
-    assert (root / "_alive").exists()
-    dr.cleanup_path_search_spill(spark)
+    alive = root / "_alive"
+    levels = [f for f in root.rglob("*") if f.is_file() and f != alive]
+    assert alive.exists() and levels
+    stale = time.time() - 48 * 3600
+    for f in levels:
+        os.utime(f, (stale, stale))
+
+    # Another driver of the same deployment runs the sweep.
+    monkeypatch.setattr(dr, "_path_spill_root", lambda spark: f"{root.parent}/other-driver")
+    assert dr.sweep_stale_path_spill(spark) == 0
+    assert all(f.exists() for f in levels)
+
+    os.utime(alive, (stale, stale))
+    assert dr.sweep_stale_path_spill(spark) == 1
+    assert not root.exists()

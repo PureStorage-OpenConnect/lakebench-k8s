@@ -151,7 +151,7 @@ SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 CHECKPOINT_URI = env(
     "LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
 )
-TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "30"))
+TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "0"))
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")

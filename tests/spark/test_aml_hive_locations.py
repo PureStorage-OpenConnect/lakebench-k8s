@@ -35,19 +35,27 @@ def test_ensure_namespaces_creates_each_namespace_once():
     ]
 
 
-def _bvf(monkeypatch, catalog_type):
+def _bvf(monkeypatch, catalog_type, table="default.pacs008_raw"):
     monkeypatch.setenv("LB_CATALOG_TYPE", catalog_type)
     monkeypatch.setenv("LB_BRONZE_URI", "s3a://ns-bronze/")
-    monkeypatch.setenv("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
+    monkeypatch.setenv("LB_FINANCIAL_BRONZE_TABLE", table)
     import bronze_verify_financial
 
     return importlib.reload(bronze_verify_financial)
 
 
-def test_hive_bronze_table_gets_an_s3_location(monkeypatch):
-    mod = _bvf(monkeypatch, "hive")
-    assert mod._bronze_location() == "s3a://ns-bronze/warehouse/default.db/pacs008_raw"
-    assert mod._location_clause() == "LOCATION 's3a://ns-bronze/warehouse/default.db/pacs008_raw'"
+@pytest.mark.parametrize(
+    ("table", "location"),
+    [
+        ("default.pacs008_raw", "s3a://ns-bronze/warehouse/default.db/pacs008_raw"),
+        ("bronze_raw", "s3a://ns-bronze/warehouse/default.db/bronze_raw"),
+    ],
+    ids=["qualified", "single-part-uses-default-namespace"],
+)
+def test_hive_bronze_table_gets_an_s3_location(monkeypatch, table, location):
+    mod = _bvf(monkeypatch, "hive", table)
+    assert mod._bronze_location() == location
+    assert mod._location_clause() == f"LOCATION '{location}'"
 
 
 def test_polaris_bronze_table_keeps_the_catalog_default(monkeypatch):
@@ -70,13 +78,3 @@ def test_namespaces_come_from_the_ddl_itself():
         "CREATE NAMESPACE IF NOT EXISTS lakehouse.gold",
         "CREATE NAMESPACE IF NOT EXISTS lakehouse.ops",
     ]
-
-
-def test_single_part_bronze_name_uses_default_namespace(monkeypatch):
-    monkeypatch.setenv("LB_CATALOG_TYPE", "hive")
-    monkeypatch.setenv("LB_BRONZE_URI", "s3a://ns-bronze/")
-    monkeypatch.setenv("LB_FINANCIAL_BRONZE_TABLE", "bronze_raw")
-    import bronze_verify_financial
-
-    mod = importlib.reload(bronze_verify_financial)
-    assert mod._bronze_location() == "s3a://ns-bronze/warehouse/default.db/bronze_raw"

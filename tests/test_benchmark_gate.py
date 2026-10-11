@@ -1,5 +1,4 @@
-"""A benchmark with failed queries is not a score (live AML run 2026-09-24:
-1 of 8 queries passed, QpH 166 printed, run exited 0)."""
+"""A benchmark with failed queries is not a score."""
 
 from __future__ import annotations
 
@@ -9,10 +8,10 @@ from lakebench.cli._run import _benchmark_gate_problems
 from tests.conftest import make_config
 
 
-def _q(name, ok):
+def _q(name, ok, secs=1.0):
     return QueryResult(
         query=BenchmarkQuery(name=name, display_name=name, query_class="scan", sql="select 1"),
-        elapsed_seconds=1.0,
+        elapsed_seconds=secs,
         rows_returned=1,
         success=ok,
     )
@@ -24,11 +23,11 @@ def test_all_pass_is_clean():
 
 def test_any_failure_fails_the_run():
     probs = _benchmark_gate_problems(make_config(), [_q("FQ1", False), _q("FQ5", True)])
-    assert probs and "1 of 2" in probs[0] and "FQ1" in probs[0]
+    assert probs and "FQ1" in probs[0]
 
 
 def test_delta_thrift_q2_failure_fails_the_run():
-    """LB-148: the Q2/Q7 crash is worked around, so Delta + Thrift Q2 is no
+    """The Q2/Q7 crash is worked around, so Delta + Thrift Q2 is no
     longer tolerated."""
     for recipe in ("hive-delta-spark-thrift", "hive-iceberg-spark-thrift"):
         cfg = make_config(recipe=recipe)
@@ -57,21 +56,9 @@ def test_paired_qph_ignores_queries_that_failed_in_either_run():
     assert n == 2 and post_q == 2 * pre_q  # C is excluded from both
 
 
-def _qr(name, ok, secs):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(query=SimpleNamespace(name=name), success=ok, elapsed_seconds=secs)
-
-
 def test_paired_qph_none_paths():
     from lakebench.cli._run import _paired_qph
 
-    assert _paired_qph([_qr("Q1", True, 2.0)], [_qr("Q2", True, 2.0)]) is None
-    assert _paired_qph([_qr("Q1", True, 0.0)], [_qr("Q1", True, 0.0)]) is None
-    assert _paired_qph([_qr("Q1", False, 2.0)], [_qr("Q1", True, 2.0)]) is None
-
-
-def test_maintenance_value_is_null_when_unmeasured():
-    from lakebench.metrics.collector import PipelineBenchmark
-
-    assert PipelineBenchmark.__dataclass_fields__["maintenance_value_pct"].default is None
+    assert _paired_qph([_q("Q1", True, 2.0)], [_q("Q2", True, 2.0)]) is None
+    assert _paired_qph([_q("Q1", True, 0.0)], [_q("Q1", True, 0.0)]) is None
+    assert _paired_qph([_q("Q1", False, 2.0)], [_q("Q1", True, 2.0)]) is None

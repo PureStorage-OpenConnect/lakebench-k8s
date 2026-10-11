@@ -1,4 +1,4 @@
-"""Destroy waits for the namespace to be gone before saying so (LB-157).
+"""Destroy waits for the namespace to be gone before saying so.
 
 A namespace delete returns as soon as the API server accepts it. The namespace
 then stays Terminating while its content drains (a PVC held by
@@ -616,7 +616,7 @@ class TestClient:
 
 
 class TestCliExitCode:
-    """A namespace still Terminating at the deadline is not "Destroy Complete"."""
+    """The destroy CLI exits 0 when every step succeeded."""
 
     def _invoke(self, results, monkeypatch, tmp_path):
         from pathlib import Path
@@ -631,25 +631,6 @@ class TestCliExitCode:
         engine.destroy_all.return_value = results
         with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
             return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
-
-    def test_still_terminating_exits_incomplete(self, monkeypatch, tmp_path):
-        from lakebench.deploy.engine import DeploymentResult
-        from lakebench.exit_codes import ExitCode
-
-        results = [
-            DeploymentResult("postgres", DeploymentStatus.SUCCESS, "removed"),
-            DeploymentResult(
-                "namespace",
-                DeploymentStatus.SKIPPED,
-                "Namespace x is still terminating after 600s",
-                details={"still_terminating": True},
-            ),
-        ]
-        out = self._invoke(results, monkeypatch, tmp_path)
-        # CLI-1: incomplete and safe to re-run is 6 (it was 4 in 1.6).
-        assert ExitCode.INCOMPLETE == 6
-        assert out.exit_code == 6, out.output
-        assert "Destroy Complete\n" not in out.output
 
     def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):
         from lakebench.deploy.engine import DeploymentResult

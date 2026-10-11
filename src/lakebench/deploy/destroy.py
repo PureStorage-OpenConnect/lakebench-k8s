@@ -1688,7 +1688,7 @@ def destroy_all(
 
     # Step 0: Identity check. Refuse if this namespace is owned by another
     # lakebench deployment or targets a different cluster. See
-    # docs/design/namespace-isolation.md.
+    # docs/internal/namespace-isolation.md.
     #
     # Legacy (annotation-less) namespaces are REFUSED unless the caller
     # passes ``force_legacy=True``. Warn-and-proceed on legacy state

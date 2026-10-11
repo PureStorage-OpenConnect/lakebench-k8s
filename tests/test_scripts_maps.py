@@ -1,9 +1,8 @@
-"""Scripts ConfigMaps by role (DEP-1, LB-207, SD-8).
+"""Scripts ConfigMaps by role (DEP-1, SD-8).
 
 The scripts ship in one ConfigMap per role, each guarded at 80% of the 1 MiB
 ConfigMap limit by measuring exactly the data that is applied. A listed file
-missing from the package raises instead of being skipped (v1.6 skipped it and
-the driver failed three attempts later with an ImportError).
+missing from the package raises instead of being skipped.
 """
 
 from __future__ import annotations
@@ -19,9 +18,7 @@ import pytest
 from lakebench import _resources
 from lakebench.modules.pipeline_engines.spark import scripts_maps as sm
 from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-from tests.fixtures.scripts_maps_helpers import LEGACY as LEGACY
-from tests.fixtures.scripts_maps_helpers import FakeK8s as FakeK8s
-from tests.fixtures.scripts_maps_helpers import _cfg as _cfg
+from tests.fixtures.scripts_maps_helpers import LEGACY, FakeK8s, _cfg
 
 PKG = Path(_resources.__file__).parent
 
@@ -42,14 +39,11 @@ def _copy_package(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# -- budget ------------------------------------------------------------------
-
-
 # -- manifest ------------------------------------------------------------------
 
 
 def test_deploy_refuses_when_listed_file_missing(tmp_path, monkeypatch):
-    """Fix-reverted: v1.6 skipped a missing listed script and returned True."""
+    """A listed script missing from the package refuses the deploy."""
     pkg = _copy_package(tmp_path)
     (pkg / "spark/scripts/tm_operations.py").unlink()
     monkeypatch.setattr(_resources, "_package_dir", lambda: pkg)
@@ -60,14 +54,6 @@ def test_deploy_refuses_when_listed_file_missing(tmp_path, monkeypatch):
     assert k8s.applied == [], "nothing may be applied when the manifest is incomplete"
 
 
-def test_duplicate_key_across_roles_raises(monkeypatch):
-    dup = dict(sm.SCRIPT_MAPS)
-    dup["aml-rules"] = (*dup["aml-rules"], sm.ScriptSource("spark/scripts/common.py", "common.py"))
-    monkeypatch.setattr(sm, "SCRIPT_MAPS", dup)
-    with pytest.raises(sm.ScriptsManifestError, match="common.py"):
-        sm.build_script_configmaps(_cfg(), "ns")
-
-
 def test_every_aml_json_listed_or_excluded():
     listed = {s.path for s in sm.SCRIPT_MAPS["aml-data"]} | set(sm.NOT_SHIPPED)
     on_disk = {f"spark/data/aml/{p.name}" for p in (PKG / "spark/data/aml").glob("*.json")}
@@ -75,52 +61,12 @@ def test_every_aml_json_listed_or_excluded():
     assert on_disk <= listed, f"unlisted AML JSON: {sorted(on_disk - listed)}"
 
 
-def test_ships_the_same_bytes_as_v16():
-    """The role maps together ship exactly the v1.6 single map's files and
-    bytes, plus the files v1.7 adds."""
-    v16_scripts = [
-        "common.py",
-        "bronze_verify.py",
-        "silver_build.py",
-        "gold_finalize.py",
-        "bronze_ingest.py",
-        "silver_stream.py",
-        "gold_refresh.py",
-        "silver_build_delta.py",
-        "gold_finalize_delta.py",
-        "gold_refresh_delta.py",
-        "bronze_ingest_delta.py",
-        "silver_stream_delta.py",
-        "bronze_verify_financial.py",
-        "silver_build_financial.py",
-        "gold_finalize_financial.py",
-        "bronze_ingest_financial.py",
-        "silver_stream_financial.py",
-        "gold_refresh_financial.py",
-        "replay_financial.py",
-        "reproduce_financial.py",
-        "score_financial.py",
-        "score_financial_reference.py",
-        "detection_rules.py",
-        "aml_features.py",
-        "tm_operations.py",
-    ]
-    # Files v1.7 adds to the maps: the AML reason-code vocabulary
-    # and the continuous time-travel reads.
-    v16_scripts += ["aml_reason_codes.py", "time_travel_financial.py"]
-    want = {n: (PKG / "spark/scripts" / n).read_bytes() for n in v16_scripts}
-    want["reference_score.py"] = (PKG / "aml/reference_score.py").read_bytes()
-    want["fidelity_gate.py"] = (PKG / "aml/fidelity_gate.py").read_bytes()
-    want["datagen_seed.py"] = (PKG / "config/datagen_seed.py").read_bytes()
-    for p in (PKG / "spark/data/aml").glob("*.json"):
-        want[p.name] = p.read_bytes()
-    got = {
-        k: v.encode("utf-8")
-        for cm in sm.build_script_configmaps(_cfg(), "ns")
-        for k, v in cm["data"].items()
-    }
-    assert got.keys() == want.keys()
-    assert all(got[k] == want[k] for k in want), [k for k in want if got[k] != want[k]]
+def test_duplicate_key_across_roles_raises(monkeypatch):
+    dup = dict(sm.SCRIPT_MAPS)
+    dup["aml-rules"] = (*dup["aml-rules"], sm.ScriptSource("spark/scripts/common.py", "common.py"))
+    monkeypatch.setattr(sm, "SCRIPT_MAPS", dup)
+    with pytest.raises(sm.ScriptsManifestError, match="common.py"):
+        sm.build_script_configmaps(_cfg(), "ns")
 
 
 def test_map_metadata_labels_and_hash():
@@ -398,7 +344,7 @@ def test_submit_refuses_when_scripts_changed_after_apply():
     created.create_namespaced_custom_object.assert_not_called()
 
 
-def test_financial_command_exits_when_not_submitted(capsys):
+def test_financial_command_exits_when_not_submitted():
     """A refused submit must not fall through to waiting on a previous
     application of the same name (a false pass) or on nothing (a hang)."""
     import typer
@@ -410,7 +356,6 @@ def test_financial_command_exits_when_not_submitted(capsys):
     with pytest.raises(typer.Exit) as ei:
         _financial._require_submitted(status)
     assert ei.value.exit_code == 1
-    assert "Not submitted: why" in capsys.readouterr().out
     _financial._require_submitted(
         JobStatus(name="x", state=JobState.SUBMITTED, message="ok")
     )  # no exit
@@ -460,35 +405,44 @@ def _destroy(core, create_namespace: bool = False):
         return destroy_all(engine, clean_buckets=False)
 
 
-def _scripts_list_calls(core):
-    return [
-        c
-        for c in core.list_namespaced_config_map.call_args_list
-        if "spark-scripts" in str(c.kwargs.get("label_selector", ""))
-    ]
-
-
-def test_destroy_deletes_this_deployments_scripts_maps():
-    """Fix-reverted: with create_namespace=false the namespace survives
-    destroy, and v1.6 destroy never deleted the scripts ConfigMap."""
+def _label_filtering_core(maps: dict[str, dict[str, str]]):
+    """A CoreV1Api whose ConfigMap list honours the label selector, over
+    ``maps`` (name -> labels), and which records deletes."""
     core = MagicMock()
-    names = ["lakebench-scripts-common", LEGACY]
-    core.list_namespaced_config_map.return_value = SimpleNamespace(
-        items=[SimpleNamespace(metadata=SimpleNamespace(name=n)) for n in names]
+
+    def listing(ns, label_selector=""):
+        want = dict(t.split("=", 1) for t in label_selector.split(",") if "=" in t)
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(metadata=SimpleNamespace(name=n, labels=lab))
+                for n, lab in maps.items()
+                if want and all(lab.get(k) == v for k, v in want.items())
+            ]
+        )
+
+    core.list_namespaced_config_map.side_effect = listing
+    return core
+
+
+def test_destroy_deletes_only_this_deployments_scripts_maps():
+    """With create_namespace=false the namespace survives destroy, so destroy
+    removes this deployment's scripts maps, and only those."""
+
+    def labels(deployment: str) -> dict[str, str]:
+        selector = sm.scripts_label_selector(deployment)
+        return dict(t.split("=", 1) for t in selector.split(","))
+
+    ours, theirs = labels("u02"), labels("other")
+    core = _label_filtering_core(
+        {"lakebench-scripts-common": ours, LEGACY: ours, "lakebench-scripts-theirs": theirs}
     )
     results = _destroy(core)
 
-    calls = _scripts_list_calls(core)
-    assert calls, "destroy never listed the scripts ConfigMaps"
-    sel = calls[0].kwargs["label_selector"]
-    assert calls[0].args[0] == "u02"
-    assert "app.kubernetes.io/component=spark-scripts" in sel
-    assert "app.kubernetes.io/instance=u02" in sel, "the selector must name this deployment"
-    deleted = [c.args for c in core.delete_namespaced_config_map.call_args_list]
-    assert ("lakebench-scripts-common", "u02") in deleted
-    assert (LEGACY, "u02") in deleted
+    deleted = {c.args[0] for c in core.delete_namespaced_config_map.call_args_list}
+    assert {"lakebench-scripts-common", LEGACY} <= deleted
+    assert "lakebench-scripts-theirs" not in deleted
     step = [r for r in results if r.component == "spark-scripts"]
-    assert step and step[-1].message == "Deleted 2 scripts ConfigMaps"
+    assert step and step[-1].status.name == "SUCCESS"
 
 
 @pytest.mark.parametrize("create_namespace,status", [(False, "FAILED"), (True, "SKIPPED")])

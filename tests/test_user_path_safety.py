@@ -1,7 +1,4 @@
-"""User-path safety: validate before deploy, info sizing, remedy hints.
-
-Each test names the defect it guards (lb16-base live report, outcome 5).
-"""
+"""User-path safety: validate before deploy, watch-list edits, remedy hints."""
 
 from __future__ import annotations
 
@@ -11,8 +8,7 @@ from lakebench.cli import operator_watch_verdict
 
 
 class TestValidateWatchListVerdict:
-    """`validate` failed on every example config before deploy because the
-    namespace was not yet in spark.jobNamespaces, although deploy adds it."""
+    """validate passes before deploy when the namespace add is possible."""
 
     @pytest.mark.parametrize("can_edit", [True, None])
     def test_pre_deploy_passes_when_the_add_is_possible_or_unknown(self, can_edit):
@@ -23,8 +19,7 @@ class TestValidateWatchListVerdict:
 
     @pytest.mark.parametrize("exists", [True, False, None])
     def test_fails_when_credentials_cannot_make_the_add(self, exists):
-        """Review: a namespace-scoped developer saw validate green, then
-        deploy built half the stack and stopped at the operator step."""
+        """Without credentials to edit the release, validate fails and names the operator namespace."""
         level, _msg, hint = operator_watch_verdict(
             "lb16-base",
             ["default"],
@@ -37,16 +32,11 @@ class TestValidateWatchListVerdict:
 
 
 class TestWatchListEditsKeepTheInstalledChart:
-    """A namespace add/remove is not an operator upgrade. Without --version
-    Helm resolved the repo's latest chart (run path, install=false); with the
-    config's version a developer could downgrade an admin's install."""
+    """A namespace add/remove pins the installed chart, never the config's or latest."""
 
-    def _mgr(self, target=None, installed=None):
+    def _mgr(self, target=None):
         from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
-        # ``installed`` was the check_status() cache the pin used to fall back
-        # on; the pin now reads the chart afresh, so it is ignored.
-        del installed
         return SparkOperatorManager(version=target, job_namespace="lb16")
 
     @staticmethod
@@ -65,23 +55,18 @@ class TestWatchListEditsKeepTheInstalledChart:
         return run
 
     def test_installed_chart_wins_over_config_and_latest(self, monkeypatch):
-        """The pin is the installed chart, read afresh (the callers hold the
-        lease). The config's version is never a stand-in: with the installed
-        chart unreadable the pin is None and the edit is refused, where it
-        used to fall back to the config pin (moving the shared operator) or
-        to no pin at all (the repo's latest)."""
-        for target, cached in (("2.4.0", "2.5.1"), (None, "2.5.1"), ("2.4.0", None)):
-            m = self._mgr(target=target, installed=cached)
+        """The pin is the installed chart, read afresh. With it unreadable the
+        pin is None and the edit is refused; the config's version never stands in."""
+        for target in ("2.4.0", None):
+            m = self._mgr(target=target)
             monkeypatch.setattr(m, "_run", self._helm_list("2.5.1"))
             assert m._watch_list_pin()[:2] == ["--version", "2.5.1"]
-        for target, cached in (("2.4.0", None), (None, None), ("2.4.0", "2.5.1")):
-            m = self._mgr(target=target, installed=cached)
+            m = self._mgr(target=target)
             monkeypatch.setattr(m, "_run", self._helm_list(None))
             assert m._watch_list_pin() is None
 
     def test_remove_refuses_when_the_installed_chart_is_unreadable(self, monkeypatch):
-        """A refused removal is a failed removal: the strict destroy path then
-        raises and keeps the namespace (never deletes a watched one)."""
+        """A refused removal fails the strict destroy, which keeps the namespace."""
         from unittest.mock import patch
 
         from lakebench.modules.pipeline_engines.spark.operator import WatchListMutationError
@@ -110,7 +95,7 @@ class TestWatchListEditsKeepTheInstalledChart:
     def test_recreate_rbac_refuses_without_the_lease(self, monkeypatch):
         from unittest.mock import MagicMock
 
-        m = self._mgr(installed="2.5.1")
+        m = self._mgr()
         run = MagicMock()
         monkeypatch.setattr(m, "_run", run)
         monkeypatch.setattr(m, "_acquire_watch_lease", lambda: (None, "refuse"))
@@ -121,8 +106,7 @@ class TestWatchListEditsKeepTheInstalledChart:
 
 @pytest.mark.parametrize("recorded", [True, False])
 def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, recorded):
-    """Review: the continuous reset deleted checkpoint and raw prefixes in any
-    name-matching bucket on FlashBlade, record or not."""
+    """On tagless backends the continuous reset proceeds only with an ownership record."""
     from unittest.mock import MagicMock, patch
 
     from lakebench.cli import _sustained
@@ -149,8 +133,7 @@ def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, reco
 
 
 class TestInstalledChartLookup:
-    """Review: `helm list -A -f spark-operator` took releases[0], so a
-    look-alike release elsewhere could set the watch-list --version pin."""
+    """Only the exact release in the operator namespace sets the watch-list pin."""
 
     def _mgr(self, stdout, rc=0):
         from unittest.mock import MagicMock

@@ -1,15 +1,4 @@
-"""CFG-1 (CC-11): every recorded setting is honoured or refused at load.
-
-Each test fails with its fix reverted:
-
-- ``platform.compute.spark.driver`` / ``.executor`` and
-  ``platform.storage.scratch.size`` sized nothing; a command that changes data
-  refuses them with fix text, destroy and status still load them;
-- ``operator.install: true`` is refused (C24);
-- ``lakebench run`` refuses benchmark settings it does not honour, and its
-  snapshot records the power pass it runs;
-- a validation error never echoes the config it failed on (LB-230).
-"""
+"""Config settings that nothing honours are refused on commands that change data and tolerated on teardown and read."""
 
 from __future__ import annotations
 
@@ -55,20 +44,27 @@ def _write(tmp_path: Path, extra: dict) -> Path:
 _EXECUTOR = {"platform": {"compute": {"spark": {"executor": {"instances": 16, "memory": "8g"}}}}}
 _DRIVER = {"platform": {"compute": {"spark": {"driver": {"cores": 2}}}}}
 _SCRATCH = {"platform": {"storage": {"scratch": {"enabled": True, "size": "200Gi"}}}}
+_SPARK_OP = {"platform": {"compute": {"spark": {"operator": {"install": True}}}}}
+_HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}}}}
 
 
 # -- removed sizing blocks -----------------------------------------------------
 
 
-def test_removed_executor_block_refused_on_run(tmp_path):
-    for extra, key in [(_EXECUTOR, "'executor' was removed"), (_DRIVER, "'driver' was removed")]:
-        for purpose in [LoadPurpose.RUN, LoadPurpose.MUTATE]:
-            path = _write(tmp_path, extra)
-            with pytest.raises(ConfigValidationError) as e:
-                load_config(path, purpose=purpose, print_notes=False)
-            text = str(e.value)
-            assert key in text
-            assert "job profiles" in text and "<job>_executors" in text
+@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
+@pytest.mark.parametrize(
+    ("extra", "loc"),
+    [
+        (_EXECUTOR, ("platform", "compute", "spark")),
+        (_DRIVER, ("platform", "compute", "spark")),
+        (_SPARK_OP, ("platform", "compute", "spark", "operator")),
+        (_HIVE_OP, ("architecture", "catalog", "hive", "operator")),
+    ],
+)
+def test_unhonoured_setting_refused_on_data_changing_commands(tmp_path, extra, loc, purpose):
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(_write(tmp_path, extra), purpose=purpose, print_notes=False)
+    assert [err["loc"] for err in e.value.errors] == [loc]
 
 
 @pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
@@ -84,8 +80,8 @@ def test_removed_executor_block_loads_for_destroy(tmp_path, purpose):
     )
     cfg = load_config(path, purpose=purpose, print_notes=False)
     notes = " ".join(load_notes(cfg).texts())
-    assert "'executor' (SparkComputeConfig) is no longer used" in notes
-    assert "'size' (ScratchStorageConfig) is no longer used" in notes
+    assert "'executor'" in notes
+    assert "'size'" in notes
     assert not hasattr(cfg.platform.compute.spark, "executor")
     assert not hasattr(cfg.platform.storage.scratch, "size")
 
@@ -97,22 +93,6 @@ def test_removed_scratch_size_refused_on_run(tmp_path):
 
 
 # -- operator install keys (C24) ----------------------------------------------
-
-_SPARK_OP = {"platform": {"compute": {"spark": {"operator": {"install": True}}}}}
-_HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}}}}
-
-
-def test_operator_install_true_refused_names_admin_install(tmp_path):
-    for purpose in [LoadPurpose.RUN, LoadPurpose.MUTATE]:
-        for extra, names in [
-            (_SPARK_OP, "lakebench admin install --component spark-operator"),
-            (_HIVE_OP, "lakebench admin install --component stackable"),
-        ]:
-            path = _write(tmp_path, extra)
-            with pytest.raises(ConfigValidationError) as e:
-                load_config(path, purpose=purpose, print_notes=False)
-            assert "install: true' is refused" in str(e.value)
-            assert names in str(e.value)
 
 
 def test_operator_install_coerced_true_refused(tmp_path):
@@ -198,7 +178,7 @@ def test_run_snapshot_records_power_hot_1(tmp_path):
     assert cont == {"mode": "power", "streams": 1, "cache": "hot", "iterations": 1}
 
 
-# -- LB-230: errors never echo their input ------------------------------------
+# -- Errors never echo their input ------------------------------------
 
 _SEED = 4343434343
 

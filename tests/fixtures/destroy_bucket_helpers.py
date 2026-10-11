@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_destroy_bucket_delete.py (imported by several test files)."""
+"""A boto fake and a destroy_all harness with per-bucket ownership verdicts."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ class DestroyAllBucketsHarness:
 
     _on_sql = None
 
-    sql_timeouts: list[int] = []
+    sql_timeouts: list[int]  # set per _run
 
     def _exec(self, _engine, _k8s, _pod, _ns, sql, timeout=30):
         self.sql_timeouts.append(timeout)
@@ -181,7 +181,6 @@ class DestroyAllBucketsHarness:
             patch("lakebench.k8s.get_k8s_client"),
             patch("kubernetes.client.CoreV1Api") as core,
             patch("kubernetes.client.CustomObjectsApi") as custom,
-            patch("lakebench.deploy.destroy.logger"),
             patch("lakebench.s3.S3Client", return_value=_s3(boto)),
             patch(
                 "lakebench.deploy.ownership.read_created_buckets",

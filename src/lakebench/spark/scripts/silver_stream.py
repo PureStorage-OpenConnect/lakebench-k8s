@@ -40,7 +40,7 @@ Environment variables (set by job.py):
     LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
     CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://silver-bucket/checkpoints/silver-stream/
-    TRIGGER_INTERVAL     - e.g., "60 seconds"
+    TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ def main() -> None:
     catalog = env("LB_ICEBERG_CATALOG", "ice")
     silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
     checkpoint_location = env("CHECKPOINT_LOCATION")
-    trigger_interval = env("TRIGGER_INTERVAL", "60 seconds")
+    trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
     target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "536870912")
 
     bronze_tbl = f"{catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}"

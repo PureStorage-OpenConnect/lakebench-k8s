@@ -455,7 +455,9 @@ class S3Client:
             size_bytes=size_bytes,
         )
 
-    def get_bucket_size(self, bucket_name: str, prefix: str = "") -> BucketInfo:
+    def get_bucket_size(
+        self, bucket_name: str, prefix: str = "", exclude_prefix: str = ""
+    ) -> BucketInfo:
         """Get accurate bucket size by paginating all objects.
 
         Unlike :meth:`get_bucket_info`, this paginates through ALL
@@ -465,6 +467,7 @@ class S3Client:
         Args:
             bucket_name: Name of the bucket
             prefix: Optional key prefix to filter by
+            exclude_prefix: Optional key prefix left out of the count
 
         Returns:
             BucketInfo with accurate ``object_count`` and ``size_bytes``
@@ -483,7 +486,10 @@ class S3Client:
 
             for page in paginator.paginate(**paginate_args):
                 objects = [
-                    o for o in page.get("Contents", []) if not is_lakebench_key(o.get("Key", ""))
+                    o
+                    for o in page.get("Contents", [])
+                    if not is_lakebench_key(o.get("Key", ""))
+                    and not (exclude_prefix and o.get("Key", "").startswith(exclude_prefix))
                 ]
                 total_objects += len(objects)
                 total_bytes += sum(obj.get("Size", 0) for obj in objects)

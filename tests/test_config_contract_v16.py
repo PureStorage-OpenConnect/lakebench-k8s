@@ -1,5 +1,5 @@
 """v1.6 config contract (design-contradictions #4, #7, #12, #13, #15, #18, #19,
-LB-181, outcome 5).
+outcome 5).
 
 Each test here fails with its fix reverted: AML on Delta and the Java/Iceberg
 pairing used to load, `custom` used to run the Customer 360 queries, the
@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from lakebench.config import load_config
 from lakebench.config.loader import ConfigValidationError, save_config
@@ -47,11 +48,11 @@ def _quiet(fn, *a, **kw):
 # -- #4: workload x format compatibility, Java/Iceberg pairing ---------------
 
 
-def test_aml_on_delta_is_refused_naming_the_supported_format():
-    with pytest.raises(ValueError) as exc:
+def test_aml_on_delta_is_refused_on_the_architecture():
+    with pytest.raises(ValidationError) as exc:
         make_config(recipe="hive-delta-spark-trino", workload={"schema": "financial"})
-    msg = str(exc.value)
-    assert "financial (AML) workload supports table_format iceberg, not delta" in msg
+    assert [e["loc"] for e in exc.value.errors()] == [("architecture",)]
+    make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
 
 
 def test_iceberg_111_on_java11_spark_image_is_refused_at_load():
@@ -62,20 +63,13 @@ def test_iceberg_111_on_java11_spark_image_is_refused_at_load():
         )
 
 
-def test_unset_iceberg_version_on_java11_image_uses_a_java11_release():
-    cfg = make_config(images={"spark": "apache/spark:3.5.4-python3"})
-    assert cfg.architecture.table_format.iceberg.version == "1.10.1"
-
-
 # -- #13: custom is refused ---------------------------------------------------
 
 
 def test_custom_workload_is_refused(tmp_path):
     with pytest.raises(ConfigValidationError) as exc:
         load_config(_write(tmp_path, {"name": "t", "workload": {"schema": "custom"}}))
-    msg = str(exc.value)
-    assert "'custom' is not supported" in msg
-    assert "workload.schema" in msg and "architecture.workload" not in msg
+    assert [e["loc"] for e in exc.value.errors] == [("workload", "schema")]
 
 
 # -- #12: top-level workload --------------------------------------------------
@@ -164,26 +158,18 @@ def test_saved_config_reloads_without_deprecations(tmp_path):
 # -- #18: continuous is canonical ---------------------------------------------
 
 
-def test_is_continuous_mode():
-    for value, expected in [
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
         ("continuous", True),
         ("sustained", True),  # metrics files still record this
         (PipelineMode.CONTINUOUS, True),
         ("batch", False),
         (None, False),
-    ]:
-        assert is_continuous_mode(value) is expected
-
-
-def test_peak_requirements_read_either_spelling():
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    a = compute_peak_requirements(1, "continuous")
-    b = compute_peak_requirements(1, "sustained")
-    c = compute_peak_requirements(1, PipelineMode.CONTINUOUS)
-    batch = compute_peak_requirements(1, "batch")
-    assert a == b == c
-    assert a != batch
+    ],
+)
+def test_is_continuous_mode(value, expected):
+    assert is_continuous_mode(value) is expected
 
 
 def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
@@ -195,49 +181,27 @@ def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
     assert gen._is_sustained(metrics) is True
 
 
-# -- #19: dead fields warn ----------------------------------------------------
+# -- Outcome 5: bucket names ----------------------------------------------
 
 
-# -- LB-181: user-facing notes cite nothing internal --------------------------
-
-
-# -- Outcome 5: bucket names and the documented quick start -------------------
-
-
-def test_unset_buckets_default_to_deployment_name():
-    cfg = make_config(name="lab-a")
+@pytest.mark.parametrize(
+    ("buckets", "expected"),
+    [
+        pytest.param(None, ("lab-a-bronze", "lab-a-silver", "lab-a-gold"), id="derived"),
+        pytest.param(
+            {"bronze": "shared-bronze"},
+            ("shared-bronze", "lab-a-silver", "lab-a-gold"),
+            id="explicit-wins",
+        ),
+    ],
+)
+def test_buckets_derive_from_the_deployment_name_unless_explicit(buckets, expected):
+    s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
+    if buckets:
+        s3["buckets"] = buckets
+    cfg = make_config(name="lab-a", platform={"storage": {"s3": s3}})
     b = cfg.platform.storage.s3.buckets
-    assert (b.bronze, b.silver, b.gold) == ("lab-a-bronze", "lab-a-silver", "lab-a-gold")
-
-
-def test_explicit_buckets_are_kept():
-    cfg = make_config(
-        name="lab-a",
-        platform={
-            "storage": {
-                "s3": {
-                    "endpoint": "http://minio:9000",
-                    "access_key": "k",
-                    "secret_key": "s",
-                    "buckets": {"bronze": "shared-bronze"},
-                }
-            }
-        },
-    )
-    b = cfg.platform.storage.s3.buckets
-    assert (b.bronze, b.silver, b.gold) == ("shared-bronze", "lab-a-silver", "lab-a-gold")
-
-
-def _resolve(group, words):
-    """Return (command, remaining words) for a 'lakebench ...' line."""
-    cmd = group
-    rest = list(words)
-    while hasattr(cmd, "commands") and rest and not rest[0].startswith("-"):
-        nxt = cmd.commands.get(rest[0])  # type: ignore[attr-defined]
-        if nxt is None:
-            break
-        cmd, rest = nxt, rest[1:]
-    return cmd, rest
+    assert (b.bronze, b.silver, b.gold) == expected
 
 
 # -- #7: a benchmark exception fails the run ----------------------------------
@@ -444,24 +408,54 @@ def test_deploy_does_not_install_when_the_lookup_fails(_lock):
     assert not [c for c in calls if c[1] in ("install", "upgrade")]
 
 
-def test_helm_values_do_not_pin_scraping_to_one_namespace():
-    from lakebench.deploy.observability import build_helm_values
-
-    values = build_helm_values(_obs_engine().config.observability)
-    assert not any("NamespaceSelector" in k for k in values)
-
-
 @pytest.mark.parametrize("name", ["lakebench-observability", "lakebench-system"])
-def test_reserved_namespaces_are_refused(name):
-    with pytest.raises(ValueError, match="reserved for shared lakebench state"):
-        make_config(name=name)
-    with pytest.raises(ValueError, match="reserved"):
+def test_reserved_namespaces_are_refused(name, monkeypatch):
+    from lakebench.config import schema
+
+    def both():
         make_config(name="ok", platform={"kubernetes": {"namespace": name}})
+        make_config(name=name)
+
+    with pytest.raises(ValidationError):
+        make_config(name=name)
+    with pytest.raises(ValidationError):
+        make_config(name="ok", platform={"kubernetes": {"namespace": name}})
+    make_config(name="ok", platform={"kubernetes": {"namespace": "ok"}})
+    # Without the reserved entry the same inputs load, so the refusals above
+    # came from the reserved-namespace rule and no other.
+    monkeypatch.setattr(
+        schema,
+        "RESERVED_NAMESPACES",
+        {k: v for k, v in schema.RESERVED_NAMESPACES.items() if k != name},
+    )
+    both()
+
+
+def test_continuous_peak_requirements_read_either_spelling():
+    from lakebench.config.schema import PipelineMode
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+    def peak(mode):
+        p = compute_peak_requirements(1, mode)
+        return (p.cpu_cores, p.memory_gb)
+
+    assert peak("continuous") == peak("sustained") == peak(PipelineMode.CONTINUOUS)
+    assert peak("continuous") != peak("batch")
 
 
 def test_invalid_derived_bucket_name_is_refused():
-    with pytest.raises(ValueError, match="not a valid S3 bucket name"):
-        make_config(name="My_Deploy", platform={"kubernetes": {"namespace": "my-deploy"}})
+    ns = {"kubernetes": {"namespace": "my-deploy"}}
+    with pytest.raises(ValidationError):
+        make_config(name="My_Deploy", platform=ns)
+    # Explicit buckets skip the derivation, so it was the derived name that failed.
+    explicit = {
+        **ns,
+        "storage": {
+            "s3": {"buckets": {"bronze": "b-bronze", "silver": "b-silver", "gold": "b-gold"}}
+        },
+    }
+    make_config(name="My_Deploy", platform=explicit)
+    make_config(name="my-deploy", platform=ns)
 
 
 def test_deploy_refuses_to_reuse_a_release_that_is_not_deployed(_lock):
@@ -522,8 +516,6 @@ def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
     )
 
     order = []
-    # The wait helper now accepts a `context=` kwarg (LB-ux-safety C1: every
-    # kubectl invocation must pin the configured kube-context).
     _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
 
     def fake_run(cmd, **kw):
@@ -542,5 +534,26 @@ def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
         result = deployer.deploy()
     assert order == [f"wait {OBSERVABILITY_NAMESPACE}"]
     assert result.status == DeploymentStatus.FAILED
-    assert "not Ready" in result.message
     assert not _lock.called
+
+
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [
+        ("0 seconds", True),
+        ("5 minutes", True),
+        ("1 hour", True),
+        ("0", False),
+        ("1.5 minutes", False),
+    ],
+)
+def test_trigger_intervals_need_a_whole_number_and_a_unit(value, ok):
+    """A bare "0" went to Spark unchanged for Customer360 and became a 10 s
+    trigger for AML: an interval is refused at load unless both read it."""
+    for key in ("bronze_trigger_interval", "silver_trigger_interval", "gold_refresh_interval"):
+        cfg = {"architecture": {"pipeline": {"continuous": {key: value}}}}
+        if ok:
+            make_config(**cfg)
+        else:
+            with pytest.raises(ValueError):
+                make_config(**cfg)

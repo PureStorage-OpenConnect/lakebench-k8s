@@ -163,7 +163,7 @@ def _safe_write_mode(spark, table_name: str) -> str:
     return "overwrite" if _table_exists(spark, table_name) else "append"
 
 
-def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
+def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> None:
     """SIMPLE_AGG strategy: Standard single-pass aggregation. For < 500GB."""
     log("Executing SIMPLE_AGG strategy...")
 
@@ -177,8 +177,8 @@ def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         .orderBy("interaction_date")
     )
 
-    kpi_count = daily_kpis.count()
-    log(f"Generated {kpi_count:,} daily KPI records")
+    # No count here: it would recompute the aggregate before the write.
+    # The KPI count is the gold table's row count, read by the gate below.
 
     # Coalesce to single file - Gold is small (daily aggregates)
     # No partitioning needed for such a small table
@@ -197,10 +197,10 @@ def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         options=opts,
     )
 
-    return kpi_count
+    return None
 
 
-def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
+def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> None:
     """TWO_PHASE_AGG strategy: Pre-aggregate then final aggregate. For 500GB - 10TB."""
     log("Executing TWO_PHASE_AGG strategy...")
 
@@ -221,8 +221,8 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         .orderBy("interaction_date")
     )
 
-    kpi_count = daily_kpis.count()
-    log(f"Generated {kpi_count:,} daily KPI records")
+    # No count here: it would recompute the aggregate before the write.
+    # The KPI count is the gold table's row count, read by the gate below.
 
     # Coalesce to single file - Gold is small (daily aggregates)
     daily_kpis_consolidated = daily_kpis.coalesce(1)
@@ -240,7 +240,7 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         options=opts,
     )
 
-    return kpi_count
+    return None
 
 
 def _merge_gold(existing_gold, new_kpis, last_date):
@@ -398,6 +398,8 @@ def main() -> None:
     # silver interaction_date, else the run did not produce a valid gold.
     _gold_rows = spark.table(gold_tbl).count()
     _distinct_dates = spark.table(silver_tbl).select("interaction_date").distinct().count()
+    if kpi_count is None:  # a full rebuild: gold holds exactly the KPIs written
+        kpi_count = _gold_rows
     _gate = gold_date_coverage_problem(_gold_rows, _distinct_dates)
     if _gate:
         log(f"ERROR: gold non-degeneracy gate FAILED ({strategy.value}): {_gate}")

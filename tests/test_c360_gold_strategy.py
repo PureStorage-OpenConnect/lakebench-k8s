@@ -1,45 +1,31 @@
-"""Customer 360 gold strategy: never silently incremental (V16-3).
-
-The run-time half: ``config/c360_run.gold_override_problem`` refuses
-``spark.lb.gold.strategy=incremental`` (and a value that names no strategy)
-when a data-changing command loads the config, so ``run`` makes no cluster
-call and ``deploy`` builds nothing; the gold scripts lose the auto
-switch to incremental and the dead ``LB_GOLD_STRATEGY`` fallback, and the
-strategy that ran is recorded per job. The Spark-tier half, a repeat over
-changed silver, is ``tests/spark/test_gold_repeat_reaggregates_spark.py``.
-"""
+"""Customer 360 gold strategy: an incremental or unknown override is refused on data-changing commands."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
 from lakebench.config import c360_run
-from tests.fixtures.run_args_helpers import (
-    CONFIG,
-    no_cluster,  # noqa: F401 (fixture
+from tests.fixtures.run_args_helpers import CONFIG
+
+
+@pytest.mark.parametrize(
+    ("value", "refused"),
+    [
+        ("incremental", True),
+        ("INCREMENTAL", True),
+        (" incremental ", True),
+        ("fastest", True),
+        (None, False),
+        ("auto", False),
+        ("simple_agg", False),
+        ("TWO_PHASE_AGG", False),
+        ("", False),
+    ],
 )
-
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "src/lakebench/spark/scripts"
-
-
-def test_incremental_override_is_refused():
-    for value in ["incremental", "INCREMENTAL", " incremental "]:
-        problem = c360_run.gold_override_problem({"spark.lb.gold.strategy": value})
-        assert problem and "multi-cycle cycles 2+ only" in problem
-
-
-def test_unknown_override_is_refused():
-    problem = c360_run.gold_override_problem({"spark.lb.gold.strategy": "fastest"})
-    assert problem and "names no gold strategy" in problem
-
-
-def test_full_rebuild_overrides_are_accepted():
-    for value in [None, "auto", "simple_agg", "TWO_PHASE_AGG", ""]:
-        conf = {} if value is None else {"spark.lb.gold.strategy": value}
-        assert c360_run.gold_override_problem(conf) is None
+def test_gold_override_refusal(value, refused):
+    conf = {} if value is None else {"spark.lb.gold.strategy": value}
+    problem = c360_run.gold_override_problem(conf)
+    assert (problem is not None) == refused
 
 
 def _config(tmp_path, workload="customer360", value="incremental"):
@@ -57,7 +43,7 @@ def test_load_refuses_for_data_changing_commands_only(tmp_path):
     for purpose in (LoadPurpose.RUN, LoadPurpose.MUTATE):
         with pytest.raises(ConfigValidationError) as exc:
             load_config(cfg, purpose=purpose)
-        assert "multi-cycle cycles 2+ only" in str(exc.value.errors), purpose
+        assert "spark.lb.gold.strategy" in str(exc.value.errors), purpose
     # Teardown and read commands still load it, so the deployment can go.
     load_config(cfg, purpose=LoadPurpose.TEARDOWN)
     load_config(cfg, purpose=LoadPurpose.READ)

@@ -1,16 +1,4 @@
-"""Functional workflow tests.
-
-Exercises the DuckDB, observability, and report generation workflows
-end-to-end with mocked infrastructure (no real K8s/S3 required).
-
-Covers gaps identified in test coverage audit:
-- DuckDB benchmark workflow (deploy -> executor -> runner -> report)
-- Observability deployer lifecycle (deploy -> collect -> report)
-- Report generation with platform metrics integration
-- DuckDB health_check coverage
-- Runner adapt_query ordering verification
-- Per-engine benchmark workflows (trino, spark-thrift, duckdb)
-"""
+"""Functional workflow tests: DuckDB benchmark and observability lifecycle with mocked infrastructure."""
 
 from __future__ import annotations
 
@@ -95,26 +83,6 @@ class TestDuckDBBenchmarkWorkflow:
 
 
 # ===========================================================================
-# 2. DuckDB Health Check
-# ===========================================================================
-
-
-# ===========================================================================
-# 3. Trino and SparkThrift Health Checks (parity)
-# ===========================================================================
-
-
-# ===========================================================================
-# 4. Per-Engine Benchmark Runner Workflows
-# ===========================================================================
-
-
-# ===========================================================================
-# 5. DuckDB Deployer Workflow
-# ===========================================================================
-
-
-# ===========================================================================
 # 6. Observability Deployer Workflow
 # ===========================================================================
 
@@ -135,12 +103,8 @@ class TestObservabilityDeployerWorkflow:
         )
         values = build_helm_values(cfg.observability)
         assert values["prometheus.prometheusSpec.retention"] == "14d"
-        assert (
-            "20Gi"
-            in values[
-                "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage"
-            ]
-        )
+        storage = [v for k, v in values.items() if k.endswith("resources.requests.storage")]
+        assert storage == ["20Gi"]
         assert values["grafana.enabled"] == "false"
 
     def test_deploy_uses_the_shared_release_and_never_installs(self):
@@ -216,16 +180,6 @@ class TestObservabilityDeployerWorkflow:
 
 
 # ===========================================================================
-# 7. Platform Metrics Collection Workflow
-# ===========================================================================
-
-
-# ===========================================================================
-# 8. S3MetricsWrapper Workflow
-# ===========================================================================
-
-
-# ===========================================================================
 # 9. Full Config -> Executor -> Runner Pipeline
 # ===========================================================================
 
@@ -255,35 +209,3 @@ class TestConfigToRunnerPipeline:
         assert executor.s3_endpoint == "https://fb.example.com"
         assert executor.s3_region == "eu-west-1"
         assert executor.s3_path_style is False
-
-
-# ===========================================================================
-# 10. DuckDB Template Context Propagation
-# ===========================================================================
-
-
-class TestDuckDBTemplateContext:
-    """Verify DuckDB template context variables are set correctly."""
-
-    def test_duckdb_context_custom_resources(self):
-        """Custom DuckDB resources propagate to template context."""
-        from lakebench.deploy.engine import DeploymentEngine
-
-        cfg = make_config(
-            recipe="hive-iceberg-spark-duckdb",
-            architecture={
-                "query_engine": {
-                    "type": "duckdb",
-                    "duckdb": {"cores": 4, "memory": "8g"},
-                },
-                "catalog": {"type": "hive"},
-                "table_format": {"type": "iceberg"},
-            },
-        )
-
-        with patch("lakebench.k8s.client.K8sClient"):
-            engine = DeploymentEngine(cfg, dry_run=True)
-            ctx = engine.context
-
-        assert ctx["duckdb_cores"] == 4
-        assert ctx["duckdb_memory"] == "8g"

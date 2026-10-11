@@ -41,13 +41,9 @@ def resolve(run_id: str) -> str:
     return matches[0]
 
 
-def record_path(run_id: str) -> Path:
-    return RECORDS_DIR / f"run-{resolve(run_id)}" / "metrics.json"
-
-
 @cache
 def _raw(run_id: str) -> str:
-    return record_path(run_id).read_text()
+    return (RECORDS_DIR / f"run-{resolve(run_id)}" / "metrics.json").read_text()
 
 
 def load_record(run_id: str) -> dict[str, Any]:
@@ -72,7 +68,3 @@ def _expected(name: str) -> dict[str, Any]:
 def expected(name: str) -> dict[str, Any]:
     """A copy of ``tests/expected/<name>.json``."""
     return copy.deepcopy(_expected(name))
-
-
-def manifest() -> dict[str, Any]:
-    return json.loads((RECORDS_DIR / "MANIFEST.json").read_text())

@@ -1,4 +1,5 @@
-# Release validation record (DESIGN.md section 6.5, layer 4).
+# Release validation record (DESIGN.md section 6.5, layer 4): the combinations
+# this release was validated on, with the runs that did it.
 #
 # Only a run of a listed combination at the listed versions is stamped
 # "supported"; a valid combination that is not listed, or runs at other
@@ -12,6 +13,20 @@
 #     mode: batch                    # batch | continuous
 #     spark: "4.1"                   # Spark minor of the run's Spark image
 #     table_format_version: 1.11.0   # experiment.architecture.table_format.version
-#     tree: <40-hex commit>
 #     runs: [20261105-011500-abcdef]
-validated: []
+validated:
+  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-133104-9ffefb]}
+  - {workload: customer360, recipe: polaris-iceberg-spark-trino, mode: batch, spark: "4.0", table_format_version: 1.11.0, runs: [20261009-134641-55226a]}
+  - {workload: customer360, recipe: hive-delta-spark-trino, mode: batch, spark: "4.1", table_format_version: 4.1.0, runs: [20261009-134951-0186d1]}
+  - {workload: customer360, recipe: hive-delta-spark-thrift, mode: batch, spark: "4.0", table_format_version: 4.0.0, runs: [20261009-133013-d1aa01]}
+  - {workload: customer360, recipe: hive-iceberg-spark-thrift, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-134302-28314a]}
+  - {workload: customer360, recipe: polaris-iceberg-spark-thrift, mode: batch, spark: "4.0", table_format_version: 1.11.0, runs: [20261009-141156-15a64c]}
+  - {workload: customer360, recipe: hive-iceberg-spark-duckdb, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-141039-2a842f]}
+  - {workload: customer360, recipe: polaris-iceberg-spark-duckdb, mode: batch, spark: "4.0", table_format_version: 1.11.0, runs: [20261009-142234-0553e0]}
+  - {workload: customer360, recipe: hive-iceberg-spark-none, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-142742-0af6a2]}
+  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: continuous, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-135044-2ad4df]}
+  - {workload: customer360, recipe: hive-delta-spark-trino, mode: continuous, spark: "4.1", table_format_version: 4.1.0, runs: [20261009-140505-fc3a03]}
+  - {workload: financial, recipe: polaris-iceberg-spark-trino, mode: batch, spark: "4.0", table_format_version: 1.11.0, runs: [20261009-144238-3b0cdb]}
+  - {workload: financial, recipe: hive-iceberg-spark-trino, mode: continuous, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-154320-884bd7]}
+  - {workload: financial, recipe: polaris-iceberg-spark-trino, mode: continuous, spark: "4.0", table_format_version: 1.11.0, runs: [20261009-154330-e5c868]}
+  - {workload: financial, recipe: hive-iceberg-spark-trino, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-144045-2e5108, 20261009-231931-fa32b1]}

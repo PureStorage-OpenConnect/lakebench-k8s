@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 #: Commits a stage needs inside the window for the run to count as
@@ -38,13 +38,19 @@ MIN_WINDOW_COMMITS = 2
 
 _LINE = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+)Z? - (.*)$")
 _WRITE = re.compile(r"Batch (\d+): writing ([\d,]+) rows")
-_BRONZE_COMMIT = re.compile(r"Batch (\d+): committed in [\d.]+s")
+_BRONZE_COMMIT = re.compile(r"Batch (\d+): committed in ([\d.]+)s")
 _TRANSFORM = re.compile(r"Batch (\d+): transforming ([\d,]+) rows")
 _OUTPUT = re.compile(r"Batch (\d+): ([\d,]+) rows after transforms")
-_SILVER_COMMIT = re.compile(r"Batch (\d+): committed to \S+ in [\d.]+s")
+_SILVER_COMMIT = re.compile(r"Batch (\d+): committed to \S+ in ([\d.]+)s")
 _AGGREGATE = re.compile(r"Cycle (\d+): aggregating ([\d,]+) Silver records")
-_REFRESHED = re.compile(r"Cycle (\d+): refreshed \S+ in [\d.]+s(?: \(([\d,]+) KPI records\))?")
+_REFRESHED = re.compile(r"Cycle (\d+): refreshed \S+ in ([\d.]+)s(?: \(([\d,]+) KPI records\))?")
+# AML gold: the whole tick (detection, baseline, time to detect, TM), logged
+# at its end.
+_TICK_TOTAL = re.compile(r"Cycle (\d+): tick timing .*?(?: tm=([\d.]+)s)? total=([\d.]+)s")
 _FRESHNESS = re.compile(r"Cycle (\d+): data freshness ([\d.]+)s( \(silver idle\))?")
+_LANDING = re.compile(r"\[landing\] batch=(\d+) oldest=([\d.]+) newest=([\d.]+)")
+# AML gold: a cycle with no silver row new since the one before it.
+_NOTHING_NEW = re.compile(r"Cycle (\d+): earliest new event time \(us\) None\s*$")
 
 
 @dataclass(frozen=True)
@@ -52,11 +58,13 @@ class StreamEvent:
     """One timestamped stage event (UTC, naive)."""
 
     at: datetime
-    kind: str  # write, commit, transform, output, aggregate, refreshed, freshness
+    kind: str  # write, commit, landing, transform, output, aggregate, refreshed, tick, freshness, nothing_new
     ident: int  # batch id (bronze, silver) or cycle number (gold)
     rows: int | None = None
     value: float | None = None
     idle: bool = False
+    # AML gold tick: seconds of the tick the TM operations pass took.
+    tm: float | None = None
 
 
 def _num(text: str) -> int:
@@ -78,6 +86,14 @@ def utc_naive(at: datetime) -> datetime:
     if at.tzinfo is None:
         return at
     return at.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def committed_writes(events: list[StreamEvent]) -> list[StreamEvent]:
+    """Bronze ``write`` events whose batch logged its commit. A batch whose
+    stream was stopped mid-write logs ``writing`` but never commits, so its
+    rows never reached the table and must not be counted as ingested."""
+    done = {e.ident for e in events if e.kind == "commit"}
+    return [e for e in events if e.kind == "write" and e.ident in done]
 
 
 def parse_events(logs: str | None, job_type: str) -> list[StreamEvent]:
@@ -102,7 +118,15 @@ def parse_events(logs: str | None, job_type: str) -> list[StreamEvent]:
                 continue
             c = _BRONZE_COMMIT.search(msg)
             if c:
-                events.append(StreamEvent(at, "commit", int(c.group(1))))
+                # value: the batch's own time, start to commit.
+                events.append(StreamEvent(at, "commit", int(c.group(1)), value=float(c.group(2))))
+                continue
+            land = _LANDING.search(msg)
+            if land:
+                # value: the newest landing time (epoch s) the batch took in.
+                events.append(
+                    StreamEvent(at, "landing", int(land.group(1)), value=float(land.group(3)))
+                )
         elif job_type == "silver-stream":
             t = _TRANSFORM.search(msg)
             if t:
@@ -114,16 +138,34 @@ def parse_events(logs: str | None, job_type: str) -> list[StreamEvent]:
                 continue
             c = _SILVER_COMMIT.search(msg)
             if c:
-                events.append(StreamEvent(at, "commit", int(c.group(1))))
+                events.append(StreamEvent(at, "commit", int(c.group(1)), value=float(c.group(2))))
         elif job_type == "gold-refresh":
+            n = _NOTHING_NEW.search(msg)
+            if n:
+                events.append(StreamEvent(at, "nothing_new", int(n.group(1))))
+                continue
             a = _AGGREGATE.search(msg)
             if a:
                 events.append(StreamEvent(at, "aggregate", int(a.group(1)), rows=_num(a.group(2))))
                 continue
             r = _REFRESHED.search(msg)
             if r:
-                kpi = _num(r.group(2)) if r.group(2) else None
-                events.append(StreamEvent(at, "refreshed", int(r.group(1)), rows=kpi))
+                kpi = _num(r.group(3)) if r.group(3) else None
+                events.append(
+                    StreamEvent(at, "refreshed", int(r.group(1)), rows=kpi, value=float(r.group(2)))
+                )
+                continue
+            k = _TICK_TOTAL.search(msg)
+            if k:
+                events.append(
+                    StreamEvent(
+                        at,
+                        "tick",
+                        int(k.group(1)),
+                        value=float(k.group(3)),
+                        tm=float(k.group(2)) if k.group(2) else None,
+                    )
+                )
                 continue
             f = _FRESHNESS.search(msg)
             if f:
@@ -195,7 +237,7 @@ def window_stats(
         "commit_offsets": [],
     }
     if job_type == "bronze-ingest":
-        writes = [e for e in events if e.kind == "write" and e.at <= end]
+        writes = [e for e in committed_writes(events) if e.at <= end]
         inside = [e for e in writes if e.at >= start]
         out["window_input_rows"] = sum(e.rows or 0 for e in inside)
         out["pre_window_input_rows"] = sum(e.rows or 0 for e in writes if e.at < start)
@@ -532,7 +574,7 @@ def settle_state(
         if datagen_rows <= 0:
             return False, "datagen row count not measured"
         bronze = events_by_job.get("bronze-ingest") or []
-        b_rows = sum(e.rows or 0 for e in bronze if e.kind == "write")
+        b_rows = sum(e.rows or 0 for e in committed_writes(bronze))
         if b_rows < datagen_rows:
             return False, f"bronze has {b_rows:,} of {datagen_rows:,} rows"
     rows_in: dict[int, int] = {}
@@ -616,3 +658,381 @@ def trickle_kept_pace(
     lag = float(window_s) - float(last_write_offset_s)  # type: ignore[arg-type]
     out["kept_pace"] = lag <= float(trigger_s) + _LAG_ROUNDING_S  # type: ignore[arg-type]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Lag per handoff and balance (DESIGN-CONTINUOUS 6)
+# ---------------------------------------------------------------------------
+
+#: The handoffs, upstream first: (name, upstream, the stage that consumes).
+HANDOFFS = (
+    ("datagen->bronze", "datagen", "bronze-ingest"),
+    ("bronze->silver", "bronze-ingest", "silver-stream"),
+    ("silver->gold", "silver-stream", "gold-refresh"),
+)
+#: Seconds between the lag samples a run records.
+LAG_SAMPLE_SECONDS = 30.0
+
+
+def _epoch(at: datetime) -> float:
+    return at.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _last_by_id(events: list[StreamEvent], kind: str) -> dict[int, StreamEvent]:
+    """The last *kind* event per batch id: a replayed batch counts once."""
+    out: dict[int, StreamEvent] = {}
+    for e in events:
+        if e.kind == kind:
+            out[e.ident] = e
+    return out
+
+
+def handoff_lags(events_by_job: dict[str, list[StreamEvent]], at: datetime) -> dict[str, Any]:
+    """Seconds the oldest upstream commit not yet taken by the next stage has
+    waited, per handoff, at *at* (naive UTC); None when the handoff has no
+    upstream commit yet.
+
+    - datagen->bronze: datagen lands files continuously, so the oldest file
+      bronze has not taken landed just after the newest one its last
+      committed batch took (``[landing]`` lines; the landing time is the
+      object store's clock).
+    - bronze->silver and silver->gold: a micro-batch (a gold cycle) takes
+      every upstream commit before it starts, so the oldest upstream commit
+      after the stage's last start is waiting. Times only, so a driver log
+      that lost its early lines (a restart) moves nothing.
+    """
+    bronze = events_by_job.get("bronze-ingest") or []
+    silver = events_by_job.get("silver-stream") or []
+    gold = events_by_job.get("gold-refresh") or []
+    out: dict[str, Any] = {name: None for name, _, _ in HANDOFFS}
+
+    landed = [e for e in bronze if e.kind == "landing" and e.at <= at and e.value is not None]
+    if landed:
+        out["datagen->bronze"] = max(0.0, _epoch(at) - max(e.value or 0.0 for e in landed))
+
+    def waiting(upstream: list[StreamEvent], consumer: list[StreamEvent], start: str) -> Any:
+        commits = sorted(e.at for e in upstream if e.kind == "commit" and e.at <= at)
+        if not commits:
+            return None
+        starts = [e.at for e in consumer if e.kind == start and e.at <= at]
+        last = max(starts) if starts else None
+        pending = [c for c in commits if last is None or c > last]
+        return max(0.0, (at - pending[0]).total_seconds()) if pending else 0.0
+
+    out["bronze->silver"] = waiting(bronze, silver, "transform")
+    out["silver->gold"] = waiting(silver, gold, "aggregate")
+    return out
+
+
+def _finished(events: list[StreamEvent], job_type: str) -> dict[int, StreamEvent]:
+    """Per batch (gold: cycle) id, the event that ends it, carrying its
+    seconds. A gold cycle with a ``tick`` line ends there: ``refreshed``
+    covers detection only, not the time to detect and TM pass after it."""
+    if job_type != "gold-refresh":
+        return _last_by_id(events, "commit")
+    return {**_last_by_id(events, "refreshed"), **_last_by_id(events, "tick")}
+
+
+def _batch_spans(events: list[StreamEvent], job_type: str) -> list[tuple[datetime, datetime]]:
+    """(start, end) of each micro-batch (gold: cycle), from the time it logs
+    with its end; a replayed batch counts once."""
+    return [
+        (e.at - timedelta(seconds=e.value or 0.0), e.at)
+        for e in _finished(events, job_type).values()
+        if e.value is not None
+    ]
+
+
+def _tm_share(events: list[StreamEvent], start: datetime, end: datetime) -> float:
+    """Share of gold's tick time inside [start, end] its TM passes took."""
+    ticks = [e for e in _last_by_id(events, "tick").values() if start <= e.at <= end]
+    total = sum(e.value or 0.0 for e in ticks)
+    return sum(e.tm or 0.0 for e in ticks) / total if total > 0 else 0.0
+
+
+def _busy_share(events: list[StreamEvent], job_type: str, start: datetime, end: datetime) -> float:
+    """Share of [start, end] the stage spent inside micro-batches (or cycles)."""
+    busy = 0.0
+    for began, done in _batch_spans(events, job_type):
+        lo, hi = max(began, start), min(done, end)
+        if hi > lo:
+            busy += (hi - lo).total_seconds()
+    span = (end - start).total_seconds()
+    return min(1.0, busy / span) if span > 0 else 0.0
+
+
+def _median_batch_seconds(
+    events: list[StreamEvent], job_type: str, since: datetime, until: datetime
+) -> float:
+    """Median batch time over the batches that ended inside [since, until],
+    or over all of them when none did. A gold cycle that found no new silver
+    row is left out: it is a quick pass over nothing, not the stage's
+    cadence, and counted in it gave a back-to-back AML gold whose window
+    opened before data an 11 s cadence against 76-113 s ticks."""
+    idle = {e.ident for e in events if e.kind == "nothing_new"}
+    spans = [
+        (e.at - timedelta(seconds=e.value or 0.0), e.at)
+        for ident, e in _finished(events, job_type).items()
+        if e.value is not None and ident not in idle
+    ]
+    inside = [(b, d) for b, d in spans if since <= d <= until]
+    times = sorted((d - b).total_seconds() for b, d in (inside or spans))
+    return times[len(times) // 2] if times else 0.0
+
+
+#: The executor-count key a stage is resized with.
+_EXECUTOR_KNOB = {
+    "bronze-ingest": "bronze_ingest_executors",
+    "silver-stream": "silver_stream_executors",
+    "gold-refresh": "gold_refresh_executors",
+}
+
+
+def _phase_samples(
+    events_by_job: dict[str, list[StreamEvent]], name: str
+) -> list[tuple[datetime, float]]:
+    """One lag sample per batch of the handoff's consuming stage, each at the
+    same phase of the batch (see ``balance``)."""
+    if name == "datagen->bronze":
+        return [
+            (e.at, max(0.0, _epoch(e.at) - e.value))
+            for e in events_by_job.get("bronze-ingest") or []
+            if e.kind == "landing" and e.value is not None
+        ]
+    stage, kind = (
+        ("silver-stream", "transform")
+        if name == "bronze->silver"
+        else ("gold-refresh", "aggregate")
+    )
+    out = []
+    for e in _last_by_id(events_by_job.get(stage) or [], kind).values():
+        lag = handoff_lags(events_by_job, e.at - timedelta(milliseconds=1))[name]
+        if lag is not None:
+            out.append((e.at, lag))
+    return sorted(out)
+
+
+def _growth(samples: list[tuple[datetime, float]], seconds: float) -> float:
+    """How far the least-squares trend of *samples* rises over *seconds*."""
+    t0 = samples[0][0]
+    xs = [(t - t0).total_seconds() for t, _ in samples]
+    ys = [lag for _, lag in samples]
+    mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+    var = sum((x - mx) ** 2 for x in xs)
+    if var == 0:
+        return 0.0
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / var
+    return slope * seconds
+
+
+def balance(
+    events_by_job: dict[str, list[StreamEvent]],
+    start: datetime,
+    end: datetime,
+    *,
+    shape: dict[str, dict[str, Any]] | None = None,
+    ran: dict[str, int] | None = None,
+    intervals: dict[str, float | None] | None = None,
+    unjudged: dict[str, str] | None = None,
+    step_s: float = LAG_SAMPLE_SECONDS,
+) -> dict[str, Any]:
+    """Whether every stage kept up inside the window [*start*, *end*].
+
+    A stage keeps up when its lag did not climb through the window's second
+    half, so the start-up surge (and the empty pipeline's ramp) is ignored
+    and a growing backlog is caught. The lag is sampled once per batch of
+    the stage at the same phase (bronze at each commit, from the newest file
+    it took; silver and gold as each batch starts, from the oldest upstream
+    commit waiting), so the sawtooth of a lag that swings by a batch time
+    does not read as a trend. The stage keeps up when the least-squares
+    trend of those samples rose less than one cadence across the second
+    half: its trigger interval from *intervals* (a timer's lag saws up to
+    it), or, back to back, its median batch time in the first half. With fewer than
+    three samples there, its lag at the end must be no larger than the most
+    it reached in the first half, or within two cadences. *shape* is the
+    run record's ``streaming_shape`` and names the executors to raise;
+    *ran* the executor count each stage was submitted with (after the
+    concurrent budget), which the advice reports when it differs.
+    *unjudged* maps a handoff to why its lag says nothing about the stage
+    (a corpus written before the run, an intake cap): it is recorded, not
+    judged.
+    """
+    span = (end - start).total_seconds()
+    offsets: list[float] = []
+    t = 0.0
+    while t < span:
+        offsets.append(t)
+        t += step_s
+    offsets.append(span)
+    samples = [(o, handoff_lags(events_by_job, start + timedelta(seconds=o))) for o in offsets]
+    handoffs: dict[str, Any] = {}
+    for name, upstream, stage in HANDOFFS:
+        if stage not in events_by_job:
+            continue
+        series = [(o, lags[name]) for o, lags in samples if lags[name] is not None]
+        if not series:
+            continue
+        first = [lag for o, lag in series if o <= span / 2]
+        first_max = max(first) if first else 0.0
+        at_end = series[-1][1] if series[-1][0] == span else 0.0
+        # Back to back, a batch takes what landed while the last one ran, so
+        # the lag swings up to about two batch times. The batch time is the
+        # first half's: a stage falling behind runs longer batches, and an
+        # allowance taken from them would grow with the backlog it judges.
+        mid = start + timedelta(seconds=span / 2)
+        cadence = max(
+            _median_batch_seconds(events_by_job.get(stage) or [], stage, start, mid),
+            float((intervals or {}).get(stage) or 0.0),
+        )
+        allow = 2 * cadence
+        late = [(t, lag) for t, lag in _phase_samples(events_by_job, name) if mid <= t <= end]
+        growth = _growth(late, (end - mid).total_seconds()) if len(late) >= 3 else None
+        kept = growth <= cadence if growth is not None else at_end <= max(first_max, allow)
+        handoffs[name] = {
+            "stage": stage,
+            "upstream": upstream,
+            "samples": [[round(o, 1), round(lag, 1)] for o, lag in series],
+            "first_half_max_s": round(first_max, 1),
+            "end_s": round(at_end, 1),
+            "allowance_s": round(allow, 1),
+            "cadence_s": round(cadence, 1),
+            # Rise of the per-batch lag trend across the second half, and
+            # the per-batch samples (seconds into the window, lag) it is
+            # fitted to.
+            "second_half_growth_s": round(growth, 1) if growth is not None else None,
+            "trend_samples": [
+                [round((t - start).total_seconds(), 1), round(lag, 1)] for t, lag in late
+            ],
+            "keeps_up": kept or name in (unjudged or {}),
+            **({"not_judged": (unjudged or {})[name]} if name in (unjudged or {}) else {}),
+            "busy_share": round(_busy_share(events_by_job.get(stage) or [], stage, start, end), 3),
+        }
+    behind = [h for h in handoffs.values() if not h["keeps_up"]]
+    lever: str | None = None
+    if behind:
+        worst = max(
+            behind,
+            key=lambda h: (
+                h["second_half_growth_s"]
+                if h["second_half_growth_s"] is not None
+                else h["end_s"] - h["first_half_max_s"]
+            ),
+        )
+        stage = worst["stage"]
+        knob = _EXECUTOR_KNOB[stage]
+        need = ((shape or {}).get(stage) or {}).get("balance_need")
+        planned = ((shape or {}).get(stage) or {}).get("executors")
+        have = (ran or {}).get(stage) or planned
+        from lakebench.config.schema import MAX_EXECUTOR_OVERRIDE
+
+        lever = f"platform.compute.spark.{knob}"
+        advice = f"raise {lever}"
+        if planned and have and have < planned:
+            lever = "cluster capacity"
+            advice = (
+                f"it ran {have} executors, cut from the {planned} planned by the cluster's "
+                "concurrent budget: free cluster capacity"
+            )
+            sized = ""
+        elif need and need > MAX_EXECUTOR_OVERRIDE:
+            lever = "platform.compute.spark." + knob.replace("_executors", "_executor_cores")
+            advice = f"raise {lever}"
+            sized = (
+                f" (the offered load needs ~{need} executors, above the "
+                f"{MAX_EXECUTOR_OVERRIDE} a stage takes)"
+            )
+        elif (
+            stage == "gold-refresh"
+            and _tm_share(events_by_job.get(stage) or [], start, end) >= 0.25
+        ):
+            share = _tm_share(events_by_job.get(stage) or [], start, end)
+            lever = "workload.tm_operations.continuous_interval_seconds"
+            advice = (
+                f"the TM operations pass took {share:.0%} of gold's time: raise "
+                "workload.tm_operations.continuous_interval_seconds, or raise "
+                f"platform.compute.spark.{knob}"
+            )
+            sized = ""
+        elif need and have and have >= need:
+            sized = (
+                f" (has {have}, which the sizing default rate expected to carry the load: "
+                "its measured rate is below the default)"
+            )
+        elif need and have:
+            sized = f" (has {have}, the offered load needs ~{need})"
+        else:
+            sized = ""
+        rose = (
+            f"its lag grew {worst['second_half_growth_s']:.0f}s across the window's second "
+            f"half (one cadence is {worst['cadence_s']:.0f}s); {worst['end_s']:.0f}s at the "
+            "window's end"
+            if worst["second_half_growth_s"] is not None
+            else (
+                f"its lag rose to {worst['end_s']:.0f}s at the window's end from at most "
+                f"{worst['first_half_max_s']:.0f}s in the first half"
+            )
+        )
+        line = (
+            f"not balanced: {stage} fell behind {worst['upstream']}: {rose}, busy "
+            f"{worst['busy_share']:.0%}; {advice}{sized} or lower the scale"
+        )
+    elif handoffs:
+        busiest = max(handoffs.values(), key=lambda h: h["busy_share"])
+        line = (
+            f"balanced: busiest stage {busiest['stage']}, busy "
+            f"{busiest['busy_share']:.0%} of the window"
+        )
+    else:
+        line = "balance not measured: no handoff had a commit inside the window"
+    return {
+        "balanced": bool(handoffs) and not behind,
+        "measured": bool(handoffs),
+        "handoffs": handoffs,
+        "bottleneck": line,
+        # The setting the bottleneck line says to change (None: balanced or
+        # not measured; "cluster capacity" when the cluster budget cut the
+        # stage's executors).
+        "lever": lever,
+        "sample_seconds": step_s,
+    }
+
+
+def lag_line(lags: dict[str, Any]) -> str:
+    """``datagen->bronze 12s, bronze->silver 40s, silver->gold 95s``."""
+    parts = [f"{name} {lags[name]:.0f}s" for name, _, _ in HANDOFFS if lags.get(name) is not None]
+    return ", ".join(parts) if parts else "no handoff yet"
+
+
+def freshness_summary(gold: list[StreamEvent], start: datetime, end: datetime) -> dict[str, Any]:
+    """p50, p95 and max of gold's freshness over the cycles inside the window
+    that saw new data (DESIGN-CONTINUOUS 7); None when no cycle measured it."""
+    values = sorted(
+        e.value
+        for e in gold
+        if e.kind == "freshness"
+        and not e.idle
+        and e.value is not None
+        and _inside(e.at, start, end)
+    )
+    if not values:
+        return {"p50_s": None, "p95_s": None, "max_s": None, "cycles": 0}
+
+    def pct(q: float) -> float:
+        return values[min(len(values) - 1, int(round(q * (len(values) - 1))))]
+
+    return {
+        "p50_s": round(pct(0.5), 1),
+        "p95_s": round(pct(0.95), 1),
+        "max_s": round(values[-1], 1),
+        "cycles": len(values),
+    }
+
+
+_CLOCK = re.compile(r"\[landing\] object store clock is ([-+][\d.]+)s")
+
+
+def store_clock_offset(bronze_log: str | None) -> float | None:
+    """How far the object store's clock ran from the bronze pod's, from
+    bronze's ``[landing]`` clock line; None when the line is absent."""
+    found = _CLOCK.findall(bronze_log or "")
+    return float(found[-1]) if found else None

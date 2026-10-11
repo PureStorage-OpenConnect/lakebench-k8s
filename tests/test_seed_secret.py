@@ -122,9 +122,8 @@ def test_registered_job_has_no_seed_argument_and_reads_the_secret():
 
 
 def test_development_job_is_unchanged():
-    # Seed 43 keeps --seed in the args and gets no secret env; nothing else
-    # in the container moves. (The seed-43 render was also compared byte for
-    # byte with the parent commit's template when this was written.)
+    # Seed 43 keeps --seed in the args and gets no secret env; a registered
+    # render differs from it only in the seed arg and env.
     _, c = _render(_cfg(seed=43))
     assert c["args"][c["args"].index("--seed") + 1] == "43"
     assert "LB_DATAGEN_SEED" not in {e["name"] for e in c["env"]}
@@ -411,15 +410,10 @@ def test_no_registered_spark_job_carries_the_seed():
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
     mgr = SparkJobManager(_registered(), MagicMock())
-    built = 0
+    mgr._cluster_cpu_m = None  # capacity unknown: the streaming jobs build uncapped
     for jt in JobType:
-        try:
-            manifest = mgr._build_manifest(jt)
-        except Exception:  # noqa: BLE001 -- a job type this config cannot build
-            continue
-        built += 1
+        manifest = mgr._build_manifest(jt)
         assert _no_seed_in(json.dumps(manifest, default=str)), jt
-    assert built >= 5
 
 
 # ---------------------------------------------------------------------------

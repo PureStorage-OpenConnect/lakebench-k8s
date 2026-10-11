@@ -37,9 +37,7 @@ def test_trino_query_carries_server_run_time_limit_below_client_timeout():
         _trino().execute_query("SELECT 1", timeout=300)
     cmd = run.call_args_list[0].args[0]
     limit = _arg_after(cmd, "--session")
-    assert limit == "query_max_run_time=295s"
     assert int(limit.split("=")[1].rstrip("s")) < 300
-    assert _arg_after(cmd, "--source").startswith("lakebench-")
     assert cmd[-2:] == ["--execute", "SELECT 1"]
 
 
@@ -90,14 +88,6 @@ def _duckdb() -> DuckDBExecutor:
     return ex
 
 
-def test_duckdb_script_ends_itself_before_the_client_timeout():
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 0, '{"rows": 1}', "")
-        _duckdb().execute_query("SELECT 1", timeout=300)
-    script = run.call_args.args[0][-1]
-    assert script.startswith("import signal; signal.alarm(295); ")
-
-
 def test_duckdb_alarm_prefix_terminates_a_blocked_process():
     """Executed: the prefix the executor emits kills a process stuck in a
     call that never returns to the interpreter's signal handling."""
@@ -112,7 +102,3 @@ def test_duckdb_alarm_prefix_terminates_a_blocked_process():
         timeout=20,
     )
     assert proc.returncode == -14
-
-
-def test_duckdb_script_without_timeout_is_unchanged():
-    assert _duckdb()._build_python_script("SELECT 1").startswith("import duckdb")

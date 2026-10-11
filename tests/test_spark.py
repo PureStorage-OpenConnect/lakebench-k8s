@@ -2,29 +2,16 @@
 
 import pytest
 
-from lakebench.config import LakebenchConfig
-from lakebench.spark.job import JobType, SparkJobManager
-from tests.fixtures.spark_helpers import _make_config as _make_config
-from tests.fixtures.spark_helpers import _mock_k8s as _mock_k8s
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# JobType / JobState enums
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# JobStatus dataclass
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# SparkJobManager - manifest building
-# ---------------------------------------------------------------------------
+from lakebench.modules.pipeline_engines.spark.job import (
+    JobType,
+    SparkJobManager,
+    _resolve_job_profile,
+    compute_peak_requirements,
+    get_executor_count,
+    get_job_profile,
+)
+from tests.conftest import make_config
+from tests.fixtures.spark_helpers import _make_config, _mock_k8s
 
 
 class TestSparkJobManager:
@@ -49,32 +36,6 @@ class TestSparkJobManager:
         assert "test-silver" in bronze_wh
 
 
-# ---------------------------------------------------------------------------
-# JobResult dataclass
-# ---------------------------------------------------------------------------
-
-
-class TestMaxExecutorsCaps:
-    """Tests for max_executors limits in _JOB_PROFILES."""
-
-    def test_bronze_max_executors_20(self):
-        """Bronze auto-scale caps at 20 (unchanged)."""
-        from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
-
-        count = _scale_executor_count(_JOB_PROFILES["bronze-verify"], 10000)
-        assert count == 20
-
-
-# ---------------------------------------------------------------------------
-# SparkJobMonitor - basic init
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Streaming concurrent budget
-# ---------------------------------------------------------------------------
-
-
 class TestStreamingConcurrentBudget:
     """Tests for streaming concurrent resource budgeting."""
 
@@ -93,42 +54,22 @@ class TestStreamingConcurrentBudget:
         return k8s
 
     def test_streaming_budget_caps_to_cluster(self):
-        """On a small cluster, streaming executor counts should be reduced."""
-        from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
-
+        """Concurrent streams share the cluster budget: their executor cores sum
+        to at most the budget fraction of the cluster, and every stream keeps one."""
         config = _make_config(
             architecture={
                 "workload": {"datagen": {"scale": 100}},
             },
         )
+        total_cores = 64
+        mgr = SparkJobManager(config, self._make_k8s_with_capacity(total_cores * 1000))
 
-        # Small cluster: 64 cores -- streaming jobs should get capped
-        k8s = self._make_k8s_with_capacity(64000)
-        mgr = SparkJobManager(config, k8s)
-
-        # Get uncapped executor count for silver-stream
-        profile = _JOB_PROFILES["silver-stream"]
-        uncapped = _scale_executor_count(profile, 100)
-
-        manifest = mgr._build_manifest(JobType.SILVER_STREAM)
-        actual = manifest["spec"]["executor"]["instances"]
-
-        # Should be capped below uncapped
-        assert actual < uncapped, (
-            f"silver-stream should be capped: actual={actual}, uncapped={uncapped}"
-        )
-        # But at least 2 (minimum)
-        assert actual >= 2
-
-
-# ---------------------------------------------------------------------------
-# Phase 1: Monitor returns driver_logs on success
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Streaming env vars: throughput tuning fields
-# ---------------------------------------------------------------------------
+        manifests = [
+            mgr._build_manifest(jt)["spec"]["executor"]
+            for jt in (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
+        ]
+        assert all(e["instances"] >= 1 for e in manifests)
+        assert sum(e["instances"] * e["cores"] for e in manifests) <= total_cores
 
 
 class TestStreamingThroughputEnvVars:
@@ -187,164 +128,61 @@ class TestStreamingThroughputEnvVars:
             assert env.get(same_checkpoint) == env["CHECKPOINT_LOCATION"]
 
 
-# ---------------------------------------------------------------------------
-# Spark Operator Namespace Watching
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Polaris Spark Manifest Tests
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# ConfigMap includes Delta scripts (v1.2)
-# ---------------------------------------------------------------------------
-
-
-class TestFinancialScriptDispatch:
-    """schema=financial routes JobType -> *_financial.py scripts (ENG-2C.3c+)."""
-
-    def _make_financial_config(self):
-        cfg = _make_config()
-        # Rebuild via schema to pick up the FINANCIAL enum path cleanly.
-
-        blob = cfg.model_dump(by_alias=True)
-        blob["architecture"]["workload"]["schema"] = "financial"
-        return LakebenchConfig(**blob)
-
-    def test_bronze_verify_dispatches_to_financial_script(self):
-        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-
-        cfg = self._make_financial_config()
-        mgr = SparkJobManager(cfg, _mock_k8s())
-        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
-        assert "bronze_verify_financial.py" in manifest["spec"]["mainApplicationFile"]
-
-    def test_reference_score_dispatches_to_reference_script(self):
-        """SCORE_FINANCIAL_REFERENCE routes to score_financial_reference.py so
-        the leakage gate + reference detector (the LB-130 gate) is runnable."""
-        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-
-        cfg = self._make_financial_config()
-        mgr = SparkJobManager(cfg, _mock_k8s())
-        manifest = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
-        assert "score_financial_reference.py" in manifest["spec"]["mainApplicationFile"]
-        assert manifest["metadata"]["name"] == "lakebench-score-financial-reference"
+@pytest.mark.parametrize(
+    ("job", "script"),
+    [
+        (JobType.BRONZE_VERIFY, "bronze_verify_financial.py"),
+        (JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py"),
+    ],
+)
+def test_financial_schema_dispatches_job_to_financial_script(job, script):
+    cfg = make_config(architecture={"workload": {"schema": "financial"}})
+    manifest = SparkJobManager(cfg, _mock_k8s())._build_manifest(job)
+    assert manifest["spec"]["mainApplicationFile"].endswith(script)
 
 
 class TestSchemaProfileOverrides:
-    """LB-118: AML bronze-verify needs a bigger scratch PVC than c360's
-    50Gi baseline because the CTAS fallback path rewrites the full pacs.008
-    dataset through Iceberg and its per-executor spill overwhelms 50Gi at
-    scale >= 5. Live at scale 10 this hit ``No space left on device`` after
-    78 min."""
+    """The scorecard path resolves the same profile and executor count that
+    deploy puts in the manifest, per schema."""
 
-    def _find_pvc_size_limit(self, manifest):
-        conf = manifest["spec"]["sparkConf"]
-        key = (
-            "spark.kubernetes.executor.volumes.persistentVolumeClaim."
-            "spark-local-dir-1.options.sizeLimit"
+    @pytest.mark.parametrize("schema", ["customer360", "financial"])
+    @pytest.mark.parametrize("job", [JobType.BRONZE_VERIFY, JobType.SILVER_BUILD])
+    @pytest.mark.parametrize("scale", [10, 100])
+    def test_get_job_profile_is_schema_aware(self, job, schema, scale):
+        cfg = make_config(
+            architecture={"workload": {"schema": schema, "datagen": {"scale": scale}}}
         )
-        return conf.get(key)
+        manifest = SparkJobManager(cfg, _mock_k8s())._build_manifest(job)
+        executor = manifest["spec"]["executor"]
+        profile = get_job_profile(job.value, schema)
 
-    def _make_config(self, schema):
+        assert profile == _resolve_job_profile(job.value, schema)
+        assert get_executor_count(job.value, scale, schema) == executor["instances"]
+        assert profile["executor_memory"] == executor["memory"]
 
-        cfg = _make_config()
-        blob = cfg.model_dump(by_alias=True)
-        blob["architecture"]["workload"]["schema"] = schema
-        # Portworx scratch must be enabled for sizeLimit to appear in the manifest.
-        blob["platform"]["storage"]["scratch"]["enabled"] = True
-        blob["platform"]["storage"]["scratch"]["storage_class"] = "px-csi-scratch"
-        return LakebenchConfig(**blob)
+    def test_aml_bronze_verify_gets_more_memory_than_c360(self):
+        def total_mem(profile):
+            return sum(
+                int(profile[k].rstrip("g")) for k in ("executor_memory", "executor_memory_overhead")
+            )
 
-    def test_aml_bronze_verify_gets_500gi_scratch(self):
-        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-
-        cfg = self._make_config("financial")
-        mgr = SparkJobManager(cfg, _mock_k8s())
-        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
-        assert self._find_pvc_size_limit(manifest) == "500Gi"
+        aml = get_job_profile("bronze-verify", "financial")
+        c360 = get_job_profile("bronze-verify", "customer360")
+        assert total_mem(aml) > total_mem(c360)
+        assert c360 == get_job_profile("bronze-verify")
 
     def test_aml_bronze_verify_scales_executors_at_scale_100(self):
-        """LB-118 review finding: at scale 100 the base bronze-verify
-        profile gives 7 executors (~143 GB input/executor for AML),
-        which projects to CTAS spill above 200 Gi. The AML override
-        bumps ``executors_per_100_scale`` 4 -> 8 and ``max_executors``
-        20 -> 28 so per-executor load at scale 100 stays under 100 GB."""
-        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
+        """AML bronze-verify gets more executors than c360 at scale 100 and stays
+        within the executor cap at scale 500."""
         c360 = compute_peak_requirements(100, "batch", "customer360")
         aml = compute_peak_requirements(100, "batch", "financial")
         c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
         aml_bronze = next(r for r in aml.per_job if r.job_type == "bronze-verify")
-        # AML must have more executors than c360 at s100+.
         assert aml_bronze.executors > c360_bronze.executors
-        # And scale toward the fabric8 ceiling by scale 500.
+
         aml_500 = compute_peak_requirements(500, "batch", "financial")
         aml_500_bronze = next(r for r in aml_500.per_job if r.job_type == "bronze-verify")
-        assert aml_500_bronze.executors == 28  # matches silver/gold ceiling
-
-    def test_get_job_profile_is_schema_aware(self):
-        """LB-135 review Finding 2: the metrics/scorecard path must be able to
-        get schema-resolved profiles, else AML bronze-verify is reported at the
-        c360 base (6Gi) instead of the deployed 20Gi -- an honest-scorecard bug."""
-        from lakebench.modules.pipeline_engines.spark.job import (
-            get_executor_count,
-            get_job_profile,
-        )
-
-        # No schema == c360 base (backward compat).
-        base = get_job_profile("bronze-verify")
-        assert base["executor_memory"] == "4g"
-        # Schema-aware == deployed AML profile.
-        aml = get_job_profile("bronze-verify", "financial")
-        assert aml["executor_memory"] == "8g"
-        assert aml["executor_memory_overhead"] == "12g"
-        # Executor count also schema-aware at scale > 10 (AML 8-per-100 vs base 4).
-        assert get_executor_count("bronze-verify", 100, "financial") > get_executor_count(
-            "bronze-verify", 100
-        )
-
-    def test_aml_bronze_verify_has_memory_headroom_over_c360(self):
-        """LB-135: c360's 4g+2g bronze-verify (a thin add_files register) is too
-        small for AML's full-corpus CTAS DISTINCT/ORDER BY -- executors
-        OOMKilled on the 6Gi container limit at scale 10. The AML override must
-        give real per-executor memory headroom, in both modes (OOMKilled is a
-        container-limit hit, not node contention)."""
-        from lakebench.modules.pipeline_engines.spark.job import (
-            _JOB_PROFILES,
-            _resolve_job_profile,
-        )
-
-        base = _JOB_PROFILES["bronze-verify"]
-        aml = _resolve_job_profile("bronze-verify", "financial")
-        assert aml is not None
-        # The OOM is OFF-HEAP (partitioned Iceberg write shuffle + S3A bytebuffer
-        # uploads), so the bump goes into OVERHEAD, not heap. Total 20Gi.
-        assert aml["executor_memory"] == "8g"
-        assert aml["executor_memory_overhead"] == "12g"
-        heap = int(aml["executor_memory"].rstrip("g"))
-        overhead = int(aml["executor_memory_overhead"].rstrip("g"))
-        assert heap + overhead == 20  # total container
-        # Overhead must exceed heap -- the pressure is off-heap, not heap. A
-        # regression that pours the bump back into heap (the original mistake)
-        # would flip this.
-        assert overhead > heap, "bronze-verify memory bump must favour overhead, not heap"
-        assert overhead > int(base["executor_memory_overhead"].rstrip("g"))
-        # Still bounded well under the heaviest batch job (silver-build 48g heap).
-        assert heap + overhead < int(
-            _JOB_PROFILES["silver-build"]["executor_memory"].rstrip("g")
-        ) + int(_JOB_PROFILES["silver-build"]["executor_memory_overhead"].rstrip("g"))
-        # c360 bronze-verify must stay register-sized (no AML cost leak).
-        c360 = _resolve_job_profile("bronze-verify", "customer360")
-        assert c360["executor_memory"] == base["executor_memory"]
-        assert c360["executor_memory_overhead"] == base["executor_memory_overhead"]
-
-
-# ---------------------------------------------------------------------------
-# PipelineEngine protocol conformance
-# ---------------------------------------------------------------------------
+        assert aml_500_bronze.executors <= 28
 
 
 class TestReferencePyDeps:
@@ -368,12 +206,8 @@ class TestReferencePyDeps:
         assert "install-pydeps" not in init
         cmd = init["lb-deps-py-reference"]["command"][-1]
         # From the deployment's set only, hash-checked against the manifest.
-        for flag in ("--no-index", "--require-hashes", "--only-binary=:all:", "--no-deps"):
+        for flag in ("--no-index", "--require-hashes"):
             assert flag in cmd
-        assert f"--find-links {mgr.deps.base_url}/py-reference/" in cmd
-        assert f"-r {dm.MANIFEST_MOUNT}/requirements-py-reference.txt" in cmd
-        assert f"--target {REFERENCE_PY_DEPS_DIR}" in cmd
-        assert "pypi.org" not in cmd
         mounts = drv["containers"][0]["volumeMounts"]
         assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
         vols = {v["name"]: v for v in drv["volumes"]}

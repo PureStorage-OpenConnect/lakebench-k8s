@@ -51,20 +51,6 @@ def test_strictest_any_false_flag_is_failed(
         )
 
 
-def test_strictest_gate_fail_wins_over_true_flags() -> None:
-    """Any gate outcome of FAIL forces FAILED, even when every flag is True."""
-    v = Verdict.strictest(
-        exit_ok=True,
-        badge_ok=True,
-        success_flag=True,
-        gate_outcomes={"pipeline": "PASS", "benchmark": "FAIL"},
-        reasons=["explicit gate failure"],
-        qualifiers={"n_runs": 1},
-    )
-    assert v.status == "FAILED"
-    assert "explicit gate failure" in v.reasons
-
-
 def test_strictest_priority_order() -> None:
     """FAILED > INTERRUPTED > REFUSED > PASSED."""
     # INTERRUPTED beats REFUSED beats PASSED
@@ -93,11 +79,12 @@ def test_strictest_priority_order() -> None:
         exit_ok=True,
         badge_ok=True,
         success_flag=True,
-        gate_outcomes={"a": "FAIL", "b": "INTERRUPTED"},
-        reasons=[],
-        qualifiers={},
+        gate_outcomes={"pipeline": "PASS", "a": "FAIL", "b": "INTERRUPTED"},
+        reasons=["explicit gate failure"],
+        qualifiers={"n_runs": 1},
     )
     assert v_failed.status == "FAILED"
+    assert "explicit gate failure" in v_failed.reasons
 
 
 def test_strictest_passed_when_everything_ok() -> None:
@@ -228,24 +215,12 @@ def test_regression_badge_failed_becomes_verdict_failed(fixture_name: str) -> No
 
 
 # ---------------------------------------------------------------------------
-# The verdict block also survives a JSON round-trip via MetricsStorage.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# The strictest classmethod returns immutable data and does not alias input.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Strict gate-outcome vocabulary. A past-tense value like "FAILED" is a
 # common miswrite; it must raise, not silently PASS.
 # ---------------------------------------------------------------------------
 
 
 def test_strictest_rejects_unknown_gate_vocabulary() -> None:
-    import pytest
-
     # Past-tense misfire from a hypothetical future caller.
     with pytest.raises(ValueError, match="Unknown gate outcome"):
         Verdict.strictest(
@@ -276,9 +251,3 @@ def test_strictest_rejects_unknown_gate_vocabulary() -> None:
             reasons=[],
             qualifiers={},
         )
-
-
-# ---------------------------------------------------------------------------
-# Deep copy on ingress and on to_dict: a frozen value object must not be
-# mutable-by-reference through nested containers.
-# ---------------------------------------------------------------------------

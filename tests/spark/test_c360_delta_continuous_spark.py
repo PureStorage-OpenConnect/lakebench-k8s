@@ -1,7 +1,5 @@
 """Executed: hive-delta continuous names every c360 table in spark_catalog
-(lb16-cs, 2026-09-27). The reset used CATALOG_NAME ("lakehouse") for bronze
-and failed with REQUIRES_SINGLE_PART_NAMESPACE on every attempt, before any
-stream ran; bronze-ingest built the same name and would have failed next.
+(bronze, silver and gold), and the reset and a fresh stream agree on them.
 
 Runs ``c360_delta_continuous_scenarios.py`` in a fresh JVM with the Delta
 jars from ``LB_SPARK_TEST_JARS`` on the classpath, and the Iceberg jar too:
@@ -55,8 +53,16 @@ def test_a_fresh_stream_after_the_reset_recreates_bronze(result):
 
 
 def test_reset_clears_an_unregistered_bronze_log(result):
-    """Review finding: DROP of the EXTERNAL bronze leaves its _delta_log; the
-    reset skipped the unregistered table and bronze-ingest then refused it."""
+    """The reset also clears the _delta_log an unregistered EXTERNAL bronze
+    leaves behind, so a fresh bronze-ingest accepts the location."""
     assert result["orphan_log_left"] is True
     assert result["orphan_dir_files_after_reset"] == 0
     assert result["bronze_rows_after_orphan_reset"] == 10
+
+
+def test_reset_clears_an_unregistered_silver_log(result):
+    """A failed batch build can leave a Delta log at silver's managed path
+    with no catalog entry; the continuous reset clears it, or the stream's
+    first batch fails on its schema."""
+    assert result["silver_orphan_unregistered"] is True
+    assert result["silver_orphan_files_after_reset"] == 0

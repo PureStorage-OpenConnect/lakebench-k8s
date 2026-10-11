@@ -287,18 +287,16 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.protected_corpus",
         _C.USAGE,
-        "a command that reads or scores data was given a protected AML corpus (a config "
-        "whose role or seed is the evaluation or robustness one, or a run record from one), "
-        "or `generate --registered-corpus` a config that names none; or bronze-verify (or its "
-        "check before a `run --stage` subset) refused the corpus: its manifest comes from a "
-        "held-out or spent seed, gives back no corpus seed, is missing where one is required, "
-        "or the held-out record cannot be read",
+        "a protected AML corpus (evaluation or robustness role or seed, or a run record from "
+        "one) reached a command that reads or scores data; `generate --registered-corpus` got "
+        "a config naming none; or bronze-verify, or its check before `run --stage`, refused "
+        "the manifest (held-out or spent seed, no corpus seed, missing, unreadable)",
     ),
     ExitPath(
         "alias.refused",
         _C.USAGE,
         "a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean "
-        "journal`, `compare`); the message names the replacement, and no argument is echoed",
+        "journal`); the message names the replacement, and no argument is echoed",
         v16_code=0,
     ),
     ExitPath(
@@ -475,6 +473,12 @@ PATHS: tuple[ExitPath, ...] = (
         "`logs` or `status` got an API error reading the deployment, or `stop` reading "
         "its namespace (a permission gap, a server error); nothing changed",
         v16_code=0,
+    ),
+    ExitPath(
+        "run.no_corpus",
+        _C.PREREQUISITE,
+        "a `run` that reuses the corpus (`--skip-generate`, or one cycle without "
+        "`--generate`) finds no corpus in bronze: nothing was generated yet",
     ),
     ExitPath(
         "s3.unreachable",
@@ -655,14 +659,15 @@ def render_markdown() -> str:
         "",
         "## Errors and output",
         "",
-        "Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr; panels,",
-        "tables and stage headers are still on stdout. An error starts with",
-        "one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`",
-        "(the fix) and `Where` lines when they apply. An error Lakebench does",
-        "not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`",
-        "to get the traceback. Machine output (`--format json` and `--format csv`",
-        "on `query` and `report`) goes to plain stdout, unwrapped, so",
-        "it can be piped to a parser.",
+        "- Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr. Panels,",
+        "  tables and stage headers go to stdout.",
+        "- An error starts with one `ERROR` line saying what went wrong. Typed",
+        "  errors add `Why`, `Next` (the fix) and `Where` lines when they apply.",
+        "- An error Lakebench does not classify prints one line, not a",
+        "  traceback. Set `LAKEBENCH_DEBUG=1` to get the traceback.",
+        "- Machine output (`--format json` and `--format csv` on `query` and",
+        "  `report`) goes to plain stdout, unwrapped, so it can be piped to a",
+        "  parser.",
     ]
     if LEGACY_CODES:
         lines += [

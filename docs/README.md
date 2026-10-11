@@ -1,79 +1,59 @@
 # Lakebench Documentation
 
-Lakebench deploys a lakehouse stack to Kubernetes from a single YAML, runs
-a workload end to end, and records evidence of what produced each number.
+Lakebench deploys a lakehouse stack to Kubernetes from one YAML file, runs a
+workload end to end, and records what produced each number.
 
-## Getting Started
+## Start here
 
-- [Getting Started](getting-started.md) -- prerequisites, install, first deployment
-- [Prerequisites](prerequisites.md) -- cluster checklist, generated from the checks `plan` runs
-- [Recipes](recipes.md) -- the 11 recipes (plus the `default` alias) with decision guidance
-- [Polaris Quickstart](quickstart-polaris.md) -- switch from Hive Metastore to Apache Polaris
+- [Getting Started](getting-started.md): prerequisites, install, first run
+- [Recipes](recipes.md): the 11 recipes and how to choose a catalog, format and engine
+- [Upgrading to 1.7](../UPGRADING-1.7.md): every breaking change with its fix
 
-## Core Workflow
+## Guides
 
-- [Configuration](configuration.md) -- full YAML reference, generated from the schema
-- [Deployment](deployment.md) -- deploy, status, and destroy lifecycle
-- [Data Generation](data-generation.md) -- `generate` command, scale factors, monitoring
-- [Running Pipelines](running-pipelines.md) -- pipeline stages, batch and continuous modes
-- [Operations](operations.md) -- shared-cluster setup, ownership, parallel deployments, cleanup
+- [Deployment](deployment.md): install the CLI; deploy, status, destroy
+- [Operations](operations.md): shared clusters, shared components, ownership, parallel deployments, cleanup
+- [Data Generation](data-generation.md): `generate`, scale factors, batch and continuous corpora
+- [Running Pipelines](running-pipelines.md): pipeline stages, batch and continuous modes
+- [Tuning a continuous pipeline](benchmarking/continuous-tuning.md): levers when a stage falls behind
+- [Custom Datagen Images](datagen-custom-images.md): build, push and configure a datagen image
+- [Troubleshooting](troubleshooting.md): errors and fixes, by symptom
 
-## Data Generation
+## Reference
 
-- [Datagen Schema](datagen-schema.md) -- Customer 360 schema, 41 columns, 7 realism features
-- [Custom Datagen Images](datagen-custom-images.md) -- build, push, configure custom images
+Commands and configuration:
 
-## Benchmarks and Scoring
+- [CLI Reference](cli-reference.md): every command and flag
+- [Configuration](configuration.md): every YAML field
+- [Exit Codes](exit-codes.md): what each exit code means
+- [Prerequisites](prerequisites.md): cluster checks `plan` runs
+- [Sizing](sizing.md): minimum cluster per workload, mode and scale; the capacity check
+- [Compatibility Matrix](compatibility-matrix.md): support states, component versions and images
+- [Glossary](glossary.md): terms used in reports and records
 
-- [Benchmarking](benchmarking.md) -- pipeline scorecard, query benchmark, QpH scoring
-- [Query Reference](query-reference.md) -- per-query reference with categories and expected output
-- [Customer 360 benchmark](benchmarks/C360.md) -- data model, pipeline, correctness checks, queries, metrics, comparability
-- [AML benchmark](benchmarks/AML.md) -- data model, seed policy, pipeline, detection rules, scoring, comparability
-- [AML Scoring](aml-scoring.md) -- what precision and recall measure, the leakage gate, the reference detector
-- [Financial Benchmark Baselines](financial-benchmark-baselines.md) -- published Financial numbers per scale
+Components:
 
-## Components
+- Query engines: [Trino](component-trino.md), [Spark Thrift Server](component-spark-thrift.md), [DuckDB](component-duckdb.md)
+- Catalogs: [Hive Metastore](component-hive.md), [Apache Polaris](component-polaris.md)
+- Infrastructure: [Spark](component-spark.md), [S3 storage](storage-backends.md), [PostgreSQL](component-postgres.md), [Observability](component-observability.md)
+- [Architecture](architecture.md): how the components fit together
 
-### Query Engines
+Scores and reports ([overview](benchmarking.md)):
 
-- [Trino](component-trino.md) -- distributed query engine, coordinator and worker sizing, catalog integration
-- [Spark Thrift Server](component-spark-thrift.md) -- Spark-native query engine, single pod, beeline interface
-- [DuckDB](component-duckdb.md) -- single-pod engine, development and small-scale runs
+- [Batch scorecard](benchmarking/scorecard.md), [Continuous scores](benchmarking/continuous.md), [Query benchmark](benchmarking/query-benchmark.md)
+- [Verdict](benchmarking/verdict.md), [Maintenance and limits](benchmarking/maintenance.md), [Comparing runs](benchmarking/comparing.md)
+- [Run records](benchmarking/records.md), [HTML report layout](benchmarking/html-report.md)
 
-### Catalogs
+Workload specifications:
 
-- [Hive Metastore](component-hive.md) -- Stackable operator, thrift settings, PostgreSQL backend
-- [Apache Polaris](component-polaris.md) -- REST catalog, OAuth2 authentication, bootstrap lifecycle
-- [Operators and Catalogs](operators-and-catalogs.md) -- Spark Operator and Hive Metastore deep dive
+- [Customer 360](benchmarks/C360.md): data model, pipeline, queries, metrics, comparability
+- [AML](benchmarks/AML.md): data model, seed policy, rules, scoring, comparability
+- [AML Scoring](aml-scoring.md): how to read AML precision and recall
 
-### Infrastructure
+## Contributors
 
-- [Spark](component-spark.md) -- Spark Operator, driver and executor resources, per-job profiles, S3A tuning
-- [S3 Storage](component-s3.md) -- endpoint, credentials, buckets, FlashBlade specifics
-- [Storage Backends](storage-backends.md) -- validated S3 backends and conformance checks
-- [PostgreSQL](component-postgres.md) -- metadata store, storage classes, deployment order
-- [Observability](component-observability.md) -- Prometheus, Grafana, local metrics, HTML reports
-- [Supported Components](supported-components.md) -- versions, images, recipe matrix
-- [Compatibility Matrix](compatibility-matrix.md) -- Spark, Iceberg, Delta version support
-
-## Architecture and Reference
-
-- [Architecture](architecture.md) -- component topology, medallion layers, catalog pluggability
-- [DESIGN.md](DESIGN.md) -- design authority: what Lakebench measures, invariants, owner decisions
-- [Internals](internals.md) -- why the sizing, versions and catalog handling are built this way
-- [CLI Reference](cli-reference.md) -- every command and flag
-- [Exit Codes](exit-codes.md) -- what each exit code means and which paths produce it
-- [Troubleshooting](troubleshooting.md) -- common errors and fixes, by symptom
-
-## Reproductions and Upgrades
-
-- [Reproduction Packages](reproductions/README.md) -- recorded packages, how `reproduce` runs one
-- [Reproduce Deep Dive](deep-dive/reproduce.md) -- the reproduction contract
-- [Datagen Metrics Deep Dive](deep-dive/datagen-metrics.md) -- how datagen numbers are measured
-- [Upgrading to 1.7](../UPGRADING-1.7.md) -- every breaking change with its fix
-
-## Development
-
-- [Development Guide](development.md) -- architecture map, test and CI wiring, adding a recipe or workload
-- [Design Notes](design/README.md) -- long-form design records (namespace isolation, others)
-- [Contributing](../CONTRIBUTING.md) -- setup, test tiers, pull requests, review and style
+- [Contributing](../CONTRIBUTING.md): setup, test tiers, pull requests, review and style
+- [Development Guide](development.md): code map, CI, extension points, why it is built this way
+- [DESIGN.md](DESIGN.md): design authority: what Lakebench measures, invariants, owner decisions
+- [Releasing](../RELEASING.md): cutting a release
+- [Security](../SECURITY.md): reporting a vulnerability

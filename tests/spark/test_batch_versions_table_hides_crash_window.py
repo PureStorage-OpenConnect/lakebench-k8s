@@ -31,11 +31,16 @@ pytest.importorskip("pyspark")
 def test_crash_window_is_invisible_to_semi_join(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
+    # The injector fired: batch 1 really crashed before its sealed marker.
+    assert out["crash_injected"] is True, out
     # Batch 0 sealed cleanly -- txns rows visible under the filter.
     assert out["sealed_visible_rows"] == 1, out
     # Batch 1 crashed (MERGE into versions raised) -- txns rows exist in
-    # the raw table but the semi-join hides them.
+    # the raw table but the consumer's filter hides them.
     assert out["ghost_rows_batch_1"] == 1, out
+    assert out["unfiltered_rows"] == 2, out
+    assert out["filtered_rows"] == 1, out
+    assert out["filtered_rows_batch_1"] == 0, out
     # After the crashed batch 1 and the sealed retry of batch 1 (batch 2 in
     # the test's numbering) the versions table shows one row per sealed
     # (sid, batch) key. This is the MERGE-idempotency check: the crashed
@@ -150,32 +155,31 @@ def _run(jars):
             return real_sql(stmt, *a, **kw)
 
         spark.sql = _sql  # type: ignore[assignment]
+        crash_injected = False
         try:
             try:
                 foreach_batch_harness(spark, ss._merge_batch, bronze(1), 1)
             except RuntimeError as e:
                 assert "simulated driver crash" in str(e), e
+                crash_injected = True
         finally:
             spark.sql = real_sql  # type: ignore[assignment]
 
-        # ---- Consumer: semi-join filter identical to gold_finalize's
-        # _sealed_txns helper.
+        # ---- Consumer: the real gold_finalize helper, pointed at the same
+        # catalog.
+        import gold_finalize_financial as gf
         from pyspark.sql.functions import col
 
+        gf.CATALOG = "lh"
+        gf.SILVER_TXNS = "silver.transactions"
+        gf.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
+
         txns = spark.table("lh.silver.transactions")
-        versions = spark.table("lh.silver.silver_batch_versions").select(
-            col("stream_id").alias("_sv_stream_id"),
-            col("batch_id").alias("_sv_batch_id"),
-        )
-        filtered = txns.join(
-            versions,
-            (txns["_stream_id"] == versions["_sv_stream_id"])
-            & (txns["_batch_id"] == versions["_sv_batch_id"]),
-            "left_semi",
-        )
+        filtered = gf._sealed_txns(spark, "silver.transactions")
 
         unfiltered_rows = txns.count()
         filtered_rows = filtered.count()
+        filtered_rows_batch_1 = filtered.where(col("_batch_id") == 1).count()
         sealed_visible_rows = filtered.where(col("_batch_id") == 0).count()
         ghost_rows_batch_1 = txns.where(col("_batch_id") == 1).count()
         versions_row_count = spark.table("lh.silver.silver_batch_versions").count()
@@ -193,7 +197,7 @@ def _run(jars):
         versions_rows_for_batch_1_after_retry = (
             spark.table("lh.silver.silver_batch_versions").where(col("batch_id") == 1).count()
         )
-        filtered_rows_after_retry = filtered.count()
+        filtered_rows_after_retry = gf._sealed_txns(spark, "silver.transactions").count()
 
         # ---- MERGE-idempotency direct check: re-drive batch 0 again with
         # the SAME (sid, batch_id). Row count in versions must not grow.
@@ -205,6 +209,8 @@ def _run(jars):
         out = {
             "unfiltered_rows": int(unfiltered_rows),
             "filtered_rows": int(filtered_rows),
+            "filtered_rows_batch_1": int(filtered_rows_batch_1),
+            "crash_injected": crash_injected,
             "sealed_visible_rows": int(sealed_visible_rows),
             "ghost_rows_batch_1": int(ghost_rows_batch_1),
             "versions_row_count_after_retry": int(versions_row_count_after_retry),

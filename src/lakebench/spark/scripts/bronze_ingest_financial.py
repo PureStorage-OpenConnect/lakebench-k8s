@@ -20,10 +20,11 @@ from __future__ import annotations
 import signal
 import sys
 import time
+from datetime import datetime
 
-from common import env, log, stream_batch_lines
+from common import arrival_time, env, log, log_landing, stream_batch_lines
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp
+from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
@@ -47,7 +48,7 @@ CHECKPOINT_URI = env(
 MAX_FILES = int(env("LB_FINANCIAL_BRONZE_MAX_FILES", "8"))
 #: How long to wait for datagen's first file before the schema check.
 FIRST_FILE_WAIT_S = 1800
-TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "10"))
+TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "0"))
 
 
 def _fields(schema) -> dict:
@@ -100,14 +101,26 @@ def _log_new_progress(query, logged_batch: int) -> int:
         if batch_id <= logged_batch:
             continue
         logged_batch = batch_id
-        for line in stream_batch_lines(
-            batch_id,
-            rows,
-            (p.get("durationMs") or {}).get("triggerExecution", 0) / 1000.0,
-            f"{CATALOG}.{BRONZE_TABLE}",
-        ):
+        seconds = (p.get("durationMs") or {}).get("triggerExecution", 0) / 1000.0
+        for line in stream_batch_lines(batch_id, rows, seconds, f"{CATALOG}.{BRONZE_TABLE}"):
             log(line)
+        # The observed row: a Row (PySpark 4), or a dict or list from JSON.
+        landed = (p.get("observedMetrics") or {}).get("landing")
+        if isinstance(landed, dict):
+            landed = (landed.get("lo"), landed.get("hi"))
+        lo, hi = tuple(landed) if landed is not None and len(landed) == 2 else (None, None)
+        if lo is not None and hi is not None:
+            log_landing(batch_id, lo / 1e6, hi / 1e6, _started(p) + seconds)
     return logged_batch
+
+
+def _started(progress) -> float:
+    """A progress entry's trigger start, in epoch seconds (now if absent)."""
+    stamp = progress.get("timestamp")
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
 
 
 def main() -> None:
@@ -138,16 +151,24 @@ def main() -> None:
         )
         sys.exit(2)
 
-    # The datagen files carry no ingest_ts; the stream stamps it per
-    # micro-batch (current_timestamp is fixed per batch). It is the start of
-    # the continuous freshness clock that gold_refresh reports.
+    # The datagen files carry no ingest_ts; the stream stamps each row with
+    # its arrival (its file's landing time, see arrival_time), the start of
+    # the end-to-end freshness clock that gold_refresh reports.
     source_schema = StructType([f for f in target_schema.fields if f.name != "ingest_ts"])
+    arrived = arrival_time(spark, BRONZE_URI, CHECKPOINT_URI)
     check_first_file(spark)
     reader = spark.readStream.format("parquet").schema(source_schema)
     # 0: no per-trigger limit, so each micro-batch takes every landed file.
     if MAX_FILES > 0:
         reader = reader.option("maxFilesPerTrigger", MAX_FILES)
-    df = reader.load(BRONZE_URI + PACS_PREFIX).withColumn("ingest_ts", current_timestamp())
+    df = reader.load(BRONZE_URI + PACS_PREFIX).withColumn("ingest_ts", arrived)
+    # Each micro-batch's landing span, read back from its progress
+    # (observedMetrics) for the landing-to-bronze lag.
+    df = df.observe(
+        "landing",
+        F.unix_micros(F.min("ingest_ts")).alias("lo"),
+        F.unix_micros(F.max("ingest_ts")).alias("hi"),
+    )
 
     query = (
         df.writeStream.format("iceberg")

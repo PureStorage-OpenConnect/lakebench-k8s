@@ -26,7 +26,7 @@ Silver is compared by ``table_fingerprint`` over its business columns
 Gold goes back to the parent as rows (``table_rows``) for
 ``c360_gold_compare``: its two averages of a DOUBLE amount can land one
 cent apart between two correct builds, so an exact hash of gold is not
-stable (LB-267).
+stable.
 
 Usage: python c360_multicycle_equivalence_scenarios.py <jars> <work_dir>
 Prints one JSON object on the last stdout line.
@@ -37,7 +37,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import date
@@ -45,7 +44,7 @@ from pathlib import Path
 
 from c360_generator_model import generate
 from c360_stream_scenarios import BRONZE_DDL
-from delta_silver_epoch_scenarios import ICEBERG_CATALOG, _submit_args
+from delta_silver_epoch_scenarios import ICEBERG_CATALOG, fresh, submit_args, write_part
 from table_fingerprint import table_fingerprint, table_rows
 
 from lakebench.config.c360_run import cycle_windows
@@ -74,16 +73,10 @@ def cycle_rows(cycle: int) -> list[dict]:
 
 
 def stage_bronze(spark, work: str, cycle: int, rows: list[dict]) -> None:
-    base = Path(work) / "bronze" / "customer" / "interactions"
-    base.mkdir(parents=True, exist_ok=True)
     name = "part-000000.parquet" if cycle == 0 else f"part-c{cycle:03d}-000000.parquet"
     cols = [c.split()[0] for c in BRONZE_DDL.split(", ")]
-    tmp = Path(work) / "bronze-tmp"
     df = spark.createDataFrame([tuple(r[c] for c in cols) for r in rows], BRONZE_DDL)
-    df.coalesce(1).write.mode("overwrite").parquet(str(tmp))
-    (part,) = tmp.glob("part-*.parquet")
-    shutil.move(str(part), str(base / name))
-    shutil.rmtree(tmp)
+    write_part(df, work, name)
 
 
 def job(jars: str, work: str, fmt: str, script: str, cycle: int | None, log: list) -> int:
@@ -94,7 +87,7 @@ def job(jars: str, work: str, fmt: str, script: str, cycle: int | None, log: lis
     env.pop("LB_BRONZE_CYCLE", None)
     env.update(
         {
-            "PYSPARK_SUBMIT_ARGS": _submit_args(jars, work, fmt),
+            "PYSPARK_SUBMIT_ARGS": submit_args(jars, work, fmt),
             "LB_ICEBERG_CATALOG": ICEBERG_CATALOG if fmt == "iceberg" else "spark_catalog",
             "LB_BRONZE_URI": f"file://{work}/bronze/",
             "LB_SILVER_URI": f"file://{work}/silver/",
@@ -124,9 +117,8 @@ def job(jars: str, work: str, fmt: str, script: str, cycle: int | None, log: lis
             "job": name,
             "cycle": cycle,
             "rc": proc.returncode,
-            # Whether the job took the incremental path (read from the whole
-            # driver output; the tail below is for failures).
-            "appended": f"Appending to existing table (incremental mode, cycle={cycle})" in text,
+            # Gold is rewritten whole either way, so its incremental path is
+            # visible only in the driver output (the tail below is for failures).
             "replaced_from_watermark": "Replacing gold rows from" in text,
             "tail": text[-3000:],
         }
@@ -144,17 +136,17 @@ def _table(spark, work: str, fmt: str, layer: str):
     return spark.read.format("delta").load(os.path.dirname(logs[0]))
 
 
+def _data_files(table, fmt: str) -> set[str]:
+    """The data files a read of *table* scans."""
+    if fmt == "iceberg":
+        return {r[0] for r in table.select("_file").distinct().collect()}
+    return set(table.inputFiles())
+
+
 def fingerprint(spark, work: str, fmt: str, layer: str) -> dict:
     """Silver's exact fingerprint; gold's rows (``c360_gold_compare``)."""
     table = _table(spark, work, fmt, layer)
     return table_rows(table) if layer == "gold" else table_fingerprint(table)
-
-
-def _fresh(root: str, name: str) -> str:
-    work = os.path.join(root, name)
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work)
-    return work
 
 
 def changed(rows: list[dict]) -> list[dict]:
@@ -169,17 +161,25 @@ def scenario(spark, jars: str, root: str, fmt: str) -> dict:
     cycles = [cycle_rows(c) for c in range(len(WINDOWS))]
     log: list = []
 
-    inc = _fresh(root, f"{fmt}-incremental")
+    inc = fresh(root, f"{fmt}-incremental")
     rcs = []
+    appended: dict[int, bool] = {}
+    held: set[str] = set()
     for c, rows in enumerate(cycles):
         stage_bronze(spark, inc, c, rows)
         rcs.append(job(jars, inc, fmt, "silver_build", c, log))
+        if not any(rcs):
+            # An append keeps every data file silver held and adds more; a
+            # full rebuild replaces them.
+            files = _data_files(_table(spark, inc, fmt, "silver"), fmt)
+            appended[c] = held < files
+            held = files
         rcs.append(job(jars, inc, fmt, "gold_finalize", c, log))
         if any(rcs):
             return {"rcs": rcs, "log": log}
 
     def rebuild(name: str, data: list[list[dict]]) -> tuple[str, list[int]]:
-        work = _fresh(root, f"{fmt}-{name}")
+        work = fresh(root, f"{fmt}-{name}")
         for c, rows in enumerate(data):
             stage_bronze(spark, work, c, rows)
         return work, [
@@ -193,11 +193,10 @@ def scenario(spark, jars: str, root: str, fmt: str) -> dict:
     # took the incremental path (a silent fallback to a full rebuild would
     # make the comparison trivially equal).
     by_job = {(e["job"], e["cycle"]): e for e in log}
-    silver_job = f"silver_build{'_delta' if fmt == 'delta' else ''}.py"
     gold_job = f"gold_finalize{'_delta' if fmt == 'delta' else ''}.py"
     markers = {
         str(c): {
-            "silver_appended": by_job[(silver_job, c)]["appended"],
+            "silver_appended": appended[c],
             "gold_incremental": by_job[(gold_job, c)]["replaced_from_watermark"],
         }
         for c in (1, 2)

@@ -15,12 +15,12 @@ from __future__ import annotations
 
 import itertools
 import re
-from pathlib import Path
 from unittest.mock import MagicMock
 from urllib.parse import urlsplit
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from lakebench.config.recipes import RECIPES
 from lakebench.deploy.engine import DeploymentEngine, TemplateRenderer
@@ -29,7 +29,6 @@ from lakebench.deps.request import egress_hosts
 from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 from tests.conftest import make_config
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 FORBIDDEN_KEYS = (
     "spark.jars.packages",
     "spark.jars.repositories",
@@ -50,12 +49,17 @@ def _cases():
                 workload={"schema": schema},
                 architecture={"pipeline": {"mode": mode}},
             )
-        except Exception:  # noqa: BLE001 -- not a supported combination
+        except ValidationError:  # not a supported combination
             continue
         yield f"{recipe}-{schema}-{mode}", cfg
 
 
 CASES = list(_cases())
+
+
+def test_every_recipe_is_rendered():
+    covered = {name.split("-customer360-")[0].split("-financial-")[0] for name, _ in CASES}
+    assert covered == {r for r in RECIPES if r != "default"}
 
 
 def _handle(cfg):

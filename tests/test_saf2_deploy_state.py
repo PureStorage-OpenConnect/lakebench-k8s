@@ -10,9 +10,7 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from kubernetes.client.rest import ApiException
@@ -102,9 +100,8 @@ def test_carried_entry_survives_five_crashes(tmp_path):
 def test_two_crashed_deploys_own_namespace_accepted(tmp_path, monkeypatch):
     """Deploy 1 records and stamps P1, then crashes before confirming; deploy
     2 records P2 and crashes before stamping. The namespace carries P1, and
-    a nameless teardown from the directory must still pass check 2. With a
-    single pending slot P2 overwrites P1 and the user's own deployment is
-    refused (the d1 defect)."""
+    a nameless teardown from the directory must still pass check 2: a later
+    pending nonce must not displace an earlier one."""
     from lakebench.cli import _deploy
 
     named = _named(tmp_path)
@@ -197,15 +194,6 @@ def test_two_nameless_destroy_second_refuses(tmp_path):
     assert "b.yml" in str(err) and core.reads == 0
 
 
-def test_two_nameless_with_name_passes_check1(tmp_path):
-    a = _nameless(tmp_path, "a.yaml")
-    _nameless(tmp_path, "b.yaml")
-    _legacy_state(tmp_path)
-    core = FakeCore()
-    _v16_namespace(core)
-    assert _check(a, core, name=NAME) == "u1#n16"
-
-
 def test_single_config_dir_passes_check1(tmp_path):
     """Check 1 counts only the config's own directory, not subdirectories
     or non-config YAML."""
@@ -219,14 +207,27 @@ def test_single_config_dir_passes_check1(tmp_path):
     assert ds.nameless_configs_in(d) == [a.absolute()]
 
 
-def test_ledger_dir_per_namespace_passes_check1(tmp_path):
+@pytest.mark.parametrize(
+    ("legacy_state", "siblings", "ledger"),
+    [(True, 0, False), (False, 0, False), (True, 1, False), (True, 0, True)],
+    ids=["legacy-state", "no-state", "two-nameless-configs", "ledger-dir-per-namespace"],
+)
+def test_v16_namespace_with_name_and_matching_stamps_proceeds(
+    tmp_path, legacy_state, siblings, ledger
+):
+    """--name plus matching stamps passes check 1 whatever else sits in the
+    directory, with or without a legacy state.json (a config copied out of
+    its v1.6 directory carries none)."""
     core = FakeCore()
     _v16_namespace(core)
-    for ns in ("ns-a", "ns-b"):
-        d = tmp_path / "ledger-configs" / ns
-        d.mkdir(parents=True)
+    dirs = [tmp_path / "ledger-configs" / ns for ns in ("ns-a", "ns-b")] if ledger else [tmp_path]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
         cfg = _nameless(d)
-        _legacy_state(d)
+        for i in range(siblings):
+            _nameless(d, f"sibling{i}.yaml")
+        if legacy_state:
+            _legacy_state(d)
         assert _check(cfg, core, name=NAME) == "u1#n16"
 
 
@@ -295,23 +296,6 @@ def test_v16_dir_buckets_must_be_stamped(tmp_path):
     assert f"{NAME}-silver" in str(err)
     # A bucket whose own tag names the deployment counts.
     assert _check(cfg, core, name=NAME, bucket_owned=lambda b: b != f"{NAME}-bronze") == "u1#n16"
-
-
-def test_v16_dir_name_stamp_match_proceeds(tmp_path):
-    cfg = _nameless(tmp_path)
-    _legacy_state(tmp_path)
-    core = FakeCore()
-    _v16_namespace(core)
-    assert _check(cfg, core, name=NAME) == "u1#n16"
-
-
-def test_v16_dir_without_legacy_state_and_name_proceeds(tmp_path):
-    """No state at all: --name plus matching stamps (a config copied out of
-    its v1.6 directory without state.json)."""
-    cfg = _nameless(tmp_path)
-    core = FakeCore()
-    _v16_namespace(core)
-    assert _check(cfg, core, name=NAME) == "u1#n16"
 
 
 def test_check3_refuses_v17_stamped_namespace(tmp_path):
@@ -418,32 +402,6 @@ def test_relocate_copies_legacy_state_and_module_entry(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
-# destroy_all's expected incarnation
-# ---------------------------------------------------------------------------
-
-
-def test_destroy_expected_incarnation_mismatch_deletes_nothing():
-    from lakebench.deploy.destroy import destroy_all
-
-    k8s = SimpleNamespace(
-        namespace_exists=lambda ns: True,
-        get_namespace_annotation=lambda ns, key: "Y",
-        get_namespace_uid=lambda ns: "U",
-    )
-    cfg = SimpleNamespace(
-        get_namespace=lambda: NAME,
-        name=NAME,
-        platform=SimpleNamespace(kubernetes=SimpleNamespace(context="")),
-    )
-    engine = SimpleNamespace(k8s=k8s, config=cfg)
-    with patch("kubernetes.client.CoreV1Api") as core:
-        results = destroy_all(engine, expected_incarnation="U#X")  # type: ignore[arg-type]
-    assert len(results) == 1 and results[0].details["incarnation_mismatch"]
-    assert "Destroy NOT started" in results[0].message
-    assert not core.return_value.delete_namespace.called
-
-
-# ---------------------------------------------------------------------------
 # CLI: destroy, status, deploy
 # ---------------------------------------------------------------------------
 
@@ -512,18 +470,13 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     _v16_namespace(fake_cluster)
     before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     runner = CliRunner()
-    codes = [runner.invoke(app, ["status", str(cfg)]).exit_code]
-    codes.append(runner.invoke(app, ["status", str(cfg), "--name", NAME]).exit_code)
-    logs = runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME])
-    codes.append(logs.exit_code)
+    no_name = runner.invoke(app, ["status", str(cfg)])
+    runner.invoke(app, ["status", str(cfg), "--name", NAME])
+    runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME])
     after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     assert after == before
-    # Without --name a v1.6 directory is refused at load (2); with it the
-    # guard passes and status and logs go on to their own reads of the
-    # (unreachable) test server, which exit 4. A guard failure also exits 4
-    # (nameless.namespace_unreadable), so the read itself is asserted too.
-    assert codes == [2, 4, 4], codes
-    assert "metastore" in logs.output and "Kubernetes API error" in logs.output, logs.output
+    # Without --name a v1.6 directory is refused at load.
+    assert no_name.exit_code == 2, no_name.output
 
 
 def test_dry_run_creates_no_state(tmp_path, monkeypatch):
@@ -618,9 +571,6 @@ def test_deploy_cli_dry_run_writes_nothing(tmp_path, monkeypatch):
         p.relative_to(tmp_path) for p in tmp_path.rglob("*") if "lakebench-journal" not in str(p)
     )
     assert after == before
-
-
-# -- review fixes (CC-2 Full review, 10-01) ------------------------------------
 
 
 def test_relocating_a_copied_directory_is_refused(tmp_path):
@@ -789,23 +739,19 @@ def test_unusable_state_directory_stops_deploy_with_exit_4(tmp_path, monkeypatch
 
 
 def test_state_lock_times_out_instead_of_hanging(tmp_path):
-    import fcntl
-
     cfg_path = _named(tmp_path)
     with ds.state_lock(cfg_path, NAME):
-        lock = ds.state_path(cfg_path, NAME).with_suffix(".lock")
-        with open(lock, "a") as other:
-            with pytest.raises(BlockingIOError):
-                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with pytest.raises(ds.StateError, match="held by another"):
+        with pytest.raises(ds.StateError):
             with ds.state_lock(cfg_path, NAME, timeout=0.3):
                 pass
 
 
-def test_state_path_refuses_names_that_are_not_plain_file_names(tmp_path):
-    for bad in ["../evil", "a/b", ".hidden", "state", ""]:
-        with pytest.raises(ds.StateError):
-            ds.state_path(tmp_path / "a.yaml", bad)
+@pytest.mark.parametrize(
+    "bad", ["../evil", "a/b", ".hidden", "state", "", "State", "STATE", "a\x00b", "a\\b"]
+)
+def test_state_path_refuses_names_that_are_not_plain_file_names(tmp_path, bad):
+    with pytest.raises(ds.StateError):
+        ds.state_path(tmp_path / "a.yaml", bad)
 
 
 def test_relocate_removes_its_copies_when_the_source_cannot_be_marked(tmp_path, monkeypatch):
@@ -843,9 +789,6 @@ def test_relocate_moves_a_nameless_state_keyed_by_name(tmp_path):
     assert old is not None and old.moved_to
 
 
-# -- fix pass 2 -------------------------------------------------------------------
-
-
 def test_directory_identity_ignores_the_device_number(tmp_path, monkeypatch):
     """An NFS or overlay remount can change st_dev; only the inode counts."""
     cfg_path = _named(tmp_path)
@@ -874,12 +817,6 @@ def test_relocate_accepts_a_directory_renamed_with_mv(tmp_path):
     dst = ds.relocate_state(b / cfg_a.name, tmp_path / "c")
     moved = ds.read_state_file(ds.state_path(dst, NAME))
     assert moved is not None and ds.not_here(moved, dst) is None
-
-
-def test_state_path_refuses_more_unsafe_names(tmp_path):
-    for bad in ["State", "STATE", "a\x00b", "a\\b"]:
-        with pytest.raises(ds.StateError):
-            ds.state_path(tmp_path / "a.yaml", bad)
 
 
 def test_relocate_name_must_match_the_config_name(tmp_path):

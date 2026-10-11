@@ -12,31 +12,11 @@ from __future__ import annotations
 
 import datetime as dt
 import decimal
-import sys
-from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyspark")
-_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
-
-
-@pytest.fixture(scope="module")
-def spark():
-    import os
-
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
 
 
 PARTY_T = (
@@ -87,33 +67,19 @@ def _bronze(spark, rows):
     )
 
 
-def test_cross_border_true_when_countries_differ(spark):
+@pytest.mark.parametrize(
+    ("dbtr_ctry", "cdtr_ctry", "expected"),
+    [
+        ("US", "GB", True),
+        ("US", "US", False),
+        ("US", None, None),
+        (None, None, None),
+    ],
+    ids=["differ", "match", "one_missing", "both_missing"],
+)
+def test_cross_border(spark_session, dbtr_ctry, cdtr_ctry, expected):
     from silver_build_financial import build_transactions
 
-    bronze = _bronze(spark, [_bronze_row("US", "GB")])
+    bronze = _bronze(spark_session, [_bronze_row(dbtr_ctry, cdtr_ctry)])
     row = build_transactions(bronze).select("cross_border").collect()[0]
-    assert row["cross_border"] is True
-
-
-def test_cross_border_false_when_countries_match(spark):
-    from silver_build_financial import build_transactions
-
-    bronze = _bronze(spark, [_bronze_row("US", "US")])
-    row = build_transactions(bronze).select("cross_border").collect()[0]
-    assert row["cross_border"] is False
-
-
-def test_cross_border_null_when_one_country_missing(spark):
-    from silver_build_financial import build_transactions
-
-    bronze = _bronze(spark, [_bronze_row("US", None)])
-    row = build_transactions(bronze).select("cross_border").collect()[0]
-    assert row["cross_border"] is None
-
-
-def test_cross_border_null_when_both_countries_missing(spark):
-    from silver_build_financial import build_transactions
-
-    bronze = _bronze(spark, [_bronze_row(None, None)])
-    row = build_transactions(bronze).select("cross_border").collect()[0]
-    assert row["cross_border"] is None
+    assert row["cross_border"] is expected

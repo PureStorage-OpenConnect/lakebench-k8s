@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_lb_deps.py (imported by several test files)."""
+"""A fake spark-submit, pip and lb-deps pod environment for the lb_deps tests."""
 
 from __future__ import annotations
 
@@ -57,26 +57,15 @@ def put(z, name, data, ct=zipfile.ZIP_DEFLATED):
 
 
 args = sys.argv[1:]
-if os.environ.get("FAKE_SPARK_FAIL_IF_CALLED"):
-    sys.exit("spark-submit must not run")
-if os.environ.get("FAKE_KILL"):
-    os.kill(os.getpid(), 9)
-log = os.environ.get("FAKE_SPARK_ARGV")
-if log:
-    open(log, "a").write(repr(args) + "\n")
 coords = args[args.index("--packages") + 1].split(",")
 confs = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "--conf")
 ivy = confs["spark.jars.ivy"]
 extra = [c for c in os.environ.get("FAKE_TRANSITIVE", "").split(",") if c]
 skip = os.environ.get("FAKE_SKIP", "")
 big = int(os.environ.get("FAKE_BIG_MB", "0"))
-dup = os.environ.get("FAKE_DUP_CLASS", "").split(",")
 jars = os.path.join(ivy, "jars")
 os.makedirs(jars, exist_ok=True)
 print(":: resolving dependencies ::")
-if os.environ.get("FAKE_EGRESS"):
-    print("Server access error at url https://repo1.maven.org/maven2/ (java.net.UnknownHostException: repo1.maven.org)")
-    sys.exit(1)
 order = []
 for c in coords + extra:
     if c == skip:
@@ -90,15 +79,10 @@ for c in coords + extra:
         with zipfile.ZipFile(path, "w") as z:
             put(z, "META-INF/maven/%s/%s/pom.properties" % (g, a), "groupId=%s\nartifactId=%s\nversion=%s\n" % (g, a, v))
             put(z, "x/%s.class" % a, a * 50)
-            if a in dup:
-                put(z, "shared/Dup.class", a)
-            if os.environ.get("FAKE_MODULE_INFO"):
-                put(z, "module-info.class", a)
             if big and "aws-bundle" in a:
                 put(z, "big.bin", os.urandom(big << 20), zipfile.ZIP_STORED)
     order.append("file://" + path)
-if not os.environ.get("FAKE_NO_VERBOSE"):
-    print("(spark.jars," + ",".join(order) + ")")
+print("(spark.jars," + ",".join(order) + ")")
 print("Error: Failed to load class org.apache.spark.deploy.DummyNonExistent.")
 sys.exit(101)
 """
@@ -106,21 +90,12 @@ sys.exit(101)
 
 FAKE_PIP = r"""import os, sys, zipfile
 args = sys.argv[1:]
-log = os.environ.get("FAKE_PIP_ARGV")
-if log:
-    open(log, "a").write(repr(args) + "\n")
 assert "--isolated" in args, args
 if args[0] == "download":
     d = args[args.index("-d") + 1]
     os.makedirs(d, exist_ok=True)
     pins = [a for a in args if "==" in a]
-    if os.environ.get("FAKE_PIP_FULL"):
-        print("ERROR: Could not install packages due to an OSError: [Errno 28] No space left on device")
-        sys.exit(1)
-    if os.environ.get("FAKE_PIP_FAIL"):
-        print("WARNING: Retrying after connection broken by 'NewConnectionError: Failed to establish a new connection'")
-        sys.exit(1)
-    for p in pins + [x for x in os.environ.get("FAKE_PIP_EXTRA", "").split(",") if x]:
+    for p in pins:
         n, v = p.split("==")
         fn = "%s-%s-py3-none-any.whl" % (n.replace("-", "_"), v)
         with zipfile.ZipFile(os.path.join(d, fn), "w") as z:
@@ -134,21 +109,7 @@ elif args[0] == "install":
 """
 
 
-FAKE_VARS = (
-    "FAKE_SKIP",
-    "FAKE_SPARK_FAIL_IF_CALLED",
-    "FAKE_NO_VERBOSE",
-    "FAKE_PIP_EXTRA",
-    "FAKE_PIP_FAIL",
-    "FAKE_KILL",
-    "FAKE_EGRESS",
-    "FAKE_BIG_MB",
-    "FAKE_DUP_CLASS",
-    "FAKE_SPARK_ARGV",
-    "FAKE_PIP_ARGV",
-    "FAKE_MODULE_INFO",
-    "FAKE_PIP_FULL",
-)
+FAKE_VARS = ("FAKE_SKIP", "FAKE_BIG_MB")
 
 
 def _zip_bytes(names: dict[str, str]) -> bytes:

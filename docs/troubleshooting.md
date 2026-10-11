@@ -1,10 +1,10 @@
 # Troubleshooting
 
-Common issues when deploying and running Lakebench on Kubernetes (OpenShift
-or vanilla), grouped by area and listed by symptom. Each entry ends with the
-code or test that implements the behaviour it describes, so you can check it
-against the version you run. Maintainer background (why the code is the way
-it is) is in [Internals](internals.md).
+Guide: find the cause and fix for a Lakebench failure, by symptom.
+
+Entries are grouped by area and cover OpenShift and vanilla Kubernetes. Most
+end with the code that implements the behaviour, so you can check it against
+the version you run. Why the code is the way it is: [Internals](development.md#why-it-is-built-this-way).
 
 ---
 
@@ -272,22 +272,26 @@ pods [...] still watch it`.
 
 **Cause:** destroy removed the namespace from the watch list and restarted
 the operator, but 120 s later a pod with the old `--namespaces=` list was
-still there (usually one still terminating, or one a restart did not
-replace; destroy restarts the operator once more for that). Deleting a
-watched namespace crash-loops the operator for every deployment, so destroy
-keeps the namespace.
+still there. Usually one is still terminating, or a restart did not replace
+it; destroy restarts the operator once more for that. Deleting a watched
+namespace crash-loops the operator for every deployment, so destroy keeps
+the namespace.
 
-**Fix:** check `kubectl get pods -n spark-operator`; once the old pods are
-gone, re-run `lakebench destroy`. When the list names a `deployment/...`, an
-operator Deployment's pod template still lists the namespace while the Helm
-values do not, usually an upgrade that did not apply (check `helm history
-spark-operator -n spark-operator`). `lakebench admin repair-operator` reads
-the Helm values and the `--namespaces` of the controller and webhook
-Deployments, and sets the list with one upgrade to the namespaces any of
-them names that still exist; run it, then destroy again. Destroy also keeps
-the namespace (exit 1) when the operator restart after the removal fails;
-the namespace is already off the list then, so re-run destroy once the
-operator pods are Ready.
+**Fix:**
+
+- Check `kubectl get pods -n spark-operator`. Once the old pods are gone,
+  re-run `lakebench destroy`.
+- When the list names a `deployment/...`, an operator Deployment's pod
+  template still lists the namespace while the Helm values do not. This is
+  usually an upgrade that did not apply (check `helm history spark-operator
+  -n spark-operator`).
+- Then run `lakebench admin repair-operator`, and destroy again. It reads the
+  Helm values and the `--namespaces` of the controller and webhook
+  Deployments. With one upgrade it sets the list to the namespaces any of
+  them names that still exist.
+- Destroy also keeps the namespace (exit 1) when the operator restart after
+  the removal fails. The namespace is already off the list then, so re-run
+  destroy once the operator pods are Ready.
 
 Code: `src/lakebench/deploy/destroy.py:_await_operator_unwatch`,
 `src/lakebench/deploy/destroy.py:_OPERATOR_POD_WAIT_S`.
@@ -301,21 +305,26 @@ holding the cluster lease; finishing the shared change` and keeps running.
 shared change. It finishes that change first (its hold budget is 750 s, or
 1800 s for `admin` commands), then releases the lock and stops.
 
-**Fix:** wait, or press Ctrl-C twice more to abort at once; the lock is
-still released. If a Helm upgrade was running, run `helm history
-spark-operator -n spark-operator`: a `pending-upgrade` revision blocks every
-deployment's watch-list change. `lakebench admin repair-operator` rolls it
-back once the pending revision is at least 10 minutes old by the API
-server's clock (a Helm call may still be running before that), to the
-newest deployed revision that watches no deleted namespace (an operator that
-watches every namespace only to a revision that does too), then sets the
-list it read before the rollback, so a namespace the interrupted upgrade
-added is kept. Otherwise it exits 3 with the reason; `--dry-run` shows the
-verdict. Do not run `helm rollback` by hand: it skips the deleted-namespace
-check and the lock. The one exception is when every earlier revision names
-a deleted namespace: the message then gives the `helm rollback` to run,
-followed at once by `repair-operator`, with no deploy or destroy running
-(the operator restarts in a loop in between).
+**Fix:**
+
+- Wait, or press Ctrl-C twice more to abort at once; the lock is still
+  released.
+- If a Helm upgrade was running, run `helm history spark-operator -n
+  spark-operator`. A `pending-upgrade` revision blocks every deployment's
+  watch-list change.
+- `lakebench admin repair-operator` rolls it back once the pending revision
+  started at least 10 minutes ago by the API server's clock (a Helm call
+  may still be running before that). The target
+  revision is in [admin](cli-reference.md#admin). It then sets the list it
+  read before the rollback, so a namespace the interrupted upgrade added is
+  kept.
+- Otherwise it exits 3 with the reason; `--dry-run` shows the verdict.
+- Do not run `helm rollback` by hand: it skips the deleted-namespace check
+  and the lock.
+- The one exception is when every earlier revision names a deleted
+  namespace. The message then gives the `helm rollback` to run, followed at
+  once by `repair-operator`, with no deploy or destroy running (the operator
+  restarts in a loop in between).
 
 Code: `src/lakebench/deploy/cluster_lock.py:LEASE_MAX_HOLD_S`,
 `src/lakebench/deploy/cluster_lock.py:ADMIN_MAX_HOLD_S`,
@@ -327,10 +336,10 @@ Code: `src/lakebench/deploy/cluster_lock.py:LEASE_MAX_HOLD_S`,
 is still in the namespace, and the run printed a `kubectl delete` line for
 it.
 
-**Cause:** `run` deletes the jobs it created when it is interrupted, but
+**Cause:** `run` deletes the jobs it created when it is interrupted. It
 leaves any it cannot show to be its own (another invocation recreated it,
-or the interrupt landed while it was being created) or could not reach
-within its cleanup budget of about 60 s. The record's `interrupted.left`
+or the interrupt landed while it was being created). It also leaves any it
+could not reach within its cleanup budget of about 60 s. The record's `interrupted.left`
 lists each with the reason.
 
 **Fix:** run the printed `kubectl delete`, or let the next `run` handle it:
@@ -341,41 +350,51 @@ Code: `src/lakebench/cli/_interrupt.py:CLEANUP_DEADLINE_S`.
 
 ### Stages slow at random, SUBMISSION_FAILED, Spark Operator controller evicted
 
-**Symptom:** a stage that usually takes about a minute takes two or more,
-and `lakebench run` prints `submission attempt N failed` before the stage
-ends. The stage line reads `completed in 150.0s (includes 60s waiting on 1
-failed operator submission)`, and metrics.json records each failure under
-the stage's `submission_failures` with `submission_retry_seconds` as the
-total. The SparkApplication's status shows `SUBMISSION_FAILED` with a Maven
-message such as `Downloaded file size (0) doesn't match expected Content
-Length`, or `driver pod already exist`. It affects every deployment on the
-cluster, not only yours.
+**Symptom:**
 
-**Cause:** the Spark Operator runs spark-submit inside its controller pod,
-and spark-submit resolves `spark.jars.packages` into `/tmp/.ivy2`. The
-controller's root filesystem is read-only, so `/tmp` is the chart's `tmp`
-emptyDir, which chart 2.5.1 caps at 1Gi. One Spark line's Iceberg or Delta
-runtime, hadoop-aws and AWS SDK bundle come to about 1.2 GB. The kubelet
-evicts the controller (`Usage of EmptyDir volume "tmp" exceeds the limit
-"1Gi"`); the next leader starts with an empty cache and retries any
-submission the old one had in flight about 60 s later.
+- A stage that usually takes about a minute takes two or more.
+- `lakebench run` prints `submission attempt N failed` before the stage
+  ends. The stage line reads `completed in 150.0s (includes 60s waiting on
+  1 failed operator submission)`.
+- metrics.json records each failure under the stage's
+  `submission_failures`, with `submission_retry_seconds` as the total.
+- The SparkApplication's status shows `SUBMISSION_FAILED` with a Maven
+  message such as `Downloaded file size (0) doesn't match expected Content
+  Length`, or `driver pod already exist`.
+- It affects every deployment on the cluster, not only yours.
+
+**Cause:**
+
+- The Spark Operator runs spark-submit inside its controller pod.
+  spark-submit resolves `spark.jars.packages` into `/tmp/.ivy2`.
+- The controller's root filesystem is read-only, so `/tmp` is the chart's
+  `tmp` emptyDir, which chart 2.5.1 caps at 1Gi.
+- One Spark line's Iceberg or Delta runtime, hadoop-aws and AWS SDK bundle
+  come to about 1.2 GB.
+- The kubelet evicts the controller (`Usage of EmptyDir volume "tmp"
+  exceeds the limit "1Gi"`). The next leader starts with an empty cache and
+  retries any submission the old one had in flight about 60 s later.
 
 **Diagnosis:** `lakebench admin doctor` (or `lakebench admin status`)
 reports the controller's `/tmp` size limit and any storage evictions still
 on record (evicted pods and events last about an hour).
 
 **Fix (cluster admin):** `lakebench admin repair-operator --dry-run`, then
-`lakebench admin repair-operator`. When the controller's `/tmp` is smaller
-than 8Gi it raises it to 8Gi under the cluster lock with `--reuse-values`,
-keeps the installed chart version, and rolls the controller. The same run
-also reconciles the watch list (dropping deleted or Terminating
-namespaces), which restarts the operator before the resize when it changes.
-`lakebench admin install --component spark-operator` sets the same size on
-a fresh install (`--controller-tmp-size` chooses another). The size is
-stored in the release's values, so later watch-list edits carry it forward.
+`lakebench admin repair-operator`.
+
+- When the controller's `/tmp` is smaller than 8Gi it raises it to 8Gi under
+  the cluster lock with `--reuse-values`, keeps the installed chart version,
+  and rolls the controller.
+- The same run also reconciles the watch list (dropping deleted or
+  Terminating namespaces). When the list changes, that restarts the operator
+  before the resize.
+- `lakebench admin install --component spark-operator` sets the same size on
+  a fresh install (`--controller-tmp-size` chooses another).
+- The size is stored in the release's values, so later watch-list edits
+  carry it forward.
 
 Since 1.7 the jobs name their jars as URLs on the deployment's dependency
-server (`spark.jars`) and set no `spark.jars.packages`, so the controller
+server (`spark.jars`) and set no `spark.jars.packages`. So the controller
 downloads nothing for a 1.7 deployment; the larger `/tmp` still protects the
 controller from applications other deployments submit with packages.
 
@@ -408,7 +427,7 @@ scripts are not found at the expected path inside the container.
 
 **Cause:** an unsupported Spark Operator: Lakebench needs the Kubeflow
 Spark Operator v2.x line, and puts its volumes in the driver and executor
-pod templates (see [Internals](internals.md#spark-operator) for why).
+pod templates (see [Internals](development.md#spark-operator) for why).
 
 **Fix:** use Kubeflow Spark Operator v2.x (2.5.1 is the default), installed
 with `lakebench admin install --component spark-operator`.
@@ -444,13 +463,16 @@ Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_build_manifest`,
 errors reporting no space left on device. Pods may be evicted.
 
 **Cause:** shuffle and spill outgrew the executors' local storage.
-Silver-build is the most storage-hungry stage: it joins and aggregates the
-whole interaction corpus. With `platform.storage.scratch.enabled: true`
-each executor gets its own scratch PVC sized by the job profile; without it
-(the default) spill goes to Spark's default local directories on the
-node's ephemeral storage, which a large scale can fill. Data per executor
-does not stay constant: executor counts are fixed up to scale 10 and capped
-at 28 above it, so per-executor spill grows with scale inside those ranges.
+
+- Silver-build is the most storage-hungry stage: it joins and aggregates the
+  whole interaction corpus.
+- With `platform.storage.scratch.enabled: true` each executor gets its own
+  scratch PVC sized by the job profile.
+- Without it (the default) spill goes to Spark's default local directories
+  on the node's ephemeral storage, which a large scale can fill.
+- Executor counts are fixed up to scale 10, then grow more slowly than the
+  data up to a per-job cap (at most 28). So per-executor spill grows with
+  scale.
 
 **Fix:** enable scratch storage on a class with one replica (for Portworx,
 `px-csi-scratch` with `repl=1`; shuffle data is recomputed on failure, so
@@ -465,12 +487,26 @@ platform:
 ```
 
 The per-executor scratch size comes from the job profile and should not be
-reduced; see [Job Profiles](component-spark.md#job-profiles). Check the
-cluster can hold the scratch total in the generated sizing table in
-[Getting Started](getting-started.md).
+reduced; see [Job Profiles](component-spark.md#job-profiles). Silver-build
+asks for 60 GiB x scale / executors per executor, between 50Gi and 300Gi.
+Raising `platform.compute.spark.silver_executors` makes each PVC smaller but
+does not shrink the total (scale 100: 28 x 215Gi = 6,020 Gi, against 18 x
+300Gi). Check the cluster can hold the scratch total in the generated sizing
+table in [Sizing](sizing.md).
 
 Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_JOB_PROFILES`,
 `src/lakebench/config/schema.py:ScratchStorageConfig`.
+
+### A stage times out
+
+**Symptom:** a batch stage is stopped at its per-job timeout.
+
+**Cause:** the stage needs longer than the timeout. When `--timeout` is not
+given it is `max(3600, scale * 120)` seconds per job; the AML workload adds
+900 s and never goes below its bronze-verify budget for the scale. At scale 100 (about 1 TB), silver-build can take 30 to 60 minutes,
+depending on cluster resources.
+
+**Fix:** pass a larger `--timeout`, for example `--timeout 7200` on `run`.
 
 ---
 
@@ -556,19 +592,29 @@ Code: `src/lakebench/modules/catalogs/polaris/deployer.py:PolarisDeployer`,
 
 ### Polaris credential vending fails
 
-**Symptom:** Spark jobs connecting to Polaris fail with STS or
-credential-vending errors, or Polaris's server-side S3 access goes to
-`s3.amazonaws.com` instead of your endpoint.
+**Symptom:** Spark jobs connecting to Polaris fail with `Failed to get
+subscoped credentials`, STS 400 errors or other credential-vending errors,
+or Polaris's server-side S3 access goes to `s3.amazonaws.com` instead of
+your endpoint.
 
-**Cause:** FlashBlade and most on-premises stores have no STS, so Polaris
-cannot vend temporary credentials. Releases before 1.3.0 could also try STS
-in one code path when told not to (the upstream report is
-[apache/polaris#379](https://github.com/apache/polaris/issues/379)).
+**Cause:** FlashBlade, MinIO and most on-premises stores have no STS, so
+Polaris cannot vend temporary credentials. Polaris 1.1.0 and 1.2.0 also
+ignore the credential-subscoping flag in `TaskFileIOSupplier` and try STS
+when told not to (the upstream report is
+[apache/polaris#379](https://github.com/apache/polaris/issues/379)). With
+Lakebench's catalog settings, an older Polaris is the most likely cause.
 
 **Fix:** use the default Polaris (1.6.0) or any release from
-1.3.0-incubating on. (Polaris dropped the `-incubating` suffix at 1.4.0, so
-`apache/polaris:1.3.0` does not exist but `1.6.0` does.) The STS skip is per
-catalog: the bootstrap Job creates the catalog with `stsUnavailable: true`
+1.3.0-incubating on. The version that runs is the tag of `images.polaris`.
+If you pinned an older one, update both images:
+
+```yaml
+images:
+  polaris: "apache/polaris:1.6.0"
+  polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"
+```
+
+The STS skip is per catalog: the bootstrap Job creates the catalog with `stsUnavailable: true`
 and `pathStyleAccess: true`, and the server gets static S3 credentials in
 its ConfigMap. Do not add a server-wide credential-subscoping override: it
 drops the endpoint and path-style settings, and Polaris's server-side
@@ -576,6 +622,46 @@ S3FileIO then falls back to `s3.amazonaws.com`.
 
 Code: `src/lakebench/templates/polaris/bootstrap-job.yaml.j2`,
 `src/lakebench/templates/polaris/configmap.yaml.j2`,
+`src/lakebench/config/schema.py:ImagesConfig`.
+
+### Polaris 1.3.0 image fails with ImagePullBackOff
+
+**Symptom:** after pinning Polaris 1.3.0, the pod shows `ImagePullBackOff`
+with `manifest unknown`.
+
+**Cause:** `apache/polaris:1.3.0` was never published. Polaris left the
+Apache incubator at 1.4.0, so 1.4.0 and later (the default 1.6.0 among them)
+have no `-incubating` suffix, and 1.3.0 exists only with it.
+
+**Fix:** pin `apache/polaris:1.3.0-incubating`, or use the default 1.6.0.
+
+Code: `src/lakebench/config/schema.py:ImagesConfig`.
+
+### Trino queries fail with Polaris: "scope not valid"
+
+**Symptom:** Trino queries against Iceberg tables fail with OAuth2 errors
+such as `invalid_scope: The scope is invalid`; Polaris rejects the token
+request.
+
+**Cause:** Trino's Iceberg REST client asks for `scope=catalog` by default,
+and Polaris requires `scope=PRINCIPAL_ROLE:ALL`. The error means Trino is
+older than 454 or its catalog lacks the `oauth2.scope` property.
+
+**Fix:** Lakebench sets `iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL`
+in the Trino catalog when the catalog is Polaris. If you configure Trino by
+hand, add the property. It exists from Trino 454
+([trinodb/trino#22961](https://github.com/trinodb/trino/pull/22961)).
+Lakebench's default Trino (483) has it, so this happens only when you
+override the image. Keep it at 454 or later:
+
+```yaml
+images:
+  trino: trinodb/trino:483    # Must be 454+
+```
+
+Other version constraints are in [Trino](component-trino.md).
+
+Code: `src/lakebench/templates/trino/configmap.yaml.j2`,
 `src/lakebench/config/schema.py:ImagesConfig`.
 
 ### Hive or Polaris cannot log in to PostgreSQL
@@ -598,24 +684,6 @@ Code: `src/lakebench/deploy/deployment_secrets.py:sync_role_password`,
 ---
 
 ## Query engines
-
-### Trino queries fail with Polaris: "scope not valid"
-
-**Symptom:** Trino queries against Iceberg tables fail with OAuth2 errors;
-Polaris rejects the token request because the scope is invalid.
-
-**Cause:** Trino's Iceberg REST client asks for `scope=catalog` by default,
-and Polaris requires `scope=PRINCIPAL_ROLE:ALL`.
-
-**Fix:** Lakebench sets `iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL`
-in the Trino catalog when the catalog is Polaris. If you configure Trino by
-hand, add the property. It exists from Trino 454
-([trinodb/trino#22961](https://github.com/trinodb/trino/pull/22961));
-Lakebench's default Trino has it; if you pin another image, see the
-version constraints in [Trino](component-trino.md).
-
-Code: `src/lakebench/templates/trino/configmap.yaml.j2`,
-`src/lakebench/config/schema.py:ImagesConfig`.
 
 ### Trino coordinator stays in Init
 
@@ -676,24 +744,29 @@ log or `effective_maintenance.reasons` has "compaction failed on <table>"
 with "Exceeded limit of 100 open writers for partitions" or "Query
 exceeded per-node memory limit of ... [TableWriterOperator=...]".
 
-**Cause:** one Trino `optimize` rewrote too many partitions at once. Each
-partition keeps an open Parquet writer; Trino caps the partitions one
-writer may open at 100, and Lakebench sets a query's memory per node to
-35% of the worker heap.
-Continuous runs leave small files in every partition, so a long window
-makes every partition a rewrite: Customer 360 silver has a partition per
-day, and the AML silver `transactions` and `account_statements`
-tables a partition per month, about 160 MB of writer memory each at scale
-1.
+**Cause:** one Trino `optimize` rewrote too many partitions at once.
+
+- Each partition keeps an open Parquet writer. Trino caps the partitions one
+  writer may open at 100.
+- Lakebench sets a query's memory per node to 35% of the worker heap.
+- Continuous runs leave small files in every partition, so a long window
+  makes every partition a rewrite.
+- Customer 360 silver has a partition per day. The AML silver
+  `transactions` and `account_statements` tables have a partition per
+  month, about 160 MB of writer memory each at scale 1.
 
 **Fix:** none needed on current code: these tables are compacted in
 chunks (90 days, or one month with files to merge, per statement). If it
 still appears, check the record's `detail.compaction_statements` and
-`reasons`: a failed table compacted by one statement without a `WHERE`
-means the partition read failed (a reason says "partition read failed")
-or the table was renamed in `architecture.tables`, which the chunking does
-not follow. The month chunking is sized on the single scale-1 Trino
-worker; on a failure at a larger scale, report the run.
+`reasons`. A failed table compacted by one statement without a `WHERE`
+means one of two things:
+
+- the partition read failed (a reason says "partition read failed")
+- the table was renamed in `architecture.tables`, which the chunking does
+  not follow
+
+The month chunking is sized on the single scale-1 Trino worker; on a failure
+at a larger scale, report the run.
 
 Code: `src/lakebench/modules/table_formats/iceberg/maintenance.py:build_compaction_plan`,
 `src/lakebench/cli/_sustained.py:_compaction_partitions`.
@@ -711,10 +784,10 @@ out of memory, so that recipe skips it. Delta silver is clustered by
 says what was skipped and why, and the maintenance class reflects it.
 
 On Trino, VACUUM below Delta's 7-day minimum retention needs the session
-property in the same submission as the call, so Lakebench sends `SET
+property in the same submission as the call. Lakebench sends `SET
 SESSION <catalog>.vacuum_min_retention = '0s'; CALL
-<catalog>.system.vacuum(...)` as one `--execute`; two separate CLI calls
-would drop the setting and the VACUUM would fail.
+<catalog>.system.vacuum(...)` as one `--execute`. Two separate CLI calls
+would drop the setting, and the VACUUM would fail.
 
 Code: `src/lakebench/cli/_sustained.py:_run_iceberg_maintenance`,
 `src/lakebench/modules/table_formats/delta/maintenance.py:build_delta_maintenance_sql`,
@@ -769,16 +842,27 @@ Code: `src/lakebench/config/schema.py:TableNamesConfig`,
 `src/lakebench/spark/scripts/silver_build_financial.py:SILVER_TRANSACTIONS`,
 `src/lakebench/modules/pipeline_engines/spark/job.py:_build_manifest`.
 
+### The benchmark fails but the pipeline succeeded
+
+**Symptom:** the Spark stages complete and the query benchmark fails.
+
+**Cause:** the benchmark runs against the live query engine (Trino by
+default). If its pods are unhealthy, the benchmark can fail while the
+pipeline's tables are still valid.
+
+**Fix:** run `lakebench status <config>` to check the engine's health, then
+run the benchmark on its own with `lakebench benchmark <config>`.
+
 ### A continuous run FAILED "not balanced"
 
 **Symptom:** the run ends `FAILED` with `balance gate: not balanced:
 <stage> fell behind <upstream>: its lag grew Ns across the window's second
 half ...` and the report's Balance card says "not balanced".
 
-**Cause:** that stage could not carry the scale's offered load: the lag of
+**Cause:** that stage could not carry the scale's offered load. The lag of
 the commits waiting for it, sampled once per batch, rose by more than one
-cadence (its trigger interval, or back to back its median batch time in the
-window's first half) across the window's second half. The line gives its
+cadence across the window's second half. A cadence is its trigger interval,
+or, back to back, its median batch time in the window's first half. The line gives its
 executors and the count the load needs.
 
 **Fix:** raise the setting the line names (for example

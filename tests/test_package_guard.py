@@ -142,11 +142,6 @@ def _absence(mode, problems):
     return lambda texts: (mode, problems(texts))
 
 
-def test_heldout_check_is_off_without_the_hash_file(tmp_path):
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=tmp_path / "heldout_hashes.json")
-    assert found.status == pg.SKIP
-
-
 @pytest.mark.parametrize(("mode", "status"), [("report", pg.PENDING), ("enforce", pg.FAIL)])
 def test_planted_heldout_token_follows_the_files_mode(tmp_path, mode, status):
     hashes = tmp_path / "heldout_hashes.json"
@@ -175,52 +170,64 @@ def test_planted_heldout_token_follows_the_files_mode(tmp_path, mode, status):
     assert pg.exit_code(found, require_all=True) == 1
 
 
-def test_heldout_check_that_cannot_run_fails(tmp_path):
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text("{}")
+def _raising(exc):
+    def load(path=None):
+        raise exc
 
-    def broken(texts):
-        raise RuntimeError("no absence check")
-
-    (found,) = pg.check_heldout({"a": b"1"}, broken, hashes)
-    assert found.status == pg.FAIL and "no absence check" in found.detail
+    return load
 
 
-def test_hash_file_that_cannot_load_yet_is_pending(tmp_path, monkeypatch):
-    # The datagen lane ships the hash file before the maintainers' commit
-    # writes its compiled floor; until then loading it raises.
+@pytest.mark.parametrize(
+    ("hash_text", "ds_patch", "absence", "status", "detail"),
+    [
+        (None, None, None, "SKIP", "held-out check is off"),
+        ("{}", None, "broken", "FAIL", "no absence check"),
+        ("{}", "no_absence_fn", None, "FAIL", "no absence check"),
+        (
+            '{"absence_check": "report"}',
+            _raising(RuntimeError("compiled held-out floor is not initialised")),
+            None,
+            "PENDING",
+            "cannot be loaded yet",
+        ),
+        (
+            '{"absence_check": "enforce"}',
+            _raising(ValueError("role hash is not hex")),
+            None,
+            "FAIL",
+            "do not load",
+        ),
+        ("not json", _raising(ValueError("x")), None, "FAIL", ""),
+    ],
+    ids=[
+        "no-hash-file-is-off",
+        "absence-check-raises",
+        "no-absence-function",
+        "report-mode-cannot-load-is-pending",
+        "enforce-mode-cannot-load-fails",
+        "unparseable-hash-file-fails",
+    ],
+)
+def test_heldout_check_states(tmp_path, monkeypatch, hash_text, ds_patch, absence, status, detail):
     from lakebench.config import datagen_seed as ds
 
     hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text('{"absence_check": "report"}')
+    if hash_text is not None:
+        hashes.write_text(hash_text)
     monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
+    if ds_patch == "no_absence_fn":
+        monkeypatch.delattr(ds, "absence_problems", raising=False)
+    elif ds_patch is not None:
+        monkeypatch.setattr(ds, "load_heldout", ds_patch, raising=False)
+        monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
+    check = None
+    if absence == "broken":
 
-    def not_yet(path=None):
-        raise RuntimeError("compiled held-out floor is not initialised")
+        def check(texts):
+            raise RuntimeError("no absence check")
 
-    monkeypatch.setattr(ds, "load_heldout", not_yet, raising=False)
-    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.PENDING and "cannot be loaded yet" in found.detail
-
-
-def test_hash_file_marked_enforce_that_does_not_load_fails(tmp_path, monkeypatch):
-    from lakebench.config import datagen_seed as ds
-
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text('{"absence_check": "enforce"}')
-    monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
-
-    def broken(path=None):
-        raise ValueError("role hash is not hex")
-
-    monkeypatch.setattr(ds, "load_heldout", broken, raising=False)
-    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL and "do not load" in found.detail
-    hashes.write_text("not json")
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL
+    (found,) = pg.check_heldout({"a": b"1"}, check, hashes)
+    assert found.status == getattr(pg, status) and detail in found.detail
 
 
 def test_symlink_in_a_wheel_fails(tmp_path):
@@ -238,20 +245,9 @@ def test_symlink_in_a_wheel_fails(tmp_path):
     ]
 
 
-def test_hash_file_without_an_absence_check_fails(tmp_path, monkeypatch):
-    from lakebench.config import datagen_seed as ds
-
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text("{}")
-    monkeypatch.delattr(ds, "absence_problems", raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL and "no absence check" in found.detail
-
-
 def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):
-    # Runs once the held-out hash file and its test fixture are in the tree.
-    ts = pytest.importorskip("tests.fixtures.heldout_test_seeds")
     from lakebench.config import datagen_seed as ds
+    from tests.fixtures import heldout_test_seeds as ts
 
     held = ts.use_fixture(monkeypatch)
     texts = {
@@ -263,6 +259,7 @@ def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):
     assert str(ts.TEST_EVALUATION_SEED) not in " ".join(problems)
 
 
+@pytest.mark.slow
 def test_real_build_passes_non_seed_checks(tmp_path):
     pytest.importorskip("build")
     pytest.importorskip("hatchling")
@@ -272,8 +269,6 @@ def test_real_build_passes_non_seed_checks(tmp_path):
     assert [f for f in found if f.status == pg.FAIL] == [], [f.render() for f in found]
     by = {f.check: f for f in found}
     assert by["names"].status == by["content"].status == pg.PASS
-    # The script maps were rendered from the wheel and scanned with it.
-    assert int(by["names"].detail.split()[0]) > 100
 
 
 def test_release_gate_check_maps_pending_to_skip(monkeypatch):

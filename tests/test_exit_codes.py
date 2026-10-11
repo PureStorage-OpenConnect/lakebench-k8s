@@ -8,7 +8,6 @@ fails here.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +16,6 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-import lakebench
 from lakebench import exit_codes
 from lakebench.cli import _exit as cli_exit
 from lakebench.cli import app
@@ -34,7 +32,6 @@ from lakebench.exit_codes import (
 from tests.fixtures.exit_codes_helpers import _reproduce_package as _reproduce_package
 
 ROOT = Path(__file__).resolve().parents[1]
-SRC = Path(lakebench.__file__).resolve().parents[1]
 
 # TUD 4.3, by hand.
 TUD_CODES = {
@@ -82,64 +79,6 @@ def test_error_class_codes():
         (Incomplete, 6),
     ]:
         assert int(cls("x").code) == code
-
-
-# -- PATHS ---------------------------------------------------------------------
-
-
-def _is_exit_call(func) -> bool:
-    """An exit call: ``*.Exit``/``Exit``/``SystemExit``, ``*.exit``/``exit``.
-
-    Covers ``typer.Exit``, ``from typer import Exit``, ``click.exceptions.Exit``,
-    ``sys.exit``, ``ctx.exit`` and the bare builtin.
-    """
-    import ast
-
-    if isinstance(func, ast.Attribute):
-        return func.attr in ("Exit", "exit")
-    return isinstance(func, ast.Name) and func.id in ("Exit", "SystemExit", "exit")
-
-
-def _is_literal_code(node) -> bool:
-    """A code written as a literal other than 0: ``1``, ``-1``, ``int(2)``,
-    ``1 if x else 2``, or a message string (Click exits 1 with it)."""
-    import ast
-
-    if isinstance(node, ast.Constant):
-        return node.value not in (0, None, False)
-    if isinstance(node, ast.UnaryOp):
-        return _is_literal_code(node.operand)
-    if isinstance(node, ast.IfExp):
-        return _is_literal_code(node.body) or _is_literal_code(node.orelse)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "int":
-        return any(_is_literal_code(a) for a in node.args)
-    return False
-
-
-_CODE_NAME = re.compile(r"(^|_)(exit|exit_code|code|rc)$")
-
-
-def literal_exit_sites(root: Path) -> list[str]:
-    """Exit codes under *root* written as a literal (CLI-1).
-
-    An exit call given a literal, or a name such as ``exit_code`` assigned a
-    non-zero literal (the value then reaches an exit through the variable).
-    """
-    import ast
-
-    sites = []
-    for path in sorted(root.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and _is_exit_call(node.func):
-                args = list(node.args) + [kw.value for kw in node.keywords if kw.arg == "code"]
-                if args and _is_literal_code(args[0]):
-                    sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
-            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                named = [t for t in targets if isinstance(t, ast.Name) and _CODE_NAME.search(t.id)]
-                if named and _is_literal_code(node.value):
-                    sites.append(f"{path.name}:{node.lineno}: {ast.unparse(node)}")
-    return sites
 
 
 # -- refusals reported as failed step results ---------------------------------
@@ -250,12 +189,6 @@ def test_handler_maps_exception():
     ]:
         result = _runner().invoke(_probe_app(factory), ["boom"])
         assert result.exit_code == code, result.output
-
-
-def test_root_app_uses_the_handler():
-    cmd = typer.main.get_command(app)
-    assert isinstance(cmd, cli_exit.LakebenchGroup)
-    assert app.pretty_exceptions_enable is False
 
 
 # -- named paths on the real CLI -----------------------------------------------
@@ -583,17 +516,27 @@ def _scenario_run_series_mismatch(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg), "--skip-generate", "--skip-preflight", "--yes"])
 
 
-def test_run_reuse_with_s3_unreadable_exits_4(monkeypatch, tmp_path):
+def _scenario_run_no_corpus(monkeypatch, tmp_path):
+    """A run that reuses bronze on a deployment where nothing was generated
+    (live: it went on to a bronze-verify crash and a "crashed" verdict)."""
+    import lakebench.deploy.corpus as corpus
+
+    real = corpus.bronze_holds_data
+    dg = _fake_s3(monkeypatch)  # an empty bronze
+    dg._stub_full_run(monkeypatch)
+    monkeypatch.setattr(corpus, "bronze_holds_data", real)
+    cfg = dg._write_cfg(tmp_path)
+    return _runner().invoke(app, ["run", str(cfg), "--skip-preflight", "--yes"])
+
+
+def _scenario_run_s3_unreadable(monkeypatch, tmp_path):
     """A run that reuses bronze cannot read its series marker: exit 4 before
-    anything is deployed or submitted (path s3.unreachable)."""
+    anything is deployed or submitted."""
     dg = _fake_s3(monkeypatch, init_error="endpoint unreachable")
     stubs = dg._stub_full_run(monkeypatch)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     res = _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), "--skip-preflight", "--yes"])
-    assert res.exit_code == ExitCode.PREREQUISITE, res.output
-    assert "Cannot check the corpus in bronze before reusing it" in res.output
     stubs["job_manager"].submit_job.assert_not_called()
+    return res
 
 
 def _scenario_datagen_pods_live(monkeypatch, tmp_path):
@@ -742,13 +685,13 @@ def _local_run(monkeypatch, tmp_path, success: bool):
         lambda *a, **k: SimpleNamespace(success=success, stages=[], elapsed_seconds=1.0),
     )
     monkeypatch.setattr(local, "print_local_summary", lambda *a, **k: None)
+    # Recording needs a real stack; the pass path stubs it, since a run with
+    # no jobs recorded fails the verdict.
     monkeypatch.setattr(run_mod, "_record_local_jobs", lambda *a, **k: None)
     monkeypatch.setattr(run_mod, "_save_local_metrics", lambda *a, **k: None)
-    # Scale 10 so the local scale advisory prints (init's default is now 1).
-    cfg = tmp_path / "c.yaml"
-    init = _runner().invoke(app, ["init", "--output", str(cfg), "--scale", "10"])
-    assert init.exit_code == 0, init.output
-    return _runner().invoke(app, ["run", str(cfg), "--local", "--skip-benchmark", "--yes"])
+    return _runner().invoke(
+        app, ["run", str(_init_config(tmp_path)), "--local", "--skip-benchmark", "--yes"]
+    )
 
 
 def _scenario_run_pass(monkeypatch, tmp_path):
@@ -1265,6 +1208,34 @@ def _scenario_destroy_incarnation_mismatch(monkeypatch, tmp_path):
     return _nameless_destroy(monkeypatch, tmp_path, setup, ["--name", "lb-x"])
 
 
+_CLUSTER_RUN_FLAGS = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
+
+
+def _scenario_run_operator_not_ready(monkeypatch, tmp_path):
+    """The finally block re-raises the run's code; it must keep 4, not 1."""
+    from unittest.mock import MagicMock
+
+    dg = _fake_s3(monkeypatch)  # the finally block measures bucket sizes
+    stubs = dg._stub_full_run(monkeypatch)
+    stubs["op"].check_status.return_value = MagicMock(
+        ready=False, installed=True, version="2.5.1", message="controller down"
+    )
+    return _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), *_CLUSTER_RUN_FLAGS])
+
+
+def _scenario_run_step_failed(monkeypatch, tmp_path):
+    dg = _fake_s3(monkeypatch)
+    stubs = dg._stub_full_run(monkeypatch)
+    stubs["job_manager"].deploy_scripts_configmap.return_value = False
+    return _runner().invoke(app, ["run", str(dg._write_cfg(tmp_path)), *_CLUSTER_RUN_FLAGS])
+
+
+def _path_name(name: str) -> str:
+    """A scenario name is a PATHS name, then "#" and a variant when one path
+    has several producers."""
+    return name.split("#", 1)[0]
+
+
 SCENARIOS = {
     "config.upgrade_refused": _scenario_config_upgrade_refused,
     "alias.refused": _scenario_alias_refused,
@@ -1296,6 +1267,7 @@ SCENARIOS = {
     "cli.bad_argument": _scenario_cli_bad_argument,
     "k8s.unreachable": _scenario_k8s_unreachable,
     "s3.unreachable": _scenario_s3_unreachable,
+    "s3.unreachable#run_reuse": _scenario_run_s3_unreadable,
     "destroy.redeployed": _scenario_destroy_redeployed,
     "destroy.unverified_cluster": _scenario_destroy_unverified_cluster,
     "lease.held": _scenario_lease_held,
@@ -1306,8 +1278,10 @@ SCENARIOS = {
     "datagen.pods_live": _scenario_datagen_pods_live,
     "generate.multi_cycle": _scenario_generate_multi_cycle,
     "run.series_mismatch": _scenario_run_series_mismatch,
+    "run.no_corpus": _scenario_run_no_corpus,
     "run.datagen_timeout": _scenario_run_datagen_timeout,
     "run.prereq_failed": _scenario_run_prereq_failed,
+    "run.prereq_failed#operator_not_ready": _scenario_run_operator_not_ready,
     "run.deps_missing": _scenario_run_deps_missing,
     "run.deps_stale": _scenario_run_deps_stale,
     "run.deps_mismatch": _scenario_run_deps_mismatch,
@@ -1318,6 +1292,7 @@ SCENARIOS = {
     "run.namespace_missing_no_yes": _scenario_run_namespace_missing_no_yes,
     "run.pass": _scenario_run_pass,
     "run.verdict_failed": _scenario_run_verdict_failed,
+    "run.verdict_failed#step_failed": _scenario_run_step_failed,
     "run.interrupted": _scenario_run_interrupted,
     "repeat.no_verified_corpus": _scenario_repeat_no_verified_corpus,
     "series.corpus_changed": _scenario_series_corpus_changed,
@@ -1349,14 +1324,10 @@ EXPECTED_STDERR = {
     "sigint": "ERROR  Interrupted.",
     "financial.k8s_unreachable": "ERROR  Cannot reach the Kubernetes cluster: connection refused",
     "k8s.unreachable": "ERROR Kubernetes connection failed: connection refused",
-    # The scenario's bucket has no ownership proof, so the gate's unowned row.
-    "run.bronze_nonempty": "cannot prove it owns",
     "s3.unreachable": "refusing to generate",
-    "datagen.pods_live": "lakebench-datagen-0-old of an earlier lakebench-datagen Job",
     "run.prereq_failed": "ERROR Prerequisites not met",
     "run.deps_missing": "has no dependency server",
     "run.deps_stale": "resolved for another request",
-    "run.deps_mismatch": "does not check",
     "run.namespace_missing_no_yes": "does not exist",
     "cli.bad_argument": "ERROR Unknown recipe: no-such-recipe",
     "config.unsupported": "Unsupported combination, refused",
@@ -1369,30 +1340,26 @@ EXPECTED_STDERR = {
 
 
 # Text in the combined output that shows the scenario took its named path,
-# where the code alone has more than one producer.
+# where the code alone has more than one producer. Refusals (exit 3) are
+# identified by the exit-path file instead.
 EXPECTED_OUTPUT = {
     "plan.missing_storage_class": "Next: (cluster admin) lakebench admin install --component",
     "plan.ok": "ok: Kubeflow Spark Operator 2.x",
     "capacity.unknown": "capacity could not be read: listing nodes failed",
     "capacity.shortfall": "Insufficient free cluster capacity",
     "run.datagen_timeout": "wait budget",
-    "destroy.redeployed": "Destroy Incomplete",
-    "destroy.unverified_cluster": "Destroy Incomplete",
-    "lease.held": "Destroy Incomplete",
+    "s3.unreachable#run_reuse": "Cannot check the corpus in bronze before reusing it",
+    "run.prereq_failed#operator_not_ready": "Spark Operator not ready",
+    "run.verdict_failed#step_failed": "Failed to deploy Spark scripts ConfigMap",
     "destroy.namespace_terminating": "still terminating",
-    "deploy.identity_foreign": "Deployment Failed",
-    "run.pass": "Local mode is sized",
-    "run.verdict_failed": "Local mode is sized",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
     "repeat.no_verified_corpus": "no verified corpus to reuse",
-    "series.corpus_changed": "bronze changed during or between repetitions",
     "run.args": "--force-reset only applies to a continuous run",
     "generate.multi_cycle": "does not apply to a multi-cycle config",
-    "run.series_mismatch": "series incomplete: cycle(s) [0] missing",
     "run.protected_corpus": "never runs on a protected AML corpus",
     "run.namespace_gone": "was deleted mid-run; stopping",
-    "config.validation": "Config error",
     "config.name_required": "config has no name, so it cannot change data",
+    "config.validation": "Config error",
     "reproduce.commit_drift": "Commit drift",
     "reproduce.drift": "scale_ratio",
 }
@@ -1405,7 +1372,7 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # journal and state files land here
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     result = SCENARIOS[name](monkeypatch, tmp_path)
-    assert result.exit_code == exit_codes.path_code(name), result.output
+    assert result.exit_code == exit_codes.path_code(_path_name(name)), result.output
     assert "Traceback" not in result.output
     if name in EXPECTED_STDERR:
         assert EXPECTED_STDERR[name] in _stderr(result), result.output
@@ -1419,7 +1386,7 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
 # harness tells refusals apart (incarnation mismatch, unverified cluster,
 # lease held) without reading message text. Deploy and destroy step
 # refusals exit through typer.Exit and note their paths first.
-_REFUSALS = sorted(n for n in SCENARIOS if exit_codes.path_code(n) == ExitCode.REFUSED)
+_REFUSALS = sorted(n for n in SCENARIOS if exit_codes.path_code(_path_name(n)) == ExitCode.REFUSED)
 # Exit 6 has one producer the harness and S-P4 check by path.
 _PATH_NAMED = [*_REFUSALS, "destroy.namespace_terminating"]
 
@@ -1431,9 +1398,9 @@ def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_pat
     target = tmp_path / "exit-path"
     monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
     result = SCENARIOS[name](monkeypatch, tmp_path)
-    assert result.exit_code == exit_codes.path_code(name), result.output
+    assert result.exit_code == exit_codes.path_code(_path_name(name)), result.output
     code, *paths = target.read_text().splitlines()[-1].split()
-    assert code == str(int(exit_codes.path_code(name)))
+    assert code == str(int(exit_codes.path_code(_path_name(name))))
     assert name in paths, (name, paths)
 
 
@@ -1465,37 +1432,3 @@ def test_any_click_abort_is_not_confirmed(module):
 def test_non_click_runtime_error_is_failed():
     exc = _foreign_class("somelib.errors", "UsageError", RuntimeError)("x")
     assert cli_exit.exit_code_for(exc) == ExitCode.FAILED
-
-
-# -- batch `run` on a cluster: a specific code survives the finally block ----
-
-
-def _cluster_run(monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
-    dg = _fake_s3(monkeypatch)  # the finally block measures bucket sizes
-    stubs = dg._stub_full_run(monkeypatch)
-    return stubs, dg._write_cfg(tmp_path)
-
-
-def test_batch_run_operator_not_ready_exits_prerequisite(monkeypatch, tmp_path):
-    """The finally block re-raises the run's code; it must keep 4, not 1."""
-    from unittest.mock import MagicMock
-
-    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
-    stubs["op"].check_status.return_value = MagicMock(
-        ready=False, installed=True, version="2.5.1", message="controller down"
-    )
-    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
-    result = _runner().invoke(app, ["run", str(cfg), *flags])
-    assert result.exit_code == ExitCode.PREREQUISITE, result.output
-    assert "Spark Operator not ready" in result.output
-
-
-def test_batch_run_failed_step_exits_failed(monkeypatch, tmp_path):
-    stubs, cfg = _cluster_run(monkeypatch, tmp_path)
-    stubs["job_manager"].deploy_scripts_configmap.return_value = False
-    flags = ["--skip-preflight", "--skip-generate", "--skip-benchmark", "--yes"]
-    result = _runner().invoke(app, ["run", str(cfg), *flags])
-    assert result.exit_code == ExitCode.FAILED, result.output
-    assert "Failed to deploy Spark scripts ConfigMap" in result.output

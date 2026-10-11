@@ -24,10 +24,9 @@ import json
 import os
 import sys
 import threading
-import time
 
-from _foreach_batch import inside_foreach_batch  # noqa: E402
-from c360_stream_scenarios import bronze_df  # noqa: E402
+from _foreach_batch import inside_foreach_batch
+from c360_stream_scenarios import bronze_df
 
 
 def _session(jars, work):
@@ -117,14 +116,6 @@ def _run_version_race(spark, work, batches=10):
     by more than one commit), where a before/after-version bracket around a
     write would count them; the I8 read of the write's own commit
     (userMetadata tag) does not.
-
-    The stand-in used to be ALTER TABLE SET TBLPROPERTIES every 20 ms. Every
-    Delta metadata change conflicts with every concurrent write by design
-    (MetadataChangedException), and nothing Lakebench runs during a window
-    changes silver's metadata (maintenance is VACUUM and OPTIMIZE), so that
-    churn could not be survived and measured nothing the product does. A
-    real metadata conflict is retried; that is
-    ``test_delta_stream_conflict_retry_spark.py``.
     """
     import silver_stream_delta as ss
 
@@ -137,6 +128,7 @@ def _run_version_race(spark, work, batches=10):
     other = "qother"
 
     stop_ev = threading.Event()
+    landed = threading.Event()  # set after each churn commit
     churn = {"optimize": 0, "foreign_appends": 0, "errors": []}
 
     def _own_rows():
@@ -157,7 +149,7 @@ def _run_version_race(spark, work, batches=10):
             except Exception as e:  # noqa: BLE001 -- reported, the test asserts none
                 churn["errors"].append(f"{type(e).__name__}: {str(e)[:300]}")
             i += 1
-            time.sleep(0.05)
+            landed.set()
 
     # Seed the table before the churn starts.
     df0 = bronze_df(spark, 5, start=0)
@@ -173,8 +165,11 @@ def _run_version_race(spark, work, batches=10):
     try:
         for bid in range(1, batches):
             df = bronze_df(spark, 5, start=1000 + bid * 5)
+            landed.clear()
             with inside_foreach_batch(spark, bid, qid):
                 n = ss.write_silver_batch(df, bid, dtbl, f"file://{work}/")
+            # At least one churn commit lands between consecutive batches.
+            landed.wait(timeout=60)
             returns.append(int(n))
             own_rows.append(_own_rows())
             versions.append(int(spark.sql(f"DESCRIBE HISTORY {dtbl} LIMIT 1").collect()[0][0]))

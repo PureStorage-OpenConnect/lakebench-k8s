@@ -103,7 +103,7 @@ build = [
 ]
 
 [project.scripts]
-lakebench = "lakebench.cli:app"
+lakebench = "lakebench.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/PureStorage-OpenConnect/lakebench-k8s"

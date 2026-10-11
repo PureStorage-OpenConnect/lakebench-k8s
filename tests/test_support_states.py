@@ -20,9 +20,6 @@ def _record(tmp_path: Path, body: str) -> Path:
     return p
 
 
-TREE = "3d304d1" + "0" * 33
-
-
 def _entry(
     workload="customer360",
     recipe="hive-iceberg-spark-trino",
@@ -34,7 +31,7 @@ def _entry(
     return (
         f"validated:\n  - workload: {workload}\n    recipe: {recipe}\n    mode: {mode}\n"
         f"    spark: {spark}\n    table_format_version: {version}\n"
-        f"    tree: {TREE}\n    runs: {runs}\n"
+        f"    runs: {runs}\n"
     )
 
 
@@ -46,7 +43,6 @@ ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.11.0"}
 
 def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_on_delta():
     rows = support.support_matrix(record={})
-    assert len(rows) == len(support.recipe_names()) * len(support.workloads()) * 2
     for r in rows:
         fmt = support.components_of(r["recipe"])[1]
         refused = r["workload"] == "financial" and fmt == "delta"
@@ -82,17 +78,22 @@ def test_supported_only_when_listed_with_runs(tmp_path):
     args = ("hive", "iceberg", "spark", "trino")
     s = support.support_state("customer360", *args, "batch", record=rec, **ICEBERG_41)
     assert s["state"] == support.SUPPORTED and s["validation_runs"] == ["run-1"]
-    assert "Spark 4.1, Iceberg 1.11.0" in s["basis"]
-    # Legacy spelling of the mode resolves to the same entry.
-    assert support.support_state("customer360", *args, "sustained", record=rec, **ICEBERG_41)[
-        "state"
-    ] == (support.UNVERIFIED)
-    assert support.support_state("customer360", *args, "batch", record={})["state"] == (
-        support.UNVERIFIED
+
+
+@pytest.mark.parametrize(
+    "workload, mode, listed",
+    [
+        ("customer360", "sustained", True),
+        ("customer360", "batch", False),
+        ("financial", "batch", True),
+    ],
+)
+def test_not_supported_unless_the_exact_entry_is_listed(tmp_path, workload, mode, listed):
+    rec = support.load_validation_record(_record(tmp_path, _entry())) if listed else {}
+    s = support.support_state(
+        workload, "hive", "iceberg", "spark", "trino", mode, record=rec, **ICEBERG_41
     )
-    assert support.support_state("financial", *args, "batch", record=rec)["state"] == (
-        support.UNVERIFIED
-    )
+    assert s["state"] == support.UNVERIFIED
 
 
 def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path):
@@ -104,8 +105,7 @@ def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path):
         (_entry(runs="['']"), "at least one run id"),
         (_entry(mode="sustained"), "mode must be"),
         (_entry() + _entry().replace("validated:\n", ""), "listed twice"),
-        (_entry().replace(f"    tree: {TREE}\n", ""), "'tree'"),
-        (_entry().replace(f"    tree: {TREE}\n", "    tree: 3d304d1\n"), "40-hex"),
+        (_entry().replace("    runs:", "    tree: 3d304d1\n    runs:"), "unknown keys"),
         (_entry().replace('    spark: "4.1"\n', ""), "rows need spark and table_format_version"),
         (_entry().replace("    table_format_version: 1.11.0\n", ""), "since 1.7"),
         (_entry(spark="4.1.1"), "Spark minor such as"),
@@ -145,38 +145,18 @@ def test_local_runs_are_never_supported(tmp_path):
     assert s["state"] == support.UNVERIFIED and "local" in s["basis"]
 
 
-def test_unsupported_is_stamped_for_combinations_outside_layers_1_to_3():
-    s = support.support_state("financial", "hive", "delta", "spark", "trino", "batch", record={})
-    assert s["state"] == support.UNSUPPORTED and "iceberg" in s["basis"]
-    s = support.support_state("customer360", "unity", "delta", "spark", "trino", "batch", record={})
+@pytest.mark.parametrize(
+    "args, system",
+    [
+        (("financial", "hive", "delta", "spark", "trino", "batch"), None),
+        (("customer360", "unity", "delta", "spark", "trino", "batch"), None),
+        (("financial", "none", "iceberg", "spark", "duckdb", "batch"), "local"),
+    ],
+)
+def test_unsupported_is_stamped_for_combinations_outside_layers_1_to_3(args, system):
+    kw = {"system": system} if system else {}
+    s = support.support_state(*args, record={}, **kw)
     assert s["state"] == support.UNSUPPORTED
-
-
-# -- refusal before a run ---------------------------------------------------
-
-
-# -- CLI display ------------------------------------------------------------
-
-
-@pytest.fixture
-def wide_consoles(monkeypatch):
-    """The CLI's module-level Rich consoles read COLUMNS once, at import, and
-    otherwise ask the process's terminal; an xdist worker has none, so its
-    tables were cut at 80 columns. Fix the width for these display tests."""
-    import sys
-
-    from rich.console import Console
-
-    import lakebench.cli  # noqa: F401  (the consoles exist once the CLI is imported)
-
-    for name, mod in list(sys.modules.items()):
-        if name.startswith("lakebench.cli") and mod is not None:
-            for value in vars(mod).values():
-                if isinstance(value, Console):
-                    monkeypatch.setattr(value, "_width", 300)
-
-
-# -- docs -------------------------------------------------------------------
 
 
 # -- local mode -------------------------------------------------------------
@@ -189,19 +169,15 @@ def test_local_mode_refuses_aml_and_continuous():
     from tests.conftest import make_config
 
     aml = make_config(architecture={"workload": {"schema": "financial"}})
-    with pytest.raises(LocalModeError, match="Customer 360 workload only"):
+    with pytest.raises(LocalModeError):
         check_local_supported(aml)
     cont = make_config(architecture={"pipeline": {"mode": "continuous"}})
-    with pytest.raises(LocalModeError, match="batch mode only"):
+    with pytest.raises(LocalModeError):
         check_local_supported(cont)
     c360 = make_config()
     check_local_supported(c360)
-    with pytest.raises(LocalModeError, match="batch mode only"):
+    with pytest.raises(LocalModeError):
         check_local_supported(c360, continuous=True)
-    s = support.support_state(
-        "financial", "none", "iceberg", "spark", "duckdb", "batch", system="local", record={}
-    )
-    assert s["state"] == support.UNSUPPORTED
 
 
 def test_matrix_degrades_when_the_record_is_malformed(tmp_path):

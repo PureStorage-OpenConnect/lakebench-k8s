@@ -11,13 +11,16 @@ Runs two micro-batches:
 * batch 1: one payment at hour 0 (EARLIER than batch 0's row), same
   iban pair.
 
-Asserts:
-* silver.account_statements gets rows from both batches;
-* ``_maintain_statements`` returns a positive late_iban_count on batch 1;
-* the per-batch `silver_statements_parity_mode: arrival_order_running_balance`
-  and `silver_statements_late_arrivals_this_batch: <N>` log lines are
-  emitted for batch 1;
-* batch 0 (no late arrival) emits `strict_monotone` and zero.
+Without ``LB_SILVER_STATEMENTS_STRICT_PARITY``:
+* ``_maintain_statements`` reports exactly 2 late ibans on batch 1 and 0 on
+  batch 0;
+* batch 1 emits `silver_statements_parity_mode: arrival_order_running_balance`
+  and `silver_statements_late_arrivals_this_batch: 2`; batch 0 emits
+  `strict_monotone` and zero.
+
+With ``LB_SILVER_STATEMENTS_STRICT_PARITY=1`` batch 0 commits cleanly and
+batch 1 raises ``SilverAbort`` instead of publishing an arrival-order
+running_balance as batch-mode parity (invariant 2).
 """
 
 from __future__ import annotations
@@ -34,25 +37,31 @@ pytest.importorskip("pyspark")
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
-def test_late_arrival_produces_arrival_order_label_in_a_fresh_jvm(spark_subprocess, spark_jars):
-    res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
+_STRICT_ENV = "LB_SILVER_STATEMENTS_STRICT_PARITY"
+
+
+@pytest.mark.parametrize("strict", [False, True], ids=["labelled", "strict"])
+def test_late_arrival_in_a_fresh_jvm(spark_subprocess, spark_jars, strict):
+    res = spark_subprocess(
+        __file__,
+        spark_jars.classpath,
+        env={_STRICT_ENV: "1" if strict else "0"},
+        timeout=600,
+    )
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Batch 0 sees no prior state -> zero late arrivals (fresh table).
+    # Batch 0 sees no prior state: zero late arrivals, strict-monotone label.
     assert out["batch0_late_count"] == 0, out
-    # Batch 1's earlier-book_ts rows are late w.r.t. batch 0's committed
-    # book_ts for both IBANs -> at least 1 iban late (both, in fact).
-    assert out["batch1_late_count"] >= 1, out
-    # Per-batch label lines were emitted through common.log (parseable by
-    # collector.parse_streaming_logs).
     assert "silver_statements_parity_mode: strict_monotone" in out["log_lines_batch0"], out
+    assert "silver_statements_late_arrivals_this_batch: 0" in out["log_lines_batch0"], out
+    assert out["batch1_raised_silver_abort"] is strict, out
+    if strict:
+        return
+    # Batch 1's earlier book_ts is late for both IBANs.
+    assert out["batch1_late_count"] == 2, out
     assert (
         "silver_statements_parity_mode: arrival_order_running_balance" in out["log_lines_batch1"]
     ), out
-    assert "silver_statements_late_arrivals_this_batch: 0" in out["log_lines_batch0"], out
-    assert (
-        "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch1"]
-        or "silver_statements_late_arrivals_this_batch: 1" in out["log_lines_batch1"]
-    ), out
+    assert "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch1"], out
 
 
 def _run(jars):
@@ -81,6 +90,7 @@ def _run(jars):
         # matches. common.log prints to stdout via `print`; monkey-patch
         # via the module the stream imports it from.
         import common
+        from common import SilverAbort
 
         captured: list[str] = []
         real_log = common.log
@@ -103,16 +113,22 @@ def _run(jars):
         # IBANs are late.
         b1_rows = [("B1T0", BASE_TS + timedelta(hours=0), "GB01", "US02", "50.00")]
         captured_len_before_b1 = len(captured)
-        b1_result = foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, b1_rows), 1)
+        raised = False
+        b1_result = None
+        try:
+            b1_result = foreach_batch_harness(
+                spark, ss._merge_batch, bronze_batch(spark, b1_rows), 1
+            )
+        except SilverAbort:
+            raised = True
         b1_lines = captured[captured_len_before_b1:]
 
         common.log = real_log  # type: ignore[assignment]
 
         out = {
-            "batch0_result": list(b0_result),
-            "batch1_result": list(b1_result),
             "batch0_late_count": int(b0_result[1]),
-            "batch1_late_count": int(b1_result[1]),
+            "batch1_late_count": None if raised else int(b1_result[1]),
+            "batch1_raised_silver_abort": raised,
             "log_lines_batch0": "\n".join(b0_lines),
             "log_lines_batch1": "\n".join(b1_lines),
         }

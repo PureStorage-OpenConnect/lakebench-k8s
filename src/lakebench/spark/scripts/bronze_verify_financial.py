@@ -451,8 +451,10 @@ def refuse_protected_corpus(spark) -> None:
 
 def main() -> None:
     from pyspark.sql import SparkSession
-    from pyspark.sql.functions import col
+    from pyspark.sql.functions import col, count_distinct, lit
+    from pyspark.sql.functions import count as count_
     from pyspark.sql.functions import max as max_
+    from pyspark.sql.functions import sum as sum_
 
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
     # First, before any namespace, table, ConfigMap or bronze read.
@@ -487,8 +489,28 @@ def main() -> None:
         spark.stop()
         raise SystemExit(1) from e
 
-    row_count = df.count()
     col_count = len(df.columns)
+    missing = [c for c in REQUIRED_FLAT_COLS if c not in df.columns]
+    if missing:
+        log(f"ERROR: pacs.008 dataset missing required columns: {missing}")
+        spark.stop()
+        raise SystemExit(2)
+
+    # Every summary value in one pass over the raw parquet: row count, NULL
+    # counts, partition days and the newest settlement date.
+    def _nulls(c: str):
+        return sum_(col(c).isNull().cast("long")).alias(f"null_{c}")
+
+    summary = df.agg(
+        count_(lit(1)).alias("rows"),
+        _nulls("uetr"),
+        _nulls("txn_id"),
+        _nulls("msg_id"),
+        _nulls("intr_bk_sttlm_dt"),
+        count_distinct(col("intr_bk_sttlm_dt")).alias("days"),
+        max_(col("intr_bk_sttlm_dt")).alias("newest"),
+    ).collect()[0]
+    row_count = int(summary["rows"])
 
     log("=" * 60)
     log("DATA SUMMARY")
@@ -496,22 +518,16 @@ def main() -> None:
     log(f"Rows: {row_count:,}")
     log(f"Columns: {col_count}")
 
-    missing = [c for c in REQUIRED_FLAT_COLS if c not in df.columns]
-    if missing:
-        log(f"ERROR: pacs.008 dataset missing required columns: {missing}")
-        spark.stop()
-        raise SystemExit(2)
-
     # Non-null invariants. `intr_bk_sttlm_dt` is required (partition key of
     # the target Iceberg table); one NULL row rejects the whole CTAS with
     # a cryptic partition-transform error. Fail loud here rather than there.
     null_counts: dict[str, int] = {}
     for c in ("uetr", "txn_id", "msg_id"):
-        n = df.filter(col(c).isNull()).count()
+        n = int(summary[f"null_{c}"] or 0)
         null_counts[c] = n
         if n:
             log(f"WARNING: {n} rows have NULL {c}")
-    n_null_sttlm_dt = df.filter(col("intr_bk_sttlm_dt").isNull()).count()
+    n_null_sttlm_dt = int(summary["null_intr_bk_sttlm_dt"] or 0)
     if n_null_sttlm_dt:
         log(
             f"ERROR: {n_null_sttlm_dt} rows have NULL intr_bk_sttlm_dt; "
@@ -520,19 +536,15 @@ def main() -> None:
         spark.stop()
         raise SystemExit(3)
 
-    partition_days = df.select("intr_bk_sttlm_dt").distinct().count()
+    partition_days = int(summary["days"])
     log(f"Partition days present: {partition_days}")
 
     # C2 (silver-plan): compute the bronze-side data clock (newest settlement
     # date) and write it to the ``lakebench-silver-state`` ConfigMap so
     # job.py._build_env_vars can resolve LB_DATA_CLOCK for downstream silver
     # jobs. ``intr_bk_sttlm_dt`` is the partition column and by definition
-    # the newest event date; a single agg pass, no extra scan.
-    try:
-        _ts_max = df.agg(max_(col("intr_bk_sttlm_dt")).alias("m")).collect()[0]["m"]
-    except Exception as e:  # noqa: BLE001
-        log(f"bronze_data_clock: skipped ({one_line(e)})")
-        _ts_max = None
+    # the newest event date, from the summary pass above.
+    _ts_max = summary["newest"]
     write_bronze_data_clock(env("LAKEBENCH_NAMESPACE", ""), _ts_max)
 
     source_bytes = None

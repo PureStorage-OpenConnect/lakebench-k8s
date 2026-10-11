@@ -1,5 +1,5 @@
-"""The capacity check and the plan count the driver the manifest builds
-(LB-244): a platform.compute.spark driver override and the Spark 3 driver
+"""The capacity check and the plan count the driver the manifest builds:
+a platform.compute.spark driver override and the Spark 3 driver
 size reach compute_peak_requirements(config=...)."""
 
 from __future__ import annotations
@@ -101,25 +101,22 @@ def test_preflight_counts_the_driver_override():
     assert "570 GB pipeline" in (result.hint or "") + result.message
 
 
-def test_plan_counts_the_driver_override():
-    # config show, info and recommend read the one sizing plan.
-    from lakebench.config.sizing import plan_requirements
-
-    plan = plan_requirements(_config(driver_memory="64g"))
-    assert plan.spark.memory_gb == 570
-
-
 def test_unreadable_driver_memory_is_refused_for_run():
     for value in ["16Gi", "1.5g", "16 g", "lots", "16384", "0g", "\u0661\u0666g"]:
         with pytest.raises(ValueError, match="not a Spark memory size"):
             _config(driver_memory=value)
 
 
-def test_spark_sizes_load_and_count():
-    for value in ["16g", "16G", "16384m", "16gb", "16GB", "1t"]:
-        cfg = _config(driver_memory=value)
-        peak = compute_peak_requirements(1, "batch", config=cfg)
-        assert peak.memory_gb >= 480 + 16
+@pytest.mark.parametrize(
+    ("value", "gib"),
+    [("16g", 16), ("16G", 16), ("16384m", 16), ("16gb", 16), ("16GB", 16), ("1t", 1024)],
+)
+def test_spark_sizes_parse_to_the_driver_the_peak_counts(value, gib):
+    def peak_gb(v):
+        return compute_peak_requirements(1, "batch", config=_config(driver_memory=v)).memory_gb
+
+    want = (_driver_pod_bytes(f"{gib}g") - _driver_pod_bytes("16g")) / GIB
+    assert peak_gb(value) - peak_gb("16g") == pytest.approx(want, abs=1)
 
 
 def test_unreadable_driver_memory_drops_with_a_note_for_teardown(tmp_path):

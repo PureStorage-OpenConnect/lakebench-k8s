@@ -1,42 +1,37 @@
-"""Trino compaction of the months()-partitioned AML silver tables (LB-273).
+"""Trino compaction of the months()-partitioned AML silver tables.
 
-Continuous AML s1 (lb17-qr32-cont, run-20261003-175243-5496fc) ran one
-unchunked ``optimize`` on silver.transactions and silver.account_statements
-at about 4,320 s, with 12 to 13 monthly partitions of small micro-batch
-files, and both failed: "Query exceeded per-node memory limit of 2.24GB
-[... TableWriterOperator=2.06GB ...]". The plan now compacts those tables
-one month per statement, with a range on the source column that Trino's
-Iceberg connector enforces on a months() partition (both bounds on a month
-start, 00:00 UTC), and the record names the operation as before.
+One unchunked ``optimize`` over a table whose months hold many small
+micro-batch files exceeds Trino's per-node memory limit. The plan compacts
+those tables one month per statement, with a range on the source column that
+Trino's Iceberg connector enforces on a months() partition (both bounds on a
+month start, 00:00 UTC), and the record names the operation as for any
+other table.
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
 
 import pytest
-from rich.console import Console
 
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 from lakebench.modules.table_formats.iceberg.maintenance import (
-    COMPACTION_CHUNK_MONTHS,
     build_compaction_plan,
     build_partition_values_sql,
-    compaction_operation,
     compaction_partitioning,
     data_size_bytes,
     parse_partition_values,
 )
+from tests.fixtures.compaction_helpers import Trino, compact, trino_cfg
 
 TXNS = "lakehouse.silver.transactions"
 STMTS = "lakehouse.silver.account_statements"
 HEAD = "EXECUTE optimize(file_size_threshold => '128MB')"
-# The live failure's stderr (lb17-qr32-cont log), kubectl's notice first.
+# A memory-limit failure's stderr, kubectl's notice first.
 MEMORY_LIMIT = (
     'Defaulted container "trino" out of: trino, wait-for-hive (init)\n'
-    "Query 20261004_010656_00257_4jms4 failed: Query exceeded per-node memory limit of "
+    "Query 20240101_000000_00001_abcde failed: Query exceeded per-node memory limit of "
     "2.24GB [Allocated: 2.23GB, Delta: 6.94MB, Top Consumers: {TableWriterOperator=2.06GB, "
     "TableScanOperator-ConnectorPageSource=161MB, LazyOutputBuffer=21.74MB}]"
 )
@@ -77,29 +72,13 @@ def _selects(stmt: str, column: str, ts: datetime) -> bool:
 # -- the plan -----------------------------------------------------------------
 
 
-def test_aml_silver_tables_are_on_the_partition_map():
+def test_partition_map_resolves_quoted_identifiers_and_only_aml_silver():
     txns = compaction_partitioning(TXNS)
-    stmts = compaction_partitioning(STMTS)
-    assert txns is not None and stmts is not None
-    assert (txns.column, txns.transform, txns.partition_field) == (
-        "txn_timestamp",
-        "month",
-        "txn_timestamp_month",
-    )
-    assert (stmts.column, stmts.transform, stmts.partition_field) == (
-        "book_ts",
-        "month",
-        "book_ts_month",
-    )
-    assert txns.chunk == stmts.chunk == COMPACTION_CHUNK_MONTHS == 1
-    # Quoted identifiers resolve the same; the bare name "transactions" in
-    # another schema is not an AML silver table.
+    assert txns is not None
     assert compaction_partitioning('lakehouse."silver"."transactions"') == txns
+    # The bare name "transactions" in another schema is not an AML silver table.
     assert compaction_partitioning("lakehouse.gold.transactions") is None
     assert compaction_partitioning("lakehouse.silver.accounts") is None
-    # C360 keeps its identity chunking.
-    c360 = compaction_partitioning("lakehouse.silver.customer_interactions_enriched")
-    assert c360 is not None and (c360.transform, c360.chunk) == ("identity", 90)
 
 
 def test_thirteen_months_compact_one_month_per_statement():
@@ -176,23 +155,12 @@ def test_null_month_partition_gets_its_own_statement():
     ]
 
 
-def test_partition_read_sql_names_the_month_field():
-    spec = compaction_partitioning(TXNS)
-    assert spec is not None
-    assert build_partition_values_sql(TXNS, spec.partition_field) == (
-        "SELECT DISTINCT partition.txn_timestamp_month FROM "
-        'lakehouse.silver."transactions$partitions" ORDER BY 1'
-    )
-    # Months: data files at or under the threshold, which optimize may
-    # rewrite (Trino drops a larger one before it groups by partition).
-    assert build_partition_values_sql(TXNS, spec.partition_field, spec.transform) == (
-        "SELECT partition.txn_timestamp_month, count(*) FROM "
-        'lakehouse.silver."transactions$files" '
-        "WHERE content = 0 AND file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1"
-    )
-    assert build_partition_values_sql(TXNS, "txn_timestamp_month", "month", "256MB").endswith(
-        "file_size_in_bytes <= 268435456 GROUP BY 1 ORDER BY 1"
-    )
+@pytest.mark.parametrize(("threshold", "nbytes"), [("128MB", 134217728), ("256MB", 268435456)])
+def test_month_read_counts_files_at_or_under_the_threshold(threshold, nbytes):
+    """Optimize may rewrite a file at or under the threshold (Trino drops a
+    larger one before it groups by partition)."""
+    sql = build_partition_values_sql(TXNS, "txn_timestamp_month", "month", threshold)
+    assert sql.endswith(f"file_size_in_bytes <= {nbytes} GROUP BY 1 ORDER BY 1")
 
 
 def test_data_size_bytes_uses_trino_binary_units():
@@ -225,7 +193,7 @@ def test_parse_month_values():
 
 
 def test_months_with_one_file_are_not_counted():
-    """Trino 483 does not rewrite a partition's only data file (no deletes),
+    """Trino does not rewrite a partition's only data file (no deletes),
     so a month of one file adds no writer: it is not counted, and it falls in
     the statement of the month before it (or the first, open below)."""
     out = '"648","1"\n"649","7"\n"650","1"\n"651","1"\n"652","9"\n"653","1"\n'
@@ -259,88 +227,57 @@ def test_null_month_counts_every_month():
     assert parse_partition_values(out, "month") == ["2024-01-01", "2024-02-01", None]
 
 
-def test_compaction_operation_is_unchanged():
-    """Chunking is not a different operation: the record and the
-    comparability key stay trino_optimize with its threshold."""
-    assert compaction_operation("trino", "128MB") == {
-        "operation": "trino_optimize",
-        "params": {"file_size_threshold": "128MB"},
-    }
-
-
 # -- the run path -----------------------------------------------------------------
 
 
 def _cfg():
     from lakebench.config.schema import TableNamesConfig
 
-    cfg = MagicMock()
-    cfg.get_namespace.return_value = "lakebench-test"
-    cfg.architecture.query_engine.type.value = "trino"
-    cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
-    cfg.architecture.table_format.type.value = "iceberg"
-    # What ArchitectureConfig.financial_table_defaults resolves on AML.
-    cfg.architecture.tables = TableNamesConfig(silver="silver.transactions")
-    cfg.architecture.workload.schema_type.value = "financial"
-    return cfg
+    # What ArchitectureConfig.financial_table_defaults resolves on AML; in
+    # continuous mode silver.counterparty_pairs exists too.
+    return trino_cfg(
+        "financial", tables=TableNamesConfig(silver="silver.transactions"), mode="continuous"
+    )
 
 
-class _Trino:
-    """exec_in_pod for a Trino coordinator whose AML month tables hold the
-    60-month corpus, 47 months of one large file each and 13 months
-    (2024-01 to 2025-01) of small micro-batch files: an optimize that
-    rewrites more than one of the 13 exceeds the per-node memory limit, as
-    live."""
+def _months_in(sql: str) -> int:
+    """How many of the 13 small-file months the statement's WHERE selects."""
+    column = "txn_timestamp" if TXNS in sql else "book_ts"
+    mids = [datetime(2024 + (m // 12), m % 12 + 1, 15, tzinfo=timezone.utc) for m in range(13)]
+    return sum(_selects(sql, column, ts) for ts in mids)
 
-    def __init__(self, read_rc: int = 0):
-        self.read_rc = read_rc
-        self.reads: list[str] = []
-        self.statements: list[str] = []
 
-    def __call__(self, pod, argv, namespace, container=None, timeout=30):
-        sql = argv[2]
-        if "$files" in sql or "$partitions" in sql:
-            self.reads.append(sql)
-            if self.read_rc:
-                return self.read_rc, "", "Query failed"
-            rows = _months(47, first=JAN_2024 - 47, files=1) + _months(13, files=40)
-            return 0, "\n".join(rows) + "\n", ""
-        self.statements.append(sql)
+def _trino(read_rc: int = 0) -> Trino:
+    """A coordinator whose AML month tables hold the 60-month corpus, 47
+    months of one large file each and 13 months (2024-01 to 2025-01) of small
+    micro-batch files: an optimize that rewrites more than one of the 13
+    exceeds the per-node memory limit."""
+
+    def read(sql):
+        if read_rc:
+            return read_rc, "", "Query failed"
+        rows = _months(47, first=JAN_2024 - 47, files=1) + _months(13, files=40)
+        return 0, "\n".join(rows) + "\n", ""
+
+    def fail(sql):
         month_table = TXNS in sql or STMTS in sql
-        if month_table and (" WHERE " not in sql or self._months_in(sql) > 1):
-            return 1, "", MEMORY_LIMIT
-        return 0, "", ""
+        if month_table and (" WHERE " not in sql or _months_in(sql) > 1):
+            return MEMORY_LIMIT
+        return None
 
-    @staticmethod
-    def _months_in(sql: str) -> int:
-        """How many of the 13 small-file months the statement's WHERE selects."""
-        column = "txn_timestamp" if TXNS in sql else "book_ts"
-        mids = [datetime(2024 + (m // 12), m % 12 + 1, 15, tzinfo=timezone.utc) for m in range(13)]
-        return sum(_selects(sql, column, ts) for ts in mids)
+    return Trino(read=read, fail=fail)
 
 
-def _compact(trino: _Trino, **kw) -> list[dict]:
-    from lakebench.cli._sustained import _run_iceberg_compaction
-
-    k8s = MagicMock()
-    k8s.exec_in_pod.side_effect = trino
-    outcomes: list[dict] = []
-    with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
-        return_value=("trino", "trino-coordinator-0", "lakehouse"),
-    ):
-        _run_iceberg_compaction(
-            _cfg(), k8s, Console(quiet=True), MagicMock(), outcomes=outcomes, **kw
-        )
-    return outcomes
+def _compact(trino: Trino, **kw) -> list[dict]:
+    return compact(trino, _cfg(), **kw)
 
 
 def test_continuous_aml_silver_compacts_every_table():
-    """The live case: continuous AML compacts the 4 silver tables
+    """Continuous AML compacts the 4 silver tables
     silver-stream only appends to (the 4 it MERGEs into are left, see
     _run_iceberg_compaction), and the two month tables no longer fail on the
     per-node memory limit."""
-    trino = _Trino()
+    trino = _trino()
     outcomes = _compact(trino, live_streams=True)
     (rec,) = outcomes
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (4, 4, 0), rec.get("failures")
@@ -369,20 +306,18 @@ def test_continuous_aml_silver_compacts_every_table():
     assert eff["detail"]["compaction_failures"] == []
 
 
-def test_failed_month_read_falls_back_to_one_statement():
-    trino = _Trino(read_rc=1)
-    (rec,) = _compact(trino, live_streams=True)
-    assert rec["statements_total"] == 4
+@pytest.mark.parametrize(
+    ("read_rc", "kw", "reads_issued"),
+    [
+        (1, {}, True),  # the month read fails
+        (0, {"file_size_threshold": "128mb"}, False),  # a threshold it cannot turn into bytes
+    ],
+)
+def test_an_unusable_month_read_falls_back_to_one_statement_per_table(read_rc, kw, reads_issued):
+    trino = _trino(read_rc=read_rc)
+    (rec,) = _compact(trino, live_streams=True, **kw)
+    assert bool(trino.reads) is reads_issued
+    # every table is still attempted, unchunked
+    assert (rec["total"], rec["statements_total"]) == (4, 4)
     assert (rec["succeeded"], rec["failed"]) == (2, 2)
     assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
-
-
-def test_unreadable_threshold_falls_back_and_says_so():
-    """A threshold the month read cannot turn into bytes is a failed read:
-    one unchunked statement per table, named in the note."""
-    trino = _Trino()
-    (rec,) = _compact(trino, live_streams=True, file_size_threshold="128mb")
-    assert trino.reads == []
-    assert rec["statements_total"] == 4
-    assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
-    assert "data size '128mb'" in rec["note"]

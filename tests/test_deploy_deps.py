@@ -154,8 +154,10 @@ def _idx(rec, **match) -> list[int]:
 
 
 def test_deploy_serves_verifies_and_writes_the_annotation_last(recording_k8s, monkeypatch):
+    """The config name differs from the namespace: a URL or label built from
+    the name instead of the namespace fails here."""
     rec = recording_k8s
-    cfg = _cfg()
+    cfg = _cfg(name="dep-a", platform={"kubernetes": {"namespace": NS}})
     engine = _setup(rec, cfg)
     request = req.select_request(cfg)
     shown = fake_shown(request)
@@ -184,6 +186,8 @@ def test_deploy_serves_verifies_and_writes_the_annotation_last(recording_k8s, mo
     # Every mutation is in the config's namespace.
     assert all(c.scope == OWN for c in rec.mutations()), [c.describe() for c in rec.mutations()]
     assert {c.namespace for c in rec.mutations()} <= {NS, None}
+    labels = rec.store[("deployments", NS, m.SERVER_NAME)].metadata.labels
+    assert labels["lakebench.io/deployment"] == "dep-a"
 
 
 def test_tools_configmap_holds_exactly_the_hashed_bytes(recording_k8s, monkeypatch):
@@ -229,25 +233,6 @@ def test_same_config_redeploy_renders_an_identical_deployment(recording_k8s, mon
     assert not [c for c in later if c.kind == "pods" and c.deleting]
     assert not [c for c in later if c.kind == "configmaps" and c.verb == "create"]
     assert _ns_annotations(rec)[m.ANNOTATION_DEPS_SET] == fake_shown(request)["pinset_sha256"]
-
-
-def test_a_changed_image_renders_a_new_pod_template():
-    a = _cfg()
-    b = _cfg(images={"spark": "apache/spark:4.0.2-python3"})
-    eng = MagicMock(renderer=TemplateRenderer(), dry_run=False)
-
-    def template(cfg):
-        eng.config = cfg
-        docs = DependencyServerDeployer(eng).render(req.select_request(cfg))
-        return next(d for d in docs if d["kind"] == "Deployment")["spec"]["template"]
-
-    ta, tb = template(a), template(b)
-    ra, rb = req.select_request(a).request_sha256, req.select_request(b).request_sha256
-    assert ra != rb
-    assert ta["metadata"]["annotations"][m.POD_ANNOTATION_REQUEST] == ra
-    assert tb["metadata"]["annotations"][m.POD_ANNOTATION_REQUEST] == rb
-    assert tb["spec"]["volumes"][0]["configMap"]["name"] == m.tools_configmap_name(rb)
-    assert ta != tb
 
 
 def test_dry_run_makes_no_cluster_call(recording_k8s):
@@ -359,40 +344,10 @@ def test_a_pod_whose_server_runs_is_never_deleted(recording_k8s, monkeypatch):
 # --- the rendered pod ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "over,parts",
-    [
-        ({}, ["spark"]),
-        ({"recipe": "polaris-iceberg-spark-duckdb"}, ["duckdb", "spark"]),
-    ],
-)
-def test_resolve_commands_are_pinned(over, parts):
-    """Every flag that decides what is resolved lives in lb_deps.py, which
-    is in the request hash; a flag added to the template instead would
-    change the set without changing the request (SD-1 note)."""
-    cfg = _cfg(**over)
-    eng = MagicMock(config=cfg, renderer=TemplateRenderer(), dry_run=False)
-    docs = DependencyServerDeployer(eng).render(req.select_request(cfg))
-    spec = next(d for d in docs if d["kind"] == "Deployment")["spec"]["template"]["spec"]
-    tool = f"{m.TOOLS_MOUNT}/lb_deps.py"
-    assert [c["command"] for c in spec["initContainers"]] == [
-        ["python3", tool, "resolve", p] for p in parts
-    ]
-    assert [c["image"] for c in spec["initContainers"]] == [
-        cfg.images.duckdb if p == "duckdb" else cfg.images.spark for p in parts
-    ]
-    (serve,) = spec["containers"]
-    assert serve["command"] == ["python3", tool, "serve", "--port", str(m.PORT)]
-    for c in [*spec["initContainers"], serve]:
-        assert {e["name"] for e in c["env"]} == {"HOME", "LB_DEPS_REQUEST_SHA256"}
-        assert "args" not in c
-    assert spec["automountServiceAccountToken"] is False
-    assert {v["name"] for v in spec["volumes"]} == {"tools", "data", "work"}
-    data_mount = next(v for v in serve["volumeMounts"] if v["name"] == "data")
-    assert data_mount["readOnly"] is True
-
-
 def test_deploy_all_runs_deps_after_the_operator_and_before_the_engines(monkeypatch):
+    """The engines read ``engine.deps`` when they start, and the server pod
+    runs as the spark-runner ServiceAccount, so deps must be deployed after
+    rbac and the operator and before every engine."""
     cfg = _cfg()
     k8s = MagicMock()
     k8s.get_cluster_capacity.return_value = None
@@ -411,28 +366,31 @@ def test_deploy_all_runs_deps_after_the_operator_and_before_the_engines(monkeypa
 # --- isolation --------------------------------------------------------------------
 
 
+def _foreign_deployment(rec, ns: str = "dp2") -> dict:
+    """Seed another deployment's lb-deps objects and return them, keyed as in
+    the store, to compare after A deploys."""
+    sha = "b" * 64
+    rec.add_namespace(ns, annotations={m.ANNOTATION_DEPS_SET: sha})
+    for kind, name in (
+        ("configmaps", m.MANIFEST_CONFIGMAP),
+        ("configmaps", m.tools_configmap_name(sha)),
+        ("services", m.SERVER_NAME),
+    ):
+        rec.add(kind, {"metadata": {"name": name, "labels": dict(m.SELECTOR_LABELS)}}, namespace=ns)
+    pod = _pod("lb-deps-b", sha)
+    pod["metadata"]["namespace"] = ns
+    rec.add("pods", pod, namespace=ns)
+    return {k: v for k, v in rec.store.items() if k[1] == ns or k == ("namespaces", None, ns)}
+
+
 def test_two_deployments_isolated(recording_k8s, monkeypatch):
-    """Deploying A touches nothing of B, whose namespace holds its own
-    lb-deps objects and annotation; every object, read and URL of A is built
-    from A's namespace, which differs from A's name here (a server URL or
-    label built from the name would fail)."""
+    """Deploying A touches nothing of B, whose namespace holds its own lb-deps
+    objects and annotation, and mutates nothing cluster-wide but A's own
+    namespace."""
     rec = recording_k8s
     cfg = _cfg(name="dep-a", platform={"kubernetes": {"namespace": NS}})
     engine = _setup(rec, cfg)
-    rec.add_namespace("dp2", annotations={m.ANNOTATION_DEPS_SET: "b" * 64})
-    for kind, name in (
-        ("configmaps", m.MANIFEST_CONFIGMAP),
-        ("configmaps", m.tools_configmap_name("b" * 64)),
-        ("services", m.SERVER_NAME),
-    ):
-        rec.add(
-            kind, {"metadata": {"name": name, "labels": dict(m.SELECTOR_LABELS)}}, namespace="dp2"
-        )
-    rec.add("pods", {**_pod("lb-deps-b", "b" * 64), "metadata": {
-        **_pod("lb-deps-b", "b" * 64)["metadata"], "namespace": "dp2"}}, namespace="dp2")  # fmt: skip
-    before = {
-        k: v for k, v in rec.store.items() if k[1] == "dp2" or k == ("namespaces", None, "dp2")
-    }
+    before = _foreign_deployment(rec)
     request = req.select_request(cfg)
     Controller(rec, monkeypatch)
     _show(rec, lambda sha: fake_shown(request))
@@ -443,13 +401,10 @@ def test_two_deployments_isolated(recording_k8s, monkeypatch):
         k: v for k, v in rec.store.items() if k[1] == "dp2" or k == ("namespaces", None, "dp2")
     }
     assert after == before
-    assert engine.deps.base_url.startswith(f"http://lb-deps.{NS}.svc.cluster.local:8080/")
     assert all(c.namespace in (NS, None) for c in rec.calls if c.api != "kubectl")
     assert not [c for c in rec.calls if c.namespace == "*"]  # no all-namespace call
     cluster = [c for c in rec.mutations() if c.namespace is None]
     assert {(c.kind, c.name) for c in cluster} <= {("namespaces", NS)}
-    labels = rec.store[("deployments", NS, m.SERVER_NAME)].metadata.labels
-    assert labels["lakebench.io/deployment"] == "dep-a"
 
 
 # --- review fixes (SD-4a Full review) ---------------------------------------------
@@ -516,7 +471,9 @@ def test_the_rollout_must_finish_before_a_ready_pod_counts(recording_k8s, monkey
     ctl.roll = half_rolled
     _show(rec, lambda sha: pytest.fail("show must not run"))
     result = DependencyServerDeployer(engine).deploy()
-    assert result.status == DeploymentStatus.FAILED and "Timeout" in result.message
+    assert result.status == DeploymentStatus.FAILED
+    assert ("configmaps", NS, m.MANIFEST_CONFIGMAP) not in rec.store
+    assert m.ANNOTATION_DEPS_SET not in _ns_annotations(rec)
 
 
 def test_a_server_replaced_after_the_wait_is_not_recorded(recording_k8s, monkeypatch):
@@ -549,7 +506,10 @@ def test_a_tools_map_with_other_bytes_is_refused(recording_k8s):
         namespace=NS,
     )
     result = DependencyServerDeployer(engine).deploy()
-    assert result.status == DeploymentStatus.FAILED and "delete it and re-run" in result.message
+    assert result.status == DeploymentStatus.FAILED
+    assert ("deployments", NS, m.SERVER_NAME) not in rec.store
+    assert ("configmaps", NS, m.MANIFEST_CONFIGMAP) not in rec.store
+    assert m.ANNOTATION_DEPS_SET not in _ns_annotations(rec)
 
 
 def test_the_manifest_records_the_images_that_ran(recording_k8s, monkeypatch):

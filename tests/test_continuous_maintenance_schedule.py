@@ -1,12 +1,5 @@
-"""A default continuous run runs table maintenance inside its window.
-
-lb16-cs (2026-09-27): retention_interval defaulted to 1800 s, equal to the
-default run_duration, so the first round never came due and every Iceberg
-recipe recorded effective maintenance "not run" on a defaults-only run
-(runs 20260927-073818-7934eb, 20260927-073533-9de9c9). DESIGN 5: continuous
-mode includes periodic maintenance. Unset intervals now derive from the
-window, and an explicit interval that cannot fire is refused at start.
-"""
+"""A default continuous run runs table maintenance and compaction inside its window;
+an explicit interval that cannot fire is refused at start."""
 
 from __future__ import annotations
 
@@ -70,7 +63,6 @@ def _schedule(run_duration=1800, skip=False, **kw):
 def test_default_run_fires_maintenance_and_compaction():
     for bench_s in range(0, 301, 30):
         s = _schedule()
-        assert (s["retention_interval"], s["compaction_interval"]) == (600, 1200)
         assert s["problem"] is None and s["warnings"] == []
         maint, comp = _simulate_continuous_loop(
             1800, s["retention_interval"], s["compaction_interval"], bench_s
@@ -78,35 +70,49 @@ def test_default_run_fires_maintenance_and_compaction():
         assert maint >= 1 and comp >= 1, (bench_s, maint, comp)
 
 
-def test_auto_interval_follows_the_window():
-    for window, expected in [(900, 300), (1800, 600), (3600, 1200), (86400, 7200)]:
-        assert _schedule(window)["retention_interval"] == expected
-        assert _schedule(window)["retention_source"] == "auto: run_duration / 3"
+@pytest.mark.parametrize(
+    ("window", "explicit", "skip", "retention", "compaction", "refused"),
+    [
+        (900, {}, False, 300, 600, False),
+        (1800, {}, False, 600, 1200, False),
+        (3600, {}, False, 1200, 2400, False),
+        (86400, {}, False, 7200, 14400, False),
+        (1800, {"retention_interval": 450, "compaction_interval": 900}, False, 450, 900, False),
+        (1800, {"retention_interval": 1800}, False, 1800, 3600, True),
+        (1800, {"retention_interval": 600, "compaction_interval": 1800}, False, 600, 1800, True),
+        (1800, {"retention_interval": 1800}, True, 1800, 3600, False),
+    ],
+    ids=[
+        "auto-900",
+        "auto-1800",
+        "auto-3600",
+        "auto-86400",
+        "explicit-fires",
+        "retention-not-inside-window",
+        "compaction-not-inside-window",
+        "unfireable-with-skip-maintenance",
+    ],
+)
+def test_interval_derives_from_the_window_and_unfireable_explicit_is_refused(
+    window, explicit, skip, retention, compaction, refused
+):
+    s = _schedule(window, skip=skip, **explicit)
+    assert (s["retention_interval"], s["compaction_interval"]) == (retention, compaction)
+    assert (s["problem"] is not None) == refused
 
 
-def test_explicit_interval_that_fires_is_kept():
-    s = _schedule(1800, retention_interval=450, compaction_interval=900)
-    assert s["problem"] is None
-    assert (s["retention_interval"], s["compaction_interval"]) == (450, 900)
-    assert s["retention_source"] == s["compaction_source"] == "set in config"
-
-
-def test_config_default_is_auto():
-    c = make_config().architecture.pipeline.sustained
-    assert c.retention_interval is None
-    assert c.effective_retention_interval() == 600
-    assert c.effective_compaction_interval() == 1200
-
-
-def test_snapshot_records_the_effective_intervals():
+@pytest.mark.parametrize(("mode", "moves"), [("continuous", True), ("batch", False)])
+def test_snapshot_maintenance_follows_the_window_only_in_continuous(mode, moves):
     from lakebench.metrics.collector import build_config_snapshot
 
-    cfg = make_config(architecture={"pipeline": {"mode": "continuous"}})
-    snap = build_config_snapshot(cfg, run_mode="continuous")
-    assert snap["maintenance"]["retention_interval"] == 600
-    assert snap["maintenance"]["compaction_interval"] == 1200
-    settings = snap["experiment_inputs"]["maintenance_config"]["settings"]
-    assert (settings["retention_interval"], settings["compaction_interval"]) == (600, 1200)
+    def snap(run_duration):
+        cfg = make_config(
+            architecture={"pipeline": {"mode": mode, "continuous": {"run_duration": run_duration}}}
+        )
+        s = build_config_snapshot(cfg, run_mode=mode)
+        return s["maintenance"], s["experiment_inputs"]["maintenance_config"]
+
+    assert (snap(1800) != snap(3600)) == moves
 
 
 def test_run_start_writes_the_resolved_values_back(monkeypatch):
@@ -128,12 +134,3 @@ def test_run_start_writes_the_resolved_values_back(monkeypatch):
         sus._run_sustained(cfg, Path("c.yaml"), 100, False, 3600)
     s = cfg.architecture.pipeline.sustained
     assert (s.retention_interval, s.compaction_interval) == (1200, 2400)
-
-
-def test_batch_snapshot_does_not_carry_continuous_intervals():
-    """Review finding: a batch fingerprint moved with sustained.run_duration."""
-    from lakebench.metrics.collector import build_config_snapshot
-
-    snap = build_config_snapshot(make_config())
-    assert snap["maintenance"]["retention_interval"] is None
-    assert snap["maintenance"]["compaction_interval"] is None

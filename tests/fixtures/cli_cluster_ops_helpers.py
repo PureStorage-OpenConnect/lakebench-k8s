@@ -12,6 +12,20 @@ from kubernetes.client.rest import ApiException
 from lakebench.cli import _cluster_ops as ops
 
 
+def stderr(result) -> str:
+    try:
+        return result.stderr
+    except ValueError:  # Click < 8.2 without mix_stderr=False
+        return result.output
+
+
+def stdout(result) -> str:
+    try:
+        return result.stdout
+    except ValueError:
+        return result.output
+
+
 class _Resp:
     def __init__(self, data: bytes):
         self.data = data

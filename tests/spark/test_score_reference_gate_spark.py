@@ -123,19 +123,33 @@ def _prereg_variant(tmp_path, monkeypatch, **unit):
     monkeypatch.setenv("LB_AML_PREREG_PATH", str(path))
 
 
+@pytest.fixture
+def silver_ref(spark, tmp_path, monkeypatch):
+    """``build(**unit)`` serves the pre-registration with ``unit`` overriding
+    its unit_of_scoring, writes the silver fixture and points the driver at
+    it; returns ``(score_financial_reference, manifest)``."""
+
+    def build(**unit):
+        import score_financial_reference as ref
+
+        _prereg_variant(tmp_path, monkeypatch, **unit)
+        manifest, acct = _silver(spark, tmp_path)
+        monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
+        monkeypatch.setattr(ref, "SILVER_TXNS", "refsilver.transactions")
+        monkeypatch.setattr(ref, "SILVER_ENTITIES", "refsilver.entities")
+        monkeypatch.setattr(ref, "SILVER_ACCOUNTS", "refsilver.accounts")
+        monkeypatch.setattr(ref, "ACCOUNT_PATH", acct)
+        return ref, manifest
+
+    return build
+
+
 @pytest.mark.slow  # 430 to 450 s; the "AML statistics (slow)" CI job
-def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
-    import score_financial_reference as ref
+def test_fidelity_gate_over_silver(spark, tmp_path, silver_ref):
     from threadpoolctl import threadpool_limits
 
     # The v3.3 lifetime unit with participant labels: known counts.
-    _prereg_variant(tmp_path, monkeypatch, window="lifetime", label_role="participant")
-    manifest, acct = _silver(spark, tmp_path)
-    monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
-    monkeypatch.setattr(ref, "SILVER_TXNS", "refsilver.transactions")
-    monkeypatch.setattr(ref, "SILVER_ENTITIES", "refsilver.entities")
-    monkeypatch.setattr(ref, "SILVER_ACCOUNTS", "refsilver.accounts")
-    monkeypatch.setattr(ref, "ACCOUNT_PATH", acct)
+    ref, manifest = silver_ref(window="lifetime", label_role="participant")
     with threadpool_limits(limits=2):
         report = ref.run_fidelity_gate(
             spark, manifest, cap_rows=10_000, provenance={"git_sha": "x"}
@@ -214,19 +228,12 @@ def test_cap_keeps_positives_and_weights_negatives(spark, tmp_path, monkeypatch)
     assert len(neg) > 0 and all(w == pytest.approx(1 / frac) for w in neg["weight"])
 
 
-def test_fidelity_gate_over_silver_monthly_unit(spark, tmp_path, monkeypatch):
+def test_fidelity_gate_over_silver_monthly_unit(spark, silver_ref):
     """The DRAFT monthly unit end to end on silver (burn-in shortened to fit a
     one-year fixture): units, subject labels, and the ungated lifetime block."""
-    import score_financial_reference as ref
     from threadpoolctl import threadpool_limits
 
-    _prereg_variant(tmp_path, monkeypatch, burn_in_months=1, history_days=60)
-    manifest, acct = _silver(spark, tmp_path)
-    monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
-    monkeypatch.setattr(ref, "SILVER_TXNS", "refsilver.transactions")
-    monkeypatch.setattr(ref, "SILVER_ENTITIES", "refsilver.entities")
-    monkeypatch.setattr(ref, "SILVER_ACCOUNTS", "refsilver.accounts")
-    monkeypatch.setattr(ref, "ACCOUNT_PATH", acct)
+    ref, manifest = silver_ref(burn_in_months=1, history_days=60)
     with threadpool_limits(limits=2):
         report = ref.run_fidelity_gate(spark, manifest, cap_rows=100_000, provenance={})
     assert report["verdict"] == "ok" and report["unit"] == "utc_calendar_month"
@@ -261,16 +268,14 @@ def test_fidelity_gate_over_silver_monthly_unit(spark, tmp_path, monkeypatch):
         assert r["n_positives"] == report["typologies"][t]["n_positives"], t
 
 
-def test_seed_claim_verified_only_by_the_corpus_verdict(spark, tmp_path, monkeypatch):
+def test_seed_claim_verified_only_by_the_corpus_verdict(spark, silver_ref):
     """A claimed seed is verified only by provenance.corpus_seed_matches_claim,
     the verdict over every manifest row. A provenance without it reads as not
     verified, even when the 200-row sample would match."""
     import aml_features as af
-    import score_financial_reference as ref
     from threadpoolctl import threadpool_limits
 
-    _prereg_variant(tmp_path, monkeypatch, window="lifetime", label_role="participant")
-    manifest, acct = _silver(spark, tmp_path)
+    ref, manifest = silver_ref(window="lifetime", label_role="participant")
 
     def iseed(tid_j: str) -> int:
         _, tid, j = tid_j.rsplit("_", 2)
@@ -281,11 +286,6 @@ def test_seed_claim_verified_only_by_the_corpus_verdict(spark, tmp_path, monkeyp
     rows = [{**r.asDict(), "seed": iseed(r["typology_id"])} for r in manifest.collect()]
     manifest = spark.createDataFrame(rows, manifest.schema)
     assert af.corpus_seed_check(manifest, 43)["matched_share"] == 1
-    monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
-    monkeypatch.setattr(ref, "SILVER_TXNS", "refsilver.transactions")
-    monkeypatch.setattr(ref, "SILVER_ENTITIES", "refsilver.entities")
-    monkeypatch.setattr(ref, "SILVER_ACCOUNTS", "refsilver.accounts")
-    monkeypatch.setattr(ref, "ACCOUNT_PATH", acct)
     with threadpool_limits(limits=2):
         bare = ref.run_fidelity_gate(
             spark, manifest, cap_rows=100_000, provenance={"corpus_seed": "43"}

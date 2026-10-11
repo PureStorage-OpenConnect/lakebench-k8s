@@ -87,15 +87,25 @@ class FakeRbac:
 
 class FakeAuthz:
     """LocalSubjectAccessReview: allowed once ``rbac`` binds the SA, unless
-    ``allowed`` forces an answer or ``status`` makes the review fail."""
+    ``allowed`` forces an answer, ``status`` makes the review fail with that
+    HTTP status and ``error`` raises that exception."""
 
-    def __init__(self, rbac: FakeRbac | None = None, allowed=None, status: int | None = None):
+    def __init__(
+        self,
+        rbac: FakeRbac | None = None,
+        allowed=None,
+        status: int | None = None,
+        error: Exception | None = None,
+    ):
         self.rbac = rbac
         self.allowed = allowed
         self.status = status
+        self.error = error
         self.reviews: list[dict] = []
 
     def create_namespaced_local_subject_access_review(self, ns, body):
+        if self.error is not None:
+            raise self.error
         if self.status is not None:
             raise ApiException(status=self.status)
         self.reviews.append(body)
@@ -201,26 +211,15 @@ def test_second_review_waits_for_the_binding_to_propagate(monkeypatch):
     assert api.creates
 
 
-def test_review_connection_error_is_unknown_not_a_crash():
-    from lakebench.k8s.security import _sa_can_use_scc
-
-    authz = MagicMock()
-    authz.create_namespaced_local_subject_access_review.side_effect = ConnectionError("reset")
-    assert _sa_can_use_scc(authz, NS, SA, "anyuid") is None
-
-
-def test_review_unavailable_still_grants():
+@pytest.mark.parametrize(
+    "authz",
+    [FakeAuthz(status=403), FakeAuthz(error=ConnectionError("reset"))],
+    ids=["forbidden", "connection-error"],
+)
+def test_review_unavailable_still_grants(authz):
     api = FakeRbac()
-    _grant(api, FakeAuthz(status=403))
+    _grant(api, authz)
     assert api.creates
-
-
-def test_review_dict_response_is_read():
-    from lakebench.k8s.security import _sa_can_use_scc
-
-    authz = MagicMock()
-    authz.create_namespaced_local_subject_access_review.return_value = {"status": {"allowed": True}}
-    assert _sa_can_use_scc(authz, NS, SA, "anyuid") is True
 
 
 # -- callers --------------------------------------------------------------------
@@ -286,7 +285,8 @@ def test_platform_is_keyed_on_the_scc_api_group(groups, expected, monkeypatch):
         assert SecurityVerifier(MagicMock()).detect_platform(strict=True) is expected
 
 
-def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, caplog):
+@pytest.mark.parametrize("strict", [False, True], ids=["watch-edit-lenient", "install-strict"])
+def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, strict):
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
     mgr = SparkOperatorManager.__new__(SparkOperatorManager)
@@ -297,7 +297,8 @@ def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, capl
 
     monkeypatch.setattr("lakebench.k8s.security.ensure_scc_rolebinding", refused)
     with patch("kubernetes.client.RbacAuthorizationV1Api", return_value=FakeRbac()):
-        mgr._assign_openshift_scc()  # a deploy's watch-list edit: logged only
-        assert "spark-operator-controller" in caplog.text
-        with pytest.raises(SCCGrantError):
-            mgr._assign_openshift_scc(strict=True)
+        if strict:
+            with pytest.raises(SCCGrantError):
+                mgr._assign_openshift_scc(strict=True)
+        else:
+            mgr._assign_openshift_scc()  # a deploy's watch-list edit does not raise

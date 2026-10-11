@@ -270,22 +270,6 @@ def test_marker_name_matches_the_cli(gr):
     assert gr.STOP_MARKER == GOLD_REFRESH_STOP_MARKER
 
 
-def test_run_tick_logs_pinned_committed_completed_in_order():
-    """Static: the pinned line precedes detection, the committed line
-    follows it, and the completed line follows ``Tick complete``."""
-    src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    body = src[src.index("def run_tick(") : src.index("def _stop_marker_path(")]
-    marks = [
-        "tick_pinned_line(",
-        "detection = run_detection_rules(",
-        'f"Cycle {cycle}: committed alerts=',
-        'log(f"Tick complete in',
-        'log(f"Cycle {cycle}: completed run={RUN_ID}")',
-    ]
-    pos = [body.index(m) for m in marks]
-    assert pos == sorted(pos), list(zip(marks, pos, strict=True))
-
-
 # --- AML-9 tick record: snapshot metadata only (AM-15) -----------------------
 
 

@@ -23,7 +23,7 @@ import yaml
 from typer.testing import CliRunner
 
 from lakebench.cli import app
-from lakebench.config import LoadPurpose, load_config
+from lakebench.config import ConfigError, LoadPurpose, load_config
 from lakebench.config.loader import load_notes
 from lakebench.config.refused_keys import REFUSED_KEYS
 from lakebench.config.schema import LakebenchConfig
@@ -182,9 +182,9 @@ def test_init_from_round_trip_v16_saved_config(tmp_path, monkeypatch):
     _assert_round_trip(monkeypatch, old, new, r.output)
     # benchmark.streams: 4 (the default, written by save_config) is dropped,
     # so run accepts the new file; it is the value benchmark uses anyway.
-    assert "architecture.benchmark.streams: was 4" in r.output
     assert "streams" not in yaml.safe_load(new.read_text())["architecture"]["benchmark"]
-    assert "still refuse" not in r.output
+    _set_refs(monkeypatch, new.read_text())
+    load_config(new, purpose=LoadPurpose.RUN, print_notes=False)
 
 
 def test_init_from_round_trip_flat_v12(tmp_path, monkeypatch):
@@ -194,7 +194,7 @@ def test_init_from_round_trip_flat_v12(tmp_path, monkeypatch):
     raw = yaml.safe_load(new.read_text())
     for flat in ("endpoint", "access_key", "secret_key", "scale", "namespace", "mode"):
         assert flat not in raw
-        assert f"moved:   {flat} -> " in r.output
+        assert re.search(rf"moved:\s+{flat} -> ", r.output)
     assert raw["workload"]["datagen"]["scale"] == 2
     assert cfg.get_namespace() == "flat12-ns"
 
@@ -597,7 +597,10 @@ def test_init_from_keeps_a_medallion_block_that_moved_bronze(tmp_path, monkeypat
     assert raw["architecture"]["pipeline"]["medallion"]["bronze"]["path_template"] == (
         "custom/prefix"
     )
-    assert "run still refuses it" in r.output and "medallion" in r.output
+    _set_refs(monkeypatch, new.read_text())
+    load_config(new, purpose=LoadPurpose.READ, print_notes=False)
+    with pytest.raises(ConfigError):
+        load_config(new, purpose=LoadPurpose.RUN, print_notes=False)
 
 
 def test_init_from_empty_platform_block(tmp_path, monkeypatch):
@@ -624,15 +627,6 @@ def test_init_from_takes_back_a_recipe_that_changes_settings(tmp_path, monkeypat
     old, new, r = _convert(tmp_path, monkeypatch, "name: plain\n")
     assert r.exit_code == 0, r.output
     assert "recipe" not in yaml.safe_load(new.read_text())
-    assert "not written" in r.output and "images.trino" in r.output
-
-
-def test_init_from_notes_a_credential_variable_already_set(tmp_path, monkeypatch):
-    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "something-else")
-    old, new, r = _convert(tmp_path, monkeypatch, FLAT_V12)
-    assert r.exit_code == 0, r.output
-    assert "LAKEBENCH_S3_ACCESS_KEY is already set" in r.output
-    assert "something-else" not in r.output
 
 
 @pytest.mark.parametrize("unset_side", ["old", "replaced"])

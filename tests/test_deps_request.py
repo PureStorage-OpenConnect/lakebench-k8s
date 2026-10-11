@@ -63,12 +63,6 @@ SPARK35 = "apache/spark:3.5.4-python3"
             ],
         ),
         (
-            SPARK40,
-            "delta",
-            None,
-            ["io.delta:delta-spark_2.13:4.0.0", "org.apache.hadoop:hadoop-aws:3.4.1"],
-        ),
-        (
             SPARK41,
             "delta",
             None,
@@ -81,27 +75,22 @@ def test_jar_coordinates(image, fmt, version, expected):
     assert req.jar_coordinates(_cfg(image, fmt, version, recipe=recipe)) == expected
 
 
-def test_selected_groups_by_workload_and_engine():
-    assert req.selected_groups(make_config(recipe="hive-iceberg-spark-trino")) == ("jars",)
-    assert req.selected_groups(make_config(recipe="polaris-iceberg-spark-duckdb")) == (
-        "jars",
-        "duckdb",
-    )
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert req.selected_groups(aml) == ("jars", "py-reference")
+@pytest.mark.parametrize(
+    "recipe,schema,groups",
+    [
+        ("hive-iceberg-spark-trino", None, ("jars",)),
+        ("polaris-iceberg-spark-duckdb", None, ("jars", "duckdb")),
+        ("hive-iceberg-spark-trino", "financial", ("jars", "py-reference")),
+    ],
+)
+def test_selected_groups_by_workload_and_engine(recipe, schema, groups):
+    over = {"workload": {"schema": schema}} if schema else {}
+    assert req.selected_groups(make_config(recipe=recipe, **over)) == groups
 
 
-def test_request_hash_mirror_sensitive_pinset_not(monkeypatch):
-    """A mirror change alters request_sha256; the same file triples give the
-    same pinset_sha256 whatever the repositories (ch01 s2.2, s2.7)."""
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    public = req.select_request(cfg, tools_digest="t").request_sha256
-    assert req.select_request(cfg, tools_digest="t").request_sha256 == public
-    monkeypatch.setattr(
-        req, "_deps_key", lambda c, k: "http://nexus/m2/" if k == "maven_repository" else None
-    )
-    mirrored = req.select_request(cfg, tools_digest="t").request_sha256
-    assert mirrored != public
+def test_pinset_hash_ignores_size_and_resolve_time():
+    """The same file triples give the same pinset_sha256 whatever the
+    repositories or resolve metadata (ch01 s2.2, s2.7)."""
     groups = {"jars": [{"file": "a.jar", "sha256": "11", "size": 1, "coordinate": "g:a:1"}]}
     assert req.pinset_sha256(groups, ["a.jar"]) == req.pinset_sha256(
         {"jars": [{"file": "a.jar", "sha256": "11", "size": 999, "resolved_at": "x"}]}, ["a.jar"]
@@ -124,13 +113,6 @@ def test_request_hash_covers_resolver_image_and_versions():
         ).request_sha256
         != base
     )
-
-
-def test_aml_request_reads_reference_pins_in_place():
-    from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS
-
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert req.select_request(aml, tools_digest="t").py_reference == tuple(REFERENCE_PY_DEPS)
 
 
 def test_every_request_field_enters_the_hash():
@@ -158,28 +140,49 @@ def test_every_request_field_enters_the_hash():
         assert dataclasses.replace(base, **{field: value}).request_sha256 != base.request_sha256
 
 
-def _with_deps(**deps):
+def _with_deps(recipe="hive-iceberg-spark-trino", schema=None, **deps):
     s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
-    return make_config(platform={"storage": {"s3": s3}, "deps": deps})
+    over = {"workload": {"schema": schema}} if schema else {}
+    return make_config(recipe=recipe, platform={"storage": {"s3": s3}, "deps": deps}, **over)
 
 
-def test_deps_key_reads_platform_deps():
-    """request.py reads the typed platform.deps keys (SD-4a)."""
-    cfg = _with_deps(maven_repository=" http://nexus/m2 ")
-    assert req._deps_key(cfg, "maven_repository") == "http://nexus/m2/"
-    assert req._deps_key(cfg, "pypi_index") is None
-    assert req.repositories(cfg) == ["http://nexus/m2/"]
-    assert req.repositories(_with_deps())[0] == req.MAVEN_CENTRAL
-    aml = make_config(recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"})
-    mirrored = aml.model_copy(deep=True)
-    mirrored.platform.deps.pypi_index = "http://pypi.lab/simple/"
-    mirrored.platform.deps.duckdb_extension_repository = "http://ext.lab"
-    r = req.select_request(mirrored, tools_digest="t")
-    assert (r.pypi_index, r.duckdb_extension_repository) == (
-        "http://pypi.lab/simple/",
-        "http://ext.lab",
+@pytest.mark.parametrize(
+    "recipe,schema,deps",
+    [
+        ("hive-iceberg-spark-trino", None, {"maven_repository": "http://nexus/m2/"}),
+        ("polaris-iceberg-spark-duckdb", "financial", {"pypi_index": "http://pypi.lab/simple/"}),
+        (
+            "polaris-iceberg-spark-duckdb",
+            "financial",
+            {"duckdb_extension_repository": "http://ext.lab"},
+        ),
+    ],
+)
+def test_configured_mirror_changes_the_request_hash(recipe, schema, deps):
+    """A mirror set in platform.deps alters request_sha256 (ch01 s2.2, s2.7)."""
+    public = req.select_request(_with_deps(recipe, schema), tools_digest="t")
+    mirrored = req.select_request(_with_deps(recipe, schema, **deps), tools_digest="t")
+    assert (
+        public.request_sha256
+        == req.select_request(_with_deps(recipe, schema), tools_digest="t").request_sha256
     )
-    assert r.request_sha256 != req.select_request(aml, tools_digest="t").request_sha256
-    assert req.egress_hosts(mirrored) == sorted(
+    assert mirrored.request_sha256 != public.request_sha256
+
+
+def test_configured_maven_mirror_is_the_only_repository():
+    assert req.repositories(_with_deps(maven_repository=" http://nexus/m2 ")) == [
+        "http://nexus/m2/"
+    ]
+    assert req.repositories(_with_deps())[0] == req.MAVEN_CENTRAL
+
+
+def test_egress_hosts_follow_configured_mirrors():
+    cfg = _with_deps(
+        "polaris-iceberg-spark-duckdb",
+        "financial",
+        pypi_index="http://pypi.lab/simple/",
+        duckdb_extension_repository="http://ext.lab",
+    )
+    assert req.egress_hosts(cfg) == sorted(
         {"repo1.maven.org", "maven-central.storage-download.googleapis.com", "pypi.lab", "ext.lab"}
     )

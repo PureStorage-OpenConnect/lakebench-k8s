@@ -110,7 +110,7 @@ def test_current_context_change_mid_run_keeps_the_pinned_one(kubeconfig) -> None
 
 
 def test_unknown_context_refused_not_replaced_by_in_cluster(kubeconfig, monkeypatch) -> None:
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
     with pytest.raises(ConfigException, match="'nope'"):
         ClusterTarget.resolve(context="nope")
 
@@ -120,7 +120,7 @@ def test_in_cluster_only_without_a_kubeconfig(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     with pytest.raises(ConfigException):
         ClusterTarget.resolve(None)
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
     t = ClusterTarget.resolve(None)
     assert t.in_cluster and t.context is None
     assert t.cli_args("kubectl") == []
@@ -130,7 +130,7 @@ def test_in_cluster_only_without_a_kubeconfig(tmp_path, monkeypatch) -> None:
 
 
 def test_kubeconfig_wins_over_in_cluster(kubeconfig, monkeypatch) -> None:
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
     assert ClusterTarget.resolve(None).context == "B"
 
 
@@ -327,7 +327,7 @@ def test_existing_but_broken_kubeconfig_never_falls_back_to_in_cluster(
     path = tmp_path / "kubeconfig"
     path.write_text("apiVersion: v1\nkind: Config\ncontexts: []\nclusters: []\nusers: []\n")
     point_kubeconfig_at(monkeypatch, path)
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
     with pytest.raises(ConfigException):
         ClusterTarget.resolve(None)
 

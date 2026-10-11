@@ -2,10 +2,10 @@
 labelled (metrics/requested_effective.py, ER-5).
 
 Fixtures are pinned stored records (tests/fixtures/records) with named
-fields edited. The LB-224 case: gold asked for nothing (auto) and ran
-incremental, which aggregates only part of silver; before EVD-3 nothing in
-the record said so. The LB-206 case: the trickle resolved automatically to
-1 file per trigger; the record carries the entry and the BOUNDED BY label.
+fields edited. One case: gold asked for nothing (auto) and ran
+incremental, which aggregates only part of silver. The other: the trickle
+resolved automatically to 1 file per trigger; the record carries the entry
+and the BOUNDED BY label.
 """
 
 from __future__ import annotations
@@ -44,28 +44,59 @@ def _requested(rec: dict, strategy: str) -> None:
     rec["config_snapshot"]["requested"] = {"gold_strategy": strategy}
 
 
-def test_lb224_fixture_labelled() -> None:
-    """Requested auto, effective incremental (not chosen for a cycle): the
-    verdict stays PASSED and carries the label and a warning."""
+@pytest.mark.parametrize(
+    ("requested", "reported", "labelled"),
+    [
+        # Asked for auto, the driver ran incremental without a cycle asking
+        # for it: labelled, verdict stays PASSED.
+        ("auto", ("incremental", "auto"), True),
+        # A record from before the request was recorded: the script's source
+        # (auto) says no override reached it.
+        (None, ("incremental", "auto"), True),
+        ("two_phase_agg", ("two_phase_agg", "override"), False),
+        # The config named a strategy, the driver chose by size.
+        ("two_phase_agg", ("simple_agg", "auto"), True),
+        ("auto", ("simple_agg", "auto"), False),
+        # An older script logged no strategy: the request cannot be judged.
+        (None, None, False),
+        ("two_phase_agg", None, False),
+    ],
+    ids=[
+        "auto-ran-incremental",
+        "no-recorded-request",
+        "override-reached-script",
+        "override-did-not-reach-script",
+        "auto-simple-agg",
+        "unrecorded-strategy",
+        "request-unrecorded-effective",
+    ],
+)
+def test_gold_strategy_label(requested, reported, labelled) -> None:
+    """A mismatch between the requested and the strategy the script ran is
+    labelled on the verdict; a match, or nothing recorded, claims nothing."""
     rec = sr.load_record(C360_BATCH)
-    _requested(rec, "auto")
-    _gold_reports(rec, "incremental", "auto")
+    if requested:
+        _requested(rec, requested)
+    if reported:
+        _gold_reports(rec, *reported)
     v = V.verdict_from_record(rec)
     assert v.status == "PASSED"
+    if not labelled:
+        assert "requested_effective" not in v.qualifiers
+        if not reported:
+            entry = re_.derive(_metrics(rec))["gold_strategy"]
+            assert entry["effective"] == re_.NOT_RECORDED
+            assert re_.mismatches({"gold_strategy": entry}) == []
+        return
     label = v.qualifiers["requested_effective"]
     assert list(label) == ["gold_strategy"]
-    assert label["gold_strategy"]["requested"] == "auto"
-    assert label["gold_strategy"]["effective"] == "incremental"
-    _ok, _reasons, warnings = V.compute_badge_status(_metrics(rec))
-    assert "gold_strategy: requested auto, ran incremental (auto)" in warnings
-
-
-def test_lb224_label_without_a_recorded_request() -> None:
-    """A record from before the request was recorded: the script's source
-    (auto) says no override reached it."""
-    rec = sr.load_record(C360_BATCH)
-    _gold_reports(rec, "incremental", "auto")
-    assert "gold_strategy" in V.verdict_from_record(rec).qualifiers["requested_effective"]
+    assert label["gold_strategy"]["effective"] == reported[0]
+    if requested:
+        assert label["gold_strategy"]["requested"] == requested
+        _ok, _reasons, warnings = V.compute_badge_status(_metrics(rec))
+        assert (
+            f"gold_strategy: requested {requested}, ran {reported[0]} ({reported[1]})" in warnings
+        )
 
 
 def test_multi_cycle_incremental_gold_is_not_labelled() -> None:
@@ -84,45 +115,15 @@ def test_multi_cycle_incremental_gold_is_not_labelled() -> None:
     assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
 
 
-def test_override_that_reached_the_script_is_not_labelled() -> None:
-    rec = sr.load_record(C360_BATCH)
-    _requested(rec, "two_phase_agg")
-    _gold_reports(rec, "two_phase_agg", "override")
-    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
-
-
-def test_override_that_did_not_reach_the_script_is_labelled() -> None:
-    """The config named a strategy, the driver chose by size: labelled."""
-    rec = sr.load_record(C360_BATCH)
-    _requested(rec, "two_phase_agg")
-    _gold_reports(rec, "simple_agg", "auto")
-    label = V.verdict_from_record(rec).qualifiers["requested_effective"]
-    assert label["gold_strategy"]["requested"] == "two_phase_agg"
-
-
-def test_auto_simple_agg_is_not_labelled() -> None:
-    rec = sr.load_record(C360_BATCH)
-    _requested(rec, "auto")
-    _gold_reports(rec, "simple_agg", "auto")
-    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
-
-
-def test_unrecorded_gold_strategy_claims_no_mismatch() -> None:
-    """A record whose gold job logged no strategy (an older image)."""
-    rec = sr.load_record(C360_BATCH)
-    entry = re_.derive(_metrics(rec))["gold_strategy"]
-    assert entry["effective"] == re_.NOT_RECORDED
-    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
-
-
-def test_lb206_fixture_labelled() -> None:
+def test_auto_trickle_is_recorded_and_bounds_the_throughput() -> None:
     """The trickle resolved automatically to 1: the entry is recorded and
-    the throughput carries the BOUNDED BY trickle label (EVD-4)."""
+    the throughput figure carries the BOUNDED BY trickle qualifier."""
     rec = sr.load_record(AML_CONT)
     assert rec["continuous"]["trickle"]["source"] == "auto"
     entry = re_.derive(_metrics(rec))["trickle"]
     assert (entry["requested"], entry["effective"], entry["source"]) == ("auto", 1, "auto")
     assert bounds.trickle_bound(rec)["kind"] == "trickle"
+    assert "BOUNDED BY trickle" in bounds.trickle_note(rec)
     assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
 
 
@@ -269,7 +270,10 @@ def test_fresh_record_stores_the_entries() -> None:
     assert any(k.startswith("executors[") for k in exp["requested_effective"])
 
 
-@pytest.mark.parametrize("value,want", [(None, "auto"), ("two_phase_agg", "two_phase_agg")])
+@pytest.mark.parametrize(
+    "value,want",
+    [(None, "auto"), ("two_phase_agg", "two_phase_agg"), (" Two_Phase_Agg ", "two_phase_agg")],
+)
 def test_snapshot_records_the_configured_gold_strategy(value, want) -> None:
     from lakebench.metrics.collector import build_config_snapshot
     from tests.conftest import make_config
@@ -280,15 +284,6 @@ def test_snapshot_records_the_configured_gold_strategy(value, want) -> None:
         **({"spark": spark} if spark else {}),
     )
     assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": want}
-
-
-def test_explicit_request_with_an_unrecorded_effective_claims_nothing() -> None:
-    """An older script logged no strategy: the request cannot be judged."""
-    rec = sr.load_record(C360_BATCH)
-    _requested(rec, "two_phase_agg")
-    entry = re_.derive(_metrics(rec))["gold_strategy"]
-    assert entry["effective"] == re_.NOT_RECORDED
-    assert re_.mismatches({"gold_strategy": entry}) == []
 
 
 def test_override_seen_by_the_script_without_a_recorded_request() -> None:
@@ -303,14 +298,3 @@ def test_no_gold_entry_outside_customer360(schema) -> None:
     rec = sr.load_record(C360_BATCH)
     rec["config_snapshot"]["workload_schema"] = schema
     assert "gold_strategy" not in re_.derive(_metrics(rec))
-
-
-def test_configured_gold_strategy_is_normalised() -> None:
-    from lakebench.metrics.collector import build_config_snapshot
-    from tests.conftest import make_config
-
-    cfg = make_config(
-        architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
-        spark={"conf": {"spark.lb.gold.strategy": " Two_Phase_Agg "}},
-    )
-    assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": "two_phase_agg"}

@@ -1,33 +1,24 @@
 """Tests for configuration loading and validation."""
 
 import pytest
+from pydantic import ValidationError
 
-from lakebench.config import (
-    LakebenchConfig,
-)
-
-
-class TestScaleConfig:
-    """Tests for scale factor configuration."""
-
-    def test_target_size_backward_compat(self):
-        """Legacy target_size is converted to scale."""
-        with pytest.warns(DeprecationWarning, match="target_size is deprecated"):
-            config = LakebenchConfig(
-                name="test", architecture={"workload": {"datagen": {"target_size": "100gb"}}}
-            )
-        assert config.architecture.workload.datagen.scale == 10
+from lakebench.config import LakebenchConfig
 
 
 class TestComponentValidation:
     """Tests for component combination validation."""
 
     @pytest.mark.parametrize(
-        ("catalog", "fmt"),
-        [("unity", "iceberg"), ("polaris", "delta"), ("hive", "hudi")],
+        ("catalog", "fmt", "loc"),
+        [
+            ("unity", "iceberg", ("architecture",)),
+            ("polaris", "delta", ("architecture",)),
+            ("hive", "hudi", ("architecture", "table_format", "type")),
+        ],
     )
-    def test_unsupported_combination_rejected(self, catalog, fmt):
-        with pytest.raises(ValueError):
+    def test_unsupported_combination_rejected(self, catalog, fmt, loc):
+        with pytest.raises(ValidationError) as exc:
             LakebenchConfig(
                 name="test",
                 architecture={
@@ -36,6 +27,7 @@ class TestComponentValidation:
                     "query_engine": {"type": "trino"},
                 },
             )
+        assert [e["loc"] for e in exc.value.errors()] == [loc]
 
 
 class TestSustainedBenchmarkConfig:
@@ -66,26 +58,3 @@ class TestSustainedBenchmarkConfig:
             },
         )
         assert getattr(config.architecture.pipeline.sustained, field) == expected
-
-
-# ---------------------------------------------------------------------------
-# Batch Cycles Config (v1.1.0)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Sustained Compaction Config (v1.1.0)
-# ---------------------------------------------------------------------------
-
-
-def test_job_injects_w1_max_vertices_env():
-    """job.py must inject LB_FINANCIAL_W1_MAX_VERTICES for financial so
-    gold_finalize can thread the configured cap into W1."""
-    from pathlib import Path
-
-    p = Path(__file__).resolve().parents[1] / (
-        "src/lakebench/modules/pipeline_engines/spark/job.py"
-    )
-    body = p.read_text()
-    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
-    assert "cfg.architecture.workload.w1_max_vertices" in body

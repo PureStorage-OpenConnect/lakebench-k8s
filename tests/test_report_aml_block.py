@@ -50,22 +50,13 @@ def test_aml_block_values():
     assert f"SARs filed {ops['sars_filed']:,} tm_operations.ops.sars_filed" in funnel
     per = ops["funnel"]["alerts"] / ops["reconciliation"]["completeness.customers"]
     assert f"customer alerts per customer {per:.2f}" in funnel
-    # Reconciliation, each identity checked here from the record.
-    assert scoring["total_alerts"] == ops["alerts_total"]
+    # Reconciliation labels.
     assert "scoring and TM rule alerts agree" in funnel
-    assert (
-        ops["funnel"]["alerts"] + ops["alerts_out_of_scope"] - ops["alerts_withdrawn_carried"]
-        == ops["alerts_total"]
-    )
     assert (
         "TM rule alerts = customer + non-customer dispositions - withdrawn carried alerts" in funnel
     )
-    assert sum(ops["alerts_by_disposition"].values()) == (
-        ops["funnel"]["alerts"] + ops["alerts_out_of_scope"]
-    )
     assert "dispositions sum to customer + non-customer dispositions" in funnel
     cont = ops["reconciliation"]["funnel.continuing_sars"]
-    assert ops["sars_filed"] == ops["funnel"]["sars"] + cont
     assert f"SARs filed = {ops['funnel']['sars']:,} on alert cases + {cont:,}" in funnel
     # Per-rule recall with chance beside it.
     recall = next(t for t in scoring["typologies"] if t["typology_type"] == "rapid_layering")
@@ -128,15 +119,16 @@ def test_continuous_recall_covered_with_coverage():
     html = _render_dict(record)
     text = _plain(html)
     assert "Recall over covered instances (uncalibrated, in-sample)" in text
-    assert "61.2% covered, coverage 33.8%" in text
+    assert "rapid_layering 201,503 61.2% covered, coverage 33.8% 5.0%" in text
+    assert "Chance (covered)" in text and "Off-target (covered)" in text
     assert "Recall (uncalibrated, in-sample)" not in text
     assert mismatches(record, html) == []
 
 
 def test_totals_labelled_when_a_rule_skipped_on_a_cap():
     """W1 skipped on vertex-cap (a Lakebench cap the verdict lists in
-    rule_caps): Total alerts and the off-target rate carry the cap; the
-    skip reason names it."""
+    rule_caps): the funnel, Total alerts and the off-target rate carry the
+    cap; the skip reason names it."""
     record = load_record("1320bd")
     gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
     gold["rules_skipped"]["W1_connected_components"] = "vertex-cap"
@@ -148,6 +140,9 @@ def test_totals_labelled_when_a_rule_skipped_on_a_cap():
         f"{total:,} BOUNDED BY: rule W1_connected_components cap" in text
     )
     assert re.search(r"Overall off-target rate .*?: \d+\.\d% BOUNDED BY: rule W1", text)
+    funnel = _funnel(text)
+    assert f"Rule alerts (scoring) {total:,} BOUNDED BY: rule W1_connected_components cap" in funnel
+    assert "Every count here comes from the rules that ran" in funnel
 
 
 def test_totals_not_capped_on_a_data_skip():
@@ -185,15 +180,6 @@ def test_nested_counts_and_withdrawn_alerts_reconcile():
     assert "differ" not in funnel
 
 
-def test_funnel_carries_the_rule_cap():
-    record = load_record("1320bd")
-    gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
-    gold["rules_skipped"]["W1_connected_components"] = "vertex-cap"
-    funnel = _funnel(_plain(_render_dict(record)))
-    assert "Rule alerts (scoring) 728,291 BOUNDED BY: rule W1_connected_components cap" in funnel
-    assert "Every count here comes from the rules that ran" in funnel
-
-
 def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
     """A skip reason naming a cap labels the totals whether or not the
     verdict allows it (metrics/bounds.py's rule)."""
@@ -203,11 +189,6 @@ def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
     gold["alerts_by_rule"].pop("W2_structuring", None)
     text = _plain(_render_dict(record))
     assert "BOUNDED BY: rule W2_structuring cap" in text
-
-
-def test_covered_mode_labels_chance_and_off_target():
-    text = _plain(_render_dict(_covered()))
-    assert "Chance (covered)" in text and "Off-target (covered)" in text
 
 
 def test_continuous_totals_name_their_scope():

@@ -1,34 +1,31 @@
-"""Trino compaction of the partitioned C360 silver table (V16-4, LB-210).
+"""Trino compaction of the partitioned C360 silver table.
 
 Trino's Iceberg connector refuses an optimize that opens more than 100
-partition writers ("Exceeded limit of 100 open writers for partitions:
-101"), which is what failed on silver.customer_interactions_enriched in
-run-20260929-204941-1d17f4. The plan now chunks the table by its identity
-partition column at 90 partitions per statement, a table counts as compacted
-only when every chunk succeeds, and a failed table is named in the effective
-maintenance record.
+partition writers, so the plan chunks the table by its identity partition
+column at 90 partitions per statement. A table counts as compacted only when
+every chunk succeeds, a failed table is named in the effective maintenance
+record, and with live streams the silver tables a MERGE targets are not
+compacted.
 """
 
 from __future__ import annotations
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
-
-from rich.console import Console
 
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
 from lakebench.modules.table_formats.iceberg.maintenance import (
     COMPACTION_CHUNK_PARTITIONS,
     build_compaction_plan,
 )
+from tests.fixtures.compaction_helpers import Trino, compact, trino_cfg
 
 SILVER = "lakehouse.silver.customer_interactions_enriched"
 GOLD = "lakehouse.gold.customer_executive_dashboard"
-# The stderr shape of the live failure (journal of run-20260929-204941-1d17f4):
-# kubectl's container notice first, then Trino's error.
+# The stderr shape of the failure: kubectl's container notice first, then
+# Trino's error.
 WRITER_LIMIT = (
     'Defaulted container "trino" out of: trino, wait-for-hive (init)\n'
-    "Query 20260929_210101_00042_abcde failed: Exceeded limit of 100 open writers "
+    "Query 20240101_000000_00001_abcde failed: Exceeded limit of 100 open writers "
     "for partitions: 101\n\tat io.trino.plugin.iceberg.IcebergPageSink.getWriterIndexes"
 )
 
@@ -118,55 +115,17 @@ def test_unchunked_cases():
 # -- the run path and the record -------------------------------------------------
 
 
-def _cfg():
-    from lakebench.config.schema import TableNamesConfig
-
-    cfg = MagicMock()
-    cfg.get_namespace.return_value = "lakebench-test"
-    cfg.architecture.query_engine.type.value = "trino"
-    cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
-    cfg.architecture.table_format.type.value = "iceberg"
-    cfg.architecture.tables = TableNamesConfig()
-    cfg.architecture.workload.schema_type.value = "customer360"
-    return cfg
+def _trino(days: list[str], fail=lambda sql: False) -> Trino:
+    """A coordinator whose silver table holds *days* as partitions; it fails
+    the statements *fail* matches."""
+    return Trino(
+        read=lambda sql: (0, "".join(f'"{d}"\n' for d in days), ""),
+        fail=lambda sql: WRITER_LIMIT if fail(sql) else None,
+    )
 
 
-class _Trino:
-    """exec_in_pod for a Trino coordinator: answers the partition read and
-    fails the statements *fail* matches."""
-
-    def __init__(self, partitions: list[str], fail=lambda sql: False, read_rc: int = 0):
-        self.partitions = partitions
-        self.fail = fail
-        self.read_rc = read_rc
-        self.statements: list[str] = []
-
-    def __call__(self, pod, argv, namespace, container=None, timeout=30):
-        sql = argv[2]
-        if "$partitions" in sql:
-            if self.read_rc:
-                return self.read_rc, "", "Query failed: Table not found"
-            return 0, "".join(f'"{p}"\n' for p in self.partitions), ""
-        self.statements.append(sql)
-        if self.fail(sql):
-            return 1, "", WRITER_LIMIT
-        return 0, "", ""
-
-
-def _compact(trino: _Trino, **kw) -> list[dict]:
-    from lakebench.cli._sustained import _run_iceberg_compaction
-
-    k8s = MagicMock()
-    k8s.exec_in_pod.side_effect = trino
-    outcomes: list[dict] = []
-    with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
-        return_value=("trino", "trino-coordinator-0", "lakehouse"),
-    ):
-        _run_iceberg_compaction(
-            _cfg(), k8s, Console(quiet=True), MagicMock(), outcomes=outcomes, **kw
-        )
-    return outcomes
+def _compact(trino: Trino, **kw) -> list[dict]:
+    return compact(trino, trino_cfg("customer360"), **kw)
 
 
 def _effective(outcomes: list[dict]) -> dict:
@@ -180,7 +139,7 @@ def _effective(outcomes: list[dict]) -> dict:
 
 
 def test_continuous_silver_compacts_two_of_two():
-    trino = _Trino(_days(366))
+    trino = _trino(_days(366))
     outcomes = _compact(trino, live_streams=True)
     (rec,) = outcomes
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (2, 2, 0)
@@ -196,7 +155,7 @@ def test_continuous_silver_compacts_two_of_two():
 
 def test_failed_compaction_names_table_in_effective_maintenance():
     # One silver chunk fails: silver counts as failed, gold as compacted.
-    trino = _Trino(_days(366), fail=lambda sql: "<= DATE '2024-06-28'" in sql)
+    trino = _trino(_days(366), fail=lambda sql: "<= DATE '2024-06-28'" in sql)
     outcomes = _compact(trino, live_streams=True)
     (rec,) = outcomes
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (2, 1, 1)
@@ -204,7 +163,7 @@ def test_failed_compaction_names_table_in_effective_maintenance():
     assert failure["table"] == SILVER
     assert "<= DATE '2024-06-28'" in failure["statement"]
     # The cause, not kubectl's container notice.
-    assert failure["error"].startswith("Query 20260929_210101_00042_abcde failed: Exceeded limit")
+    assert failure["error"].startswith("Query 20240101_000000_00001_abcde failed: Exceeded limit")
     assert "Defaulted container" not in failure["error"] and "\n" not in failure["error"]
 
     eff = _effective(outcomes)
@@ -221,7 +180,7 @@ def test_failed_compaction_names_table_in_effective_maintenance():
 def test_partly_compacted_tables_are_partial_not_failed():
     """Every table has a failed chunk, but statements succeeded: the id rule
     (failed means no statement succeeded) is unchanged by per-table counts."""
-    trino = _Trino(_days(366), fail=lambda sql: "<= DATE '2024-06-28'" in sql or GOLD in sql)
+    trino = _trino(_days(366), fail=lambda sql: "<= DATE '2024-06-28'" in sql or GOLD in sql)
     outcomes = _compact(trino, live_streams=True)
     (rec,) = outcomes
     assert (rec["total"], rec["succeeded"], rec["failed"]) == (2, 0, 2)
@@ -233,7 +192,7 @@ def test_partly_compacted_tables_are_partial_not_failed():
 
 
 def test_every_statement_failed_is_still_failed():
-    trino = _Trino(_days(366), fail=lambda sql: True)
+    trino = _trino(_days(366), fail=lambda sql: True)
     eff = _effective(_compact(trino))
     assert eff["id"].endswith("compaction=failed")
     assert "compaction: 0 of 6 statements succeeded" in eff["reasons"]
@@ -244,7 +203,7 @@ def test_spent_budget_skips_the_partition_read():
 
     budget = MaintenanceBudget(60)
     budget.stopped = "pre-benchmark maintenance exceeded its 60s cap"
-    trino = _Trino(_days(366))
+    trino = _trino(_days(366))
     k8s_calls = _compact(trino, budget=budget)
     (rec,) = k8s_calls
     assert trino.statements == []
@@ -253,21 +212,11 @@ def test_spent_budget_skips_the_partition_read():
 
 def test_live_aml_compaction_leaves_the_tables_silver_merges_into():
     """A rewrite committed while silver-stream's MERGE is planned fails the
-    MERGE ("Missing required files to delete", AML hive-iceberg-spark-trino
-    continuous, 2026-10-07) and ends the stream, so with live streams only
-    the silver tables it appends to are compacted."""
-    from lakebench.cli._sustained import _run_iceberg_compaction
-
-    cfg = _cfg()
-    cfg.architecture.workload.schema_type.value = "financial"
-    trino = _Trino(_days(30))
-    k8s = MagicMock()
-    k8s.exec_in_pod.side_effect = trino
-    with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
-        return_value=("trino", "trino-coordinator-0", "lakehouse"),
-    ):
-        _run_iceberg_compaction(cfg, k8s, Console(quiet=True), MagicMock(), live_streams=True)
+    MERGE ("Missing required files to delete") and ends the stream, so with
+    live streams only the silver tables it appends to are compacted."""
+    cfg = trino_cfg("financial")
+    trino = _trino(_days(30))
+    compact(trino, cfg, live_streams=True)
     touched = {
         t
         for t in cfg.architecture.tables.workload_tables("financial")

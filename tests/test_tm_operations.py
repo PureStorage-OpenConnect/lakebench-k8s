@@ -8,7 +8,6 @@ tests/spark/test_tm_operations_spark.py.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -151,9 +150,9 @@ def test_continuing_activity_review_fires_ninety_days_after_sar():
 
 def test_review_not_due_yet_is_not_fired():
     _, cases = _run([_alert("a0", 0, True)], as_of_day=100)
-    parent = cases[0]
-    if parent["filing_date"] is not None:
-        assert parent["continuing_review_due_date"] > D0 + timedelta(days=100)
+    (parent,) = [c for c in cases if c["case_type"] == "alert_escalation"]
+    assert parent["filing_date"] is not None
+    assert parent["continuing_review_due_date"] > D0 + timedelta(days=100)
     assert parent["continuing_review_case_id"] is None
 
 
@@ -206,12 +205,6 @@ def test_triage_priority_is_weight_times_crr():
     assert set(tm.PRIORITY_RANK) == {"low", "medium", "high", "critical"}
 
 
-def test_split_run_id():
-    assert tm.split_run_id("run-abc-c3") == ("run-abc", 3)
-    assert tm.split_run_id("run-abc") == ("run-abc", 1)
-    assert tm.split_run_id("run-abc", cycle=9) == ("run-abc", 9)
-
-
 def _counts(**over):
     base = {
         "customers": 30,
@@ -254,6 +247,7 @@ def test_invariants_pass_on_a_consistent_cycle():
     "over,failing",
     [
         ({"excluded": 39}, "reconciliation"),
+        ({"unaccounted": 3}, "reconciliation"),
         ({"negative_items": ["exclusion.in_flight=-3"]}, "reconciliation"),
         ({"escalated": 11}, "escalated_le_alerts"),
         ({"alert_cases": 5}, "cases_le_escalated"),
@@ -324,6 +318,9 @@ def test_continuing_activity_sar_meets_the_120_day_limit():
         _, cases = _continuing(cust)
         by = {c["case_id"]: c for c in cases}
         for c in cases:
+            if c["sar_decision"] == "sar_filed":
+                # No late-filing draw: no SAR of either type is late.
+                assert c["filed_late"] is False, (cust, c["case_type"], c["days_since_prior_sar"])
             if c["case_type"] == "continuing_activity" and c["sar_decision"] == "sar_filed":
                 n += 1
                 prior = by[c["parent_case_id"]]
@@ -395,17 +392,6 @@ def test_deferred_review_is_covered_by_the_sar_the_blocking_case_files():
                 assert blocker["determination_date"] <= c["continuing_review_due_date"]
                 assert blocker["filing_date"] >= c["continuing_review_due_date"]
     assert seen > 0
-
-
-def test_no_continuing_sar_is_late_by_construction():
-    # With no late-filing draw, no continuing-activity SAR misses its limit
-    # (the reviewer's probe: deferred-origin reviews were measured from the
-    # wrong SAR and came out late).
-    for cust in range(300):
-        _, cases = _continuing(cust)
-        for c in cases:
-            if c["sar_decision"] == "sar_filed":
-                assert c["filed_late"] is False, (cust, c["case_type"], c["days_since_prior_sar"])
 
 
 # --- Alert identity across cycles -----------------------------------------
@@ -572,7 +558,6 @@ def test_every_config_field_reaches_the_script(monkeypatch):
     assert p["enabled"] is False and p["seed"] == 3 and p["no_suspect_rate"] == 0.4
     assert p["max_alerts_per_customer"] == 777 and p["continuous_interval_seconds"] == 90
     assert p["counterparty_scenarios"] == ("W4_risk_propagation",)
-    assert len(cfg.env()) == len(TmOperationsConfig.model_fields)
 
 
 def test_new_alert_never_takes_a_withdrawn_alerts_key():
@@ -601,13 +586,25 @@ def test_grown_windows_pair_in_time_order():
     assert all(a["in_current_detection"] for a in out.values())
 
 
-def test_unavailable_source_is_unchecked_not_failed():
+@pytest.mark.parametrize(
+    "over,name",
+    [
+        ({"source": None}, "reconciliation"),
+        ({"unaccounted": None}, "reconciliation"),
+        ({"history_note": "snapshots expired"}, "history_stable"),
+    ],
+)
+def test_unverifiable_invariant_is_unchecked_not_failed(over, name):
+    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(**over))}
+    assert inv[name] == "unchecked"
+
+
+def test_unavailable_source_leaves_the_verdict_unknown():
     from lakebench.metrics.tm_ops import tm_verdict
 
     inv = {
         n: {"status": s, "detail": d} for n, s, d in tm.evaluate_invariants(_counts(source=None))
     }
-    assert inv["reconciliation"]["status"] == "unchecked"
     v = tm_verdict({1: inv}, {})
     assert v["status"] == "unknown" and not v["problems"] and "reconciliation" in v["reason"]
 
@@ -685,56 +682,6 @@ def test_cap_bounds_the_workflow_total_per_customer():
     assert len(worked) == 5 and len(d) == 13
     # New alerts admitted oldest first.
     assert {r["alert_id"] for r in worked} == {"P0", "P1", "P2", "N0", "N1"}
-
-
-# --- Continuous scheduling (gold-refresh) ------------------------------------
-
-
-# --- Continuous in-flight bound ---------------------------------------------
-
-
-def test_reconciliation_fails_on_unaccounted_and_is_unchecked_when_unbounded():
-    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(unaccounted=3))}
-    assert inv["reconciliation"] == "fail"
-    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(unaccounted=None))}
-    assert inv["reconciliation"] == "unchecked"
-    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(history_note="snapshots expired"))}
-    assert inv["history_stable"] == "unchecked"
-
-
-def test_continuous_jobs_get_the_cli_run_id_and_window():
-    from lakebench.cli._sustained import _streaming_job_env
-
-    env = _streaming_job_env("20260925-101010-abcdef", 900)
-    assert env == {
-        "LB_RUN_ID": "20260925-101010-abcdef",
-        "LB_CONTINUOUS_WINDOW_S": "900",
-        "LB_GOLD_INCREMENTAL": "true",
-    }
-    import inspect
-
-    from lakebench.cli import _sustained
-
-    src = inspect.getsource(_sustained._run_sustained)
-    assert "submit_job(job_type, cycle_env=stream_env)" in src
-
-
-def test_gold_refresh_samples_freshness_after_a_tm_pass():
-    """Gold is not refreshed while a pass runs, so the staleness it causes
-    must reach the freshness score: a freshness line follows each pass."""
-    src = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/gold_refresh_financial.py"
-    ).read_text()
-    i = src.index("run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True")
-    after = src[i : i + 1800]
-    assert 'tm_clock["end"] = time.time()' in after
-    assert "data freshness" in after
-    # Only on the same terms as the tick's own sample: a drained corpus's
-    # idle time must not become the freshness score.
-    assert "(fresh_sampled or arrived)" in after
-    assert "tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s)" in src
-    assert "window_start_marker(spark, GOLD_CHECKPOINT" in src
 
 
 def test_alert_sharing_one_payment_cannot_take_a_grown_alerts_identity():

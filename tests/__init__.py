@@ -1,1 +1,1 @@
-"""Benchlake test suite."""
+"""Lakebench test suite."""

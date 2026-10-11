@@ -1,26 +1,18 @@
-"""LB-146: JVM heap must sit below the container memory limit.
-
-Live 2026-09-24: hive-delta-spark-trino c360 scale 1 under parallel load, Q2
-got the coordinator OOM-killed (exit 137) with limit 4Gi and -Xmx4G. Heap plus
-metaspace, thread stacks, direct buffers and code cache exceeded the cgroup
-limit. These tests render the real templates from the engine context.
-"""
+"""Trino JVM heap sits below the container memory limit and fits the memory properties."""
 
 from __future__ import annotations
 
-import re
-from unittest.mock import MagicMock, patch
-
 import pytest
-import yaml
 
-from lakebench.deploy.engine import (
-    JVM_HEAP_FRACTION,
-    DeploymentEngine,
-    TemplateRenderer,
-    k8s_memory_bytes,
+from lakebench.deploy.engine import JVM_HEAP_FRACTION, k8s_memory_bytes
+from tests.fixtures.trino_configmap import (
+    configmap,
+    engine,
+    render,
+    size_bytes,
+    xmx_bytes,
 )
-from tests.conftest import make_config
+from tests.fixtures.trino_configmap import props as parse_props
 
 # Trino defaults when the properties are not set: each is 30% of the heap.
 _TRINO_DEFAULT_FRACTION = {
@@ -29,43 +21,11 @@ _TRINO_DEFAULT_FRACTION = {
 }
 
 
-def _engine(**overrides) -> DeploymentEngine:
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = None
-    with patch.object(DeploymentEngine, "_detect_openshift", return_value=False):
-        return DeploymentEngine(make_config(**overrides), k8s_client=k8s)
-
-
-def _render(name: str, ctx: dict) -> list[dict]:
-    return [d for d in yaml.safe_load_all(TemplateRenderer().render(name, ctx)) if d]
-
-
-def _xmx_bytes(jvm_config: str) -> int:
-    m = re.search(r"^\s*-Xmx(\d+)([mMgG])\s*$", jvm_config, re.MULTILINE)
-    assert m, jvm_config
-    return int(m.group(1)) * (2**20 if m.group(2) in "mM" else 2**30)
-
-
 def _container_limit(doc: dict) -> int:
     (container,) = [c for c in doc["spec"]["template"]["spec"]["containers"] if "resources" in c]
     res = container["resources"]
     assert res["limits"]["memory"] == res["requests"]["memory"]
     return k8s_memory_bytes(res["limits"]["memory"])
-
-
-def _props(text: str) -> dict[str, str]:
-    return dict(
-        line.strip().split("=", 1)
-        for line in text.splitlines()
-        if "=" in line and not line.strip().startswith("#")
-    )
-
-
-def _size_bytes(value: str) -> int:
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(B|kB|MB|GB|TB)", value.strip())
-    assert m, value
-    mult = {"B": 1, "kB": 2**10, "MB": 2**20, "GB": 2**30, "TB": 2**40}[m.group(2)]
-    return int(float(m.group(1)) * mult)
 
 
 def _trino_overrides(engine_type: str, coord_mem: str, worker_mem: str) -> dict:
@@ -87,35 +47,37 @@ def _trino_overrides(engine_type: str, coord_mem: str, worker_mem: str) -> dict:
     [("8Gi", "16Gi"), ("4Gi", "8Gi"), ("16Gi", "64Gi"), ("4096Mi", "12G")],
 )
 def test_trino_xmx_below_pod_limit_and_memory_props_fit(coord_mem, worker_mem):
-    ctx = _engine(**_trino_overrides("trino", coord_mem, worker_mem)).context
+    ctx = engine(**_trino_overrides("trino", coord_mem, worker_mem)).context
 
-    cm = _render("trino/configmap.yaml.j2", ctx)[0]["data"]
-    (coord,) = [d for d in _render("trino/coordinator.yaml.j2", ctx) if d["kind"] == "Deployment"]
-    workers = [d for d in _render("trino/worker.yaml.j2", ctx) if d["kind"] == "StatefulSet"]
+    cm = configmap(ctx)
+    (coord,) = [d for d in render("trino/coordinator.yaml.j2", ctx) if d["kind"] == "Deployment"]
+    workers = [d for d in render("trino/worker.yaml.j2", ctx) if d["kind"] == "StatefulSet"]
     assert len(workers) == 1
 
     for role, pod, configured in (
         ("coordinator", coord, coord_mem),
         ("worker", workers[0], worker_mem),
     ):
-        heap = _xmx_bytes(cm[f"jvm.config.{role}"])
+        heap = xmx_bytes(cm[f"jvm.config.{role}"])
         limit = _container_limit(pod)
         assert limit == k8s_memory_bytes(configured)  # pod limit unchanged
         assert heap <= JVM_HEAP_FRACTION * limit
         assert heap >= 0.75 * limit  # not needlessly small either
 
         # Trino refuses to start if max-memory-per-node + headroom > heap.
-        props = _props(cm[f"config.properties.{role}"])
+        props = parse_props(cm[f"config.properties.{role}"])
         used = sum(
-            _size_bytes(props[k]) if k in props else frac * heap
+            size_bytes(props[k]) if k in props else frac * heap
             for k, frac in _TRINO_DEFAULT_FRACTION.items()
         )
         assert used <= heap, (role, props)
 
 
-def test_bad_trino_memory_ignored_for_other_engines():
+@pytest.mark.parametrize("engine_type", ["spark-thrift", "duckdb", "none"])
+def test_bad_trino_memory_ignored_for_other_engines(engine_type):
     """An unused Trino field must not block that deployment's destroy, which
     builds the same context."""
-    for engine_type in ["spark-thrift", "duckdb", "none"]:
-        ctx = _engine(**_trino_overrides(engine_type, "8g", "lots")).context
-        assert ctx["trino_coordinator_heap"] == "" and ctx["trino_worker_heap"] == ""
+    ctx = engine(**_trino_overrides(engine_type, "8g", "lots")).context
+    assert ctx["trino_coordinator_heap"] == "" and ctx["trino_worker_heap"] == ""
+    assert ctx["trino_memory"] == {}
+    assert "query.max-memory" not in parse_props(configmap(ctx)["config.properties.worker"])

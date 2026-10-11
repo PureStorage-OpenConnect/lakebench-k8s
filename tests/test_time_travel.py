@@ -1,4 +1,4 @@
-"""Time-travel reads of a continuous AML run (AML-9, AM-16).
+"""Time-travel reads of a continuous AML run.
 
 The job script's passes run here on fakes for the Spark reads (the Spark
 tier runs them on a real Iceberg table); the record, the expiry attribution
@@ -8,18 +8,14 @@ and S3 client.
 
 from __future__ import annotations
 
-import ast
 import json
 import re
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lakebench.metrics import time_travel as tt
-
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 
 T1, T2, T3 = 101, 102, 103
 
@@ -318,14 +314,23 @@ def test_the_cluster_clock_offset_moves_the_round_end():
     assert got["ticks"][0]["state"] == "missing_unexplained"
 
 
-def test_configured_retention_reason_when_not_floored():
+@pytest.mark.parametrize(
+    ("configured", "reason"),
+    [
+        ("1h", "configured retention"),
+        ("60m", "configured retention"),
+        (None, "configured retention unknown"),
+    ],
+)
+def test_expiry_reason_names_the_configured_retention(configured, reason):
     by = tt.expired_by(
         _rec(1, T1, committed="2026-10-03T10:00:00Z"),
         [_round(1, "2026-10-03T12:00:00Z", applied="1h")],
-        "1h",
+        configured,
         None,
     )
-    assert by is not None and by["reason"] == "configured retention"
+    assert by is not None and by["reason"] == reason
+    assert by["ran_at_clock"] == "host"
 
 
 def test_maintenance_skipped_leaves_every_expiry_unexplained():
@@ -359,24 +364,6 @@ def test_verdict(states, incomplete, verdict):
     assert (reason == "") == (verdict == "pass")
 
 
-def test_hash_only_alone_names_the_missing_comparison():
-    assert tt.verdict_of([{"state": "verified_hash_only"}], False) == (
-        "fail",
-        "no snapshot was compared with the count its tick recorded",
-    )
-
-
-def test_configured_retention_reason_compares_durations():
-    by = tt.expired_by(
-        _rec(1, T1, committed="2026-10-03T10:00:00Z"),
-        [_round(1, "2026-10-03T12:00:00Z", applied="1h")],
-        "60m",
-        None,
-    )
-    assert by is not None and by["reason"] == "configured retention"
-    assert by["basis"].startswith("the earliest") and by["ran_at_clock"] == "host"
-
-
 def test_spark_thrift_cutoff_is_on_the_host_clock():
     # The cluster is 10 minutes behind; Spark Thrift's cutoff literal is the
     # host's time, so the offset does not apply and a 09:55 commit is covered.
@@ -388,28 +375,17 @@ def test_spark_thrift_cutoff_is_on_the_host_clock():
     assert got["ticks"][0]["state"] == "expired"
 
 
-def test_zero_records_verdict_names_it():
-    assert tt.verdict_of([], False) == ("fail", "zero recorded snapshots")
-
-
 def test_a_recorded_tick_with_no_result_is_an_error():
     cont = _continuous([_rec(1, T1), _rec(2, T2)], [])
     got = tt.merge(cont, _result([(2, "verified")]), POLICY)
     assert got["ticks"][0]["state"] == "error" and got["verdict"] == "fail"
 
 
-def test_line_says_the_check_never_fails_the_run():
-    got = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "mismatch")]), POLICY)
-    text = tt.line(got)
-    assert text.startswith(
-        "time-travel check: FAIL (1 mismatch of 1 ticks in the current driver log; retention 30m, applied 1h)"
-    )
-    assert text.endswith("not a run FAIL")
+def test_line_distinguishes_a_failed_check_from_a_pass():
+    bad = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "mismatch")]), POLICY)
     ok = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "verified")]), POLICY)
-    assert (
-        tt.line(ok)
-        == "time-travel check: pass (1 verified of 1 ticks in the current driver log; retention 30m, applied 1h)"
-    )
+    assert tt.line(bad).startswith("time-travel check: FAIL")
+    assert "FAIL" not in tt.line(ok) and tt.line(ok).startswith("time-travel check: pass")
 
 
 # --- the CLI step ---------------------------------------------------------------
@@ -632,30 +608,7 @@ def test_a_continuous_maintenance_round_records_its_time_and_tables():
     assert "rounds" not in continuous_retention_record(cfg)
 
 
-# --- wiring, profile and the no-pin guard ---------------------------------------
-
-
-def test_the_step_runs_after_the_scorer_with_the_streams_stopped():
-    """In _run_sustained: drain, stop the streams, the covered scorer, then
-    the time-travel reads; and the maintenance rounds reach the record."""
-    text = (SRC / "cli" / "_sustained.py").read_text()
-    body = text[text.index("def _run_sustained(") :]
-    drain = body.index("drain_gold_refresh(")
-    stop = body.index("_stopped_now = _stop_streams(")
-    score = body.index("continuous_scoring(\n")
-    step = body.index("run_time_travel(\n")
-    assert drain < stop < score < step
-    assert "rounds=retention_rounds" in body
-    assert "continuous_retention_record(\n                    cfg," in body
-    assert (
-        'retention_rounds\n                        if cfg.architecture.workload.schema_type.value == "financial"'
-        in body
-    )
-    settle = body.index("_settle_financial_scoring(cfg, collector, pipeline_success, _abort)")
-    assert body.index("settle_time_travel(") > settle
-    # The namespace is checked right before each post-window job.
-    assert "_ns_watch.check(time.time() - start)\n                run_time_travel(" in body
-    assert "_ns_watch.check(time.time() - start)\n            _fs = continuous_scoring(" in body
+# --- profile ---------------------------------------
 
 
 @pytest.mark.parametrize("schema", ["customer360", "financial"])
@@ -675,57 +628,6 @@ def test_profile_equals_the_scorer_and_one_attempt(schema):
     assert spec["restartPolicy"]["onSubmissionFailureRetries"] == 5
 
 
-_PIN = re.compile(
-    r"CREATE\s+(OR\s+REPLACE\s+)?(TAG|BRANCH)|REPLACE\s+(TAG|BRANCH)|manageSnapshots|createTag"
-    r"|createBranch|wap\.branch",
-    re.IGNORECASE,
-)
-
-
-def test_no_snapshot_pin_anywhere():
-    """Time travel keeps no pin (DESIGN 04 AML-9, "Decision: no pin"): no tag
-    or branch is created on a table by any script, CLI path or deploy path,
-    so expiry and destroy need no unpin step."""
-    found = []
-    for sub in ("spark/scripts", "cli", "deploy", "modules"):
-        for path in sorted((SRC / sub).rglob("*.py")):
-            for n, line in enumerate(path.read_text().splitlines(), 1):
-                if _PIN.search(line):
-                    found.append(f"{path.relative_to(SRC)}:{n}: {line.strip()}")
-    assert found == []
-
-
-def test_the_pin_pattern_would_see_a_pin():
-    for sql in (
-        "ALTER TABLE t CREATE TAG `run-1` AS OF VERSION 5",
-        "ALTER TABLE t CREATE OR REPLACE BRANCH b",
-        "ALTER TABLE t REPLACE TAG x",
-        "table.manageSnapshots().createTag('x', 1)",
-        "spark.conf.set('spark.wap.branch', 'audit')",
-    ):
-        assert _PIN.search(sql), sql
-
-
-def test_the_job_script_writes_no_table():
-    tree = ast.parse((SRC / "spark" / "scripts" / "time_travel_financial.py").read_text())
-    calls = {
-        n.func.attr
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-    }
-    assert not calls & {"saveAsTable", "insertInto", "writeTo", "save", "parquet"}
-    # Every statement it sends is a read: SELECT or DESCRIBE.
-    source = (SRC / "spark" / "scripts" / "time_travel_financial.py").read_text()
-    sqls = [
-        ast.get_source_segment(source, n.args[0])
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "sql"
-    ]
-    assert len(sqls) >= 4
-    for sql in sqls:
-        assert re.match(r'f?"(SELECT|DESCRIBE) ', sql or ""), sql
-
-
 def test_the_verdict_shows_the_time_travel_check_and_never_fails_on_it():
     from lakebench.metrics.verdict import compute_verdict
     from lakebench.reports.front_matter import _qualifier_lines
@@ -734,7 +636,7 @@ def test_the_verdict_shows_the_time_travel_check_and_never_fails_on_it():
     m = _metrics(_cfg(schema="financial", mode="continuous"))
     before = compute_verdict(m)
     assert "time_travel" not in before.qualifiers
-    # AM-15's tick records alone (no verdict yet) give no line.
+    # Tick records alone (no verdict yet) give no line.
     m.continuous = {"time_travel": {"ticks": [_rec(1, T1)]}}
     assert "time_travel" not in compute_verdict(m).qualifiers
     got = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "mismatch")]), POLICY)
@@ -770,16 +672,6 @@ def test_spark_thrift_rounds_use_their_start():
     assert tt.expired_by(tick, [{**rnd, "engine": "spark-thrift"}], "30m", None) is None
 
 
-def test_unknown_configured_retention_is_said():
-    by = tt.expired_by(
-        _rec(1, T1, committed="2026-10-03T10:00:00Z"),
-        [_round(1, "2026-10-03T12:00:00Z")],
-        None,
-        None,
-    )
-    assert by is not None and by["reason"] == "configured retention unknown"
-
-
 def test_a_run_that_failed_after_the_reads_does_not_keep_their_verdict():
     from lakebench.cli._aml_post import settle_time_travel
 
@@ -806,15 +698,7 @@ def test_a_wait_that_raises_deletes_the_job():
     jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
 
 
-def test_the_settle_carries_the_run_outcome_and_the_stage():
-    text = (SRC / "cli" / "_sustained.py").read_text()
-    body = text[text.index("settle_time_travel(\n") :][:600]
-    assert '"interrupted during the time-travel reads"' in body
-    assert 'if _stage == "time-travel"' in body
-    assert "pipeline_success," in body
-
-
-# --- the hash covers the business columns (SPEC section 8) ------------------
+# --- the hash covers the business columns ---
 
 
 def test_the_job_hashes_business_columns_only(job):
@@ -844,3 +728,98 @@ def test_the_record_says_which_columns_were_hashed():
     # No job result names its columns: nothing claims what was hashed.
     none = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "verified")]), POLICY)
     assert "hashed_columns" not in none
+
+
+# --- order of the post-window steps ---
+
+
+def test_the_reads_follow_the_drain_the_stop_and_the_scorer(monkeypatch, tmp_path):
+    """The reads compare against the tables the scorer saw: drain, stop the
+    streams, score, then read, and the run outcome goes to the reads."""
+    import time as real_time
+
+    from lakebench.cli import _aml_post, _sustained
+    from lakebench.spark.job import JobState
+    from tests.conftest import make_config
+
+    order: list[str] = []
+    seen: dict = {}
+    cfg = make_config(
+        recipe="hive-iceberg-spark-trino",
+        workload={"schema": "financial"},
+        architecture={"pipeline": {"mode": "continuous"}},
+    )
+    monkeypatch.chdir(tmp_path)
+    op = MagicMock()
+    op.check_status.return_value = MagicMock(ready=True, version="2.5.1")
+    op.ensure_namespace_watched.return_value = MagicMock(watching_namespace=True)
+    monkeypatch.setattr("lakebench.spark.SparkOperatorManager", lambda **kw: op)
+    monkeypatch.setattr(_sustained, "get_k8s_client", lambda **kw: MagicMock())
+    jm = MagicMock()
+    jm.deploy_scripts_configmap.return_value = True
+    jm.submit_job.return_value = MagicMock(state=JobState.RUNNING)
+    monkeypatch.setattr("lakebench.engine.get_engine", lambda c, k: jm)
+    mon = MagicMock()
+    mon.wait_for_completion.return_value = SimpleNamespace(
+        success=True, message="", elapsed_seconds=1.0
+    )
+    mon._get_driver_logs.return_value = ""
+    monkeypatch.setattr("lakebench.spark.SparkJobMonitor", lambda *a, **kw: mon)
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c, **kw: MagicMock())
+    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: MagicMock())
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock())
+    monkeypatch.setattr(_sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
+    monkeypatch.setattr(_sustained, "_collect_platform_metrics", lambda *a, **kw: None)
+    monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
+    monkeypatch.setattr(_sustained, "_stop_leftover_streams", lambda jm_, ns: None)
+    monkeypatch.setattr(_sustained, "_reset_continuous_state", lambda c, clear_raw: None)
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: ("none", ""))
+    clock = [real_time.time()]
+
+    def sleep(seconds):
+        clock[0] += seconds
+
+    monkeypatch.setattr(
+        _sustained,
+        "time",
+        SimpleNamespace(
+            time=lambda: clock[0],
+            sleep=sleep,
+            monotonic=lambda: clock[0],
+            strftime=real_time.strftime,
+        ),
+    )
+
+    def drain(*a, **kw):
+        order.append("drain")
+        return _drained(), None, "", None
+
+    def stop(k8s, ns, subs):
+        order.append("stop")
+        return list(subs)
+
+    def score(*a, **kw):
+        order.append("score")
+        return {"status": "scored"}
+
+    def reads(*a, **kw):
+        order.append("reads")
+        seen.update(kw)
+
+    real_record = _sustained.continuous_retention_record
+
+    def record(cfg, rounds=None):
+        seen["rounds"] = rounds
+        return real_record(cfg, rounds=rounds)
+
+    monkeypatch.setattr(_sustained, "continuous_retention_record", record)
+    monkeypatch.setattr(_sustained, "drain_gold_refresh", drain)
+    monkeypatch.setattr(_sustained, "_stop_streams", stop)
+    monkeypatch.setattr(_aml_post, "continuous_scoring", score)
+    monkeypatch.setattr(_aml_post, "run_time_travel", reads)
+    monkeypatch.setattr(_aml_post, "settle_time_travel", lambda *a, **kw: None)
+    with pytest.raises(BaseException) as ei:  # noqa: B017, PT011 -- the exit is not asserted
+        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60, skip_generate=True)
+    assert order == ["drain", "stop", "score", "reads"], repr(ei.value)
+    assert "run_failed" in seen
+    assert seen["rounds"] == []

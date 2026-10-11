@@ -1,52 +1,60 @@
-"""G4: Iceberg silver append re-asserts TBLPROPERTIES on cycles 1+.
+"""Iceberg silver append re-asserts TBLPROPERTIES on cycles 1+.
 
-An Iceberg table's `writeTo(...).append()` does not carry
-TBLPROPERTIES: if a cycle-0 CREATE established a property set and a
-later ALTER (or a rebuild by an older script) dropped one, the append
-would keep writing under whichever properties currently exist. This
-silently degrades the write for the lifetime of the deployment. G4
-adds an ALTER TABLE ... SET TBLPROPERTIES call before each append.
-
-Local Spark is not available in the unit tier; test via source
-inspection and a stubbed exec of the helper. The full-fixture Iceberg
-verification lives in tests/spark under the standard local-Spark tier.
+An Iceberg table's `writeTo(...).append()` does not carry TBLPROPERTIES, so a
+table that lost a property would keep writing under whichever properties
+currently exist. The silver build issues an ALTER TABLE ... SET TBLPROPERTIES
+before each append, honouring the operator's distribution mode and fanout.
 """
 
 from __future__ import annotations
 
+import ast
+import re
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
+import pytest
+
+_SILVER_BUILD = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/silver_build.py"
+TABLE = "ice.silver.customer_interactions_enriched"
+KEYS = {
+    "write.format.default",
+    "write.parquet.compression-codec",
+    "write.metadata.delete-after-commit.enabled",
+    "write.metadata.previous-versions-max",
+    "write.target-file-size-bytes",
+    "write.distribution-mode",
+}
 
 
-def _exec_helper_only():
-    """Execute just the shared helper without importing pyspark.
+@pytest.fixture
+def silver_build(monkeypatch, load_script):
+    """The re-assert helper and its property tuple from silver_build.py.
 
-    The helper uses METADATA_DELETE_AFTER_COMMIT / METADATA_PREVIOUS_VERSIONS_MAX
-    from common.py. We supply those constants and let the helper's
-    `spark.sql(...)` call reach a MagicMock.
+    The script runs the whole pipeline when imported, so only the two
+    definitions are executed, against the real constants of ``common``.
     """
-    src = (_SCRIPTS_DIR / "silver_build.py").read_text()
-    # Slice out just the module-level helper block G4 added.
-    start = src.index("_SILVER_ICEBERG_STATIC_PROPS")
-    end = src.index("\ndef silver_simple", start)
-    snippet = src[start:end]
+    for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
+        monkeypatch.setitem(sys.modules, mod, MagicMock())
+    common = load_script("common")
+    wanted = {"_SILVER_ICEBERG_STATIC_PROPS", "reassert_silver_iceberg_props"}
+    nodes = []
+    for node in ast.parse(_SILVER_BUILD.read_text()).body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            nodes.append(node)
+        elif isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) in wanted:
+            nodes.append(node)
+    assert len(nodes) == len(wanted)
     ns = {
-        "METADATA_DELETE_AFTER_COMMIT": (
-            "write.metadata.delete-after-commit.enabled",
-            "true",
-        ),
-        "METADATA_PREVIOUS_VERSIONS_MAX": (
-            "write.metadata.previous-versions-max",
-            "50",
-        ),
+        "METADATA_DELETE_AFTER_COMMIT": common.METADATA_DELETE_AFTER_COMMIT,
+        "METADATA_PREVIOUS_VERSIONS_MAX": common.METADATA_PREVIOUS_VERSIONS_MAX,
     }
-    exec(compile(snippet, str(_SCRIPTS_DIR / "silver_build.py"), "exec"), ns)
+    exec(compile(ast.fix_missing_locations(ast.Module(nodes, [])), str(_SILVER_BUILD), "exec"), ns)
     return ns
 
 
-def _mock_spark_with_conf(dist_mode="hash", fanout="false"):
+def _mock_spark_with_conf(dist_mode, fanout):
     spark = MagicMock()
     spark.conf.get.side_effect = lambda key, default=None: {
         "spark.lb.silver.distribution_mode": dist_mode,
@@ -55,78 +63,28 @@ def _mock_spark_with_conf(dist_mode="hash", fanout="false"):
     return spark
 
 
-def test_helper_runs_alter_tblproperties_with_the_full_set():
-    """reassert_silver_iceberg_props issues an ALTER for the property keys."""
-    ns = _exec_helper_only()
-    reassert = ns["reassert_silver_iceberg_props"]
-    spark = _mock_spark_with_conf()
-    reassert(spark, "ice.silver.customer_interactions_enriched")
-    assert spark.sql.called
+@pytest.mark.parametrize(
+    ("dist_mode", "fanout"),
+    [
+        ("hash", "false"),
+        # The operator's escape hatch must survive the cycle-1+ re-assert rather
+        # than revert to hash.
+        ("none", "false"),
+        ("hash", "true"),
+    ],
+    ids=["defaults", "distribution-none", "fanout"],
+)
+def test_reassert_sets_the_full_property_set_from_the_conf(silver_build, dist_mode, fanout):
+    spark = _mock_spark_with_conf(dist_mode, fanout)
+    silver_build["reassert_silver_iceberg_props"](spark, TABLE)
     sql = spark.sql.call_args.args[0]
-    assert sql.startswith("ALTER TABLE ice.silver.customer_interactions_enriched SET TBLPROPERTIES")
-    for key in (
-        "write.format.default",
-        "write.parquet.compression-codec",
-        "write.metadata.delete-after-commit.enabled",
-        "write.metadata.previous-versions-max",
-        "write.target-file-size-bytes",
-        "write.distribution-mode",
-    ):
-        assert key in sql, f"missing TBLPROPERTIES key: {key}"
-
-
-def test_helper_honours_distribution_mode_override():
-    """Operator's spark.lb.silver.distribution_mode=none is NOT overwritten.
-
-    BUG-003 / LB-049 escape hatch for scale-5TB+ STREAMING must survive
-    the cycle-1+ re-assert. Previously the helper hardcoded
-    write.distribution-mode=hash, silently reverting the operator's
-    choice on every append.
-    """
-    ns = _exec_helper_only()
-    reassert = ns["reassert_silver_iceberg_props"]
-    spark = _mock_spark_with_conf(dist_mode="none")
-    reassert(spark, "ice.silver.customer_interactions_enriched")
-    sql = spark.sql.call_args.args[0]
-    assert "'write.distribution-mode' = 'none'" in sql
-    assert "'write.distribution-mode' = 'hash'" not in sql
-
-
-def test_helper_carries_fanout_when_enabled():
-    ns = _exec_helper_only()
-    reassert = ns["reassert_silver_iceberg_props"]
-    spark = _mock_spark_with_conf(fanout="true")
-    reassert(spark, "ice.silver.customer_interactions_enriched")
-    sql = spark.sql.call_args.args[0]
-    assert "write.spark.fanout.enabled" in sql
-    assert "'write.spark.fanout.enabled' = 'true'" in sql
-
-
-def test_financial_replace_data_reasserts_props_before_overwrite():
-    """AML batch's ``_replace_data`` helper runs ALTER before overwrite.
-
-    A drifted silver.transactions or silver.entities table would take
-    the next .overwrite(lit(True)) under whichever properties the ALTER
-    trail left, so the DDL's declared retention/compression can silently
-    stop applying (invariant 5).
-
-    The helper lives at module scope (extracted from a main() closure in
-    the A1-atomic + F2 rework) so the pre-flight tests can spy on it
-    without a live Iceberg backend. The extraction changed its signature
-    to ``(spark, df, table)`` but its ALTER-before-overwrite contract is
-    unchanged.
-    """
-    src = (_SCRIPTS_DIR / "silver_build_financial.py").read_text()
-    body = src.split("def _replace_data(spark, df, table):", 1)[1]
-    # Cut at the end of the helper body (blank line + next `def` at column 0).
-    body = body.split("\n\n\ndef ", 1)[0]
-    assert "ALTER TABLE" in body
-    assert "SET TBLPROPERTIES" in body
-    assert "ICEBERG_V2_SNAPPY_PROPS_SQL" in body
-    # The ALTER must run BEFORE the overwrite so a drifted table takes
-    # the DDL properties before this cycle's write commits. The docstring
-    # also mentions .overwrite(lit(True)); anchor on the executable call
-    # sequence to avoid matching prose.
-    alter_idx = body.index('spark.sql(f"ALTER TABLE')
-    write_idx = body.index("df.writeTo(fq).overwrite(lit(True))")
-    assert alter_idx < write_idx
+    assert sql.startswith(f"ALTER TABLE {TABLE} SET TBLPROPERTIES")
+    props = dict(re.findall(r"'([^']+)' = '([^']*)'", sql))
+    expected = {
+        **dict(silver_build["_SILVER_ICEBERG_STATIC_PROPS"]),
+        "write.distribution-mode": dist_mode,
+    }
+    if fanout == "true":
+        expected["write.spark.fanout.enabled"] = "true"
+    assert props == expected
+    assert KEYS <= set(props)

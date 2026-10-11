@@ -26,31 +26,33 @@ class TestRuntimeSuffix:
         assert iceberg_runtime_suffix_for((4, 1), "1.10.1") == "4.0"
         assert iceberg_runtime_suffix_for((4, 1), "1.10.0") == "4.0"
 
-    @pytest.mark.parametrize("iceberg", ["1.10.1", "1.11.0"])
-    def test_spark_40_is_unaffected(self, iceberg):
-        assert iceberg_runtime_suffix_for((4, 0), iceberg) == "4.0"
-
-    @pytest.mark.parametrize("iceberg", ["1.9.1", "1.10.1", "1.11.0"])
-    def test_spark_35_is_unaffected(self, iceberg):
-        assert iceberg_runtime_suffix_for((3, 5), iceberg) == "3.5"
+    @pytest.mark.parametrize(
+        ("spark", "iceberg", "suffix"),
+        [
+            ((4, 0), "1.10.1", "4.0"),
+            ((4, 0), "1.11.0", "4.0"),
+            ((3, 5), "1.9.1", "3.5"),
+            ((3, 5), "1.10.1", "3.5"),
+            ((3, 5), "1.11.0", "3.5"),
+        ],
+    )
+    def test_spark_35_and_40_are_unaffected(self, spark, iceberg, suffix):
+        assert iceberg_runtime_suffix_for(spark, iceberg) == suffix
 
 
 class TestJava17Requirement:
     """Iceberg 1.11.0 ships bytecode major 61; 1.10.x shipped 55."""
 
-    def test_1_11_requires_java17(self):
-        assert iceberg_requires_java17("1.11.0")
-
-    @pytest.mark.parametrize("version", ["1.10.1", "1.9.1", "1.5.2"])
-    def test_earlier_versions_do_not(self, version):
-        assert not iceberg_requires_java17(version)
+    @pytest.mark.parametrize(
+        ("version", "required"),
+        [("1.11.0", True), ("1.10.1", False), ("1.9.1", False), ("1.5.2", False)],
+    )
+    def test_requires_java17(self, version, required):
+        assert iceberg_requires_java17(version) is required
 
     def test_java11_spark35_image_is_refused(self):
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ValueError, match="java17"):
             validate_iceberg_java_runtime("apache/spark:3.5.4-python3", "1.11.0")
-        message = str(exc.value)
-        assert "Java 17" in message
-        assert "java17" in message, "the error must name the fix, not just the fault"
 
     def test_java17_spark35_image_is_accepted(self):
         validate_iceberg_java_runtime("apache/spark:3.5.9-java17-python3", "1.11.0")

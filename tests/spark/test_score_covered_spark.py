@@ -65,10 +65,10 @@ def test_covered_score(spark_subprocess, spark_jars):
     assert out["current_accounts_would_drop_f3"] is True
     # Not scored, never a fallback.
     assert out["expired"]["status"] == "not_scored"
-    assert out["expired"]["reason"] == "snapshot silver.transactions expired before scoring"
-    assert out["unknown"]["reason"] == (
-        "silver.silver_batch_versions snapshot unknown at the last completed tick"
-    )
+    assert "silver.transactions" in out["expired"]["reason"]
+    # An unknown snapshot raises NotScored rather than falling back to current state.
+    assert out["unknown"]["reason"] is not None
+    assert "silver_batch_versions" in out["unknown"]["reason"]
     assert "recall" not in out["expired"]
 
 

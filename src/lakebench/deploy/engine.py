@@ -446,8 +446,10 @@ class DeploymentEngine:
     @staticmethod
     def _get_spark_major_minor(cfg: Any) -> str:
         """Extract Spark major.minor from image tag."""
-        tag = cfg.images.spark.split(":")[-1]
-        return ".".join(tag.split(".")[:2])
+        from lakebench.modules.pipeline_engines.spark.job import _parse_spark_major_minor
+
+        major, minor = _parse_spark_major_minor(cfg.images.spark)
+        return f"{major}.{minor}"
 
     @staticmethod
     def _trino_heap(cfg: Any, limit: str) -> str:
@@ -876,7 +878,7 @@ class DeploymentEngine:
         The stamp is the anchor for the "delete A does not affect B"
         invariant: destroy compares it before touching any resource, and
         a foreign stamp is a hard refuse. See
-        docs/design/namespace-isolation.md.
+        docs/internal/namespace-isolation.md.
         """
         import time
 

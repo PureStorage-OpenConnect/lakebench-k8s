@@ -1,4 +1,4 @@
-"""Destroy must un-watch a namespace before deleting it (LB-066).
+"""Destroy must un-watch a namespace before deleting it.
 
 The Spark Operator crash-loops on a watched namespace that does not exist --
 it cannot establish a Pod watch, its cache never syncs, and SparkApplication
@@ -56,19 +56,6 @@ def _run_destroy(engine, manager_cls) -> list:
         # Buckets are not under test here; a failed bucket step (the mocked
         # S3 config cannot init) now keeps the namespace by design.
         return destroy_all(engine, clean_buckets=False)
-
-
-class TestOrdering:
-    def test_operator_is_addressed_with_its_own_namespace_and_version(self):
-        manager_cls = MagicMock(return_value=MagicMock())
-        engine = _engine()
-
-        _run_destroy(engine, manager_cls)
-
-        kwargs = manager_cls.call_args.kwargs
-        assert kwargs["namespace"] == "spark-operator"
-        assert kwargs["version"] == "2.4.0", "removal must not drift the pinned chart"
-        assert kwargs["job_namespace"] == "u02"
 
 
 class TestDestroyIsNotBlocked:

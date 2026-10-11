@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.fixtures.clean_helpers import CFG, verified_namespace
+
 MAINT = "lakebench.modules.table_formats.iceberg.maintenance"
 
 
@@ -106,40 +108,12 @@ def test_spark_thrift_delta_drops_only_inside_the_bucket_being_emptied(detail, d
     assert bool(res.kept) is not dropped
 
 
-def test_spark_thrift_delta_with_its_files_already_gone_is_dropped():
-    gone = RuntimeError("[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/x doesn't exist")
-    # (the error DESCRIBE DETAIL gives on a log-less table, path included;
-    # probed on Delta 4.0)
-    res, sent = _run(
-        _cfg("delta"),
-        "silver",
-        "my-clean-silver",
-        ("spark-thrift", "pod", "spark_catalog"),
-        detail=lambda sql: gone,
-    )
-    assert res.unregistered and sent[-1].startswith("DROP TABLE")
-
-
 def test_no_engine_pod_skips_with_a_reason():
     res, sent = _run(_cfg(), "silver", "my-clean-silver", (None, None, None))
     assert res.skipped and sent == []
 
 
 # -- the clean command ------------------------------------------------------
-
-CFG = (
-    "name: my-clean\n"
-    "platform:\n"
-    "  storage:\n"
-    "    s3:\n"
-    "      endpoint: http://minio:9000\n"
-    "      access_key: k\n"
-    "      secret_key: s\n"
-    "      buckets:\n"
-    "        bronze: my-clean-bronze\n"
-    "        silver: my-clean-silver\n"
-    "        gold: my-clean-gold\n"
-)
 
 
 def _clean(tmp_path, unregister, target="silver"):
@@ -164,13 +138,10 @@ def _clean(tmp_path, unregister, target="silver"):
 
     code = None
     with (
-        patch("kubernetes.client.CoreV1Api"),
+        verified_namespace(bucket_report=match),
         patch("kubernetes.client.CustomObjectsApi"),
         patch("kubernetes.client.BatchV1Api"),
         patch("lakebench.k8s.get_k8s_client"),
-        patch("lakebench.deploy.ownership.verify_namespace_identity", return_value=match),
-        patch("lakebench.deploy.ownership.build_identity_from_config"),
-        patch("lakebench.deploy.ownership.verify_bucket_ownership", return_value=match),
         patch("lakebench.s3.S3Client", return_value=s3),
         patch("lakebench.deploy.unregister.unregister_layer_tables", side_effect=fake_unregister),
     ):
@@ -236,25 +207,6 @@ def test_an_unreadable_delta_location_is_a_failure_not_kept():
     assert not any(s.startswith("DROP") for s in sent)
 
 
-def test_a_logless_delta_entry_is_dropped():
-    """What a clean by older code left: DESCRIBE DETAIL cannot load it. The
-    error comes through beeline's long prefix, past the reader's cut-off."""
-    long = (
-        "query_sql failed (rc=1): Error: org.apache.hive.service.cli.HiveSQLException: "
-        "Error running query: org.apache.spark.sql.delta.DeltaAnalysisException: "
-        "[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/warehouse/silver.db/t doesn't "
-        "exist, or is not a Delta table."
-    )
-    res, sent = _run(
-        _cfg("delta"),
-        "silver",
-        "my-clean-silver",
-        ("spark-thrift", "pod", "spark_catalog"),
-        detail=lambda sql: RuntimeError(long),
-    )
-    assert res.unregistered and sent[-1].startswith("DROP TABLE")
-
-
 @pytest.mark.parametrize(
     "text",
     [
@@ -303,14 +255,37 @@ def test_a_stuck_engine_stops_at_the_first_timeout():
     assert len(sent) == 1 and len(res.failed) == 1 and not res.may_empty
 
 
+_LONG_PREFIX = (
+    "query_sql failed (rc=1): Error: org.apache.hive.service.cli.HiveSQLException: "
+    "Error running query: org.apache.spark.sql.delta.DeltaAnalysisException: "
+)
+
+
 @pytest.mark.parametrize(
-    ("text", "kept", "failed"),
+    ("text", "dropped", "kept", "failed"),
     [
-        ("[DELTA_PATH_DOES_NOT_EXIST] s3a://other-bucket/silver.db/t doesn't exist", True, False),
-        ("[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist.", False, True),
+        # files already gone, path inside the bucket being emptied: dropped
+        ("[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/x doesn't exist", True, False, False),
+        # the same behind beeline's long prefix, past the reader's cut-off
+        (
+            _LONG_PREFIX
+            + "[DELTA_PATH_DOES_NOT_EXIST] s3a://my-clean-silver/warehouse/silver.db/t "
+            "doesn't exist, or is not a Delta table.",
+            True,
+            False,
+            False,
+        ),
+        # elsewhere or unplaced: DROP would delete a managed directory outside the bucket
+        (
+            "[DELTA_PATH_DOES_NOT_EXIST] s3a://other-bucket/silver.db/t doesn't exist",
+            False,
+            True,
+            False,
+        ),
+        ("[DELTA_TABLE_NOT_FOUND] Delta table `silver`.`t` doesn't exist.", False, False, True),
     ],
 )
-def test_a_logless_delta_entry_elsewhere_or_unplaced_is_not_dropped(text, kept, failed):
+def test_a_logless_delta_entry_is_dropped_only_inside_the_bucket(text, dropped, kept, failed):
     """DROP deletes a managed table's directory even with its log gone."""
     res, sent = _run(
         _cfg("delta"),
@@ -319,5 +294,6 @@ def test_a_logless_delta_entry_elsewhere_or_unplaced_is_not_dropped(text, kept, 
         ("spark-thrift", "pod", "spark_catalog"),
         detail=lambda sql: RuntimeError(text),
     )
-    assert not any(x.startswith("DROP") for x in sent)
+    assert any(x.startswith("DROP TABLE") for x in sent) is dropped
+    assert bool(res.unregistered) is dropped
     assert bool(res.kept) is kept and bool(res.failed) is failed

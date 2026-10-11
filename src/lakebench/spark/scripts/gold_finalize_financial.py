@@ -426,7 +426,15 @@ def alert_set_line(spark, run_id: str, table: str | None = None) -> str:
 
 
 def run_detection_rules(
-    spark, txns, run_id: str, rules=None, skipped_rules=None, profile_stages=False
+    spark,
+    txns,
+    run_id: str,
+    rules=None,
+    skipped_rules=None,
+    profile_stages=False,
+    first_detection=False,
+    incremental=None,
+    rule_overrides=None,
 ) -> dict:
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
@@ -453,8 +461,7 @@ def run_detection_rules(
     Two concurrent ``lakebench run`` invocations against the
     SAME catalog will race on ``DELETE WHERE rule_id = ...``; the
     intended usage model is one live pipeline per catalog / namespace
-    at a time (per shared-cluster ownership discipline in
-    docs/architecture-shared-cluster.md). Cross-namespace concurrent
+    at a time. Cross-namespace concurrent
     runs are safe because each has its own Iceberg gold.alerts table.
 
     Metrics: the per-rule ``alerts=N`` line is picked up by the
@@ -476,6 +483,15 @@ def run_detection_rules(
     rule. The profile runs after the rule's commit, so the rule's elapsed
     time and commit time do not include it; it counts in ``cleanup_s``. Off
     by default, so the continuous tick's timings are unchanged.
+
+    ``first_detection`` (continuous): an alert whose content an earlier
+    pass already wrote keeps that pass's ``detected_ts``. The returned
+    timings carry this pass's ``status`` rows. ``incremental`` (continuous):
+    an ``incremental_detection.IncrementalDetection`` that runs its rules in
+    place of their full recompute, with the same alerts; its state for a rule
+    becomes current once the rule's alerts are written, and only the rows in
+    its ``write_spans`` are rewritten. ``rule_overrides`` ({rule_id:
+    {param: value}}) sets rule parameters on top of ``rule_params``.
     """
     import inspect
 
@@ -487,6 +503,7 @@ def run_detection_rules(
         rule_params,
         sweep_stale_path_spill,
     )
+    from incremental_detection import INCREMENTAL_RULES, incremental_line
 
     # Which rules to run this invocation. Batch passes None (the full default
     # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
@@ -558,7 +575,9 @@ def run_detection_rules(
     # passed to each as screen_base; results are the same frame either way.
     screen_rules = [r for r in rules if r in SCREEN_BASE_RULES]
     screen_base = None
-    if len(screen_rules) > 1 and silver_entities is not None:
+    # Not in continuous: the shared base joins all of silver, and an
+    # incremental pass screens only the payments of its cut.
+    if len(screen_rules) > 1 and silver_entities is not None and incremental is None:
         from detection_rules import screen_base_frame
 
         try:
@@ -571,6 +590,26 @@ def run_detection_rules(
             screen_base = None
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
+        if (
+            incremental is not None
+            and rule_id in INCREMENTAL_RULES
+            and incremental.unchanged(rule_id, silver_entities)
+        ):
+            # Nothing new since this rule's last pass: its alerts in
+            # gold.alerts are this pass's, so they are not rewritten.
+            rule_start = time.time()
+            standing = int(
+                spark.table(f"{CATALOG}.{GOLD_ALERTS}")
+                .where((col("rule_id") == rule_id) & (col("run_id") == run_id))
+                .count()
+            )
+            elapsed = time.time() - rule_start
+            timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
+            log(f"[detection] {rule_id}: alerts={standing} elapsed={elapsed:.1f}s")
+            log(f"[incremental] {rule_id}: mode=unchanged s={elapsed:.1f}")
+            status_rows.append((rule_id, "ran", None, target_typology, standing))
+            total_alerts += standing
+            continue
         fn = get_rule(rule_id)
         if fn is None:
             log(f"[detection] {rule_id}: alerts=0 error=unknown-rule elapsed=0.0s")
@@ -600,11 +639,15 @@ def run_detection_rules(
             # the configured W1 vertex cap), so a reproduction runs the rule
             # as gold did.
             params = rule_params(fn, run_id, silver_entities)
+            params.update((rule_overrides or {}).get(rule_id, {}))
             if "silver_entities" in sig.parameters and "silver_entities" not in params:
                 params["silver_entities"] = None  # the rule decides (it skips)
             if "screen_base" in sig.parameters and screen_base is not None:
                 params["screen_base"] = screen_base
-            alerts = fn(txns, **params)
+            run_rule = fn
+            if incremental is not None and rule_id in INCREMENTAL_RULES:
+                run_rule = incremental.rule(rule_id, fn)
+            alerts = run_rule(txns, **params)
             # Persist before counting, so the rule is computed exactly once.
             # The loop used to count the frame and then INSERT from a temp
             # view, which is not materialised: every rule ran twice, each run
@@ -612,31 +655,36 @@ def run_detection_rules(
             # while computing has its rows removed by the error handler
             # below, so gold.alerts never shows alerts for a rule whose
             # status is not 'ran'.
-            alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
-            rule_frame = alerts
-            alert_count = alerts.count()
-            # Snapshot prior alert count for this rule_id so that a
-            # partial-write incident (DELETE commits, INSERT throws)
-            # is visible in the driver log. Round-2 finding: without
-            # this, an executor OOM or S3 5xx during INSERT silently
-            # drops the prior committed alerts for this rule; the
-            # next full run rewrites them, but this cycle's metrics
-            # show a false zero for the affected rule with no signal.
-            try:
-                prior_row = spark.sql(
-                    f"SELECT COUNT(*) AS c FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'"
-                ).collect()
-                prior_count = int(prior_row[0]["c"]) if prior_row else 0
-            except Exception:  # noqa: BLE001 -- diagnostic only
-                prior_count = -1
-            _write_rule_alerts(spark, alerts, rule_id, alert_count)
+            spans = (
+                incremental.write_spans(rule_id)
+                if incremental is not None and rule_id in INCREMENTAL_RULES
+                else None
+            )
+            if spans is not None:
+                # Every row outside the spans is as the last pass wrote it,
+                # so only the spans' rows are materialised and rewritten; the
+                # full set is the rule's written state, counted in place.
+                alert_count = alerts.count()
+                alerts = alerts.filter(_in_spans(col("alert_ts"), spans)).persist(
+                    StorageLevel.MEMORY_AND_DISK
+                )
+                rule_frame = alerts
+                write_count = alerts.count()
+            else:
+                alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
+                rule_frame = alerts
+                alert_count = write_count = alerts.count()
+            if first_detection:
+                alerts = _keep_first_detection(spark, alerts, rule_id, spans)
+                rule_frame = alerts
+            _write_rule_alerts(spark, alerts, rule_id, write_count, spans)
             committed_s = time.time()
+            if incremental is not None and rule_id in INCREMENTAL_RULES:
+                incremental.committed(rule_id)
+                log(f"[incremental] {rule_id}: {incremental_line(incremental.last.get(rule_id))}")
             elapsed = committed_s - rule_start
             timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": committed_s}
-            log(
-                f"[detection] {rule_id}: alerts={alert_count} "
-                f"prior={prior_count} elapsed={elapsed:.1f}s"
-            )
+            log(f"[detection] {rule_id}: alerts={alert_count} elapsed={elapsed:.1f}s")
             status_rows.append((rule_id, "ran", None, target_typology, int(alert_count)))
             total_alerts += alert_count
         except RuleSkipped as skip:
@@ -648,6 +696,8 @@ def run_detection_rules(
             # gold.alerts never shows alerts for a rule the status calls
             # not run.
             _drop_rule_alerts(spark, rule_id)
+            if incremental is not None:
+                incremental.failed(rule_id)
             elapsed = time.time() - rule_start
             timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             log(
@@ -660,14 +710,13 @@ def run_detection_rules(
             # Emit the alerts=0 shape so a downstream metrics parser
             # that greps for ``alerts=`` sees a row for every rule
             # that was attempted, not a silent hole for the failed
-            # ones. ``error=`` carries the class/message. If the
-            # exception fired between DELETE and INSERT, gold.alerts
-            # is now missing this rule's prior rows -- the operator
-            # sees this as a delta from prior_count on the next
-            # successful run.
+            # ones. ``error=`` carries the class/message; the rule's
+            # rows are dropped below, so a failed write leaves none.
             err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             _drop_rule_alerts(spark, rule_id)
+            if incremental is not None:
+                incremental.failed(rule_id, drop_state=True)
             timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
@@ -701,6 +750,7 @@ def run_detection_rules(
         log(f"[detection] {rule_id}: skipped=mode-excluded elapsed=0.0s")
         status_rows.append((rule_id, "skipped", "mode-excluded", target_typology, None))
 
+    timings["status"] = list(status_rows)
     _write_detection_status(spark, status_rows, run_id)
 
     # P0.5: project the two derived gold tables from the alerts the rules
@@ -739,16 +789,87 @@ def _drop_rule_alerts(spark, rule_id: str) -> None:
         log(f"[detection] {rule_id}: could not clear its rows: {one_line(e)}")
 
 
-def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int) -> None:
-    """Replace ``rule_id``'s rows in gold.alerts with ``alerts`` (persisted).
+def _spans_sql(spans) -> str:
+    """SQL predicate on alert_ts for ``spans`` (epoch-microsecond pairs)."""
+    return (
+        "("
+        + " OR ".join(
+            f"(alert_ts >= timestamp_micros({int(lo)}) AND alert_ts < timestamp_micros({int(hi)}))"
+            for lo, hi in spans
+        )
+        + ")"
+    )
+
+
+def _in_spans(ts, spans):
+    """Whether timestamp column ``ts`` lies in ``spans``."""
+    from pyspark.sql.functions import timestamp_micros
+
+    out = lit(False)
+    for lo, hi in spans:
+        out = out | ((ts >= timestamp_micros(lit(int(lo)))) & (ts < timestamp_micros(lit(int(hi)))))
+    return out
+
+
+def _keep_first_detection(spark, alerts, rule_id: str, spans=None):
+    """``alerts`` (persisted) with each alert's ``detected_ts`` taken from
+    the row of the same content (entity and sorted related transactions) an
+    earlier pass wrote, when there is one: in continuous a rule's alerts are
+    rewritten every pass, and detected_ts is when an alert was first raised.
+    Persisted and counted here, before the write deletes those rows. With
+    ``spans``, ``alerts`` holds only the rows there, and only those are read.
+    """
+    from pyspark.sql.functions import array_join, array_sort, coalesce, concat_ws
+    from pyspark.sql.functions import min as min_
+
+    def key(df):
+        return concat_ws(
+            "|",
+            coalesce(df["entity_id"].cast("string"), lit("")),
+            coalesce(array_join(array_sort(df["related_txn_ids"]), ","), lit("")),
+        )
+
+    from tm_operations import current_snapshot_id, read_at_snapshot
+
+    # Pinned: the write's DELETE drops cached frames that read gold.alerts,
+    # and a recompute of a live read would see the rows already deleted.
+    fq = f"{CATALOG}.{GOLD_ALERTS}"
+    prior = read_at_snapshot(spark, fq, current_snapshot_id(spark, fq)).where(
+        col("rule_id") == lit(rule_id)
+    )
+    if spans is not None:
+        prior = prior.where(_in_spans(col("alert_ts"), spans))
+    first = (
+        prior.select(key(prior).alias("_key"), col("detected_ts").alias("_first"))
+        .groupBy("_key")
+        .agg(min_("_first").alias("_first"))
+    )
+    merged = (
+        alerts.withColumn("_key", key(alerts))
+        .join(first, "_key", "left")
+        .withColumn("detected_ts", coalesce(col("_first"), col("detected_ts")))
+        .select(*alerts.columns)
+        .persist(StorageLevel.MEMORY_AND_DISK)
+    )
+    merged.count()
+    return merged
+
+
+def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int, spans=None) -> None:
+    """Replace ``rule_id``'s rows in gold.alerts with ``alerts`` (persisted);
+    with ``spans``, only its rows with alert_ts there, and ``alerts`` holds
+    just those.
 
     DELETE then INSERT: two Iceberg commits, see run_detection_rules for the
     partial-write semantics.
     """
     tmp_view = f"_lb_alerts_{rule_id}"
     alerts.createOrReplaceTempView(tmp_view)
+    where = f"rule_id = '{rule_id}'"
+    if spans is not None:
+        where += f" AND {_spans_sql(spans)}"
     try:
-        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
+        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE {where}")
         if alert_count > 0:
             spark.sql(f"INSERT INTO {CATALOG}.{GOLD_ALERTS} SELECT * FROM {tmp_view}")
     finally:
@@ -856,14 +977,28 @@ def _project_derived_gold(spark, run_id: str) -> None:
     # NOT NULL`` filter guarantees the NOT NULL risk_score target receives
     # non-null input (same storeAssignmentPolicy rationale as clusters).
     try:
+        from pyspark.sql.functions import expr
+
+        # One row per entity: continuous W4 raises an alert per entity per
+        # week, and the entity's score is its highest.
         risk = (
             alerts.filter(col("rule_id") == lit("W4_risk_propagation"))
             .filter(col("alert_score").isNotNull())
+            .groupBy("entity_id", "model_id", "model_version", "run_id")
+            .agg(
+                expr("max(alert_score)").alias("risk_score"),
+                # The entity's highest priority over its alerts, so the tier
+                # does not depend on which of two equal scores comes first.
+                expr(
+                    "element_at(array('LOW', 'MED', 'HIGH'), max(CASE priority "
+                    "WHEN 'HIGH' THEN 3 WHEN 'MED' THEN 2 ELSE 1 END))"
+                ).alias("priority"),
+            )
             .select(
                 col("entity_id"),
                 col("model_id"),
                 col("model_version"),
-                col("alert_score").alias("risk_score"),
+                col("risk_score"),
                 when(col("priority") == lit("HIGH"), lit("high"))
                 .when(col("priority") == lit("MED"), lit("medium"))
                 .otherwise(lit("low"))

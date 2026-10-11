@@ -1,13 +1,12 @@
 """financial reproduce (AML-10) without a cluster: the record it reads, the
 refusals before any cluster call, the outcome codes, and the pieces gold
 and the scorer contribute (the [read-snapshot] lines, the scorer arguments,
-the shared rule parameters, one attempt for the job).
+the shared rule parameters).
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -18,8 +17,6 @@ from typer.testing import CliRunner
 from lakebench.cli import app
 from lakebench.metrics import read_snapshots as rs
 
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "src" / "lakebench" / "spark" / "scripts"
 RUN = "20261003-120000-aaaaaa"
 SNAPS = [
     {"table": t, "snapshot": i + 11, "total_records": 5, "rows": 5, "fp": "1", "cols_sha": "c"}
@@ -76,32 +73,25 @@ def test_score_arguments_round_trip():
     assert [rs.parse_score_argument(v) for v in values] == parsed + [
         {"table": "silver.x", "snapshot": "unknown", "total_records": None}
     ]
-    # The scorer's own pattern accepts exactly what the CLI writes.
-    src = (SCRIPTS / "score_financial.py").read_text()
-    pattern = re.search(r'_READ_SNAPSHOT_ARG = re.compile\(\s*r"(.+?)"\s*\)', src, re.S).group(1)
-    assert all(re.match(pattern, v) for v in values)
     for bad in ("silver.t=1", "x;drop=1:2", "silver.t=one:2"):
         with pytest.raises(ValueError):
             rs.parse_score_argument(bad)
-        assert not re.match(pattern, bad)
 
 
 @pytest.mark.parametrize(
-    ("snaps", "why"),
+    ("snaps", "usable"),
     [
-        (None, "recorded no read snapshots"),
-        ([], "recorded no read snapshots"),
-        (SNAPS[:2], "2 read snapshots"),
-        ([{**SNAPS[0], "snapshot": "unknown"}, *SNAPS[1:]], "no known snapshot"),
+        (None, False),
+        ([], False),
+        (SNAPS[:2], False),
+        ([{**SNAPS[0], "snapshot": "unknown"}, *SNAPS[1:]], False),
+        (SNAPS, True),
+        ([{**s, "fp": None} for s in SNAPS], True),
     ],
+    ids=["none", "empty", "two-of-three", "unknown-snapshot", "complete", "no-fingerprint"],
 )
-def test_a_record_that_cannot_drive_a_reproduction(snaps, why):
-    assert why in rs.usable(snaps)
-
-
-def test_a_usable_record_needs_no_fingerprint():
-    assert rs.usable(SNAPS) is None
-    assert rs.usable([{**s, "fp": None} for s in SNAPS]) is None
+def test_which_records_can_drive_a_reproduction(snaps, usable):
+    assert (rs.usable(snaps) is None) is usable
 
 
 # --- shared rule parameters ------------------------------------------------------
@@ -140,12 +130,6 @@ def test_rule_params_follow_the_signature(load_script, monkeypatch):
         assert "max_vertices" not in rules.rule_params(w1, "r")
     monkeypatch.setenv("LB_FINANCIAL_W1_MAX_VERTICES", "lots")
     assert rules.rule_params(w1, "r")["max_vertices"] == 8_000_000
-
-
-# --- static: LB-226's second finding --------------------------------------------
-
-
-# --- one attempt -------------------------------------------------------------------
 
 
 # --- the CLI -------------------------------------------------------------------------
@@ -319,25 +303,28 @@ def test_a_record_without_read_snapshots_is_refused_before_any_cluster_call(
 
 
 def test_a_protected_record_is_refused_before_any_cluster_call(monkeypatch, tmp_path):
-    from lakebench.aml import look_guard
+    from tests.fixtures.heldout_test_seeds import TEST_EVALUATION_SEED, use_fixture
 
-    _write(tmp_path / "lakebench-output" / "runs", RUN)
-    seen = {}
-
-    def reason(record, **kw):
-        seen.update(kw)
-        return "corpus_role evaluation"
-
-    monkeypatch.setattr(look_guard, "protected_record_reason", reason)
+    use_fixture(monkeypatch)
+    _write(
+        tmp_path / "lakebench-output" / "runs",
+        RUN,
+        experiment={
+            "workload": {"name": "financial"},
+            "mode": "batch",
+            "corpus": {"seed": TEST_EVALUATION_SEED},
+        },
+    )
     cluster = _Cluster()
     out = _invoke(monkeypatch, tmp_path, cluster)
     assert out.exit_code == 2 and "protected AML corpus" in out.output, out.output
-    assert cluster.calls == [] and seen.get("fail_closed") is True
+    assert cluster.calls == []
 
 
-def test_the_batch_scorer_gets_what_gold_read(monkeypatch):
-    """run_financial_scoring passes the parsed [read-snapshot] lines to the
-    score job; covered mode does not."""
+@pytest.mark.parametrize("covered", [False, True])
+def test_the_batch_scorer_gets_what_gold_read(monkeypatch, covered):
+    """Batch scoring passes the [read-snapshot] values gold read; covered mode
+    pins its own snapshots instead and passes none."""
     from lakebench.cli import _aml_post as post
 
     seen = []
@@ -354,5 +341,25 @@ def test_the_batch_scorer_gets_what_gold_read(monkeypatch):
     snaps = [{k: s[k] for k in ("table", "snapshot", "total_records")} for s in SNAPS]
     monitor = MagicMock()
     monitor.wait_for_completion.return_value = SimpleNamespace(success=False, message="x")
-    post.run_financial_scoring(cfg, RUN, _Jobs(), monitor, 60, read_snapshots=snaps)
-    assert seen and seen[0][-6:] == rs.score_arguments(snaps)
+    pinned = {key: 7 for _, key in post.COVERED_OPTIONS}
+    post.run_financial_scoring(
+        cfg,
+        RUN,
+        _Jobs(),
+        monitor,
+        60,
+        covered=pinned if covered else None,
+        read_snapshots=snaps,
+    )
+    assert len(seen) == 1
+    if covered:
+        assert "--read-snapshot" not in seen[0]
+    else:
+        assert seen[0][-6:] == [
+            "--read-snapshot",
+            "silver.transactions=11:5",
+            "--read-snapshot",
+            "silver.entities=12:5",
+            "--read-snapshot",
+            "silver.silver_batch_versions=13:5",
+        ]

@@ -1,8 +1,5 @@
-"""The post-maintenance round waits for storage to settle (LB-150).
-
-Live c360 scale 10 on FlashBlade: the same compacted files read QpH 546 about
-2 minutes after maintenance, 569 at +15 min and 841 at +35 min, against 828
-before maintenance. The probes here replay that shape with a fake clock.
+"""The post-maintenance round waits until a probe is within tolerance of the
+pre-maintenance time, then reports the wait. The probes are driven by a fake clock.
 """
 
 from __future__ import annotations
@@ -83,8 +80,8 @@ def test_slow_plateau_is_not_accepted_when_pre_time_is_known():
     """+2 and +15 min agreed within 4% while 33% slow; consecutive agreement
     alone would have settled there."""
     clock = _Clock()
-    slow = [15.2] * 20  # 546 QpH-like plateau
-    fast = [10.0, 9.9]  # back to the 828 QpH-like pre time
+    slow = [15.2] * 20  # slow plateau
+    fast = [10.0, 9.9]  # back to the pre-maintenance time
     r = _wait(clock, slow + fast, reference_seconds=10.0, max_seconds=2700)
     assert r.settled
     assert len(r.probes) == 22
@@ -341,18 +338,18 @@ def test_settle_is_recorded_and_ttv_is_unchanged(tmp_path):
     assert "maintenance_settle_seconds" not in raw_without
 
 
-def test_report_shows_settle_rows():
+def test_report_shows_settle_rows(tmp_path):
     from lakebench.reports.generator import ReportGenerator
 
     clock = _Clock()
     pm, _ = _pb_with_settle(_wait(clock, [12.0, None, 12.1, 12.0], reference_seconds=12.0))
-    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
+    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(pm)
     assert "Storage settle wait" in html and "settled after" in html
     assert "12.0s, fail, 12.1s, 12.0s" in html
 
     clock = _Clock()
     pm, _ = _pb_with_settle(_wait(clock, [10.0, 20.0] * 100, max_seconds=600))
-    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
+    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(pm)
     assert "did not settle within 600s" in html
 
 
@@ -374,9 +371,30 @@ def test_stopped_maintenance_is_persisted_and_flagged_in_the_report(tmp_path):
 
     loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
     assert loaded.pipeline_benchmark.maintenance_stopped is True
-    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(loaded)
+    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(loaded)
     assert "maintenance stopped before completion" in html
     assert "not a clean measurement" in html
+
+
+def test_run_records_a_stopped_maintenance_budget_on_the_saved_run(tmp_path, monkeypatch):
+    """A batch run whose maintenance budget stopped early is saved as stopped,
+    with the budget's reason, so the report can label the QpH."""
+    import lakebench.cli._sustained as sustained
+    from tests.harness.run_harness import SCENARIOS, invoke_scenario, saved_record
+
+    reason = "pre-benchmark maintenance exceeded its 1s cap"
+
+    class StoppedBudget(sustained.MaintenanceBudget):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.stopped = reason
+
+    monkeypatch.setattr(sustained, "MaintenanceBudget", StoppedBudget)
+    result, _rec = invoke_scenario(SCENARIOS["batch_c360"], tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    scores = saved_record(tmp_path)["pipeline_benchmark"]["scores"]
+    assert scores["maintenance_stopped"] is True
+    assert scores["maintenance_stop_reason"] == reason
 
 
 def test_completed_maintenance_is_not_flagged(tmp_path):
@@ -384,24 +402,14 @@ def test_completed_maintenance_is_not_flagged(tmp_path):
 
     pm, pb = _pb_with_settle(None)
     assert "maintenance_stopped" not in pb.to_dict()["scorecard"]
-    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
+    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(pm)
     assert "stopped before completion" not in html
 
 
-def test_run_passes_the_stop_reason_and_records_it():
-    import inspect
-
-    import lakebench.cli._run as run_mod
-
-    src = inspect.getsource(run_mod)
-    assert "stopped_reason=maint_stop_reason" in src
-    assert "pb.maintenance_stopped = True" in src
-
-
-def test_headline_qph_is_flagged_when_maintenance_stopped():
+def test_headline_qph_is_flagged_when_maintenance_stopped(tmp_path):
     from lakebench.reports.generator import ReportGenerator
 
-    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    rg = ReportGenerator(metrics_dir=tmp_path)
     pm, pb = _pb_with_settle(None)
     assert "qph-stop-warning" not in rg._generate_batch_summary(pm)
     assert "qph-stop-warning" not in rg._generate_qph_card(pm)
@@ -426,7 +434,7 @@ def test_live_streams_are_persisted_and_flagged_in_the_report(tmp_path):
     assert scores["maintenance_live_streams"] is True
     loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
     assert loaded.pipeline_benchmark.maintenance_live_streams is True
-    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    rg = ReportGenerator(metrics_dir=tmp_path)
     section = rg._generate_maintenance_section(loaded)
     assert "Streams during maintenance" in section and "writers active" in section
     for html in (rg._generate_batch_summary(loaded), rg._generate_qph_card(loaded)):

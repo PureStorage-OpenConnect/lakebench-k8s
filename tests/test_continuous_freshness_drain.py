@@ -1,4 +1,4 @@
-"""LB-145: continuous freshness must not score the idle tail of a drained corpus.
+"""Continuous freshness must not score the idle tail of a drained corpus.
 
 A gold cycle whose silver input has not moved since the previous cycle logs
 "(silver idle)". Only the trailing idle run can be a drained corpus, and only

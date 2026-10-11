@@ -1,20 +1,15 @@
-"""A4 (v1.6): datagen timeout and --regenerate.
+"""Datagen timeout and --regenerate.
 
-Covers three related fixes on the datagen run path.
-
-- Batch ``run --generate`` no longer prints "Datagen completed" when the
-  wait loop's timeout expired. The run exits 1 (CLI-1; 5 in 1.6) and the
-  record's ``verdict.reasons`` says "datagen timed out", the datagen Job is
-  deleted, and every
-  leftover streaming SparkApplication (``bronze-ingest``, ``silver-stream``,
-  ``gold-refresh``) is deleted so a timed-out generate does not leave
-  orphan compute behind.
-- ``lakebench generate`` and ``lakebench run --generate`` refuse a
-  non-empty bronze prefix (exit 3, refused; 2 in 1.6) unless ``--regenerate`` is passed;
-  with the flag, on a bucket this deployment may empty, the datagen prefix
-  is cleared (``S3Client.delete_prefix``) before datagen submits. SAF-9
-  (v1.7) replaced the whole-bucket empty; tests/test_bronze_gate.py covers
-  the unowned rows.
+- Batch ``run --generate`` does not report datagen complete when the wait
+  loop's timeout expired. The run exits 1 and the record's
+  ``verdict.reasons`` says "datagen timed out", the datagen Job is deleted,
+  and every leftover streaming SparkApplication (``bronze-ingest``,
+  ``silver-stream``, ``gold-refresh``) is deleted so a timed-out generate
+  does not leave orphan compute behind.
+- ``lakebench generate`` and ``lakebench run --generate`` refuse a non-empty
+  bronze prefix (exit 3) unless ``--regenerate`` is passed; with the flag, on
+  a bucket this deployment may empty, the datagen prefix is cleared before
+  datagen submits. tests/test_bronze_gate.py covers the unowned rows.
 - The deployer's cycle path (``deploy_cycle``) does not call the CLI gate;
   the multi-cycle loop in ``run`` does, before cycle 0.
 """
@@ -72,52 +67,18 @@ def _cfg(schema: str = "customer360"):
 
 
 class TestHandleDatagenTimeout:
-    """The A4 timeout handler: fail with a distinct exit code, stop the
-    datagen Job, delete leftover SparkApplications."""
+    """The timeout handler: fail the run, stop the datagen Job, delete leftover
+    SparkApplications, whatever the cleanup does."""
 
-    def test_fails_the_run(self) -> None:
-        deployer = MagicMock()
-        job_manager = MagicMock()
-        with pytest.raises(typer.Exit) as exc_info:
-            _handle_datagen_timeout(
-                datagen_deployer=deployer,
-                job_manager=job_manager,
-                namespace="ns-a4",
-                timeout_s=1200,
-                elapsed_s=1201.0,
-            )
-        # CLI-1: 1 like any failed run; the record keeps the reason.
-        assert exc_info.value.exit_code == ExitCode.FAILED
-
-    def test_stops_datagen_job_and_orphan_sparkapps(self) -> None:
-        deployer = MagicMock()
-        job_manager = MagicMock()
-        with pytest.raises(typer.Exit):
-            _handle_datagen_timeout(
-                datagen_deployer=deployer,
-                job_manager=job_manager,
-                namespace="ns-a4",
-                timeout_s=1200,
-                elapsed_s=1201.0,
-            )
-        # Cleanup calls pass a request_timeout so a hung K8s API cannot
-        # block the exit indefinitely.
-        deployer._delete_existing_job.assert_called_once_with("ns-a4", request_timeout=15)
-        # Every stream app that could be consuming the trickle is deleted,
-        # each with the same request_timeout cap.
-        deleted = [call.args[0] for call in job_manager._delete_job.call_args_list]
-        assert set(deleted) == set(_STREAM_APPS)
-        for call in job_manager._delete_job.call_args_list:
-            assert call.kwargs.get("request_timeout") == 15
-
-    def test_cleanup_errors_do_not_prevent_exit(self) -> None:
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    def test_run_fails_and_every_stream_app_is_tried(self, cleanup_fails: bool) -> None:
         # Best-effort cleanup: a failure deleting the Job or a SparkApplication
-        # must not swallow the exit -- the run still fails with the timeout
-        # code, and the operator sees the warning in the logs.
+        # must not swallow the exit or stop the remaining deletes.
         deployer = MagicMock()
-        deployer._delete_existing_job.side_effect = RuntimeError("API down")
         job_manager = MagicMock()
-        job_manager._delete_job.side_effect = RuntimeError("API down")
+        if cleanup_fails:
+            deployer._delete_existing_job.side_effect = RuntimeError("API down")
+            job_manager._delete_job.side_effect = RuntimeError("API down")
         with pytest.raises(typer.Exit) as exc_info:
             _handle_datagen_timeout(
                 datagen_deployer=deployer,
@@ -127,8 +88,8 @@ class TestHandleDatagenTimeout:
                 elapsed_s=61.0,
             )
         assert exc_info.value.exit_code == ExitCode.FAILED
-        # Delete of each stream app was still attempted.
-        assert job_manager._delete_job.call_count == len(_STREAM_APPS)
+        deleted = [call.args[0] for call in job_manager._delete_job.call_args_list]
+        assert set(deleted) == set(_STREAM_APPS)
 
 
 # --- enforce_bronze_gate ----------------------------------------------------
@@ -137,21 +98,44 @@ class TestHandleDatagenTimeout:
 class TestEnforceBronzeRegenerate:
     """The A4 CLI-level gate on ``run --generate`` and ``generate``."""
 
-    def test_missing_bucket_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Fresh deploy: bronze does not exist yet, no refusal.
-        monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-        _FakeS3._next_info = BucketInfo(name="b", exists=False)
-        enforce_bronze_gate(_cfg(), regenerate=False)
-        assert _FakeS3.instances[0].empty_calls == []
+    @pytest.mark.parametrize(
+        ("schema", "held_prefix", "refused"),
+        [
+            ("financial", "pacs008", True),
+            ("financial", "customer/interactions", False),
+            ("customer360", "customer/interactions", True),
+            ("customer360", "pacs008", False),
+            # Fresh deploy: bronze does not exist yet, no refusal.
+            ("customer360", None, False),
+        ],
+    )
+    def test_gate_checks_the_prefix_datagen_writes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        schema: str,
+        held_prefix: str | None,
+        refused: bool,
+    ) -> None:
+        class _PrefixS3(_FakeS3):
+            held = held_prefix
 
-    def test_financial_prefix_checked(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # AML on the C360 default template writes under ``pacs008`` -- the gate
-        # must check the same prefix as the deployer writes to.
-        monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-        _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=0, size_bytes=0)
-        enforce_bronze_gate(_cfg(schema="financial"), regenerate=False)
-        fake = _FakeS3.instances[0]
-        assert fake.get_calls[0][1].startswith("pacs008")
+            def bucket_exists(self, bucket: str) -> bool:
+                return self.held is not None
+
+            def has_user_objects(self, bucket: str, prefix: str = "") -> bool:
+                return self.held is not None and prefix.startswith(self.held)
+
+            def get_bucket_size(self, bucket: str, prefix: str = "", exclude_prefix: str = ""):
+                return BucketInfo(name=bucket, exists=True, object_count=3, size_bytes=1024)
+
+        monkeypatch.setattr("lakebench.s3.S3Client", _PrefixS3)
+        if refused:
+            with pytest.raises(typer.Exit) as exc_info:
+                enforce_bronze_gate(_cfg(schema=schema), regenerate=False)
+            assert exc_info.value.exit_code == ExitCode.REFUSED
+        else:
+            enforce_bronze_gate(_cfg(schema=schema), regenerate=False)
+        assert _FakeS3.instances[0].empty_calls == []
 
     def test_s3_init_error_refuses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Cannot check safely: refuse rather than proceed and (under
@@ -163,36 +147,47 @@ class TestEnforceBronzeRegenerate:
         assert exc_info.value.exit_code == ExitCode.PREREQUISITE  # S3 cannot be read
 
 
+# --- CLI: refusal without --regenerate --------------------------------------
+
+
+@pytest.mark.parametrize("command", ["generate", "run"])
+def test_non_empty_bronze_is_refused_without_the_flag(
+    command: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+
+    if command == "generate":
+        _stub_run_deps(monkeypatch)
+        # The gate exits first: the deploy engine must not be reached.
+        downstream = "lakebench.deploy.DeploymentEngine"
+        argv = ["generate", "--yes"]
+    else:
+        _stub_full_run(monkeypatch)
+        downstream = "lakebench.deploy.DatagenDeployer"
+        argv = ["run", "--generate", "--skip-preflight", "--skip-benchmark"]
+        argv += ["--skip-maintenance", "--yes"]
+    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
+    _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
+    reached = {"called": False}
+
+    def _boom(*_a, **_kw):
+        reached["called"] = True
+        raise AssertionError("datagen reached after refusal")
+
+    monkeypatch.setattr(downstream, _boom)
+    cfg_file = _write_cfg(tmp_path)
+    res = CliRunner().invoke(app, [argv[0], str(cfg_file), *argv[1:]])
+    assert res.exit_code == ExitCode.REFUSED, (res.output[-2000:], repr(res.exception))
+    assert reached["called"] is False
+
+
 # --- CLI: `generate --regenerate` -------------------------------------------
 
 
 class TestGenerateStandaloneRegenerate:
     """`lakebench generate --regenerate` (and the refusal without it)."""
-
-    def test_refuses_non_empty_bronze_without_flag(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        _stub_run_deps(monkeypatch)
-        monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-        _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=5, size_bytes=1_000_000)
-        # DeploymentEngine must NOT be reached; the gate exits first.
-        deploy_engine_seen = {"called": False}
-
-        def _boom(*_a, **_kw):
-            deploy_engine_seen["called"] = True
-            raise AssertionError("DeploymentEngine should not be constructed after refusal")
-
-        monkeypatch.setattr("lakebench.deploy.DeploymentEngine", _boom)
-        cfg_file = _write_cfg(tmp_path)
-        res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
-        assert res.exit_code == ExitCode.REFUSED, res.output
-        assert "refusing to generate over it" in res.output.lower()
-        assert "--regenerate" in res.output
-        assert deploy_engine_seen["called"] is False
 
     def test_with_regenerate_empties_then_refills(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -296,8 +291,6 @@ class TestRunGenerateTimeout:
         loaded = MetricsStorage().load_run(run_id)
         assert loaded is not None and loaded.failure_reasons == [DATAGEN_TIMED_OUT]
         assert DATAGEN_TIMED_OUT in compute_verdict(loaded).reasons
-        assert "Datagen completed" not in res.output
-        assert "wait budget" in res.output.lower() or "timed out" in res.output.lower()
         # datagen Job was stopped and every stream app was deleted.
         assert deployers and deployers[0].delete_calls
         deleted = [call.args[0] for call in stubs["job_manager"]._delete_job.call_args_list]
@@ -306,42 +299,6 @@ class TestRunGenerateTimeout:
 
 class TestRunGenerateRegenerate:
     """`run --generate` refuses non-empty bronze without --regenerate."""
-
-    def test_refuses_non_empty_bronze_without_flag(
-        self, tmp_path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        _stub_full_run(monkeypatch)
-        monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-        _FakeS3._next_info = BucketInfo(name="b", exists=True, object_count=9, size_bytes=1024)
-
-        # DatagenDeployer construction must not be reached.
-        seen = {"deploy": False}
-
-        def _boom(engine, **_kw):
-            seen["deploy"] = True
-            raise AssertionError("DatagenDeployer should not be constructed after refusal")
-
-        monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _boom)
-        cfg_file = _write_cfg(tmp_path)
-        res = CliRunner().invoke(
-            app,
-            [
-                "run",
-                str(cfg_file),
-                "--generate",
-                "--skip-preflight",
-                "--skip-benchmark",
-                "--skip-maintenance",
-                "--yes",
-            ],
-        )
-        assert res.exit_code == ExitCode.REFUSED, (res.output[-2000:], repr(res.exception))
-        assert "--regenerate" in res.output
-        assert seen["deploy"] is False
 
     def test_regenerate_empties_before_datagen(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch

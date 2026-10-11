@@ -1,4 +1,4 @@
-"""Destroy's table step never deletes data outside proven ownership (LB-186).
+"""Destroy's table step never deletes data outside proven ownership.
 
 Trino's DROP TABLE deletes files: on Iceberg with a Hive metastore it deletes
 every file the table references (add_files-registered datagen files

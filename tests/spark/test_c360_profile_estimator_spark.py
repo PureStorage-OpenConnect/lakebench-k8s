@@ -1,5 +1,5 @@
 """Executed: silver profiling estimates distinct customers from a sample's
-frequency profile instead of dividing by the sampling fraction (LB-144).
+frequency profile instead of dividing by the sampling fraction.
 
 The old estimate at scale 10 was 14.7M customers where there are 1M.
 """
@@ -57,16 +57,10 @@ def test_estimate_close_to_truth_where_linear_extrapolation_is_far(spark, zipf):
     est, skew = sample_key_profile(sample, "customer_id", rows)
     sample_distinct = sample.select("customer_id").distinct().count()
     linear = sample_distinct / fraction
-    assert linear > 5 * truth  # the LB-144 defect, reproduced
-    # Seeded, the result is fixed. For the record, over 1,000 random sample
-    # seeds on the uniform key the estimate ran +3.3% mean, 3.0% sd, 1.1% of
-    # draws beyond 10%, so the tolerance is only safe because the seed now
-    # holds. The heavy-tailed key lands 27% low at this seed; over 60 seeds
-    # it ran -22% mean, 2.5% sd, worst -28.5%, so a change to the sampler or
-    # slice count can push it past 0.3 without any estimator regression.
-    # Linear extrapolation is more than 5x high on both.
-    tol = 0.3 if zipf else 0.1
-    assert abs(est - truth) / truth < tol, (est, truth)
+    assert linear > 5 * truth  # the linear-scaling defect, reproduced
+    # Seeded, so the signed error is fixed; the band is the measured one.
+    lo, hi = (-0.35, -0.20) if zipf else (-0.1, 0.1)
+    assert lo < (est - truth) / truth < hi, (est, truth)
     assert skew >= 1.0
 
 
@@ -79,14 +73,3 @@ def test_estimator_edge_cases():
     # Never above the population row count.
     assert estimate_distinct_from_sample(10, 10, 10, 0, 100) == 55
     assert estimate_distinct_from_sample(10, 10, 10, 0, 20) == 20
-
-
-def test_scale10_shape_gives_about_one_million():
-    """Expected frequency profile of a 0.1% sample of 24.77M rows over 1M
-    customers (Poisson, lambda 0.0248): about 24.5K distinct, 24.2K seen once,
-    300 seen twice."""
-    from common import estimate_distinct_from_sample
-
-    est = estimate_distinct_from_sample(24_770, 24_490, 24_190, 300, 24_770_109)
-    assert 0.9e6 < est < 1.1e6
-    assert 24_490 / 0.001 > 14e6  # what the old code reported

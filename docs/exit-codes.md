@@ -53,7 +53,7 @@ the CLI down every path listed here and checks the code.
 | `status.namespace_missing` | 1 | `status` finds no namespace |
 | `stop.api_error` | 1 | `stop` could not list or delete a job; it still tried every other deletion |
 | `unhandled_exception` | 1 | an error Lakebench does not classify; one line, with the traceback only under LAKEBENCH_DEBUG=1 |
-| `alias.refused` | 2 | a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean journal`, `compare`); the message names the replacement, and no argument is echoed |
+| `alias.refused` | 2 | a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean journal`); the message names the replacement, and no argument is echoed |
 | `cli.bad_argument` | 2 | a command refuses an argument it checks itself: an unknown recipe, component, stage or example, a missing file, conflicting options |
 | `click.usage` | 2 | an unknown flag, a missing argument or a bad value |
 | `config.name_required` | 2 | a command that changes data or tears a deployment down was given a config with no name; a read command (`status`, `logs`, `report`) too, in a directory whose v1.6 state names a deployment |
@@ -64,7 +64,7 @@ the CLI down every path listed here and checks the code.
 | `generate.multi_cycle` | 2 | `generate` with a multi-cycle config (`cycles` above 1): `run` generates each cycle |
 | `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
-| `run.protected_corpus` | 2 | a command that reads or scores data was given a protected AML corpus (a config whose role or seed is the evaluation or robustness one, or a run record from one), or `generate --registered-corpus` a config that names none; or bronze-verify (or its check before a `run --stage` subset) refused the corpus: its manifest comes from a held-out or spent seed, gives back no corpus seed, is missing where one is required, or the held-out record cannot be read |
+| `run.protected_corpus` | 2 | a protected AML corpus (evaluation or robustness role or seed, or a run record from one) reached a command that reads or scores data; `generate --registered-corpus` got a config naming none; or bronze-verify, or its check before `run --stage`, refused the manifest (held-out or spent seed, no corpus seed, missing, unreadable) |
 | `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
 | `datagen.pods_live` | 3 | `generate`, `run --generate`, a multi-cycle or a continuous run: an earlier datagen Job's pods were still running five minutes after the Job was deleted, and would write into the new corpus |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
@@ -114,11 +114,12 @@ the CLI down every path listed here and checks the code.
 
 ## Errors and output
 
-Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr; panels,
-tables and stage headers are still on stdout. An error starts with
-one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`
-(the fix) and `Where` lines when they apply. An error Lakebench does
-not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`
-to get the traceback. Machine output (`--format json` and `--format csv`
-on `query` and `report`) goes to plain stdout, unwrapped, so
-it can be piped to a parser.
+- Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr. Panels,
+  tables and stage headers go to stdout.
+- An error starts with one `ERROR` line saying what went wrong. Typed
+  errors add `Why`, `Next` (the fix) and `Where` lines when they apply.
+- An error Lakebench does not classify prints one line, not a
+  traceback. Set `LAKEBENCH_DEBUG=1` to get the traceback.
+- Machine output (`--format json` and `--format csv` on `query` and
+  `report`) goes to plain stdout, unwrapped, so it can be piped to a
+  parser.

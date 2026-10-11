@@ -1,4 +1,4 @@
-"""LB-239: no message the AML seed guard raises or returns, nor the CLI text
+"""No message the AML seed guard raises or returns, nor the CLI text
 built from it, names a protected seed (held out or spent) or a held-out
 member of the spent list. Every refusal names a role or a kind instead.
 

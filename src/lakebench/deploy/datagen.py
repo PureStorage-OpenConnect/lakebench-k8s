@@ -867,6 +867,10 @@ class DatagenDeployer:
                 # the declared corpus role (config/datagen_seed.py).
                 "datagen_robustness_perturbation": config_perturbation(cfg),
                 "datagen_cpu": datagen.cpu,
+                # One generator thread per started core: the image rounds a
+                # fractional CPU quota to the nearest core, so a 1300m pod
+                # would run one thread and offer less than it was sized for.
+                "datagen_threads": _threads(datagen.cpu),
                 "datagen_memory": datagen.memory,
                 "datagen_mode": effective_mode,
                 "datagen_workers": datagen.generators,
@@ -1411,3 +1415,10 @@ class DatagenDeployer:
             if e.status == 404:
                 return {"running": False, "error": "Job not found"}
             raise
+
+
+def _threads(cpu: str) -> int:
+    """Generator threads for a datagen pod of *cpu*: one per started core."""
+    from lakebench.config.autosizer import _parse_cpu_millicores
+
+    return max(1, -(-_parse_cpu_millicores(cpu) // 1000))

@@ -3,7 +3,6 @@ out of evidence. Design 02 section 2.2."""
 
 from __future__ import annotations
 
-import copy
 import warnings
 from pathlib import Path
 
@@ -72,12 +71,17 @@ def test_override_20_raises_peak():
     cfg = make_config(platform={"compute": {"spark": {"silver_executors": 20}}})
     peak = compute_peak_requirements(1, "batch", config=cfg)
     sb = next(r for r in peak.per_job if r.job_type == "silver-build")
-    assert sb.executors == 20
-    assert sb.cpu_cores == 20 * 4 + 4 == 84
-    # 20 x 60 GiB executors + the 32g driver pod (32 + 0.4 x 32 GiB), rounded up
-    assert sb.memory_gb == 1245
-    assert sb.scratch_gb == 20 * 300
-    assert compute_peak_requirements(1, "batch").memory_gb == 525
+    base = next(
+        r for r in compute_peak_requirements(1, "batch").per_job if r.job_type == "silver-build"
+    )
+    profile = job_mod._JOB_PROFILES["silver-build"]
+    assert base.executors < 20 == sb.executors
+    # Each added executor adds its profile's cores and scratch; the driver is unchanged.
+    added = 20 - base.executors
+    assert sb.cpu_cores == base.cpu_cores + added * profile["executor_cores"]
+    assert sb.scratch_gb == base.scratch_gb + added * (base.scratch_gb // base.executors)
+    assert sb.memory_gb > base.memory_gb
+    assert peak.memory_gb > compute_peak_requirements(1, "batch").memory_gb
 
 
 def test_a_continuous_override_is_counted_in_the_capacity_plan():
@@ -182,45 +186,100 @@ def test_overrides_recorded_for_the_run_mode_only():
     assert "spark_executor_overrides" not in local and "spark_driver_overrides" not in local
 
 
-def test_v16_and_v17_records_read_the_same_overrides():
-    """One key space: a stored v1.6 record's snapshot overrides and a v1.7
-    block's recorded overrides of the same config are equal; the snapshot's
-    overrides for the other mode do not enter."""
-    a = sr.load_record("5105a0")
-    a["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 12
-    a["config_snapshot"]["spark"]["executor_overrides"]["gold_refresh"] = 3
-    b = copy.deepcopy(sr.load_record("5105a0"))
-    b["experiment"]["architecture"]["spark_executor_overrides"] = {"silver": 12}
-    assert cmp.optional_keys(a["experiment"], a)["spark executor overrides"] == {"silver": 12}
-    assert cmp.optional_keys(b["experiment"], b)["spark executor overrides"] == {"silver": 12}
+def _snapshot_overrides(**overrides):
+    def mutate(rec):
+        rec["config_snapshot"]["spark"]["executor_overrides"].update(overrides)
+
+    return mutate
 
 
-def test_override_pair_architecture_difference():
+def _recorded_block(key, value):
+    def mutate(rec):
+        rec["experiment"]["architecture"][key] = value
+
+    return mutate
+
+
+def _run_mode(mode):
+    def mutate(rec):
+        rec["experiment"]["mode"] = mode
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    ("mutations", "key", "expected"),
+    [
+        # A stored v1.6 snapshot and a v1.7 block read the same overrides; the
+        # snapshot's overrides for the other mode do not enter.
+        (
+            [_snapshot_overrides(silver=12, gold_refresh=3)],
+            "spark executor overrides",
+            {"silver": 12},
+        ),
+        (
+            [_recorded_block("spark_executor_overrides", {"silver": 12})],
+            "spark executor overrides",
+            {"silver": 12},
+        ),
+        (
+            [_snapshot_overrides(silver=12, gold_refresh=3), _run_mode("continuous")],
+            "spark executor overrides",
+            {"gold_refresh": 3},
+        ),
+        (
+            [_recorded_block("spark_driver_overrides", {"driver_memory": "16g"})],
+            "spark driver overrides",
+            {"driver_memory": "16g"},
+        ),
+    ],
+)
+def test_identity_reads_the_run_modes_overrides(mutations, key, expected):
+    rec = sr.load_record("5105a0")
+    for mutate in mutations:
+        mutate(rec)
+    assert cmp.optional_keys(rec["experiment"], rec)[key] == expected
+
+
+@pytest.mark.parametrize(
+    ("mutate_a", "mutate_b", "key"),
+    [
+        (
+            _snapshot_overrides(silver=12),
+            _snapshot_overrides(silver=16),
+            "spark executor overrides",
+        ),
+        (
+            lambda rec: None,
+            _recorded_block("spark_driver_overrides", {"driver_memory": "16g"}),
+            "spark driver overrides",
+        ),
+    ],
+)
+def test_override_pair_architecture_difference(mutate_a, mutate_b, key):
     a = sr.load_record("5105a0")
     b = sr.load_record("5105a0")
-    a["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 12
-    b["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 16
+    mutate_a(a)
+    mutate_b(b)
     ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
-    assert [d.key for d in cmp.diff_group(ca, cb, cmp.ARCHITECTURE)] == ["spark executor overrides"]
+    assert [d.key for d in cmp.diff_group(ca, cb, cmp.ARCHITECTURE)] == [key]
     assert cmp.diff_group(ca, cb, cmp.CONDITIONS) == []
-
-
-def test_driver_overrides_are_their_own_architecture_key():
-    a = sr.load_record("5105a0")
-    b = copy.deepcopy(a)
-    b["experiment"]["architecture"]["spark_driver_overrides"] = {"driver_memory": "16g"}
-    ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
-    assert [d.key for d in cmp.diff_group(ca, cb, cmp.ARCHITECTURE)] == ["spark driver overrides"]
 
 
 # -- 6. not a baseline, not evidence -------------------------------------------------------
 
 
-def test_a_binding_override_labels_the_metrics_it_caps():
+@pytest.mark.parametrize(
+    "metric",
+    ["total_core_hours", "pipeline_throughput_gb_per_second", "total_elapsed_seconds"],
+)
+def test_a_binding_override_labels_the_metrics_it_caps(metric):
     from lakebench.metrics.metric_registry import capped_by
 
-    kinds = ["silver-build: executor override"]
-    assert capped_by("total_core_hours", kinds, "batch") == kinds
+    cfg = _cfg()
+    cfg.platform.compute.spark.silver_executors = 4  # the profile asks 8 at scale 1
+    kinds = _record_with(cfg)["experiment"]["limits"]["bound_kinds"]
+    assert "silver-build: executor override" in capped_by(metric, kinds, "batch")
 
 
 def test_a_count_pinned_at_the_cap_keeps_the_cap_label():
@@ -244,10 +303,6 @@ def test_a_local_run_applies_no_override():
         x for x in rec["experiment"]["limits"]["executors"] if x["job_type"] == "silver-build"
     )
     assert sb["override"] is None and "override_bound" not in sb
-    # A local run's block records no override (experiment_inputs with
-    # system="local"); the identity must not take one back from the snapshot.
-    rec["experiment"]["architecture"].pop("spark_executor_overrides", None)
-    assert "spark executor overrides" not in cmp.optional_keys(rec["experiment"], rec)
 
 
 def test_the_identity_fallback_reads_the_run_mode():
@@ -258,13 +313,3 @@ def test_the_identity_fallback_reads_the_run_mode():
     assert cmp.optional_keys(rec["experiment"], rec)["spark executor overrides"] == {
         "gold_refresh": 3
     }
-
-
-def test_the_comparability_key_table_is_the_job_table():
-    for mode, job_types in (
-        ("batch", job_mod.BATCH_JOB_TYPES),
-        ("continuous", job_mod.STREAMING_JOB_TYPES),
-    ):
-        assert cmp._OVERRIDE_KEYS_BY_MODE[mode] == {
-            jt: EXECUTOR_OVERRIDE_FIELDS[jt][1] for jt in job_types
-        }

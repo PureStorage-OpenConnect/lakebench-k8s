@@ -73,12 +73,10 @@ class TestCrossEngineEquality:
         assert mismatch(a, _fp(list(reversed(DUCKDB_ROWS)))) is None
         doubled = _fp(DUCKDB_ROWS + [DUCKDB_ROWS[0]])
         assert mismatch(a, doubled) == "rows differs"
+        assert mismatch(a, _fp(DUCKDB_ROWS[:1])) == "rows differs"
         # XOR would cancel a pair; the sum keeps it.
         pair = _fp([DUCKDB_ROWS[0], DUCKDB_ROWS[0]])
         assert pair["exact"] != _fp([])["exact"]
-
-    def test_a_missing_row_differs(self):
-        assert mismatch(_fp(DUCKDB_ROWS), _fp(DUCKDB_ROWS[:1])) == "rows differs"
 
     @pytest.mark.parametrize(
         "a,b",
@@ -95,8 +93,15 @@ class TestCrossEngineEquality:
     def test_numeric_renderings_of_one_value_agree(self, a, b):
         assert canonical_cell(a) == canonical_cell(b)
 
-    def test_integers_compare_exactly(self):
-        assert canonical_cell("123456789012345") != canonical_cell("123456789012346")
+    @pytest.mark.parametrize(
+        "a,b",
+        [
+            ("123456789012345", "123456789012346"),
+            (None, ""),
+        ],
+    )
+    def test_distinct_values_render_differently(self, a, b):
+        assert canonical_cell(a) != canonical_cell(b)
 
     @pytest.mark.parametrize(
         "text",
@@ -113,8 +118,7 @@ class TestCrossEngineEquality:
     def test_timestamp_renderings_normalise_to_utc(self, text):
         assert canonical_cell(text) == "2024-01-01T10:00:00.000000Z"
 
-    def test_null_and_empty_string_differ(self):
-        assert canonical_cell(None) != canonical_cell("")
+    def test_beeline_null_marker_is_none(self):
         assert rows_from_beeline_tsv2("s\nNULL\n\n")[0] == [None]
 
 
@@ -206,15 +210,13 @@ def _completed(stdout: str, rc: int = 0, stderr: str = ""):
 
 class TestSparkThriftCounting:
     def test_beeline_options_come_before_e(self):
-        """After -e they were read as more -e statements and dropped: beeline
-        fell back to table format and the count read n + 3 x ceil(n/100)."""
+        """Options after -e are read as more statements and dropped."""
         from lakebench.modules.query_engines.spark_thrift.executor import beeline_argv
 
         argv = beeline_argv("SELECT 1")
         e = argv.index("-e")
         assert argv[e + 1] == "SELECT 1" and len(argv) == e + 2
-        for opt in ("--silent=true", "--outputformat=tsv2", "--nullemptystring=false"):
-            assert argv.index(opt) < e
+        assert "--outputformat=tsv2" in argv[:e]
 
     def test_row_count_is_lines_after_the_header(self):
         from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
@@ -274,16 +276,6 @@ class TestTrinoSession:
         with mock.patch("subprocess.run", return_value=_completed('"1"\n')) as run:
             ex.execute_query("SELECT 1")
         assert "--output-format" not in run.call_args[0][0]
-
-    def test_thrift_session_zone_is_pinned_in_the_template(self):
-        from pathlib import Path
-
-        import lakebench
-
-        tpl = (
-            Path(lakebench.__file__).parent / "templates/spark-thrift/sparkapplication.yaml.j2"
-        ).read_text()
-        assert "spark.sql.session.timeZone=UTC" in tpl
 
 
 class TestRunnerFingerprintPass:

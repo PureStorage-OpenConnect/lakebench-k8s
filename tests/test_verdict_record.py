@@ -70,6 +70,14 @@ def _no_alerts(rec: dict) -> None:
     rec["financial_scoring"]["total_alerts"] = 0
 
 
+def _drain_unsettled(rec: dict) -> None:
+    # The drain stopped bronze mid-batch and silver never caught up, so the
+    # end-of-run result check did not run: the answers are not established.
+    rec.setdefault("continuous", {})["result_check"] = {
+        "not_checked": "the drain did not settle: silver has committed 1 of 2 bronze rows"
+    }
+
+
 MUTATIONS = {
     "silver_rows_0": (C360_BATCH, _silver_zero, "layer_rows"),
     "gold_rows_and_bytes_0": (C360_BATCH, _gold_zero, "layer_rows"),
@@ -77,6 +85,7 @@ MUTATIONS = {
     "scale_ratio_0": (C360_BATCH, _ratio_zero, "scale_ratio"),
     "every_rule_errored": (AML_BATCH, _rules_errored, "aml_rules"),
     "zero_alerts": (AML_BATCH, _no_alerts, "aml_rules"),
+    "continuous_result_check_not_done": (C360_CONT, _drain_unsettled, "result_check"),
 }
 
 
@@ -199,6 +208,17 @@ def test_no_per_rule_counts_is_a_warning_not_a_fail() -> None:
     assert any("executed rule set not recorded" in w for w in warnings)
 
 
+def test_batch_scoring_that_produced_nothing_fails() -> None:
+    """A batch AML run whose score job failed or refused the corpus has
+    unchecked answers: the verdict fails it and names the reason."""
+    rec = sr.load_record(AML_BATCH)
+    assert V.verdict_from_record(rec).status == "PASSED"
+    rec["financial_scoring"] = {"mode": "batch", "status": "not_scored", "reason": "x"}
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
+    assert any("AML scoring did not produce a result: x" in r for r in v.reasons)
+
+
 def test_continuous_mode_excluded_rule_ran_fails() -> None:
     rec = sr.load_record(AML_CONT)
     gold = _stream(rec, "gold-refresh")
@@ -207,6 +227,64 @@ def test_continuous_mode_excluded_rule_ran_fails() -> None:
     v = V.verdict_from_record(rec)
     assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
     assert any("W1_connected_components" in r for r in v.reasons)
+
+
+@pytest.mark.parametrize(
+    ("ttd_rules", "excluded_screening"),
+    [
+        # Alerted on some tick: the run had W5 and W6 in its rule set.
+        ({"W2_structuring", "W5_sanctions_match", "W6_pep_counterparty"}, False),
+        # A record from before W5 and W6 joined continuous.
+        ({"W2_structuring", "W4_risk_propagation"}, True),
+    ],
+)
+def test_a_record_without_rule_status_keeps_its_rule_set(ttd_rules, excluded_screening) -> None:
+    """With no scored or drain-tick status, the rules that alerted say
+    whether W5 and W6 were in the run: never "outside the expected set" for
+    a run that ran them, never expected of a run from before."""
+    rec = sr.load_record(AML_CONT)
+    rec.pop("financial_scoring", None)
+    rec.setdefault("continuous", {}).pop("ticks", None)
+    gold = _stream(rec, "gold-refresh")
+    gold["ttd_by_rule"] = {r: {"alerts": 1} for r in ttd_rules}
+    m = _metrics(rec)
+    excluded = V.continuous_excluded_rules(m)
+    assert ({"W5_sanctions_match", "W6_pep_counterparty"} <= excluded) is excluded_screening
+    v = V.verdict_from_record(rec)
+    assert not any("outside the expected set" in r for r in v.reasons), v.reasons
+
+
+def test_continuous_rule_skipped_on_the_scored_tick_fails() -> None:
+    """The scored alerts come from one tick: a rule that skipped there fails
+    the run even though it alerted on earlier ticks (its time-to-detect
+    lines exist)."""
+    from lakebench.benchmark.aml_queries import RULE_TARGETS
+    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+    rec = sr.load_record(AML_CONT)
+    status = [
+        {"rule_id": r, "status": "skipped", "reason": "mode-excluded"}
+        if r in AML_CONTINUOUS_SKIPPED_RULES
+        else {"rule_id": r, "status": "ran", "reason": None}
+        for r in RULE_TARGETS
+    ]
+    rec["financial_scoring"] = {"covered": {"rules": status}}
+    assert V.verdict_from_record(rec).status == "PASSED"
+    w3 = next(s for s in status if s["rule_id"] == "W3_round_tripping")
+    w3.update(status="skipped", reason="path-cap")
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
+
+    # Not scored: the drain tick's logged status stands in (live, Polaris
+    # AML s1: W4 failed on the drain tick and the run passed unscored).
+    rec["financial_scoring"] = {"status": "not_scored"}
+    logged = {s["rule_id"]: "ran" for s in status if s["reason"] != "mode-excluded"}
+    rec.setdefault("continuous", {})["drain"] = {"last_completed_cycle": 7}
+    rec["continuous"]["ticks"] = [{"cycle": 7, "rule_status": logged}]
+    assert V.verdict_from_record(rec).status == "PASSED"
+    logged["W4_risk_propagation"] = "error"
+    v = V.verdict_from_record(rec)
+    assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
 
 
 def test_continuous_rule_with_no_alerts_is_not_a_fail() -> None:
@@ -882,17 +960,15 @@ def _stale(rec: dict, ahead: bool) -> None:
     pb.setdefault("config_snapshot", {})["datagen_continuous"] = True
 
 
-def test_stale_gold_fails_a_kept_pace_run_and_warns_on_a_capacity_run() -> None:
-    """A capacity run offers more than the pipeline takes in, so its slowest
-    stage falls behind by design: stale gold is a warning there, a failure
-    when nothing fell behind at bronze."""
+@pytest.mark.parametrize(("ahead", "says"), [(False, "balance gate"), (True, "capacity run")])
+def test_stale_gold_is_reported_not_failed(ahead, says) -> None:
+    """Peak freshness is a number beside the verdict: whether gold kept up
+    is the balance gate's (lag not climbing), so stale gold warns and never
+    fails the run on its own."""
     rec = sr.load_record(C360_CONT)
-    _stale(rec, False)
+    _stale(rec, ahead)
     v = V.verdict_from_record(rec)
-    assert v.status == "FAILED" and any("Gold freshness" in str(r) for r in v.reasons)
-    rec = sr.load_record(C360_CONT)
-    _stale(rec, True)
-    v = V.verdict_from_record(rec)
+    assert v.status == "PASSED"
     assert not any("Gold freshness" in str(r) for r in v.reasons)
     _, _, warnings = V.compute_badge_status(_metrics(rec))
-    assert any("capacity run" in str(w) for w in warnings)
+    assert any("Gold freshness" in str(w) and says in str(w) for w in warnings)

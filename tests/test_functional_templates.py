@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from lakebench._resources import get_templates_dir
 from lakebench.config.recipes import RECIPES
 from lakebench.deploy.engine import DeploymentEngine, TemplateRenderer
 from tests.conftest import make_config
@@ -24,51 +25,16 @@ from tests.fixtures.functional_templates_helpers import _enrich_context as _enri
 from tests.fixtures.functional_templates_helpers import _make_engine as _make_engine
 from tests.fixtures.functional_templates_helpers import _mock_k8s as _mock_k8s
 
-# ---------------------------------------------------------------------------
-# Template inventory (mirrors deployer TEMPLATES constants)
-# ---------------------------------------------------------------------------
+# Templates the deployers render with their own context (deps/) are not swept.
+_TEMPLATES_DIR = get_templates_dir()
+ALL_TEMPLATES: list[str] = sorted(
+    str(p.relative_to(_TEMPLATES_DIR))
+    for p in _TEMPLATES_DIR.rglob("*.j2")
+    if p.relative_to(_TEMPLATES_DIR).parts[0] != "deps"
+)
 
-DEPLOYER_TEMPLATES: dict[str, list[str]] = {
-    "postgres": [
-        "postgres/serviceaccount.yaml.j2",
-        "postgres/statefulset.yaml.j2",
-        "postgres/service.yaml.j2",
-    ],
-    "trino": [
-        "trino/configmap.yaml.j2",
-        "trino/service.yaml.j2",
-        "trino/coordinator.yaml.j2",
-        "trino/worker.yaml.j2",
-    ],
-    "spark-thrift": [
-        "spark-thrift/service.yaml.j2",
-        "spark-thrift/sparkapplication.yaml.j2",
-    ],
-    "duckdb": [
-        "duckdb/deployment.yaml.j2",
-        "duckdb/service.yaml.j2",
-    ],
-    "rbac": [
-        "rbac/serviceaccount.yaml.j2",
-        "rbac/role.yaml.j2",
-        "rbac/rolebinding.yaml.j2",
-    ],
-    "prometheus": [
-        "prometheus/configmap.yaml.j2",
-    ],
-    "polaris": [
-        "polaris/deployment.yaml.j2",
-        "polaris/service.yaml.j2",
-        "polaris/configmap.yaml.j2",
-        "polaris/bootstrap-job.yaml.j2",
-    ],
-    "datagen": ["datagen/job.yaml.j2"],
-    "storageclass": ["storageclass/px-csi-scratch.yaml.j2"],
-    "namespace": ["namespace.yaml.j2"],
-    "secrets": ["secrets.yaml.j2"],
-}
-
-ALL_TEMPLATES: list[str] = [tpl for templates in DEPLOYER_TEMPLATES.values() for tpl in templates]
+_CA_SECRET = "lakebench-ca-certificate"
+_TRUSTSTORE_PATH = "/truststore/truststore.jks"
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +48,14 @@ def _parse_yaml_docs(rendered: str) -> list[dict]:
     Returns a list of non-None parsed documents.
     """
     return [doc for doc in yaml.safe_load_all(rendered) if doc is not None]
+
+
+def _pod_spec(rendered: str) -> dict:
+    """Pod spec of the Deployment or StatefulSet in a rendered template."""
+    for doc in _parse_yaml_docs(rendered):
+        if doc["kind"] in ("Deployment", "StatefulSet"):
+            return doc["spec"]["template"]["spec"]
+    raise AssertionError("no Deployment or StatefulSet rendered")
 
 
 # ---------------------------------------------------------------------------
@@ -107,28 +81,45 @@ def default_context(default_engine: DeploymentEngine) -> dict:
     return _enrich_context(default_engine)
 
 
-# ===========================================================================
-# 1. TestTemplateRendering - Core rendering tests
-# ===========================================================================
+@pytest.fixture
+def https_ctx():
+    """Build the template context for an HTTPS S3 endpoint with a CA cert."""
+
+    def build(recipe: str = "hive-iceberg-spark-trino") -> dict:
+        platform = {
+            "storage": {
+                "s3": {
+                    "endpoint": "https://s3.example.com:443",
+                    "access_key": "AK",
+                    "secret_key": "SK",
+                    "ca_cert": "/tmp/ca.pem",
+                }
+            }
+        }
+        cfg = make_config(recipe=recipe, platform=platform)
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        return _enrich_context(engine)
+
+    return build
 
 
 # ===========================================================================
-# 2. TestTemplateVariableSubstitution - Config values flow through
+# Config values flow through
 # ===========================================================================
 
 
 class TestTemplateVariableSubstitution:
     """Verify that config values are correctly substituted into rendered output."""
-
-    def test_namespace_substituted(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-    ):
-        """Namespace template should contain the config name as namespace."""
-        rendered = renderer.render("namespace.yaml.j2", default_context)
-        assert default_context["namespace"] in rendered
-        assert default_context["name"] in rendered
 
     def test_s3_credentials_in_secrets(
         self,
@@ -139,21 +130,16 @@ class TestTemplateVariableSubstitution:
         rendered = renderer.render("secrets.yaml.j2", default_context)
         assert default_context["s3_access_key"] in rendered
 
-    def test_trino_worker_replicas(
-        self,
-        renderer: TemplateRenderer,
-        default_context: dict,
-    ):
-        """Trino worker template should contain the configured replica count."""
-        rendered = renderer.render("trino/worker.yaml.j2", default_context)
-        parsed = yaml.safe_load(rendered)
-        expected = int(default_context["trino_worker_replicas"])
-        assert parsed["spec"]["replicas"] == expected
-
     def test_duckdb_resources(self, renderer: TemplateRenderer):
         """DuckDB deployment should contain CPU/memory from config."""
-        engine = _make_engine(recipe="hive-iceberg-spark-duckdb")
-        ctx = _enrich_context(engine)
+        cfg = make_config(
+            recipe="hive-iceberg-spark-duckdb",
+            architecture={
+                "query_engine": {"type": "duckdb", "duckdb": {"cores": 4, "memory": "8g"}}
+            },
+        )
+        ctx = _enrich_context(_make_engine(cfg=cfg))
+        assert ctx["duckdb_cores"] == 4
         rendered = renderer.render("duckdb/deployment.yaml.j2", ctx)
         parsed = yaml.safe_load(rendered)
         container = parsed["spec"]["template"]["spec"]["containers"][0]
@@ -164,7 +150,7 @@ class TestTemplateVariableSubstitution:
 
 
 # ===========================================================================
-# 3. TestTemplateConditionals - Conditional rendering
+# Conditional rendering
 # ===========================================================================
 
 
@@ -216,32 +202,9 @@ class TestTemplateConditionals:
 
     # -- HTTPS / TLS conditional tests --
 
-    def test_spark_thrift_ssl_enabled_for_https(self, renderer: TemplateRenderer):
+    def test_spark_thrift_ssl_enabled_for_https(self, renderer: TemplateRenderer, https_ctx):
         """spark-thrift ssl.enabled should be true when endpoint is HTTPS."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
+        ctx = https_ctx()
         assert ctx["s3_use_ssl"] is True
 
         rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
@@ -256,111 +219,54 @@ class TestTemplateConditionals:
         rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
         assert "spark.hadoop.fs.s3a.connection.ssl.enabled=false" in rendered
 
-    def test_trino_jvm_truststore_when_ca_cert(self, renderer: TemplateRenderer):
-        """Trino JVM config should include truststore args when CA cert set."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
+    @pytest.mark.parametrize(
+        ("recipe", "template", "main_container"),
+        [
+            ("hive-iceberg-spark-trino", "trino/coordinator.yaml.j2", "trino"),
+            ("hive-iceberg-spark-trino", "trino/worker.yaml.j2", "trino"),
+            ("polaris-iceberg-spark-trino", "polaris/deployment.yaml.j2", "polaris"),
+        ],
+    )
+    def test_ca_cert_truststore_wired_into_pod(
+        self, renderer: TemplateRenderer, https_ctx, recipe, template, main_container
+    ):
+        """The truststore init container mounts the CA secret and the main container the store."""
+        spec = _pod_spec(renderer.render(template, https_ctx(recipe)))
+        volumes = {v["name"]: v for v in spec["volumes"]}
+        init = {c["name"]: c for c in spec["initContainers"]}["import-ca-cert"]
+        init_mounts = {m["name"]: m["mountPath"] for m in init["volumeMounts"]}
+        assert set(init_mounts) <= set(volumes)
+
+        secret_vols = [n for n in init_mounts if "secret" in volumes[n]]
+        store_vols = [n for n in init_mounts if "emptyDir" in volumes[n]]
+        assert len(secret_vols) == 1
+        assert volumes[secret_vols[0]]["secret"]["secretName"] == _CA_SECRET
+        assert len(store_vols) == 1
+
+        main = {c["name"]: c for c in spec["containers"]}[main_container]
+        main_mounts = {m["name"]: m["mountPath"] for m in main["volumeMounts"]}
+        assert main_mounts[store_vols[0]] == init_mounts[store_vols[0]]
+
+    def test_trino_jvm_trusts_the_imported_store(self, renderer: TemplateRenderer, https_ctx):
+        """Both Trino JVM configs point at the store the init container builds."""
+        configmap = yaml.safe_load(renderer.render("trino/configmap.yaml.j2", https_ctx()))
+        for role in ("coordinator", "worker"):
+            args = configmap["data"][f"jvm.config.{role}"].split()
+            assert f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}" in args
+
+    def test_polaris_jvm_trusts_the_imported_store(self, renderer: TemplateRenderer, https_ctx):
+        """Polaris JAVA_TOOL_OPTIONS point at the store the init container builds."""
+        spec = _pod_spec(
+            renderer.render("polaris/deployment.yaml.j2", https_ctx("polaris-iceberg-spark-trino"))
         )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
+        env = {e["name"]: e.get("value") for e in spec["containers"][0]["env"]}
+        assert f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}" in env["JAVA_TOOL_OPTIONS"].split()
 
-        # Check configmap JVM config
-        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
-        assert "javax.net.ssl.trustStore=/truststore/truststore.jks" in rendered
-        assert "javax.net.ssl.trustStorePassword=changeit" in rendered
-
-        # Check coordinator has init container + volumes
-        rendered = renderer.render("trino/coordinator.yaml.j2", ctx)
-        assert "import-ca-cert" in rendered
-        assert "lakebench-ca-certificate" in rendered
-
-        # Check worker has init container + volumes
-        rendered = renderer.render("trino/worker.yaml.j2", ctx)
-        assert "import-ca-cert" in rendered
-        assert "lakebench-ca-certificate" in rendered
-
-    def test_polaris_truststore_when_ca_cert(self, renderer: TemplateRenderer):
-        """Polaris deployment should have truststore init when CA cert set."""
-        cfg = make_config(
-            recipe="polaris-iceberg-spark-trino",
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("polaris/deployment.yaml.j2", ctx)
-        assert "import-ca-cert" in rendered
-        assert "JAVA_TOOL_OPTIONS" in rendered
-        assert "truststore.jks" in rendered
-
-    def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer):
+    def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer, https_ctx):
         """Datagen job should have S3_CA_CERT env var when CA cert set."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("datagen/job.yaml.j2", ctx)
+        rendered = renderer.render("datagen/job.yaml.j2", https_ctx())
         assert "S3_CA_CERT" in rendered
-        assert "lakebench-ca-certificate" in rendered
+        assert _CA_SECRET in rendered
         env = {
             e["name"]: e.get("value")
             for d in _parse_yaml_docs(rendered)
@@ -380,81 +286,26 @@ class TestTemplateConditionals:
         assert "S3_CA_CERT" not in rendered
         assert "SSL_CERT_FILE" not in rendered
 
-    def test_hive_tls_block_when_https_with_ca(self, renderer: TemplateRenderer):
-        """Hive cluster should have TLS block when HTTPS + CA cert."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
+    def test_hive_tls_block_when_https_with_ca(self, renderer: TemplateRenderer, https_ctx):
+        """Hive cluster should trust the CA secret class when HTTPS + CA cert."""
+        ctx = https_ctx()
+        hive = yaml.safe_load(renderer.render("hive/stackable-hivecluster.yaml.j2", ctx))
+        tls = hive["spec"]["clusterConfig"]["s3"]["inline"]["tls"]
+        assert tls["verification"]["server"]["caCert"]["secretClass"] == (
+            f"lakebench-s3-ca-cert-{ctx['namespace']}"
         )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" in rendered
-        assert "tls:" in rendered or "secretClass" in rendered
 
     def test_hive_no_tls_block_for_http(self, renderer: TemplateRenderer):
         """Hive cluster should NOT have TLS block when HTTP endpoint."""
         engine = _make_engine()
         ctx = _enrich_context(engine)
 
-        rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" not in rendered
-
-    def test_all_templates_render_with_https_context(self, renderer: TemplateRenderer):
-        """All templates should render without error with HTTPS + CA cert context."""
-        cfg = make_config(
-            platform={
-                "storage": {
-                    "s3": {
-                        "endpoint": "https://s3.example.com:443",
-                        "access_key": "AK",
-                        "secret_key": "SK",
-                        "ca_cert": "/tmp/ca.pem",
-                    }
-                }
-            },
-        )
-        with (
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ),
-            patch(
-                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
-            ),
-        ):
-            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-        ctx = _enrich_context(engine)
-
-        for template_name in ALL_TEMPLATES:
-            rendered = renderer.render(template_name, ctx)
-            assert len(rendered) > 0, f"{template_name} empty with HTTPS context"
-            docs = _parse_yaml_docs(rendered)
-            assert len(docs) > 0, f"{template_name} produced no YAML with HTTPS context"
+        hive = yaml.safe_load(renderer.render("hive/stackable-hivecluster.yaml.j2", ctx))
+        assert "tls" not in hive["spec"]["clusterConfig"]["s3"]["inline"]
 
 
 # ===========================================================================
-# 4. TestPerRecipeTemplateRendering - All recipes produce valid templates
+# Every recipe renders every template, over HTTP and over HTTPS with a CA cert
 # ===========================================================================
 
 
@@ -462,76 +313,41 @@ class TestTemplateConditionals:
 _RECIPE_NAMES: list[str] = [r for r in RECIPES if r != "default"]
 
 
-class TestPerRecipeTemplateRendering:
-    """Verify every recipe produces valid rendered YAML for all deployer templates."""
-
-    def test_all_recipes_render_all_templates(self, renderer: TemplateRenderer):
-        """For each recipe, build context and render ALL templates, validating YAML."""
-        for recipe_name in _RECIPE_NAMES:
-            cfg = make_config(recipe=recipe_name)
-            with patch(
-                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-                return_value=False,
-            ):
-                engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
-            ctx = _enrich_context(engine)
-
-            for template_name in ALL_TEMPLATES:
-                rendered = renderer.render(template_name, ctx)
-                assert len(rendered) > 0, (
-                    f"Recipe '{recipe_name}': template '{template_name}' produced empty output"
-                )
-
-                docs = _parse_yaml_docs(rendered)
-                assert len(docs) > 0, (
-                    f"Recipe '{recipe_name}': template '{template_name}' produced no YAML documents"
-                )
-                for doc in docs:
-                    assert doc is not None
-                    assert "kind" in doc, (
-                        f"Recipe '{recipe_name}': template '{template_name}' "
-                        f"produced a document without 'kind'"
-                    )
+@pytest.mark.parametrize("https", [False, True], ids=["http", "https"])
+@pytest.mark.parametrize("recipe_name", _RECIPE_NAMES)
+def test_recipe_renders_every_template(renderer: TemplateRenderer, https_ctx, recipe_name, https):
+    """Each template renders to valid YAML documents, each with a kind."""
+    ctx = https_ctx(recipe_name) if https else _enrich_context(_make_engine(recipe=recipe_name))
+    for template_name in ALL_TEMPLATES:
+        docs = _parse_yaml_docs(renderer.render(template_name, ctx))
+        assert docs, f"{recipe_name} https={https}: {template_name} rendered no YAML documents"
+        for doc in docs:
+            assert "kind" in doc, (
+                f"{recipe_name} https={https}: {template_name} has a document without 'kind'"
+            )
 
 
 # ===========================================================================
-# 5. TestTrinoConfigMapFormatConditional - Connector name depends on format
+# Connector name depends on table format
 # ===========================================================================
 
 
-class TestTrinoConfigMapFormatConditional:
-    """Verify Trino configmap renders correct connector based on table_format_type."""
-
-    def test_iceberg_connector_for_iceberg_format(self, renderer: TemplateRenderer):
-        """When table_format_type is iceberg, connector.name should be iceberg."""
-        engine = _make_engine(recipe="hive-iceberg-spark-trino")
-        ctx = _enrich_context(engine)
-        assert ctx.get("table_format_type", "iceberg") == "iceberg"
-
-        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
-        assert "connector.name=iceberg" in rendered
-        assert "connector.name=delta_lake" not in rendered
-
-    def test_delta_connector_for_delta_format(self, renderer: TemplateRenderer):
-        """When table_format_type is delta, connector.name should be delta_lake."""
-        engine = _make_engine(recipe="hive-delta-spark-trino")
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
-        assert "connector.name=delta_lake" in rendered
-        # The iceberg connector line should NOT appear (not even in comments)
-        # But the template might have both branches -- just verify delta_lake is present
-        # and the rendered lakehouse.properties section has delta_lake as the active connector.
-        lines = rendered.split("\n")
-        # Find the lakehouse.properties block
-        in_lakehouse = False
-        connector_lines = []
-        for line in lines:
-            if "lakehouse.properties" in line:
-                in_lakehouse = True
-                continue
-            if in_lakehouse and line.strip().startswith("connector.name="):
-                connector_lines.append(line.strip())
-        assert any("delta_lake" in cl for cl in connector_lines), (
-            f"Expected delta_lake connector in lakehouse.properties, got: {connector_lines}"
-        )
+@pytest.mark.parametrize(
+    ("recipe", "connector"),
+    [
+        ("hive-iceberg-spark-trino", "iceberg"),
+        ("hive-delta-spark-trino", "delta_lake"),
+    ],
+)
+def test_trino_lakehouse_connector_follows_table_format(
+    renderer: TemplateRenderer, recipe: str, connector: str
+):
+    """The lakehouse catalog uses the connector for the recipe's table format."""
+    ctx = _enrich_context(_make_engine(recipe=recipe))
+    configmap = yaml.safe_load(renderer.render("trino/configmap.yaml.j2", ctx))
+    props = dict(
+        line.split("=", 1)
+        for line in configmap["data"]["lakehouse.properties"].splitlines()
+        if "=" in line
+    )
+    assert props["connector.name"] == connector

@@ -1,4 +1,4 @@
-"""Silver's reference USD rates must match the generator's (LB-137).
+"""Silver's reference USD rates must match the generator's.
 
 The generator expresses amounts in each account's own currency using
 `datagen_rs::amounts::fx_to_usd`; silver converts them back with

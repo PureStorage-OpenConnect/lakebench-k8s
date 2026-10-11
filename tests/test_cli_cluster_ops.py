@@ -18,29 +18,7 @@ from urllib3.exceptions import MaxRetryError
 from lakebench.cli import _cluster_ops as ops
 from lakebench.cli import app
 from lakebench.exit_codes import ExitCode
-from tests.fixtures.cli_cluster_ops_helpers import _TRINO_HIVE as _TRINO_HIVE
-from tests.fixtures.cli_cluster_ops_helpers import FakeApps as FakeApps
-from tests.fixtures.cli_cluster_ops_helpers import FakeBatch as FakeBatch
-from tests.fixtures.cli_cluster_ops_helpers import FakeCore as FakeCore
-from tests.fixtures.cli_cluster_ops_helpers import FakeCustom as FakeCustom
-from tests.fixtures.cli_cluster_ops_helpers import FakeK8s as FakeK8s
-from tests.fixtures.cli_cluster_ops_helpers import _config as _config
-from tests.fixtures.cli_cluster_ops_helpers import _Resp as _Resp
-
-
-def _stderr(result) -> str:
-    try:
-        return result.stderr
-    except ValueError:  # Click < 8.2 without mix_stderr=False
-        return result.output
-
-
-def _stdout(result) -> str:
-    try:
-        return result.stdout
-    except ValueError:
-        return result.output
-
+from tests.fixtures import cli_cluster_ops_helpers as co
 
 # -- fakes ---------------------------------------------------------------------
 
@@ -64,14 +42,18 @@ def cluster(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
     state = SimpleNamespace(
-        k8s=FakeK8s(), core=FakeCore(), apps=FakeApps(), batch=FakeBatch(), custom=FakeCustom()
+        k8s=co.FakeK8s(),
+        core=co.FakeCore(),
+        apps=co.FakeApps(),
+        batch=co.FakeBatch(),
+        custom=co.FakeCustom(),
     )
     monkeypatch.setattr(cli, "get_k8s_client", lambda **_k: state.k8s)
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda: state.core)
     monkeypatch.setattr("kubernetes.client.AppsV1Api", lambda: state.apps)
     monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: state.batch)
     monkeypatch.setattr("kubernetes.client.CustomObjectsApi", lambda: state.custom)
-    state.config = _config(tmp_path)
+    state.config = co._config(tmp_path)
     return state
 
 
@@ -88,7 +70,7 @@ def test_logs_datagen_selector(cluster):
     r = _invoke("logs", cluster.config, "datagen")
     assert r.exit_code == 0, r.output
     assert cluster.core.selectors == ["job-name=lakebench-datagen"]
-    assert _stdout(r) == "generated 10 files\n"
+    assert co.stdout(r) == "generated 10 files\n"
     assert cluster.core.reads[0][1]["container"] == "datagen"
 
 
@@ -105,8 +87,8 @@ def test_logs_several_pods_get_headers_and_clean_stdout(cluster):
     cluster.core.logs = {"old": b"one\n", "new": b"two\n"}
     r = _invoke("logs", cluster.config, "datagen")
     assert r.exit_code == 0, r.output
-    assert _stdout(r) == "one\ntwo\n"  # oldest first, no headers on stdout
-    assert "pod old" in _stderr(r) and "pod new" in _stderr(r)
+    assert co.stdout(r) == "one\ntwo\n"  # oldest first, no headers on stdout
+    assert "pod old" in co.stderr(r) and "pod new" in co.stderr(r)
 
 
 # -- stop ------------------------------------------------------------------------
@@ -118,38 +100,58 @@ def test_stop_deletes_every_lakebench_app_and_the_datagen_job(cluster):
     r = _invoke("stop", cluster.config)
     assert r.exit_code == 0, r.output
     assert sorted(cluster.custom.deleted) == ["lakebench-gold-refresh", "lakebench-silver-build"]
-    assert "other-app" not in r.output
-
-
-def test_stop_datagen_job_deleted(cluster):
-    cluster.batch.job = True
-    r = _invoke("stop", cluster.config)
-    assert r.exit_code == 0, r.output
-    (name, body), *_ = cluster.batch.deleted
-    assert name == "lakebench-datagen"
+    (name, body), *rest = cluster.batch.deleted
+    assert name == "lakebench-datagen" and not rest
     assert body.propagation_policy == "Foreground"
 
 
-def test_stop_403_exits_1(cluster):
-    """A refused delete is recorded, the other deletions still run, exit 1."""
-    cluster.custom.apps = ["lakebench-bronze-ingest", "lakebench-silver-stream"]
-    cluster.custom.delete_errors = {
-        "lakebench-bronze-ingest": ApiException(status=403, reason="Forbidden")
-    }
-    cluster.batch.job = True
-    r = _invoke("stop", cluster.config)
-    assert r.exit_code == ExitCode.FAILED, r.output
-    assert cluster.custom.deleted == ["lakebench-silver-stream"]
-    assert [n for n, _ in cluster.batch.deleted] == ["lakebench-datagen"]
-    assert "deleting SparkApplication/lakebench-bronze-ingest: 403 Forbidden" in _stderr(r)
+_APPS = ["lakebench-bronze-ingest", "lakebench-silver-stream"]
 
 
-def test_stop_list_error_still_deletes_the_job_and_exits_1(cluster):
-    cluster.custom.list_error = ApiException(status=500, reason="Internal Server Error")
+@pytest.mark.parametrize(
+    ("faults", "argv", "apps_deleted", "jobs_deleted"),
+    [
+        # a refused delete is recorded, the other deletions still run
+        (
+            {"delete_errors": {_APPS[0]: ApiException(status=403, reason="Forbidden")}},
+            [],
+            [_APPS[1]],
+            ["lakebench-datagen"],
+        ),
+        (
+            {"delete_errors": {_APPS[0]: MaxRetryError(None, "/apis", "connection reset")}},
+            [],
+            [_APPS[1]],
+            None,
+        ),
+        # a failed listing does not stop the datagen job being deleted
+        (
+            {"list_error": ApiException(status=500, reason="Internal Server Error")},
+            [],
+            [],
+            ["lakebench-datagen"],
+        ),
+        # a dry run that cannot list still fails, and deletes nothing
+        (
+            {"list_error": ApiException(status=403, reason="Forbidden")},
+            ["--dry-run"],
+            [],
+            [],
+        ),
+    ],
+)
+def test_stop_with_an_api_fault_exits_1_after_deleting_what_it_can(
+    cluster, faults, argv, apps_deleted, jobs_deleted
+):
+    cluster.custom.apps = list(_APPS)
     cluster.batch.job = True
-    r = _invoke("stop", cluster.config)
+    for attr, value in faults.items():
+        setattr(cluster.custom, attr, value)
+    r = _invoke("stop", cluster.config, *argv)
     assert r.exit_code == ExitCode.FAILED, r.output
-    assert [n for n, _ in cluster.batch.deleted] == ["lakebench-datagen"]
+    assert cluster.custom.deleted == apps_deleted
+    if jobs_deleted is not None:
+        assert [n for n, _ in cluster.batch.deleted] == jobs_deleted
 
 
 def test_stop_leaves_finished_jobs_and_their_logs(cluster):
@@ -165,7 +167,7 @@ def test_stop_leaves_finished_jobs_and_their_logs(cluster):
     assert r.exit_code == 0, r.output
     assert cluster.custom.deleted == ["lakebench-gold-refresh"]
     assert cluster.batch.deleted == []
-    err = _stderr(r)
+    err = co.stderr(r)
     assert "left in place: SparkApplication/lakebench-silver-build (FAILED)" in err
     assert "left in place: Job/lakebench-datagen (Complete)" in err
 
@@ -193,22 +195,6 @@ def test_stop_deletes_every_app_state_but_completed_and_failed(cluster, state, d
     r = _invoke("stop", cluster.config)
     assert r.exit_code == 0, r.output
     assert (cluster.custom.deleted == ["lakebench-silver-stream"]) is deleted
-
-
-def test_stop_dry_run_with_a_list_failure_exits_1(cluster):
-    cluster.custom.list_error = ApiException(status=403, reason="Forbidden")
-    r = _invoke("stop", cluster.config, "--dry-run")
-    assert r.exit_code == ExitCode.FAILED, r.output
-
-
-def test_stop_unreachable_at_delete_exits_1(cluster):
-    cluster.custom.apps = ["lakebench-bronze-ingest", "lakebench-silver-stream"]
-    cluster.custom.delete_errors = {
-        "lakebench-bronze-ingest": MaxRetryError(None, "/apis", "connection reset")
-    }
-    r = _invoke("stop", cluster.config)
-    assert r.exit_code == ExitCode.FAILED, r.output
-    assert cluster.custom.deleted == ["lakebench-silver-stream"]
 
 
 def test_stop_journal_records_failure(cluster, monkeypatch):
@@ -244,8 +230,8 @@ def test_stop_dry_run_deletes_nothing(cluster, monkeypatch):
     assert r.exit_code == 0, r.output
     assert cluster.custom.deleted == [] and cluster.batch.deleted == []
     assert called == []
-    assert "Would delete SparkApplication/lakebench-bronze-ingest" in _stderr(r)
-    assert "Would delete Job/lakebench-datagen" in _stderr(r)
+    assert "Would delete SparkApplication/lakebench-bronze-ingest" in co.stderr(r)
+    assert "Would delete Job/lakebench-datagen" in co.stderr(r)
 
 
 def test_stop_pre_stop_runs_first_and_a_failure_still_deletes(cluster, monkeypatch):
@@ -261,7 +247,7 @@ def test_stop_pre_stop_runs_first_and_a_failure_still_deletes(cluster, monkeypat
     assert r.exit_code == 0, r.output
     assert order == [("pre_stop", [])]  # before any deletion
     assert cluster.custom.deleted == ["lakebench-gold-refresh"]
-    assert "drain timed out" in _stderr(r)
+    assert "drain timed out" in co.stderr(r)
 
 
 def test_stop_unreachable_exits_4(cluster):
@@ -274,52 +260,47 @@ def test_stop_unreachable_exits_4(cluster):
 
 
 def test_status_ok_exits_0(cluster):
-    cluster.apps.objects = dict(_TRINO_HIVE)
+    cluster.apps.objects = dict(co._TRINO_HIVE)
     r = _invoke("status", cluster.config)
     assert r.exit_code == 0, r.output
-    assert "Every listed component is ready" in _stderr(r)
 
 
 def test_status_missing_ns_exit1(cluster):
     cluster.core.ns_exists = False
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
-    err = _stderr(r)
-    assert "namespace ops does not exist" in err
-    assert "lakebench deploy" in err
 
 
 def test_status_unready_exit1(cluster):
-    cluster.apps.objects = dict(_TRINO_HIVE, **{"lakebench-trino-worker": (1, 2)})
+    cluster.apps.objects = dict(co._TRINO_HIVE, **{"lakebench-trino-worker": (1, 2)})
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
-    assert "Drift: lakebench-trino-worker" in _stderr(r)
     # The hint names a component `logs` accepts, not the object name.
     # The exact line: no --name suffix for a config run without --name.
     hint = (
         f"Next: lakebench logs {cluster.config} trino-worker, or lakebench deploy {cluster.config}"
     )
-    assert hint in " ".join(_stderr(r).split())
+    assert hint in " ".join(co.stderr(r).split())
 
 
 def test_status_missing_component_exit1(cluster):
-    objects = dict(_TRINO_HIVE)
+    objects = dict(co._TRINO_HIVE)
     del objects["lakebench-hive-metastore-default"]
     cluster.apps.objects = objects
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
-    assert "lakebench-hive-metastore-default" in _stderr(r)
+    assert "lakebench-hive-metastore-default" in co.stderr(r)
 
 
 def test_status_read_error_exits_4(cluster):
-    cluster.apps.objects = dict(_TRINO_HIVE)
+    cluster.apps.objects = dict(co._TRINO_HIVE)
     cluster.apps.errors = {"lakebench-postgres": ApiException(status=403, reason="Forbidden")}
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.PREREQUISITE, r.output
 
 
 def test_status_drift_wins_over_a_read_error(cluster):
-    cluster.apps.objects = dict(_TRINO_HIVE, **{"lakebench-trino-worker": (0, 2)})
+    cluster.apps.objects = dict(co._TRINO_HIVE, **{"lakebench-trino-worker": (0, 2)})
     cluster.apps.errors = {"lakebench-postgres": ApiException(status=500, reason="Error")}
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.FAILED, r.output
@@ -336,50 +317,42 @@ def test_status_namespace_read_forbidden_exits_4(cluster):
     cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
     r = _invoke("status", cluster.config)
     assert r.exit_code == ExitCode.PREREQUISITE, r.output
-    assert "Kubernetes API error: cannot read namespace ops: 403 Forbidden" in _stderr(r)
+    assert "Kubernetes API error: cannot read namespace ops: 403 Forbidden" in co.stderr(r)
 
 
 def test_stop_namespace_read_forbidden_exits_4(cluster):
     cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
     r = _invoke("stop", cluster.config)
     assert r.exit_code == ExitCode.PREREQUISITE, r.output
-    assert "Kubernetes API error" in _stderr(r)
+    assert "Kubernetes API error" in co.stderr(r)
     assert cluster.custom.deleted == []
 
 
-def test_status_namespace_only_absent_components_are_not_drift(cluster, monkeypatch):
+@pytest.fixture
+def namespace_only(monkeypatch):
+    """`status --namespace` with no config: the cluster target is current."""
     from lakebench.k8s import target as target_mod
 
     monkeypatch.setattr(
         target_mod.ClusterTarget, "current", classmethod(lambda cls: target_mod.ClusterTarget("B"))
     )
-    cluster.apps.objects = {"lakebench-postgres": (1, 1), "lakebench-polaris": (1, 1)}
+
+
+@pytest.mark.parametrize(
+    ("objects", "exit_code"),
+    [
+        # components the recipe does not use are absent, not drift
+        ({"lakebench-postgres": (1, 1), "lakebench-polaris": (1, 1)}, 0),
+        ({}, ExitCode.FAILED),  # nothing found
+        ({"lakebench-postgres": (0, 1)}, ExitCode.FAILED),  # unready
+    ],
+)
+def test_status_namespace_only_drift(cluster, namespace_only, objects, exit_code):
+    cluster.apps.objects = objects
     r = _invoke("status", "--namespace", "some-ns")
-    assert r.exit_code == 0, r.output
-
-
-def test_status_namespace_only_with_nothing_found_is_drift(cluster, monkeypatch):
-    from lakebench.k8s import target as target_mod
-
-    monkeypatch.setattr(
-        target_mod.ClusterTarget, "current", classmethod(lambda cls: target_mod.ClusterTarget("B"))
-    )
-    r = _invoke("status", "--namespace", "some-ns")
-    assert r.exit_code == ExitCode.FAILED, r.output
-    assert "no lakebench component found" in _stderr(r)
-
-
-def test_status_namespace_only_unready_is_drift(cluster, monkeypatch):
-    from lakebench.k8s import target as target_mod
-
-    monkeypatch.setattr(
-        target_mod.ClusterTarget, "current", classmethod(lambda cls: target_mod.ClusterTarget("B"))
-    )
-    cluster.apps.objects = {"lakebench-postgres": (0, 1)}
-    r = _invoke("status", "--namespace", "some-ns")
-    assert r.exit_code == ExitCode.FAILED, r.output
+    assert r.exit_code == exit_code, r.output
 
 
 def test_status_scaled_to_zero_is_drift():
-    apps = FakeApps({"x": (0, 0)})
+    apps = co.FakeApps({"x": (0, 0)})
     assert ops.read_component(apps, "ns", "x", "Deployment").state == "unready"

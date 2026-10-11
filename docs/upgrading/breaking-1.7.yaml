@@ -138,7 +138,7 @@
   text: '`lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each
     report states the corpus, components, result fingerprints and caps needed to judge a comparison.'
   fix: Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench
-    report CONFIG`); see Comparing Runs in docs/benchmarking.md.
+    report CONFIG`); see docs/benchmarking/comparing.md.
 - id: init-refuses-credential-values
   title: init refuses credential values
   kind: refused-command
@@ -523,12 +523,12 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
-- id: the-default-datagen-image-is-lb-datagen3cb67f92
-  title: The default datagen image is lb-datagen:3cb67f92
+- id: the-default-datagen-image-is-lb-datagen5d7ce61a
+  title: The default datagen image is lb-datagen:5d7ce61a
   kind: version-bump
-  subject: images.datagen docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9
+  subject: images.datagen docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc
   source: src/lakebench/config/schema.py:ImagesConfig
-  text: 'The default datagen image is `lb-datagen:3cb67f92`, pinned by digest (1.7.0: `2a36ae21`; v1.6: `1.6.0`; neither is in the registry). It has no lineage row, so its corpora get a corpus id of their own.'
+  text: 'The default datagen image is `lb-datagen:5d7ce61a`, pinned by digest (1.7.0: `2a36ae21`; v1.6: `1.6.0`; neither is in the registry). It has no lineage row, so its corpora get a corpus id of their own.'
   fix: Remove any `images.datagen` pin to an older tag.
 - id: a-run-passes-only-when-its-record-shows-it
   title: A run passes only when its record shows it

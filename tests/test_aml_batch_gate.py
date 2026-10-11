@@ -27,19 +27,31 @@ def test_scoring_total_is_authoritative():
     assert _aml_batch_gate_problems([_job({"W2": 0})], {"total_alerts": 12}) == ([], [])
 
 
-def test_missing_logs_without_scoring_is_a_warning_not_a_failure():
-    probs, warns = _aml_batch_gate_problems([_job({})], None)
+def test_missing_logs_without_an_alert_total_is_a_warning_not_a_failure():
+    probs, warns = _aml_batch_gate_problems([_job({})], {"status": "scored"})
     assert probs == [] and warns
 
 
+@pytest.mark.parametrize(
+    "scoring", [None, {"mode": "batch", "status": "not_scored", "reason": "refused"}]
+)
+def test_scoring_without_a_result_fails(scoring):
+    """A batch run whose score job failed or refused the corpus has
+    unchecked answers: it fails, with the reason."""
+    probs, _ = _aml_batch_gate_problems([_job({"W2": 3})], scoring)
+    assert len(probs) == 1 and "AML scoring did not produce a result" in probs[0]
+
+
 def test_crashed_rule_fails_even_with_other_alerts():
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 5, "W7": 0}, {"W7": "AnalysisException"})])
+    probs, _ = _aml_batch_gate_problems(
+        [_job({"W2": 5, "W7": 0}, {"W7": "AnalysisException"})], {"total_alerts": 5}
+    )
     assert probs == ["Detection rule W7 failed: AnalysisException"]
 
 
 def test_healthy_run_passes_and_last_cycle_wins():
     bad_then_good = [_job({"W2": 0}), _job({"W2": 3})]
-    assert _aml_batch_gate_problems(bad_then_good) == ([], [])
+    assert _aml_batch_gate_problems(bad_then_good, {"total_alerts": 3}) == ([], [])
 
 
 def test_no_gold_job_is_not_judged_here():
@@ -57,7 +69,7 @@ def test_skipped_behavioural_rule_warns():
         rules_skipped={"W1_connected_components": "giant-component"},
         tm_invariants=_PASS,
     )
-    problems, warnings = _aml_batch_gate_problems([job], None)
+    problems, warnings = _aml_batch_gate_problems([job], {"total_alerts": 5})
     assert not problems
     assert any("gather_scatter" in w and "not run" in w for w in warnings)
 
@@ -85,7 +97,7 @@ def _tjob(alerts=None, tm=_PASS, status=None, ops=None):
 
 def test_tm_is_not_part_of_the_detection_gate():
     tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=tm)])
+    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=tm)], {"total_alerts": 3})
     assert probs == []
 
 

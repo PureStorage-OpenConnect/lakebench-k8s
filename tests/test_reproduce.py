@@ -1,6 +1,6 @@
 """Tests for `lakebench reproduce`.
 
-The reproduce contract is documented in docs/deep-dive/reproduce.md. The
+The reproduce contract is documented in docs/development.md#reproduction-packages. The
 interesting failures here are silent ones: a package that promotes a
 performance metric into the correctness band would let a real bug pass; a
 package that misses a stage would silently omit the reproduction of that
@@ -10,7 +10,7 @@ that the CLI relies on.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import mock
 
@@ -120,6 +120,9 @@ class TestCompare:
             ({"ingest_ratio": 1.0}, {}, {}, "sustained", 2, "missing"),
             ({"ingest_ratio": 1.0}, {"ingest_ratio": 1.08}, {}, "sustained", 2, "fail"),
             ({"ingest_ratio": 1.0}, {"ingest_ratio": 0.94}, {}, "sustained", 2, "fail"),
+            # two honest runs of one corpus differ by a small ratio: inside the
+            # guard band it passes
+            ({"ingest_ratio": 1.0167}, {"ingest_ratio": 1.0339}, {}, "sustained", 0, "pass"),
         ],
     )
     def test_outcome(self, expected, actual, tolerances, mode, code, status):
@@ -184,6 +187,30 @@ class TestF3CommitDriftIsCorrectnessFailure:
                 reproduce(package=pkg_path, dry_run=True)
             assert exc.value.exit_code == 14  # requirement unmet (CLI-1; 2 in 1.6)
 
+    def test_commit_is_lakebench_not_the_callers_repo(self, tmp_path, monkeypatch):
+        """Run from inside another git repo, the commit compared is the
+        running lakebench's, not that repo's HEAD (a false drift)."""
+        import subprocess
+
+        from lakebench.cli._reproduce import _current_commit_sha
+        from lakebench.metrics import provenance
+
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+        subprocess.run([*git, "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(
+            [*git, "-C", str(tmp_path), "commit", "-q", "--allow-empty", "-m", "x"], check=True
+        )
+        other = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "--short=7", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        monkeypatch.chdir(tmp_path)
+        expected = provenance.sample().get("git_sha")
+        assert _current_commit_sha() == (expected[:7] if expected else None)
+        assert _current_commit_sha() != other
+
 
 class TestF4RunFingerprintingSurvivesConcurrentRuns:
     """The reproduce must pick its own run, not a concurrent run that finished
@@ -221,67 +248,6 @@ class TestF4RunFingerprintingSurvivesConcurrentRuns:
         watermark = datetime.fromisoformat("2026-09-21T04:00:00+00:00")
         got = _find_reproduce_run(FakeStorage(), "my-config", watermark)
         assert got == "loaded:ours"
-
-
-class TestNoPreRunDestroy:
-    """reproduce never destroys before its run (SAF-1): it refuses an
-    existing namespace or bucket instead (tests/test_saf1_reproduce.py), and
-    destroys at the end only the incarnation it deployed, unless --keep."""
-
-    def _run(self, tmp_path, keep):
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: my-config\n")
-        call_log: list[tuple[str, object]] = []
-
-        def track(name):
-            def _fn(*a, **kw):
-                call_log.append((name, kw.get("expected_incarnation", kw.get("nonce"))))
-                return kw.get("nonce")
-
-            return _fn
-
-        class FakeStorage:
-            metrics_dir = tmp_path
-
-            def list_runs(self):
-                return [
-                    {
-                        "run_id": "produced",
-                        "deployment_name": "my-config",
-                        "start_time": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-
-            def load_run(self, rid):
-                return SimpleNamespace(run_id=rid)
-
-        fake_cfg = SimpleNamespace(
-            name="my-config",
-            get_namespace=lambda: "my-config",
-            architecture=SimpleNamespace(pipeline=SimpleNamespace(cycles=1)),
-        )
-        with (
-            mock.patch("lakebench.cli._destroy.destroy", track("destroy-command")),
-            mock.patch("lakebench.cli._destroy._destroy_impl", track("destroy")),
-            mock.patch("lakebench.cli._deploy._deploy_impl", track("deploy")),
-            mock.patch("lakebench.cli._generate.generate", track("generate")),
-            mock.patch("lakebench.cli._run.run", track("run")),
-            mock.patch("lakebench.cli._reproduce._refuse_existing"),
-            # run's argument rules read a real config (tests/test_run_args.py).
-            mock.patch("lakebench.cli._run_args.validate_run_args"),
-            mock.patch("lakebench.aml.look_guard.refuse_if_protected"),
-            mock.patch(
-                "lakebench.cli._reproduce._own_incarnation",
-                side_effect=lambda cfg, path, own, **k: f"uid#{own}",
-            ),
-            mock.patch("lakebench.cli._helpers.journal_open"),
-            mock.patch("lakebench.config.load_config", return_value=fake_cfg),
-            mock.patch("lakebench.metrics.MetricsStorage", return_value=FakeStorage()),
-        ):
-            from lakebench.cli._reproduce import _run_pipeline
-
-            _run_pipeline(cfg, timeout=None, keep=keep)
-        return call_log
 
 
 class TestF6RecordRequiresCorrectnessMetric:
@@ -339,7 +305,7 @@ class TestF6RecordRequiresCorrectnessMetric:
 
 
 class TestBenchmarkSampleCount:
-    """A package's QpH must be verified with the same samples per query (LB-150)."""
+    """A package's QpH must be verified with the same samples per query."""
 
     @staticmethod
     def _qb(samples):
@@ -362,25 +328,6 @@ class TestBenchmarkSampleCount:
         assert _sample_mismatch({"expected_numbers": {"scale_ratio": 1.0}}, 1) is None
         sustained = dict(meta, pipeline_mode="sustained")
         assert _sample_mismatch(sustained, 1) is None
-
-
-def test_verify_refuses_config_with_other_sample_count_before_running(tmp_path):
-    """The check fires before the pipeline, not after hours of it (LB-150)."""
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("name: x\n")  # default iterations: 3
-    pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abc")
-    pkg_path = tmp_path / "pkg.yaml"
-    pkg_path.write_text(yaml.safe_dump(pkg))
-    with (
-        mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="abc"),
-        mock.patch(
-            "lakebench.cli._reproduce._run_pipeline",
-            side_effect=AssertionError("must refuse before running"),
-        ),
-        pytest.raises(typer.Exit) as exc,
-    ):
-        reproduce(package=pkg_path)
-    assert exc.value.exit_code == 2
 
 
 class TestExperimentChecks:
@@ -411,23 +358,38 @@ class TestExperimentChecks:
         with pytest.raises(ReproduceError, match="no provenance"):
             self._pkg(_metrics(experiment=None))
 
-    def test_legacy_package_refused_before_running(self, tmp_path):
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(_ONE_SAMPLE_CFG)
-        pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abc")
-        del pkg["reproduction_metadata"]["experiment_identity"]
-        pkg_path = tmp_path / "pkg.yaml"
-        pkg_path.write_text(yaml.safe_dump(pkg))
-        with (
-            mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="abc"),
-            mock.patch(
-                "lakebench.cli._reproduce._run_pipeline",
-                side_effect=AssertionError("must refuse before running"),
-            ),
-            pytest.raises(typer.Exit) as exc,
-        ):
-            reproduce(package=pkg_path)
-        assert exc.value.exit_code == 2
+
+def _drop_identity(pkg):
+    del pkg["reproduction_metadata"]["experiment_identity"]
+
+
+@pytest.mark.parametrize(
+    ("cfg_text", "mutate"),
+    [
+        # default iterations is 3; the package carries one sample per query
+        pytest.param("name: x\n", None, id="other-sample-count"),
+        pytest.param(_ONE_SAMPLE_CFG, _drop_identity, id="legacy-package"),
+    ],
+)
+def test_verify_refuses_before_running(tmp_path, cfg_text, mutate):
+    """A package that cannot be verified is refused before the pipeline runs,
+    not after hours of it."""
+    (tmp_path / "cfg.yaml").write_text(cfg_text)
+    pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abc")
+    if mutate:
+        mutate(pkg)
+    pkg_path = tmp_path / "pkg.yaml"
+    pkg_path.write_text(yaml.safe_dump(pkg))
+    with (
+        mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="abc"),
+        mock.patch(
+            "lakebench.cli._reproduce._run_pipeline",
+            side_effect=AssertionError("must refuse before running"),
+        ),
+        pytest.raises(typer.Exit) as exc,
+    ):
+        reproduce(package=pkg_path)
+    assert exc.value.exit_code == 2
 
 
 # ---------------------------------------------------------------------------
@@ -442,11 +404,16 @@ def _stored(run_id):
     return sr.load_metrics(run_id)
 
 
-def test_package_records_corpus_role():
+@pytest.mark.parametrize("role", [None, "calibration", "evaluation"])
+def test_package_records_corpus_role(role):
+    """The package carries the stored record's corpus role: it decides
+    whether a package is verify-only."""
     from lakebench.cli._reproduce import _build_package
 
-    pkg = _build_package(_stored("212900-5105a0"), config_reference=None, commit_sha="abc1234")
-    assert "corpus_role" in pkg["reproduction_metadata"]
+    metrics = _stored("212900-5105a0")
+    metrics.experiment["corpus"]["corpus_role"] = role
+    pkg = _build_package(metrics, config_reference=None, commit_sha="abc1234")
+    assert pkg["reproduction_metadata"]["corpus_role"] == role
 
 
 def _look_package(tmp_path, role, seed, workload="financial"):
@@ -479,7 +446,6 @@ def _no_run(monkeypatch):
         raise AssertionError("a registered look must never run the pipeline")
 
     monkeypatch.setattr(r, "_run_pipeline", boom)
-    monkeypatch.setattr(r.subprocess, "run", boom)
 
 
 def test_spent_look_verify_only(tmp_path, monkeypatch, capsys):
@@ -521,16 +487,6 @@ def test_unspent_held_out_package_refused(tmp_path, monkeypatch):
     assert e.value.exit_code == 3
 
 
-def test_roleless_financial_package_with_a_look_is_verify_only(tmp_path, monkeypatch):
-    from lakebench.cli._reproduce import _verify
-
-    _stub_looks(monkeypatch, [{"role": "evaluation", "seed": 777, "state": "started"}], {777})
-    _no_run(monkeypatch)
-    with pytest.raises(typer.Exit) as e:
-        _verify(_look_package(tmp_path, None, 777), None, None, False, False, False, report=None)
-    assert e.value.exit_code == 2
-
-
 def test_ordinary_package_is_not_a_look(tmp_path, monkeypatch):
     from lakebench.cli._reproduce import _spent_look
 
@@ -558,13 +514,75 @@ def _stub_protected(monkeypatch, protected):
     monkeypatch.setattr(datagen_seed, "recorded_seeds", lambda path=None: frozenset())
 
 
-def test_roleless_spent_seed_is_verify_only(monkeypatch):
+def _unreadable(monkeypatch):
+    from lakebench.config import datagen_seed
+
+    def broken(path=None):
+        raise FileNotFoundError("aml_registered_looks.json")
+
+    monkeypatch.setattr(datagen_seed, "load_looks", broken)
+
+
+@pytest.mark.parametrize(
+    ("looks", "spent", "meta", "expected"),
+    [
+        pytest.param(
+            [],
+            {321},
+            {"experiment_identity": {"workload": "financial", "seed": 321}},
+            ("verify", False),
+            id="roleless-spent-seed",
+        ),
+        pytest.param(
+            [{"role": "evaluation", "seed": 777, "state": "started"}],
+            {777},
+            {"experiment_identity": {"workload": "financial", "seed": 777}},
+            ("verify", True),
+            id="roleless-financial-with-a-look",
+        ),
+        pytest.param(
+            None,
+            (),
+            {"experiment_identity": {"workload": "financial", "seed": 43}},
+            ("refuse", None),
+            id="unreadable-record-financial",
+        ),
+        pytest.param(
+            None,
+            (),
+            {
+                "corpus_role": "calibration",
+                "experiment_identity": {"workload": "financial", "seed": 43},
+            },
+            ("refuse", None),
+            id="unreadable-record-calibration",
+        ),
+        pytest.param(
+            None,
+            (),
+            {"experiment_identity": {"workload": "customer360", "seed": 42}},
+            None,
+            id="unreadable-record-other-workload",
+        ),
+    ],
+)
+def test_spent_look_decision(monkeypatch, looks, spent, meta, expected):
+    """Verify-only for a spent or looked-at seed, refused when the look
+    record cannot be read (a financial package), ordinary otherwise."""
     from lakebench.cli._reproduce import _spent_look
 
-    _stub_looks(monkeypatch, [], {321})
-    _stub_protected(monkeypatch, {})
-    meta = {"experiment_identity": {"workload": "financial", "seed": 321}}
-    assert _spent_look(meta) == ("verify", None)
+    if looks is None:
+        _unreadable(monkeypatch)
+    else:
+        _stub_looks(monkeypatch, looks, spent)
+        _stub_protected(monkeypatch, {})
+    got = _spent_look(meta)
+    if expected is None:
+        assert got is None
+    else:
+        assert got[0] == expected[0]
+        if expected[0] == "verify":
+            assert (got[1] is not None) is expected[1]
 
 
 def test_burned_seed_package_is_refused(monkeypatch):
@@ -594,20 +612,6 @@ def test_role_read_from_the_identity(monkeypatch):
         "experiment_identity": {"workload": "financial", "seed": 5, "corpus role": "evaluation"}
     }
     assert _spent_look(meta)[0] == "refuse"
-
-
-def test_unreadable_look_record_refuses_financial(monkeypatch):
-    from lakebench.cli._reproduce import _spent_look
-    from lakebench.config import datagen_seed
-
-    def broken(path=None):
-        raise FileNotFoundError("aml_registered_looks.json")
-
-    monkeypatch.setattr(datagen_seed, "load_looks", broken)
-    meta = {"experiment_identity": {"workload": "financial", "seed": 43}}
-    assert _spent_look(meta)[0] == "refuse"
-    meta = {"experiment_identity": {"workload": "customer360", "seed": 42}}
-    assert _spent_look(meta) is None
 
 
 def test_config_naming_a_held_out_corpus_is_refused(monkeypatch):
@@ -654,35 +658,3 @@ def test_stated_role_cannot_hide_a_held_out_seed(monkeypatch):
     meta["experiment_identity"]["corpus role"] = "evaluation"
     meta["experiment_identity"]["seed"] = 1
     assert _spent_look(meta)[0] == "refuse"
-
-
-def test_unreadable_record_refuses_a_calibration_package(monkeypatch):
-    from lakebench.cli._reproduce import _spent_look
-    from lakebench.config import datagen_seed
-
-    def broken(path=None):
-        raise FileNotFoundError("aml_registered_looks.json")
-
-    monkeypatch.setattr(datagen_seed, "load_looks", broken)
-    meta = {
-        "corpus_role": "calibration",
-        "experiment_identity": {"workload": "financial", "seed": 43},
-    }
-    assert _spent_look(meta)[0] == "refuse"
-
-
-def test_honest_continuous_rerun_passes():
-    """A package from e338c5 (ingest_ratio 1.0167) against 095006's 1.0339:
-    two honest runs of one corpus; it failed as an exact correctness check."""
-    from lakebench.cli._reproduce import _compare, _extract_expected_numbers
-
-    expected = _extract_expected_numbers(_stored("011043-e338c5"))
-    actual = _extract_expected_numbers(_stored("095006-71b4a3"))
-    rows, outcome = _compare(
-        {"ingest_ratio": expected["ingest_ratio"]},
-        {"ingest_ratio": actual["ingest_ratio"]},
-        {},
-        mode="sustained",
-    )
-    assert rows[0]["band"] == "guard" and rows[0]["status"] == "pass"
-    assert outcome == 0

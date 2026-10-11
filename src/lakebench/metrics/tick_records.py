@@ -6,6 +6,7 @@ the run id::
     Cycle N: pinned txns=<id> entities=<id> accounts=<id> versions=<id> at=<epoch_s> run=<run>
     Cycle N: tt-record table=<t> snapshot=<id> committed_at=<iso> total_records=<n>
         pos_deletes=<n> eq_deletes=<n> count_source=<summary|unavailable> run=<run>
+    Cycle N: rule-status <rule>=<ran|skipped:reason|error|...> ... run=<run>
     Cycle N: committed alerts=<id> status=<id> run=<run>
     Cycle N: completed run=<run>
 
@@ -13,7 +14,9 @@ the run id::
 is an id; an unknown value reads ``null``)
 
 and ``main`` logs ``Drain complete: ... last completed cycle N run=<run>``
-once the drain marker stopped the loop. An id is an Iceberg snapshot id, or
+once the drain marker stopped the loop, after the last completed tick's
+pinned, tt-record, rule-status and committed lines again (a log rotated
+during that tick keeps them). An id is an Iceberg snapshot id, or
 ``none`` (the table had no snapshot) or ``unknown`` (the lookup failed, or
 for ``versions`` the pinned read was not used). Cycle numbers restart with
 each driver start, so records are kept per driver start (the banner line
@@ -43,6 +46,7 @@ _TT_RECORD = re.compile(
     r"run=(\S+)\s*$"
 )
 _COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
+_RULE_STATUS = re.compile(r"Cycle (\d+): rule-status ((?:\S+=\S+ )*)run=(\S+)\s*$")
 _COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
 _DRAIN = re.compile(
     r"Drain complete: (?:stop marker present at start; )?last completed cycle (\d+) run=(\S+)\s*$"
@@ -125,6 +129,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
                 "completed": False,
                 "completed_at": None,
                 "tt": None,
+                "rule_status": None,
             }
             order.append(key)
         return ticks[key]
@@ -155,6 +160,12 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
                 "count_source": m.group(8),
             }
             continue
+        m = _RULE_STATUS.search(line)
+        if m and m.group(3) == run_id:
+            tick(int(m.group(1)))["rule_status"] = dict(
+                pair.split("=", 1) for pair in m.group(2).split()
+            )
+            continue
         m = _COMMITTED.search(line)
         if m and m.group(4) == run_id:
             t = tick(int(m.group(1)))
@@ -166,7 +177,9 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
             ts = _LOG_TS.search(line)
             t = tick(int(m.group(1)))
             t["completed"] = True
-            t["completed_at"] = ts.group(1) + "Z" if ts else None
+            # The first completed line: the drain repeats it later.
+            if t["completed_at"] is None:
+                t["completed_at"] = ts.group(1) + "Z" if ts else None
             continue
         m = _DRAIN.search(line)
         if m and m.group(2) == run_id:
@@ -228,6 +241,7 @@ def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "completed_at",
         "committed_alerts",
         "committed_status",
+        "rule_status",
         "start",
     )
     return [{k: t.get(k) for k in keys} for t in ticks]

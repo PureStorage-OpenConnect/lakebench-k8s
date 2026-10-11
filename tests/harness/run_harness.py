@@ -2,11 +2,9 @@
 
 Drives the real ``lakebench run`` command (``typer.testing.CliRunner`` on
 ``lakebench.cli.app``) with every cluster, object-store and engine seam
-replaced, and returns a *trace* of what the run did: the calls it made to the
-cluster and the object store (with the arguments that matter: timeouts,
-credentials, SQL), the Spark jobs it submitted and with what environment, the
-journal events it wrote, the shape of the ``metrics.json`` it saved, the
-published values in it that do not depend on the wall clock, and its verdict.
+replaced. The :class:`Recorder` keeps what the run did: the calls it made to
+the cluster and the object store (with the arguments that matter: timeouts,
+credentials, SQL) and the Spark jobs it submitted with their environment.
 No product code is changed; every seam is replaced with
 ``monkeypatch.setattr`` on the module attribute the code looks up at call
 time (``run()`` imports most of its collaborators inside the function, so the
@@ -68,7 +66,7 @@ against the real method's signature: a call the real seam would reject with a
 ``TypeError`` is unscripted here too. A call no fake scripts raises
 ``Unscripted`` (a ``NotImplementedError``) and is recorded in the trace's
 ``unscripted`` list even when the code under test catches it, so a new seam is
-never silent; every golden expects that list empty.
+never silent; tests assert that list empty.
 
 Failure scenarios (V16-5 interrupt, V16-6 namespace loss) use:
 
@@ -87,8 +85,9 @@ Failure scenarios (V16-5 interrupt, V16-6 namespace loss) use:
   uid precondition, answer 404 when gone and 409 when the uid differs or the
   object is listed in ``Recorder.foreign`` (recreated by someone else).
 
-There is no golden update flag (SPEC section 6.4): a change that moves a
-trace on purpose ships a new golden written by a second agent from the record.
+The trace is the run's exit code, its unscripted calls and how many run
+records it saved; tests read the saved record (:func:`saved_record`) and the
+recorder for the rest.
 """
 
 from __future__ import annotations
@@ -265,7 +264,7 @@ class Recorder:
     calls: list[list[Any]] = field(default_factory=list)
     submits: list[list[Any]] = field(default_factory=list)
     #: Every unscripted call, even one the code under test caught and
-    #: swallowed: the trace carries the list, and the golden expects none.
+    #: swallowed: the trace carries the list, and tests expect none.
     unscripted: list[str] = field(default_factory=list)
     namespace: str = NAME
     #: The fake clock of a continuous scenario (None: batch, real clock).
@@ -314,7 +313,7 @@ class Recorder:
     silver_state: dict[str, str] = field(default_factory=lambda: {"bronze_data_clock": ""})
     silver_state_rv: int = 1
     #: Objects in the bronze bucket the fake paginator lists, by key:
-    #: (size, etag). Empty: an empty bucket, as the goldens read it.
+    #: (size, etag). Empty: an empty bucket.
     bronze_objects: dict[str, tuple[int, str]] = field(default_factory=dict)
     #: With ``interrupt``: the state the monitor reports before the signal
     #: ("completed", "failed"): the application ended, its log is being read.
@@ -1018,6 +1017,8 @@ class FakeJobManager:
         self._rec = rec
         #: Read (and cleared) by the continuous submit loop.
         self.budget_warnings: list[str] = []
+        #: Read by the continuous balance verdict (executors each stream ran).
+        self.ran_executors: dict[str, int] = {}
         #: Run provenance (metrics/provenance.job_manager_fields): the maps
         #: applied, set by deploy_scripts_configmap; no dependency set.
         self.scripts_provenance: dict | None = None
@@ -2218,7 +2219,7 @@ def run_scenario_full(
     result, rec = invoke_scenario(scenario, tmp_path, monkeypatch)
     if result.exception is not None and not isinstance(result.exception, SystemExit):
         raise result.exception
-    return build_trace(result.exit_code, rec, tmp_path, os.environ.get("LB_RUN_ID")), rec
+    return build_trace(result.exit_code, rec, tmp_path), rec
 
 
 def invoke_scenario(scenario: Scenario, tmp_path: Path, monkeypatch) -> tuple[Any, Recorder]:
@@ -2234,10 +2235,9 @@ def invoke_scenario(scenario: Scenario, tmp_path: Path, monkeypatch) -> tuple[An
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "harness-access")
     monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "harness-secret")
-    # run() exports LB_RUN_ID for its child processes, and the trace records
-    # it. Unset at the start (so an export run() stops making shows), and
-    # set then deleted through monkeypatch so its undo removes run()'s value
-    # and nothing leaks into the rest of the test session.
+    # run() exports LB_RUN_ID for its child processes. Unset at the start,
+    # and set then deleted through monkeypatch so its undo removes run()'s
+    # value and nothing leaks into the rest of the test session.
     monkeypatch.setenv("LB_RUN_ID", "unset")
     monkeypatch.delenv("LB_RUN_ID")
     install_fakes(monkeypatch, rec, scenario)
@@ -2247,284 +2247,11 @@ def invoke_scenario(scenario: Scenario, tmp_path: Path, monkeypatch) -> tuple[An
     return CliRunner().invoke(app, ["run", str(cfg_path), *scenario.argv]), rec
 
 
-#: Maintenance outcome fields the trace keeps (counts and skips, not timings).
-_OUTCOME_KEYS = (
-    "kind",
-    "total",
-    "succeeded",
-    "failed",
-    "timed_out",
-    "not_attempted",
-    "skipped",
-    "user_skip",
-    "files_before",
-    "files_after",
-    "note",
-)
-
-#: Published job fields that do not depend on the wall clock.
-_JOB_VALUES = (
-    "job_type",
-    "success",
-    "error_message",
-    "timing_source",
-    "executor_count",
-    "executor_cores",
-    "executor_memory_gb",
-    "memory_gb_requested",
-    "input_rows",
-    "output_rows",
-    "input_size_gb",
-    "output_size_gb",
-)
-
-
-#: Pipeline scores that do not depend on the wall clock (stage and
-#: maintenance durations do, so time to value and the elapsed totals are left
-#: out).
-_DETERMINISTIC_SCORES = (
-    "composite_qph",
-    "scale_ratio",
-    "total_data_processed_gb",
-    "benchmark_samples_per_query",
-    "qph_spread",
-    "pre_compaction_file_count",
-    "post_compaction_file_count",
-    "compaction_ratio",
-    "pre_compaction_qph",
-    "post_compaction_qph",
-    "maintenance_value_pct",
-    "maintenance_paired_queries",
-    "maintenance_value_reason",
-    "maintenance_settled",
-    "maintenance_settle_capped",
-    "maintenance_settle_verified",
-)
-
-
-def _rounded(value: Any) -> Any:
-    return round(value, 6) if isinstance(value, float) else value
-
-
-def build_trace(
-    exit_code: int, rec: Recorder, workdir: Path, exported_run_id: str | None
-) -> dict[str, Any]:
-    out_dir = workdir / "lakebench-output"
-    runs = sorted((out_dir / "runs").glob("run-*/metrics.json"))
-    metrics: dict[str, Any] = json.loads(runs[-1].read_text()) if runs else {}
-    events: list[list[Any]] = []
-    for path in sorted((out_dir / "journal").glob("session-*.jsonl")):
-        for line in path.read_text().splitlines():
-            ev = json.loads(line)
-            details = ev.get("details") or {}
-            events.append([ev.get("event_type"), ev.get("success"), details.get("stage")])
-    pb = metrics.get("pipeline_benchmark") or {}
-    experiment = metrics.get("experiment") or {}
-    benchmark = metrics.get("benchmark") or {}
-    effective = experiment.get("effective_maintenance") or {}
-    trace = {
-        "exit_code": exit_code,
-        "unscripted": rec.unscripted,
-        "runs_saved": len(runs),
-        "exported_run_id": exported_run_id,
-        "calls": rec.calls,
-        "submits": rec.submits,
-        "journal_events": events,
-        "metrics_keys": {
-            "top": sorted(metrics),
-            "pipeline_benchmark": sorted(pb),
-            "jobs[0]": sorted((metrics.get("jobs") or [{}])[0]),
-            "experiment": sorted(experiment),
-        },
-        "jobs": [{k: _rounded(j.get(k)) for k in _JOB_VALUES} for j in metrics.get("jobs") or []],
-        "maintenance_outcomes": [
-            {k: o[k] for k in sorted(o) if k in _OUTCOME_KEYS}
-            for o in metrics.get("maintenance_outcomes") or []
-        ],
-        "values": {
-            "maintenance_policy_id": metrics.get("maintenance_policy_id"),
-            "effective_maintenance_id": effective.get("id"),
-            "effective_maintenance_detail_id": effective.get("detail_id"),
-            "bucket_gb": [
-                _rounded(metrics.get(k))
-                for k in ("bronze_size_gb", "silver_size_gb", "gold_size_gb")
-            ],
-            "benchmark_qph": _rounded(benchmark.get("qph")),
-            "benchmark_queries": [
-                [q.get("name"), q.get("rows_returned"), q.get("success")]
-                for q in benchmark.get("queries") or []
-            ],
-            "scores": {k: _rounded((pb.get("scores") or {}).get(k)) for k in _DETERMINISTIC_SCORES},
-        },
-        "c360_correctness": (metrics.get("c360_correctness") or {}).get("status"),
-        "success": metrics.get("success"),
-        "verdict": (metrics.get("verdict") or {}).get("status"),
-        "verdict_reasons": (metrics.get("verdict") or {}).get("reasons"),
-    }
-    if metrics.get("continuous") is not None:
-        trace.update(continuous_sections(metrics))
-    if metrics.get("financial_scoring") is not None or metrics.get("tm_operations") is not None:
-        trace["aml"] = aml_section(metrics)
-    return normalise(trace, workdir)
-
-
-def aml_section(metrics: dict[str, Any]) -> dict[str, Any]:
-    """What an AML run publishes about detection: per-rule alerts, skips and
-    errors from gold-finalize, the whole folded-in scoring record (recall
-    per typology, false-positive rates, precision, chance and the control
-    floor), and the whole TM operations record (verdict, invariants, ops)."""
-    gold = [j for j in metrics.get("jobs") or [] if j.get("job_type") == "gold-finalize"]
-    return {
-        "gold_alerts_by_rule": [j.get("alerts_by_rule") for j in gold],
-        "gold_rules_skipped": [j.get("rules_skipped") for j in gold],
-        "gold_rule_errors": [j.get("rule_errors") for j in gold],
-        "financial_scoring": metrics.get("financial_scoring"),
-        "tm_operations": metrics.get("tm_operations"),
-    }
-
-
-#: Per-stream published fields that do not depend on the wall clock.
-_STREAM_VALUES = (
-    "job_type",
-    "success",
-    "requested_executors",
-    "total_batches",
-    "total_rows_processed",
-    "window_input_rows",
-    "pre_window_input_rows",
-    "window_commits",
-    "window_new_data_cycles",
-    "micro_batch_duration_ms",
-    "freshness_seconds",
-    "throughput_rps",
-    "submission_failures",
-)
-
-#: Continuous pipeline scores that come from the logs, the fake clock and
-#: the fixed fleet, not from this host's wall clock.
-_CONTINUOUS_SCORES = (
-    "data_freshness_seconds",
-    "sustained_throughput_rps",
-    "stage_latency_profile",
-    "composite_qph",
-    "composite_qph_rounds",
-    "pipeline_saturated",
-    "corpus_drained",
-    "intake_limit",
-    "corpus_ingest_ratio",
-    "released_rows",
-    "window_seconds",
-    "arrival_seconds",
-    "window_arrival_fraction",
-    "pre_window_rows",
-    "total_s3_objects",
-    "benchmark_rounds_count",
-    "in_stream_composite_qph",
-)
-
-
-def continuous_sections(metrics: dict[str, Any]) -> dict[str, Any]:
-    """The trace sections only a continuous run has: what its streams did
-    in the window, its gate, settle and result check, and its rounds."""
-    cont = metrics.get("continuous") or {}
-    window = cont.get("window") or {}
-    check = cont.get("result_check") or {}
-    pb = metrics.get("pipeline_benchmark") or {}
-    return {
-        "continuous": {
-            "window_seconds": _rounded(window.get("seconds")),
-            "cluster_clock_offset_seconds": _rounded(window.get("cluster_clock_offset_seconds")),
-            "gate_problems": cont.get("gate_problems"),
-            "trickle": cont.get("trickle"),
-            "retention": cont.get("retention"),
-            "settle": cont.get("settle"),
-            "result_check": {
-                "query_set_id": check.get("query_set_id"),
-                "failed": check.get("failed"),
-                "not_checked": check.get("not_checked"),
-            },
-            "streams": {
-                name: {k: v for k, v in sorted(st.items()) if k != "running_at"}
-                for name, st in sorted((cont.get("streams") or {}).items())
-            },
-        },
-        "streaming": [
-            {k: _rounded(st.get(k)) for k in _STREAM_VALUES}
-            for st in metrics.get("streaming") or []
-        ],
-        "benchmark_rounds": [
-            [
-                _rounded(r.get("qph")),
-                [[q.get("name"), q.get("rows_returned"), q.get("success")] for q in r["queries"]],
-                (r.get("round_meta") or {}).get("table_health"),
-                (r.get("round_meta") or {}).get("gold_event_age_seconds"),
-            ]
-            for r in metrics.get("benchmark_rounds") or []
-        ],
-        "continuous_scores": {
-            k: _rounded((pb.get("scores") or {}).get(k)) for k in _CONTINUOUS_SCORES
-        },
-    }
-
-
-_RUN_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
-_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z)?")
-
-
-def normalise(value: Any, workdir: Path) -> Any:
-    """Run ids, timestamps and paths replaced, so two runs compare equal."""
-    if isinstance(value, dict):
-        return {k: normalise(v, workdir) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [normalise(v, workdir) for v in value]
-    if isinstance(value, str):
-        value = value.replace(str(workdir), "<tmp>")
-        value = _RUN_ID.sub("<run_id>", value)
-        return _ISO_TS.sub("<ts>", value)
-    return value
-
-
-# ---------------------------------------------------------------------------
-# Comparison
-# ---------------------------------------------------------------------------
-
-
-class TraceMismatch(AssertionError):
-    pass
-
-
-def load_golden(name: str) -> dict[str, Any]:
-    return json.loads((FIXTURES / f"{name}.json").read_text())
-
-
-def assert_trace_equal(actual: dict[str, Any], golden: dict[str, Any]) -> None:
-    """Fail on the first section that differs, naming its first differing entry."""
-    for section in golden:
-        if section.startswith("_"):
-            continue  # provenance notes, not trace
-        if section not in actual:
-            raise TraceMismatch(f"trace has no section {section!r}")
-        got, want = actual[section], golden[section]
-        if got == want:
-            continue
-        if isinstance(want, list) and isinstance(got, list):
-            for n, (g, w) in enumerate(zip(got, want, strict=False)):
-                if g != w:
-                    raise TraceMismatch(f"{section}[{n}]: got {g!r}, golden {w!r}")
-            raise TraceMismatch(
-                f"{section}: got {len(got)} entries, golden {len(want)}; first extra: "
-                f"{(got[len(want)] if len(got) > len(want) else want[len(got)])!r}"
-            )
-        if isinstance(want, dict) and isinstance(got, dict):
-            for key in sorted(set(want) | set(got)):
-                if got.get(key) != want.get(key):
-                    raise TraceMismatch(
-                        f"{section}.{key}: got {got.get(key)!r}, golden {want.get(key)!r}"
-                    )
-        raise TraceMismatch(f"{section}: got {got!r}, golden {want!r}")
-    extra = sorted(set(actual) - {s for s in golden if not s.startswith("_")})
-    if extra:
-        raise TraceMismatch(f"trace sections not in the golden: {extra}")
+def build_trace(exit_code: int, rec: Recorder, workdir: Path) -> dict[str, Any]:
+    """What the run did that the tests read: its exit code, every
+    unscripted seam call, and how many run records it saved."""
+    runs = list((workdir / "lakebench-output" / "runs").glob("run-*/metrics.json"))
+    return {"exit_code": exit_code, "unscripted": rec.unscripted, "runs_saved": len(runs)}
 
 
 def main(argv: list[str] | None = None) -> int:

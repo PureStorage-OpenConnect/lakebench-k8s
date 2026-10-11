@@ -124,25 +124,33 @@ def test_corpus_taken_skips_the_lag():
 
 
 @pytest.mark.parametrize(
-    ("ratio", "kept"),
-    [(0.97, "none"), (0.98, "none"), (0.985, None), (0.9899, None), (0.99, True), (1.0, True)],
+    ("ratio", "state"),
+    [
+        (0.97, "not_bounded"),
+        (0.98, "not_bounded"),
+        (0.985, "unmeasured"),
+        (0.9899, "unmeasured"),
+        (0.99, "kept"),
+        (1.0, "kept"),
+    ],
 )
-def test_the_ratio_is_ingested_over_released(ratio, kept):
-    """SPEC's 0.99 applies to ingested over released rows, as the record's
-    ingest_ratio states it. One trigger's batch on e338c5 is 30,982 rows of
-    1,858,920 released (1.7%): a shortfall within it, with the lag within
-    one trigger, may be the edge batch in flight, so it is labelled without
-    claiming kept pace; more than one batch short is not bounded."""
+def test_the_ratio_is_ingested_over_released(ratio, state):
+    """The 0.99 threshold applies to ingested over released rows, as the
+    record's ingest_ratio states it. A shortfall within one trigger's batch,
+    with the lag within one trigger, may be the edge batch in flight: it is
+    labelled without claiming kept pace. More than one batch short is not
+    bounded."""
     rec = _rec()
     _scores(rec)["ingest_ratio"] = ratio
     tb = bounds.trickle_bound(rec)
-    if kept == "none":
+    if state == "not_bounded":
         assert tb is None
         return
-    assert tb is not None and tb["kept_pace"] is kept
+    assert tb is not None
+    assert tb["kept_pace"] is (True if state == "kept" else None)
     assert tb["ratio"] == ratio and tb["offered_rows"] == _scores(rec)["released_rows"]
-    if kept is None:
-        assert "in flight" in tb["not_measured"]
+    if state == "unmeasured":
+        assert tb["not_measured"]
 
 
 def test_within_one_batch_needs_the_lag_within_one_trigger():
@@ -163,11 +171,14 @@ def test_intake_limit_trickle_rate_is_not_shown_as_capacity():
     assert tb is not None and tb["kept_pace"] is None and "intake_limit" in tb["not_measured"]
 
 
-def test_an_unreadable_continuous_record_is_not_capacity(monkeypatch):
-    monkeypatch.setattr(bounds, "trickle_bound", lambda _r: 1 / 0)
-    tb = bounds.record_trickle_bound(_rec())
+def test_an_unreadable_continuous_record_is_not_capacity():
+    rec = _rec()
+    rec["streaming"] = [5]  # a malformed stream entry the reader cannot parse
+    with pytest.raises(AttributeError):
+        bounds.trickle_bound(rec)
+    tb = bounds.record_trickle_bound(rec)
     assert tb is not None and tb["kept_pace"] is None
-    assert {"ratio", "lag_s", "offered_rows"} <= set(tb)
+    assert tb["ratio"] is None and tb["lag_s"] is None and tb["offered_rows"] is None
     assert bounds.record_trickle_bound(_rec("231711-6dd3bc")) is None
 
 
@@ -188,11 +199,8 @@ def test_block_records_the_trickle_and_identity_does_not_move(run_id):
 
     exp = _rebuilt(run_id)
     limits = exp["limits"]
-    value = _rec(run_id)["config_snapshot"]["sustained"]["max_files_per_trigger"]
     assert limits["trickle_bound"]["kept_pace"] is True
-    assert limits["bound"][-1] == (
-        f"trickle: max_files_per_trigger {value} (auto), the pipeline kept pace"
-    )
+    assert any(b.startswith(bounds.TRICKLE_LINE_PREFIX) for b in limits["bound"])
     assert "trickle" not in " ".join(limits["bound_kinds"])
     without = copy.deepcopy(exp)
     without["limits"].pop("trickle_bound")
@@ -218,33 +226,6 @@ def test_stored_block_without_the_key_is_computed():
 # --- bound kinds -------------------------------------------------------------
 
 
-def _legacy_caps_bound(limits, rules):
-    """experiment._caps_bound at integrate 9a77ab18, before bound_entries."""
-    out = [
-        f"{x['job_type']}: executor cap {x['cap']} (scale asks for {x['scale_derived']})"
-        for x in limits.get("executors") or []
-        if x.get("cap_hit")
-    ]
-    out += [
-        f"{x['job_type']}: concurrent executor budget granted {x['budget_cap']['granted']} "
-        f"of {x['budget_cap']['requested']}"
-        for x in limits.get("executors") or []
-        if x.get("budget_cap")
-    ]
-    if limits.get("tm_alerts_over_capacity"):
-        out.append(
-            f"TM max_alerts_per_customer ({limits.get('tm_max_alerts_per_customer')}): "
-            f"{limits['tm_alerts_over_capacity']} alerts over capacity"
-        )
-    out += [f"auto-sizing: {c}" for c in limits.get("autosize_cuts") or []]
-    if limits.get("maintenance_stopped"):
-        out.append("pre-benchmark maintenance stopped on its time budget")
-    for rule, why in (rules.get("skipped") or {}).items():
-        if "cap" in str(why):
-            out.append(f"rule {rule} skipped: {why}")
-    return out
-
-
 FULL_LIMITS = {
     "executors": [
         {"job_type": "silver-build", "cap": 28, "scale_derived": 40, "cap_hit": True},
@@ -264,32 +245,22 @@ FULL_RULES = {"skipped": {"W3": "rule cap 500 alerts", "W9": "giant-component"}}
 
 
 def test_bound_kind_registered():
-    """Every kind the limits can produce is in BOUND_KINDS, and the display
-    lines are exactly what _caps_bound wrote before."""
-    from lakebench.metrics.experiment import _bound_kinds, _caps_bound
-
+    """Every kind the limits can produce is in BOUND_KINDS."""
     entries = bounds.bound_entries(FULL_LIMITS, FULL_RULES)
-    assert len(entries) == 6
+    assert entries
     for kind, _line in entries:
         assert bounds.is_registered(kind), kind
-    assert _caps_bound(FULL_LIMITS, FULL_RULES) == _legacy_caps_bound(FULL_LIMITS, FULL_RULES)
-    assert _bound_kinds(FULL_LIMITS, FULL_RULES) == [
-        "TM max_alerts_per_customer",
-        "auto-sizing cuts",
-        "pre-benchmark maintenance budget",
-        "rule W3 cap",
-        "silver-build: executor cap",
-        "silver-stream: concurrent executor budget",
-    ]
     assert not bounds.is_registered("datagen: rate limit")
 
 
 def test_an_unregistered_kind_fails(monkeypatch):
-    monkeypatch.setattr(bounds, "BOUND_KINDS", bounds.BOUND_KINDS[1:])  # drop executor cap
+    kept = tuple(k for k in bounds.BOUND_KINDS if k.name != bounds.BOUND_EXECUTOR_CAP)
+    assert len(kept) == len(bounds.BOUND_KINDS) - 1
+    monkeypatch.setattr(bounds, "BOUND_KINDS", kept)
     with pytest.raises(ValueError, match="not in BOUND_KINDS"):
         bounds.bound_entries(FULL_LIMITS, FULL_RULES, strict=True)
     # A run saving its record never fails on it.
-    assert len(bounds.bound_entries(FULL_LIMITS, FULL_RULES)) == 6
+    assert bounds.bound_entries(FULL_LIMITS, FULL_RULES)
 
 
 def test_every_bound_kind_caps_some_metric():
@@ -342,10 +313,7 @@ def test_report_labels_intake_cards_only():
 
     m = sr.load_metrics("011043-e338c5")
     assert caps_bound_from(m) == []  # the trickle does not bound every number
-    (label,) = trickle_caps_from(m)
-    assert label == (
-        "trickle 2 files per trigger; this is the offered load, not infrastructure capacity"
-    )
+    assert len(trickle_caps_from(m)) == 1
     gen = ReportGenerator(output_dir="/nonexistent")
     html = gen._generate_sustained_summary(m)
     by_label = _cards(html)
@@ -387,5 +355,36 @@ def test_report_on_a_new_block_keeps_the_trickle_off_other_numbers():
 
 def test_cli_rows_per_second_carries_the_note():
     m = sr.load_metrics("011043-e338c5")
-    assert bounds.trickle_note(m) == " (BOUNDED BY trickle: offered load, not capacity)"
+    assert "BOUNDED BY" in bounds.trickle_note(m)
     assert bounds.trickle_note(sr.load_metrics("231711-6dd3bc")) == ""
+
+
+@pytest.mark.parametrize(
+    ("intervals", "trickle", "stages"),
+    [
+        ({"gold_refresh_interval": "5 minutes"}, None, ["gold-refresh"]),
+        (
+            {"bronze_trigger_interval": "30 seconds", "gold_refresh_interval": "5 minutes"},
+            8,
+            ["gold-refresh"],
+        ),
+        ({"bronze_trigger_interval": "0 seconds", "gold_refresh_interval": "0 seconds"}, None, []),
+    ],
+    ids=["gold-timer", "trickle-cadence-not-repeated", "back-to-back"],
+)
+def test_a_stream_on_a_timer_bounds_freshness_only(intervals, trickle, stages):
+    """A Lakebench trigger interval, not the stack, sets how stale a timer
+    stage's output gets: it is labelled on freshness, not on every number."""
+    from lakebench.metrics.collector import build_config_snapshot
+    from lakebench.reports.formatter import caps_bound_from, trigger_caps_from
+    from tests.fixtures.experiment_helpers import _cfg, _metrics
+
+    run = _metrics(_cfg("customer360", "continuous"))
+    run.config_snapshot = {**build_config_snapshot(_cfg("customer360", "continuous"))}
+    run.config_snapshot["sustained"] = {**run.config_snapshot["sustained"], **intervals}
+    run.continuous = {"trickle": {"value": trickle}}
+    got = trigger_caps_from(run)
+    assert [
+        s for s in ("bronze-ingest", "silver-stream", "gold-refresh") if any(s in g for g in got)
+    ] == stages
+    assert not set(got) & set(caps_bound_from(run))

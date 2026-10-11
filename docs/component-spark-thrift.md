@@ -1,132 +1,73 @@
-# Component Reference: Spark Thrift Server
+# Spark Thrift Server
 
-## Overview
+Reference: configure and size the Spark Thrift Server query engine: config keys, limits and deploy behaviour.
 
-Spark Thrift Server (HiveThriftServer2) is a Spark-native query engine option
-for Lakebench. It exposes Spark SQL over the Thrift protocol on port 10000,
-allowing Lakebench to run the benchmark query suite using the same Spark
-runtime that processes the pipeline stages.
+## What it does
 
-When `architecture.query_engine.type` is set to `spark-thrift`, Lakebench
-deploys the Spark Thrift Server during `lakebench deploy` and tears it down
-during `lakebench destroy`.
+Spark Thrift Server (HiveThriftServer2) is a Spark-native query engine. It exposes Spark SQL over Thrift on port 10000 and runs the benchmark queries on the same Spark runtime as the pipeline.
 
-## Architecture
+- Set `architecture.query_engine.type: spark-thrift`.
+- Queries run through `kubectl exec` into the pod with `beeline` and `jdbc:hive2://localhost:10000`.
+- Spark refreshes Iceberg metadata on each query; `flush_cache()` is a no-op.
+- Recipes: `hive-iceberg-spark-thrift`, `polaris-iceberg-spark-thrift`, `hive-delta-spark-thrift` ([Recipes](recipes.md)).
 
-Lakebench deploys Spark Thrift Server as a standard Kubernetes Deployment
-(not a Spark Operator SparkApplication). This is because HiveThriftServer2
-requires `--deploy-mode client`, which the Spark Operator does not support.
+## Version and image
 
-- **Deployment** -- `lakebench-spark-thrift` (1 replica). Runs `spark-submit`
-  in client mode with the HiveThriftServer2 main class.
-- **Service** -- `lakebench-spark-thrift` (ClusterIP). Exposes the Thrift
-  protocol at `lakebench-spark-thrift.<namespace>.svc.cluster.local:10000`.
+The server uses `images.spark`, shared with the pipeline jobs: changing it changes both. Defaults per recipe: [version matrix](compatibility-matrix.md#component-version-matrix).
 
-Benchmark queries are executed via `kubectl exec` into the pod using
-`beeline` (Spark's JDBC CLI) with connection string `jdbc:hive2://localhost:10000`.
+## Configuration keys
 
-### Init containers
+Defaults from `SparkThriftConfig` in `config/schema.py`; the Delta and financial values are set by `config/autosizer.py` on fields left unset.
 
-Two init containers run before the Spark Thrift Server starts (plus a
-CA-import container when `platform.storage.s3.ca_cert` is set):
-
-1. **Catalog wait** -- blocks until the catalog backend is reachable:
-   - Hive: waits for `lakebench-hive-metastore:9083` (TCP)
-   - Polaris: waits for `lakebench-polaris:8181` (TCP)
-
-2. **Dependency fetch** (`lb-deps-fetch`) -- copies the table-format
-   runtime (Iceberg or Delta), AWS SDK and Hadoop S3 jars from the
-   deployment's dependency server (`lb-deps`), checking each file's sha256
-   against the `lb-deps-manifest` ConfigMap. These are the jars the Spark
-   jobs load. The Thrift Server puts them on its driver classpath after the
-   image's own jars, in the order the jobs load them. Nothing is downloaded
-   from Maven at start.
-
-### Health checks
-
-- **Readiness/Liveness**: TCP socket probe on port 10000
-- Startup is the jar copy from the in-namespace dependency server plus JVM
-  initialization (not measured on this release yet)
-
-### Cache behavior
-
-Spark refreshes Iceberg table metadata automatically on each query. The
-`flush_cache()` operation is a no-op -- no explicit cache management is
-needed.
-
-## YAML Configuration
-
-Spark Thrift Server settings live under `architecture.query_engine` in the
-config file. The image is shared with Spark pipeline jobs under `images.spark`.
-
-```yaml
-images:
-  spark: "apache/spark:4.1.1-python3"    # Shared with pipeline Spark jobs
-
-architecture:
-  query_engine:
-    type: spark-thrift
-    spark_thrift:
-      cores: 2                       # CPU request and limit
-      memory: "4g"                   # Memory request and limit (driver JVM)
-      catalog_name: "lakehouse"      # Iceberg catalog name in queries
-```
-
-### Field reference
-
-| Field | Default | Description |
+| Key | Default | Effect |
 |---|---|---|
-| `query_engine.type` | `trino` | Set to `spark-thrift` to deploy Spark Thrift Server instead of Trino. |
-| `spark_thrift.cores` | `2` (`8` on Delta + Hive) | CPU request and limit for the Spark Thrift pod. The server runs Spark in local mode, so this is the query parallelism. |
-| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive, `"24g"` on the financial schema) | Spark driver heap -- all query processing happens in this single JVM. The pod memory request and limit are the heap plus max(10% of heap, 1 GiB) for non-heap memory, so `4g` gives a 5 GiB pod. |
-| `spark_thrift.catalog_name` | `"lakehouse"` | The Iceberg catalog name used in SQL queries. Must match the catalog registered in Hive or Polaris. |
+| `query_engine.type` | `trino` | `spark-thrift` deploys Spark Thrift Server instead of Trino. |
+| `spark_thrift.cores` | `2` (`8` on Delta + Hive) | CPU request and limit. The server runs Spark in local mode, so this is the query parallelism. Delta + Hive fits down to min(8, largest node cores - 2), floor 2. |
+| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive, `"24g"` on the financial schema) | Driver heap; all query data (shuffle, aggregation, sort) must fit here plus spill. See below. |
+| `spark_thrift.catalog_name` | `"lakehouse"` | Catalog prefix in SQL. Must match the catalog registered in Hive or Polaris. |
 
-### What the overrides do
+`spark_thrift.memory`:
 
-| Override | Effect | When to change |
-|---|---|---|
-| `spark_thrift.cores` | Controls CPU available for the Spark driver JVM. Spark SQL parallelizes query stages within this single process. | Increase to `4` at scale 50+ where queries process larger tables. |
-| `spark_thrift.memory` | Sets the Spark driver heap. All query data (shuffle, aggregation, sort) must fit in this allocation plus spill-to-disk. | Increase to `8g` or `16g` at scale 50+ for analytics queries that build large intermediate results. |
-| `spark_thrift.catalog_name` | Changes the catalog prefix in SQL. | Only change if you registered the catalog under a different name. |
+- Fit-down on the largest node: Delta + Hive min(16, node - 8) GiB; financial below 36 GiB allocatable min(20g, node - 8g); floor 4g.
+- Delta + Hive gets more because Delta OPTIMIZE is skipped for Thrift, so queries scan uncompacted silver.
+- Pod request and limit are the heap plus max(10% of heap, 1 GiB), so `4g` gives a 5 GiB pod.
+
+## Sizing
+
+At large scale Trino's distributed workers are faster.
+
+| Scale factor | Cores | Memory | Notes |
+|---|---|---|---|
+| 1-10 | 2 | 4g | Defaults work |
+| 10-50 | 4 | 8g | More memory for analytics queries |
+| 50+ | -- | -- | Consider Trino; if staying, 4 cores and 8g or 16g |
 
 ## Limitations
 
-- **Single pod.** Runs as a driver-only process with no executor distribution.
-  All query work happens in one JVM.
-- **Startup time.** The jars come from the in-namespace dependency server,
-  then the JVM warms up. A new dependency set (a changed image or format
-  version) restarts the pod once.
-- **No concurrent query streams.** Benchmark throughput mode (concurrent
-  streams) runs serially through the single Thrift connection.
-- **Shared image with pipeline.** Uses the same `apache/spark` image as
-  pipeline Spark jobs. Changing `images.spark` affects both.
+- **Single pod.** A driver-only process with no executors; all query work runs in one JVM.
+- **Serial queries.** Throughput mode streams run one at a time through the single Thrift connection.
+- **Startup time.** Jars come from the in-namespace dependency server, then the JVM warms up. A new dependency set (a changed image or format version) restarts the pod once. Startup time is not measured on this release.
 
-## Sizing Guidance
+## Deploy and destroy
 
-Spark Thrift Server is a single-JVM query engine. At large scales, Trino's
-distributed workers provide better query performance.
+The server runs as a plain Kubernetes Deployment, not a SparkApplication: HiveThriftServer2 needs `--deploy-mode client`, which the Spark Operator does not support.
 
-| Scale factor | Recommended cores | Recommended memory | Notes |
-|---|---|---|---|
-| 1--10 | 2 | 4g | Default config works |
-| 10--50 | 4 | 8g | Increase memory for analytics queries |
-| 50+ | -- | -- | Consider switching to Trino |
+- **Deployment** `lakebench-spark-thrift` (1 replica): `spark-submit` in client mode with the HiveThriftServer2 main class.
+- **Service** `lakebench-spark-thrift` (ClusterIP): `lakebench-spark-thrift.<namespace>.svc.cluster.local:10000`.
+- **Probes:** TCP socket on port 10000 for readiness and liveness.
 
-## Recipes
+Init containers, plus a CA-import container when `platform.storage.s3.ca_cert` is set:
 
-Spark Thrift Server is used by these recipes:
+1. **Catalog wait:** TCP check on `lakebench-hive-metastore:9083` (Hive) or `lakebench-polaris:8181` (Polaris).
+2. **`lb-deps-fetch`:** copies the table-format runtime (Iceberg or Delta), AWS SDK and Hadoop S3 jars that the Spark jobs load from the `lb-deps` server, checking each sha256 against the `lb-deps-manifest` ConfigMap. The server puts them on its driver classpath after the image's own jars, in the jobs' order. Nothing downloads from Maven at start.
 
-- `hive-iceberg-spark-thrift`
-- `polaris-iceberg-spark-thrift`
-- `hive-delta-spark-thrift`
+`lakebench destroy` removes the Deployment and Service.
 
-See the [Recipes Guide](recipes.md) for all combinations.
+## Troubleshooting
 
-## See Also
+- [Delta + Spark Thrift limits](compatibility-matrix.md#delta--spark-thrift)
+- [The benchmark fails but the pipeline succeeded](troubleshooting.md#the-benchmark-fails-but-the-pipeline-succeeded)
 
-- [Trino](component-trino.md) -- distributed query engine (recommended for production)
-- [DuckDB](component-duckdb.md) -- lightweight single-pod query engine
-- [Spark](component-spark.md) -- Spark Operator and pipeline job configuration
-- [Scoring and Benchmarking](benchmarking.md) -- query engine benchmark methodology
-- [Recipes](recipes.md) -- all supported component combinations
-- [Configuration](configuration.md) -- full YAML schema reference
+## See also
+
+[Trino](component-trino.md), [DuckDB](component-duckdb.md), [Spark](component-spark.md), [Benchmarking](benchmarking.md), [Configuration](configuration.md).

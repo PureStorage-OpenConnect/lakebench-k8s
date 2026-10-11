@@ -142,39 +142,44 @@ class TestAddRefusesTerminatingNamespace:
             assert mgr._add_namespace_to_watch_impl("my-ns") is False
         run.assert_not_called()
 
-    def test_live_namespace_is_added(self):
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
-            patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="boom")) as run,
-        ):
-            core.return_value.read_namespace.return_value = self._ns(deleting=False)
-            mgr._add_namespace_to_watch_impl("my-ns")
-        assert run.called, "a live namespace proceeds to the helm upgrade"
-
-    def test_one_transient_error_is_retried_then_added(self, monkeypatch):
-        """Fourth review: a single 429 must not fail deploy after postgres,
-        catalog and engine are up; retry the read, then proceed."""
+    @pytest.mark.parametrize("transient", [False, True])
+    def test_live_namespace_is_added(self, transient, monkeypatch):
+        """A live namespace, or one read after a single transient 429, is added
+        to spark.jobNamespaces by the helm upgrade."""
         from kubernetes.client.rest import ApiException
 
-        slept: list[float] = []
-        monkeypatch.setattr(mgr_mod.time, "sleep", lambda sec: slept.append(sec))
+        monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
         mgr = _mgr()
+        reads = [self._ns(deleting=False)]
+        if transient:
+            reads.insert(0, ApiException(status=429))
+        chart = '[{"name": "spark-operator", "chart": "spark-operator-2.5.1"}]'
+
+        upgraded: list[bool] = []
+
+        def watched(*_a, **_kw):
+            return ["other", "my-ns"] if upgraded else ["other"]
+
+        def run_cmd(cmd, **_kw):
+            is_list = cmd[:2] == ["helm", "list"]
+            if cmd[:2] == ["helm", "upgrade"]:
+                upgraded.append(True)
+            return MagicMock(returncode=0, stdout=chart if is_list else "", stderr="")
+
         with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch.object(mgr, "_get_watched_namespaces", side_effect=watched),
             patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
             patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="x")) as run,
+            patch.object(mgr, "_run", side_effect=run_cmd) as run,
         ):
-            core.return_value.read_namespace.side_effect = [
-                ApiException(status=429),
-                self._ns(deleting=False),
-            ]
-            mgr._add_namespace_to_watch_impl("my-ns")
-        assert run.called
-        assert slept == [0.5]
+            core.return_value.read_namespace.side_effect = reads
+            added = mgr._add_namespace_to_watch_impl("my-ns")
+        assert added is True
+        upgrades = [c.args[0] for c in run.call_args_list if c.args[0][:2] == ["helm", "upgrade"]]
+        assert any(
+            any(a.startswith("spark.jobNamespaces=") and "my-ns" in a and "other" in a for a in cmd)
+            for cmd in upgrades
+        )
 
 
 class TestPinnedContext:

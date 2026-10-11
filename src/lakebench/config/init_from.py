@@ -676,7 +676,7 @@ def _set_buckets(data: dict[str, Any], name: Any, changes: list[Change]) -> None
     """Write the bucket names a load derives from the name (``<name>-<layer>``).
 
     1.6 and 1.7 derive them; 1.5 and earlier used ``lakebench-bronze`` and
-    so on for a config that named none (docs/configuration.md says so).
+    so on for a config that named none (UPGRADING-1.7.md, "Converting a 1.6 config").
     """
     if not isinstance(name, str) or not name:
         return  # a name that is not text fails the load; nothing to derive

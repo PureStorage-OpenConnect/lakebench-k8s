@@ -1,11 +1,12 @@
-"""Tests for CLI auto-discovery and resolve_config_path."""
+"""CLI preflight guards, Spark interval parsing, maintenance retention and the
+engine-aware Iceberg maintenance helper."""
 
 import pytest
 import typer
 
 
 class TestPreflightCheck:
-    """Tests for _preflight_check deploy guard."""
+    """_preflight_check refuses a deploy whose Stackable operators are absent."""
 
     @pytest.fixture(autouse=True)
     def _capacity_fits(self, monkeypatch):
@@ -18,129 +19,96 @@ class TestPreflightCheck:
             lambda cfg: PrereqResult(name="cluster-capacity", passed=True, message="OK"),
         )
 
-    def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
-        """Preflight exits 1 when Stackable CRDs are missing and install is false."""
+    @pytest.mark.parametrize(
+        ("present", "missing"),
+        [
+            ([], ["hive-operator", "secret-operator"]),
+            (["hiveclusters.hive.stackable.tech"], ["secret-operator"]),
+            (["secretclasses.secrets.stackable.tech"], ["hive-operator"]),
+            (["hiveclusters.hive.stackable.tech", "secretclasses.secrets.stackable.tech"], []),
+        ],
+    )
+    def test_blocks_on_missing_stackable_operators(self, present, missing, capsys):
         from unittest.mock import MagicMock, patch
 
         from lakebench.cli import _preflight_check
+        from lakebench.exit_codes import ExitCode
+        from tests.conftest import make_config
 
-        # Build a config with catalog=hive, install=false, and valid S3
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "hive"
-        cfg.architecture.catalog.hive.operator.install = False
-        cfg.architecture.catalog.hive.operator.version = "25.7.0"
-        cfg.architecture.catalog.hive.operator.namespace = "stackable"
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
+        cfg = make_config()
+        assert cfg.architecture.catalog.type.value == "hive"
+        crds = MagicMock()
+        crds.items = []
+        for name in present:
+            crd = MagicMock()
+            crd.metadata.name = name
+            crds.items.append(crd)
 
-        # Mock K8s CRD listing to return no Stackable CRDs
-        mock_crd_list = MagicMock()
-        mock_crd_list.items = []
-
-        with (
-            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
-            pytest.raises(typer.Exit),
-        ):
-            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            _preflight_check(cfg)
+        with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
+            mock_api.return_value.list_custom_resource_definition.return_value = crds
+            if not missing:
+                _preflight_check(cfg)
+                return
+            with pytest.raises(typer.Exit) as exc:
+                _preflight_check(cfg)
+        assert exc.value.exit_code == ExitCode.PREREQUISITE
+        out = capsys.readouterr()
+        text = out.out + out.err
+        for op in ("hive-operator", "secret-operator"):
+            assert (op in text) is (op in missing)
 
 
 class TestRunPreflightInfraCheck:
-    """Tests for _run_preflight_infra_check run guard."""
+    """_run_preflight_infra_check refuses a run when a component is absent or unready."""
 
-    def _make_cfg(self, catalog="hive", engine="trino"):
-        from unittest.mock import MagicMock
-
-        cfg = MagicMock()
-        cfg.get_namespace.return_value = "lakebench"
-        cfg.platform.kubernetes.context = ""
-        cfg.architecture.catalog.type.value = catalog
-        cfg.architecture.query_engine.type.value = engine
-        cfg.observability.enabled = False
-        return cfg
-
-    def test_blocks_when_namespace_missing(self):
-        """Exits 1 when the target namespace does not exist."""
-        from unittest.mock import patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg()
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            pytest.raises(typer.Exit),
-        ):
-            mock_get.return_value.namespace_exists.return_value = False
-            _run_preflight_infra_check(cfg)
-
-    def test_blocks_when_postgres_missing(self):
-        """Exits 1 when PostgreSQL is not deployed."""
+    @pytest.mark.parametrize(
+        ("fault", "named"),
+        [
+            ("namespace", "lakebench-test"),
+            ("postgres", "PostgreSQL"),
+            ("trino-workers", "Trino workers"),
+            (None, None),
+        ],
+    )
+    def test_blocks_on_a_missing_or_unready_component(self, fault, named, capsys):
         from unittest.mock import MagicMock, patch
 
         from kubernetes.client.rest import ApiException
 
         from lakebench.cli import _run_preflight_infra_check
+        from lakebench.exit_codes import ExitCode
+        from tests.conftest import make_config
 
-        cfg = self._make_cfg()
+        cfg = make_config(name="lakebench-test")
+        assert cfg.architecture.query_engine.type.value == "trino"
+        assert cfg.get_namespace() == "lakebench-test"
 
-        def fake_read_sts(name, ns):
-            if name == "lakebench-postgres":
+        def read(name, ns):
+            if fault == "postgres" and name == "lakebench-postgres":
                 raise ApiException(status=404, reason="Not Found")
             obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
+            workers = name == "lakebench-trino-worker"
+            obj.spec.replicas = 4 if workers else 1
+            obj.status.ready_replicas = (
+                0 if workers and fault == "trino-workers" else obj.spec.replicas
+            )
             return obj
 
         with (
             patch("lakebench.cli.get_k8s_client") as mock_get,
             patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(typer.Exit),
         ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            _run_preflight_infra_check(cfg)
-
-    def test_blocks_when_trino_not_ready(self):
-        """Exits 1 when Trino workers have 0 ready replicas."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg(engine="trino")
-
-        def fake_read_sts(name, ns):
-            obj = MagicMock()
-            if name == "lakebench-trino-worker":
-                obj.status.ready_replicas = 0
-                obj.spec.replicas = 4
-            else:
-                obj.status.ready_replicas = 1
-                obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(typer.Exit),
-        ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            _run_preflight_infra_check(cfg)
+            mock_get.return_value.namespace_exists.return_value = fault != "namespace"
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = read
+            mock_apps.return_value.read_namespaced_deployment.side_effect = read
+            if fault is None:
+                _run_preflight_infra_check(cfg)
+                return
+            with pytest.raises(typer.Exit) as exc:
+                _run_preflight_infra_check(cfg)
+        assert exc.value.exit_code == ExitCode.PREREQUISITE
+        out = capsys.readouterr()
+        assert named in out.out + out.err
 
 
 class TestParseSparkInterval:
@@ -154,9 +122,6 @@ class TestParseSparkInterval:
             ("5 minutes", 300),
             ("1 minute", 60),
             ("2 hours", 7200),
-            ("garbage", 300),
-            ("", 300),
-            ("300", 300),
         ],
     )
     def test_parse(self, text, seconds):

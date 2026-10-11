@@ -729,7 +729,7 @@ def covered_instances(manifest, sealed_uetrs, id_map, entity_keys):
 
 def _excluded_typologies(status_rows: list[dict]) -> dict[str, str]:
     """typology -> reason, for a typology whose designated rules were all
-    skipped as excluded from this mode (W1 and W5 to W8 in continuous)."""
+    skipped as excluded from this mode (W1, W7 and W8 in continuous)."""
     by_typ: dict[str, list[dict]] = {}
     for r in status_rows:
         if r.get("target_typology"):
@@ -813,6 +813,20 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
     covered_manifest = manifest.join(
         per_inst.where(col("covered")).select("typology_id").distinct(), "typology_id", "left_semi"
     )
+    # Continuous W5 is the transaction screen only: a sanctions instance
+    # paid before its listing is detectable by a rescreen alone, so it is
+    # left out of covered recall and counted, never a miss.
+    rescreen_only: dict = {}
+    if "injection_parameters" in manifest.columns:
+        only = col("injection_parameters").getItem("detectable_by") == lit("rescreen")
+        rescreen_only = {
+            r["typology_type"]: int(r["n"])
+            for r in covered_manifest.filter(only)
+            .groupBy("typology_type")
+            .agg(scount(lit(1)).alias("n"))
+            .collect()
+        }
+        covered_manifest = covered_manifest.filter(~coalesce(only, lit(False)))
 
     # Recall and the chance floor over covered instances; FP and precision
     # over the full manifest.
@@ -841,6 +855,7 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
                 "corpus_instances": corpus_n,
                 "coverage": (covered_n / corpus_n) if corpus_n else None,
                 "no_participant_txns": int(c["no_participant"] or 0),
+                "rescreen_only_excluded": rescreen_only.get(typ, 0),
                 "detection_status": full.get("detection_status"),
                 "designated_rules": full.get("designated_rules"),
                 "workload_category": full.get("workload_category"),

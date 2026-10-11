@@ -1,6 +1,6 @@
 """Executed: the c360 continuous reset drops only this deployment's stream
 tables and their files, and afterwards silver-stream no longer refuses a
-fresh checkpoint (LB-142, GOALS P6.1).
+fresh checkpoint (GOALS P6.1).
 
 Runs ``c360_reset_scenarios.py`` in a fresh JVM with the Iceberg and Delta
 jars from ``LB_SPARK_TEST_JARS`` on the classpath.
@@ -27,7 +27,7 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
 
 
 def test_refusal_before_and_start_allowed_after(result):
-    """The state LB-142 describes, then the state the reset leaves."""
+    """The state before a reset, then the state the reset leaves."""
     assert result["refused_before"] is True
     assert result["refused_after"] is False
 

@@ -110,10 +110,30 @@ def _pythonpath_with_src() -> str:
 
 
 def check_pytest() -> Result:
-    env = {"PYTHONPATH": _pythonpath_with_src()}
+    # No bytecode: compiled tests carry their fake key patterns into
+    # __pycache__, where the working-tree gitleaks check would find them.
+    env = {"PYTHONPATH": _pythonpath_with_src(), "PYTHONDONTWRITEBYTECODE": "1"}
     return command_check(
         "pytest",
-        [sys.executable, "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
+        # The unit suite as CI runs it (.github/workflows/ci.yml).
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "auto",
+            "--dist",
+            "loadfile",
+            "-m",
+            "not slow and not e2e and not integration",
+            "--ignore=tests/spark",
+            "--ignore=tests/test_e2e.py",
+            "--ignore=tests/test_integration.py",
+        ],
         env=env,
     )
 

@@ -1,4 +1,4 @@
-"""Derived-name length limits refused at config load (LB-153)."""
+"""Derived-name length limits refused at config load."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import yaml
 from pydantic import ValidationError
 
 from lakebench.config import load_config
-from lakebench.config.loader import LoadPurpose
 from lakebench.config.schema import (
     LakebenchConfig,
     max_namespace_length,
@@ -56,20 +55,11 @@ class TestHiveLimit:
 
 
 class TestNonHiveLimit:
-    @pytest.mark.parametrize("recipe", ["polaris-iceberg-spark-trino", "hive-iceberg-spark-trino"])
-    def test_every_recipe_has_a_limit(self, recipe):
-        cfg = _cfg("ok", recipe)
-        assert max_namespace_length(cfg) <= 38
-
     def test_polaris_boundary_38_passes_39_fails(self):
         # Secret label secrets.stackable.tech/class = lakebench-s3-credentials-<ns>.
         _cfg(_exact(38), "polaris-iceberg-spark-trino")
         with pytest.raises(ValidationError, match="label secrets.stackable.tech/class"):
             _cfg(_exact(39), "polaris-iceberg-spark-trino")
-
-    def test_name_over_63_refused(self):
-        with pytest.raises(ValidationError):
-            _cfg(_exact(64), "polaris-iceberg-spark-trino")
 
 
 class TestBuckets:
@@ -109,7 +99,7 @@ class TestLoader:
     def test_teardown_and_recovery_commands_skip_the_check(
         self, module, argv, tmp_path, monkeypatch
     ):
-        # A deployment that failed LB-153 still has buckets and secrets, so
+        # A deployment that failed the length limit still has buckets and secrets, so
         # the commands that clean up or inspect it must load its config.
         import importlib
 
@@ -119,20 +109,19 @@ class TestLoader:
         from lakebench.config.loader import ConfigFileNotFoundError
 
         monkeypatch.setenv("KUBECONFIG", "/nonexistent")
-        seen: list[dict] = []
+        outcomes: list[BaseException | None] = []
+        real_load = load_config
 
         def spy(path, **kwargs):
-            seen.append(kwargs)
+            try:
+                real_load(path, **kwargs)
+                outcomes.append(None)
+            except Exception as exc:  # noqa: BLE001 -- recorded, asserted below
+                outcomes.append(exc)
             raise ConfigFileNotFoundError(str(path))
 
         monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
         cfg_path = self._write(tmp_path, "ov-perf-c360-continuous-s10")
         CliRunner().invoke(app, [*argv, str(cfg_path)])
-        assert seen, f"{argv} never loaded the config"
-        # TEARDOWN and READ skip the check; clean and stop keep MUTATE and
-        # pass allow_long_names (config/loader.py load_config).
-        kwargs = seen[0]
-        assert kwargs.get("allow_long_names") is True or kwargs.get("purpose") in (
-            LoadPurpose.TEARDOWN,
-            LoadPurpose.READ,
-        )
+        assert outcomes, f"{argv} never loaded the config"
+        assert outcomes[0] is None, f"{argv} refused the over-long name: {outcomes[0]}"

@@ -277,14 +277,6 @@ def bind_stream_module(spark):
     return ss
 
 
-def opening_balance_sql(iban_literal):
-    """Match ``build_statements`` deterministic opening_balance formula in
-    Spark SQL. Callers use this to compute expected values via ``spark.sql``
-    without reproducing xxhash64 in Python.
-    """
-    return f"(abs(xxhash64('{iban_literal}')) % 200000) + 10000"
-
-
 BASE_TS = datetime(2024, 6, 1)
 
 

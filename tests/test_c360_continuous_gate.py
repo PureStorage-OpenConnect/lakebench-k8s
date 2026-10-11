@@ -1,5 +1,5 @@
-"""c360 continuous runs that moved no data must fail (LB-044 for c360;
-2026-09-24 audit: the honest gate existed only for AML)."""
+"""c360 continuous runs that moved no data must fail
+(2026-09-24 audit: the honest gate existed only for AML)."""
 
 from lakebench.cli._sustained import _c360_continuous_gate_problems
 

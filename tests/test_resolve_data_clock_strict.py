@@ -1,10 +1,6 @@
-"""C1: resolve_data_clock(strict=True) raises SilverAbort when LB_DATA_CLOCK
-is unset. Default (non-strict) fallback keeps the current behaviour.
-
-Two cases:
-  - strict + LB_DATA_CLOCK missing -> SilverAbort
-  - default (non-strict) fallback path unchanged: returns the measured
-    date from ``df_fallback`` when the env var is unset.
+"""resolve_data_clock(strict=True) raises SilverAbort when LB_DATA_CLOCK is
+unset. The default (non-strict) fallback returns the measured date from
+``df_fallback`` when the env var is unset.
 """
 
 from __future__ import annotations
@@ -16,34 +12,23 @@ import pytest
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
-def test_resolve_data_clock_strict_missing_env_raises(monkeypatch):
-    """C1: silver C360 mains use strict=True; a missing LB_DATA_CLOCK
-    stops the run rather than silently falling back to a measured date
-    or NULL. C2 always sets LB_DATA_CLOCK in the silver env bundle, so
-    reaching this raise means the env plumbing broke.
-    """
+class _FakeDf:
+    def agg(self, *_a, **_k):  # pragma: no cover -- not reached
+        raise AssertionError("strict path must not touch df_fallback")
+
+
+@pytest.mark.parametrize("df_fallback", [None, _FakeDf()], ids=["no-fallback", "fallback-df"])
+def test_resolve_data_clock_strict_missing_env_raises(monkeypatch, df_fallback):
+    """Silver C360 mains use strict=True: a missing LB_DATA_CLOCK stops the
+    run rather than silently falling back to a measured date or NULL, even
+    when a bronze DataFrame is available. Reaching this raise means the env
+    plumbing broke."""
     from common import SilverAbort, resolve_data_clock
 
     monkeypatch.delenv("LB_DATA_CLOCK", raising=False)
 
     with pytest.raises(SilverAbort, match="LB_DATA_CLOCK"):
-        resolve_data_clock(df_fallback=None, strict=True)
-
-
-def test_resolve_data_clock_strict_missing_env_raises_even_with_fallback_df(monkeypatch):
-    """strict=True refuses to silently measure a fallback anchor even when
-    a bronze DataFrame is available. The whole point of strict is to trust
-    C2's env resolution or fail loud."""
-    from common import SilverAbort, resolve_data_clock
-
-    monkeypatch.delenv("LB_DATA_CLOCK", raising=False)
-
-    class FakeDf:
-        def agg(self, *_a, **_k):  # pragma: no cover -- not reached
-            raise AssertionError("strict path must not touch df_fallback")
-
-    with pytest.raises(SilverAbort, match="LB_DATA_CLOCK"):
-        resolve_data_clock(df_fallback=FakeDf(), strict=True)
+        resolve_data_clock(df_fallback=df_fallback, strict=True)
 
 
 def test_resolve_data_clock_default_fallback_unchanged(monkeypatch):

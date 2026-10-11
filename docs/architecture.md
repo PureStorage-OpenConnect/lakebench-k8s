@@ -1,8 +1,9 @@
 # Architecture
 
-Lakebench deploys a complete lakehouse stack on Kubernetes and runs reproducible
-benchmarks against it. The system is organized into three layers: platform
-infrastructure, data architecture, and observability.
+Reference: the layers, pipeline, components and deploy order of a Lakebench deployment.
+
+Lakebench deploys a lakehouse stack on Kubernetes and runs reproducible
+benchmarks against it, in three layers.
 
 ## System Layers
 
@@ -21,31 +22,20 @@ infrastructure, data architecture, and observability.
 +-----------------------------------------------------------------------+
 ```
 
-**Layer 1 (Platform)** provides the compute substrate and persistent storage.
-Lakebench runs on any Kubernetes distribution (vanilla, OpenShift, EKS, GKE)
-and any S3-compatible object store (AWS S3, MinIO, Pure Storage FlashBlade).
-PostgreSQL stores catalog metadata.
+| Layer | Contents |
+|---|---|
+| 1. Platform | Any Kubernetes distribution (vanilla, OpenShift, EKS, GKE); any S3-compatible store (AWS S3, MinIO, Pure Storage FlashBlade); PostgreSQL for catalog metadata |
+| 2. Data architecture | Catalog: Hive Metastore or Apache Polaris. Table format: Iceberg or Delta (Delta only with Hive). Spark runs the medallion pipeline. Query engine: Trino, Spark Thrift Server or DuckDB (DuckDB only with Iceberg) |
+| 3. Observability | Optional Prometheus and Grafana (see below). The CLI writes local JSON metrics per run, for offline analysis and HTML reports |
 
-**Layer 2 (Data Architecture)** contains the lakehouse components. A catalog
-service (Hive Metastore or Apache Polaris) manages table metadata. Apache
-Iceberg or Delta Lake provides the table format (Delta runs only with Hive).
-Spark processes data through the medallion pipeline. A query engine (Trino,
-Spark Thrift Server or DuckDB; DuckDB with Iceberg only) executes analytical
-queries for benchmarking.
-
-**Layer 3 (Observability)** captures performance data. Prometheus scrapes
-Spark and Trino metrics. Grafana renders dashboards. The CLI also collects
-local JSON metrics per run for offline analysis and HTML report generation.
+With observability on, Prometheus scrapes Trino JMX, per-pod CPU and memory, and the Pushgateway that datagen and the Spark stages push to. Grafana renders dashboards. Spark engine metrics are not exported: the Spark UI, which serves them, is off.
 
 ## Medallion Pipeline
-
-Lakebench implements the medallion architecture -- a three-layer data pipeline
-that progressively refines raw data into business-ready tables.
 
 ```
   +------------------+      +--------------------+      +-------------------------+
   |      Bronze      |      |       Silver       |      |          Gold           |
-  |   (Raw Parquet)  | ---> | (Cleaned Iceberg)  | ---> |  (Aggregated Iceberg)   |
+  |   (Raw Parquet)  | ---> |  (Cleaned table)   | ---> |   (Aggregated table)    |
   |                  |      |                    |      |                         |
   |  S3 bucket:      |      |  S3 bucket:        |      |  S3 bucket:             |
   |  <name>-bronze   |      |  <name>-silver     |      |  <name>-gold            |
@@ -54,54 +44,50 @@ that progressively refines raw data into business-ready tables.
        (Spark batch)             (Spark batch)             (Spark batch)
 ```
 
-**Bronze** holds raw Parquet files written by the datagen stage. The
-`bronze-verify` Spark job validates data integrity, checks schema conformance,
-and registers an Iceberg table over the raw files.
+Batch stages for Customer 360 (AML tables:
+[AML spec, section 2](benchmarks/aml/data-model.md)):
 
-**Silver** contains cleaned and enriched data. The `silver-build` Spark job
-reads from bronze, applies normalization transforms (email, phone, geo
-enrichment, customer segmentation, quality flags), and writes an Iceberg table
-(`customer_interactions_enriched`).
+| Stage | Reads | Does | Writes |
+|---|---|---|---|
+| datagen | -- | Generates raw data | Parquet in bronze |
+| `bronze-verify` | bronze | Checks rows, required columns and types, and rows that pass the silver filter; records the bronze data clock; fails when bronze cannot produce a valid silver | -- |
+| `silver-build` | bronze | Normalizes email and phone, geo enrichment, customer segmentation, quality flags | `customer_interactions_enriched` |
+| `gold-finalize` | silver | Daily revenue, engagement, churn indicators | `customer_executive_dashboard` |
 
-**Gold** contains aggregated KPIs ready for analytics. The `gold-finalize`
-Spark job reads from silver, computes business metrics (daily revenue,
-engagement, churn indicators), and writes the executive dashboard Iceberg table
-(`customer_executive_dashboard`).
+After the pipeline, the active query engine runs the workload's benchmark
+queries against silver and gold and computes Queries per Hour (QpH): 8 queries
+for Customer 360, 12 for AML (8 analytical plus 4 investigator). See
+[Query Reference](benchmarks/c360/queries.md#6-query-set).
 
-After the pipeline completes, Lakebench runs the workload's benchmark query
-set via the active query engine (Trino, Spark Thrift, or DuckDB) against the
-silver and gold tables and computes Queries per Hour (QpH): 8 queries for
-Customer 360, 12 for AML (8 analytical plus 4 investigator queries).
+### Multi-Cycle Batch
 
-### Multi-Cycle Batch (v1.1.0)
-
-The `pipeline.cycles` field runs N batch iterations to simulate multi-day
-table growth. Cycle 1 creates tables; cycles 2+ append incrementally.
-Iceberg compaction and table health tracking run between cycles. See
+`architecture.pipeline.cycles` runs N batch cycles to model daily table
+growth. Cycle 1 creates the tables; later cycles append. See
 [Configuration -- Multi-Cycle Batch](configuration.md#multi-cycle-batch).
 
 ### Continuous Mode
 
-In addition to batch processing, Lakebench supports a continuous
-pipeline using Spark Structured Streaming:
+Spark Structured Streaming runs three jobs alongside datagen, which writes
+until the window ends:
 
-- `bronze-ingest` reads new Parquet files as they appear
-- `silver-stream` incrementally transforms bronze to silver
-- `gold-refresh` recomputes the gold dates (Customer 360) or re-runs the rules (AML) over the new silver rows
+| Job | Does |
+|---|---|
+| `bronze-ingest` | Reads new Parquet files as they appear, with no per-trigger limit |
+| `silver-stream` | Transforms new bronze rows to silver |
+| `gold-refresh` | Recomputes the gold dates (Customer 360) or re-runs the rules over the new silver rows (AML) |
 
-By default the three jobs run back to back (trigger interval 0 s). They run
-alongside datagen, which writes until the window ends. The scale sets the
-offered load: 4 MB/s per scale unit for AML, 10 MB/s for Customer 360. The
-autosizer gives datagen the cores that produce it. A `parallelism` or `cpu`
-set in the config overrides that. `bronze-ingest` reads with no per-trigger
-limit. The continuous run duration, trigger
-intervals, and checkpoint locations are configurable. AML continuous runs
-detection rules W2, W3, W4 and W17 each tick and records W1, W5, W6, W7 and
-W8 as not run.
+- The jobs run back to back by default (trigger interval 0 s).
+- Run duration, trigger intervals and checkpoint locations are configurable.
+- Offered load per scale unit: 4 MB/s for AML, 10 MB/s for Customer 360.
+  Lakebench gives datagen the cores that produce it;
+  `workload.datagen.parallelism` or `workload.datagen.cpu` overrides that.
+- AML runs rules W2, W3, W4, W5, W6 and W17 on every gold refresh, and records
+  W1, W7 and W8 as not run. W5 and W6 screen each payment as it arrives, with
+  no rescreen.
 
 ## Component Topology
 
-The following components are deployed into a single Kubernetes namespace:
+All components deploy into one Kubernetes namespace:
 
 ```
 Namespace: lakebench
@@ -138,108 +124,57 @@ Namespace: lakebench
 
 ### PostgreSQL
 
-Deployed as a StatefulSet with a persistent volume. Serves as the metadata
-backend for both Hive Metastore and Polaris catalog. Storage
-class: the cluster default unless `platform.compute.postgres.storage_class` is set.
+- A StatefulSet with a persistent volume.
+- Metadata backend for Hive Metastore and Polaris.
+- Storage class: the cluster default unless
+  `platform.compute.postgres.storage_class` is set.
 
 ### Catalog Service (Hive Metastore or Polaris)
 
-A single configuration field (`architecture.catalog.type`) switches between
-catalog implementations:
+`architecture.catalog.type` selects the catalog. Both register and serve
+tables the same way, so the pipeline does not change.
 
-- **Hive Metastore** -- Deployed via the Stackable Hive Operator as a
-  `HiveCluster` CRD. Exposes a Thrift endpoint on port 9083. Both Spark and
-  Trino connect to it for Iceberg table metadata.
-
-- **Apache Polaris** -- Deployed as a Deployment with a REST API on port 8181.
-  Implements the Iceberg REST Catalog specification. Spark connects via the
-  `RESTCatalog` client; Trino connects via the Iceberg REST connector. Polaris
-  uses OAuth2 for authentication and stores its catalog state in the shared
-  PostgreSQL instance.
-
-The catalog choice is transparent to the pipeline -- both implementations
-register and serve Iceberg tables identically.
+| | Hive Metastore (`hive`) | Apache Polaris (`polaris`) |
+|---|---|---|
+| Deployed as | Stackable `HiveCluster` CRD (Stackable Hive Operator) | Deployment, plus a bootstrap Job that creates the warehouse, principal and grants |
+| Endpoint | Thrift, port 9083 | Iceberg REST Catalog, port 8181 |
+| Spark connects with | Hive Metastore Thrift URI | `RESTCatalog` client, OAuth2 credentials |
+| Trino connects with | Hive Metastore Thrift URI | Iceberg REST connector, OAuth2 credentials |
+| State | Shared PostgreSQL | Shared PostgreSQL |
 
 ### Spark
 
-Spark jobs are submitted as `SparkApplication` custom resources managed by the
-Kubeflow Spark Operator (v2.x). Lakebench does not rely on the operator's
-webhook for volumes, because it does not inject them from the
-SparkApplication spec. The scripts ConfigMaps and emptyDir volumes are
-declared in driver and executor pod templates, and scratch PVCs are attached
-through `spark.kubernetes.*.volumes.persistentVolumeClaim.*` conf properties.
-See [component-spark.md](component-spark.md#spark-operator).
-
-Pipeline scripts ship in one ConfigMap per role (`lakebench-scripts-common`,
-`-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate` and `-aml-data`), projected
-together at `/opt/spark/scripts` in every Spark pod. `run` applies them before
-any job is submitted and refuses to start if a listed file is missing from the
-package or a map is over 80% of the 1 MiB ConfigMap limit; see
-[component-spark.md](component-spark.md). The driver and executor
-pods run as UID 185 (the `spark` user in the `apache/spark` base image).
-On OpenShift, `deploy` grants the `anyuid` SCC to the
-`lakebench-spark-runner` and `lakebench-postgres` service accounts through the
-Kubernetes API, and fails if the grant is refused.
+- Jobs are `SparkApplication` resources managed by the Kubeflow Spark
+  Operator (v2.x).
+- Volumes do not rely on the operator's webhook, which does not inject them
+  from the SparkApplication spec. The scripts ConfigMaps and emptyDir volumes
+  are declared in the driver and executor pod templates. Scratch PVCs attach
+  through `spark.kubernetes.*.volumes.persistentVolumeClaim.*` conf
+  properties. See [component-spark.md](component-spark.md#spark-operator).
+- Pipeline scripts ship in one ConfigMap per role (`lakebench-scripts-common`,
+  `-c360`, `-aml-rules`, `-aml-jobs`, `-aml-gate`, `-aml-data`), projected
+  together at `/opt/spark/scripts` in every Spark pod. `run` applies them
+  before any job and refuses to start if a listed file is missing from the
+  package or a map is over 80% of the 1 MiB ConfigMap limit. See
+  [component-spark.md](component-spark.md).
+- Driver and executor pods run as UID 185 (the `spark` user in the
+  `apache/spark` base image).
+- On OpenShift, `deploy` grants the `anyuid` SCC to the
+  `lakebench-spark-runner` and `lakebench-postgres` service accounts through
+  the Kubernetes API, and fails if the grant is refused.
+- Executor sizes, counts and scaling:
+  [component-spark.md -- Batch Jobs](component-spark.md#batch-jobs) and
+  [Auto-Scaling](component-spark.md#auto-scaling). Why they are fixed:
+  [Internals](development.md#spark-job-sizing).
 
 ### Trino
 
-Trino is deployed as a coordinator (Deployment) plus workers (StatefulSet).
-The coordinator exposes a ClusterIP service. By default, workers use ephemeral
-storage (`emptyDir`) for spill-to-disk. When `storage_class` is set in the
-config, workers use PVC-backed persistent volumes instead. Trino connects to
-the catalog service (Hive or Polaris) for Iceberg metadata and reads data
-directly from S3.
-
-## Spark Executor Profiles
-
-Each pipeline stage has a fixed per-executor resource profile derived from
-production-proven configurations. These values are non-negotiable -- reducing
-them causes OOM kills or disk-full failures at scale.
-
-| Stage | Cores | Memory | Overhead | Scratch PVC |
-|---|---|---|---|---|
-| `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) |
-| `silver-build` | 4 | 48g | 12g | 300Gi |
-| `gold-finalize` | 4 | 32g | 8g | 300Gi |
-
-The financial workload's bronze-verify trips a CTAS fallback in
-`bronze_verify_financial.py` above scale 5 (Iceberg `add_files` cannot
-zero-copy-register the pacs.008 source once it exceeds the size/file
-thresholds), which rewrites the full source through an Iceberg CTAS and
-spills roughly twice the per-executor input to local disk. The c360
-profile is a thin `add_files` register and never sees that spill. See
-`_SCHEMA_PROFILE_OVERRIDES` in
-`modules/pipeline_engines/spark/job.py`.
-
-Per-executor sizing (cores, memory, overhead, PVC) is fixed. What scales with
-data is the **executor count**. Executor count is derived automatically from
-the scale factor using a linear formula:
-
-- At scale <= 10: uses a base count (4 for bronze, 8 for silver, 4 for gold)
-- Above scale 10: adds executors linearly (e.g., silver adds 12 per 100 scale units)
-- Each job has a maximum executor cap: 20 for c360 bronze, 28 for silver / gold
-  and for financial bronze (financial also bumps `executors_per_100_scale`
-  from 4 to 8 so per-executor load halves at scale 100+).
-
-Per-job executor count can be overridden in the config for manual tuning:
-
-```yaml
-platform:
-  compute:
-    spark:
-      silver_executors: 12   # override auto-scaling for silver-build
-```
-
-Streaming jobs (`bronze-ingest`, `silver-stream`, `gold-refresh`) have lighter
-profiles since they process micro-batches rather than full table scans.
-
-Scratch PVCs should use a single-replica storage class (`px-csi-scratch`,
-repl=1). Using higher replication doubles storage with no benefit for
-ephemeral shuffle data.
+- Coordinator (Deployment, ClusterIP service) plus workers (StatefulSet).
+- Workers spill to `emptyDir` by default, or to PVCs when
+  `architecture.query_engine.trino.worker.storage_class` is set.
+- Reads table metadata from the catalog and data directly from S3.
 
 ## Catalog Pluggability
-
-Switching catalogs requires changing a single field in the configuration:
 
 ```yaml
 architecture:
@@ -247,17 +182,9 @@ architecture:
     type: hive     # or "polaris"
 ```
 
-When `type: hive`, the deployment engine creates a Stackable `HiveCluster`
-resource, and Spark/Trino are configured with Hive Metastore Thrift URIs.
-
-When `type: polaris`, the engine deploys a Polaris REST catalog server and
-a bootstrap job that creates the warehouse, principal, and grants. Spark and
-Trino are configured with REST catalog endpoints and OAuth2 credentials.
-
-The architecture compositions lakebench accepts are the recipes below. Any
-other combination is refused at config load with the reason. A recipe being
-listed says the composition is valid, not that it is release-validated for a
-workload: support is judged per workload x recipe x mode (see
+Lakebench accepts only the recipes below; any other combination is refused at
+config load with the reason. A listed recipe is a valid composition, not a
+release-validated one: support is judged per workload x recipe x mode (see
 [Compatibility Matrix](compatibility-matrix.md#support-states)).
 
 <!-- BEGIN GENERATED: recipe-components -->
@@ -281,59 +208,21 @@ workload: support is judged per workload x recipe x mode (see
 
 ## Storage
 
-Lakebench uses S3-compatible object storage for all data. Three buckets
-correspond to the three medallion layers:
-
-| Bucket | Purpose |
+| Bucket | Holds |
 |---|---|
 | `<name>-bronze` | Raw Parquet files from datagen |
-| `<name>-silver` | Cleaned Iceberg table |
-| `<name>-gold` | Aggregated KPI Iceberg table |
+| `<name>-silver` | Cleaned table |
+| `<name>-gold` | Aggregated KPI table |
 
-`<name>` is the deployment `name`. Bucket names are configurable under
-`platform.storage.s3.buckets`. Path-style access is enabled by default for
-compatibility with S3-compatible stores (FlashBlade, MinIO) that do not support
-virtual-hosted bucket addressing.
-
-All S3 access uses the `S3AFileSystem` Hadoop connector with tuned settings
-for high throughput: fast upload with byte-buffer mode, 200 max connections,
-256 MB multipart threshold, and 256 MB block size.
+- `<name>` is the deployment `name`. Names are configurable under
+  `platform.storage.s3.buckets`.
+- Path-style access is on by default, for stores without virtual-hosted
+  bucket addressing (FlashBlade, MinIO).
+- Spark uses the Hadoop `S3AFileSystem` connector with fast upload
+  (byte-buffer), 200 max connections, 256 MB multipart threshold and 256 MB
+  block size. See [Storage backends](storage-backends.md#spark-s3a).
 
 ## Deployment Order
 
-The deployment engine creates resources in a strict dependency order:
-
-1. **Namespace** -- creates the target namespace if it does not exist
-2. **Secrets** -- S3 credentials and PostgreSQL credentials
-3. **Silver-state ConfigMap** -- per-deployment rebuild-epoch counters and
-   the bronze data clock that bronze-verify records for silver
-4. **S3 buckets** -- creates the deployment's buckets
-5. **Scratch StorageClass check** -- verifies the scratch class exists (if
-   scratch is enabled); it never creates it. A cluster admin installs it once
-   with `lakebench admin install --component scratch-storage-class`
-6. **PostgreSQL** -- StatefulSet with persistent volume
-7. **Hive Metastore** -- skipped unless the catalog is Hive
-8. **Polaris** -- skipped unless the catalog is Polaris
-9. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
-10. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
-    combination)
-11. **Spark Operator** -- verifies the shared operator (deploy never installs
-    it; `lakebench admin install --component spark-operator` does) and adds
-    the namespace to its watch list under the cluster lease
-12. **Dependency server** -- the `lb-deps` Deployment, Service and PVC in
-    the namespace: resolves the jars and wheels once per request and serves
-    them read-only; deploy waits until it is Ready and records the set
-13. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
-14. **Spark Thrift Server** -- if selected
-15. **DuckDB** -- if selected
-16. **Observability** -- checks the shared Prometheus and Grafana release
-    (installed by `lakebench admin install --component observability`) and
-    applies the deployment's PodMonitors and Pushgateway (if enabled)
-
-Destruction follows the reverse order: an ownership check, Spark jobs and pods
-first, then table removal from the catalog (metadata only, no table
-maintenance), emptying the S3
-buckets and deleting the ones this deployment created, infrastructure removal,
-and finally namespace deletion. The namespace is kept when a recorded bucket
-could not be deleted, and destroy waits for it to be NotFound before reporting
-it deleted.
+- Deploy steps: [Deployment order](deployment.md#deployment-order).
+- Destroy steps, roughly in reverse: [Destroy order](deployment.md#destroy-order).

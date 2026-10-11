@@ -1,6 +1,6 @@
 """``deploy`` refuses a config the cluster cannot hold before it creates
 anything, and ``run --skip-deploy`` still runs the read-only prerequisite
-checks (LB-247)."""
+checks."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ def test_run_skip_deploy_still_runs_the_prerequisites(monkeypatch, cfg_file, fla
         assert "Skipping prerequisites (--skip-preflight)" in res.output
 
 
-def _client(nodes, *, pod_error=None):
+def _client(nodes, *, pod_error=None, pods=()):
     """A real K8sClient over fake node and pod lists (no scratch published)."""
     from types import SimpleNamespace as NS
 
@@ -154,7 +154,7 @@ def _client(nodes, *, pod_error=None):
     if pod_error is not None:
         core.list_pod_for_all_namespaces.side_effect = pod_error
     else:
-        core.list_pod_for_all_namespaces.return_value = NS(items=[])
+        core.list_pod_for_all_namespaces.return_value = NS(items=list(pods))
     storage = mock.MagicMock()
     storage.list_csi_storage_capacity_for_all_namespaces.return_value = NS(items=[])
     k = object.__new__(K8sClient)
@@ -176,6 +176,22 @@ def _worker(name, cpu, mem):
     )
 
 
+def _busy_pod(node, cpu, memory):
+    """A pod of another team requesting *cpu* and *memory* on *node*."""
+    from types import SimpleNamespace as NS
+
+    requests = {"cpu": cpu, "memory": memory}
+    return NS(
+        metadata=NS(namespace="other-team", name=f"load-{node}", labels={}),
+        spec=NS(
+            node_name=node,
+            containers=[NS(resources=NS(requests=requests))],
+            init_containers=None,
+            overhead=None,
+        ),
+    )
+
+
 def _deploy_check(cfg_file, client):
     from lakebench.cli._prerequisites import deploy_capacity_check
     from lakebench.config._load_context import LoadPurpose
@@ -193,12 +209,14 @@ def test_deploy_refuses_an_unreadable_node_quantity(cfg_file):
 
 
 def test_deploy_sizes_against_the_worker_allocatable(cfg_file):
-    # Sized as the deploy engine and run size it: get_cluster_capacity, not
-    # the free-capacity node set.
-    from lakebench.config import sizing
-
-    client = _client([_worker(f"w{i}", "40", "402Gi") for i in range(8)])
-    workers = client.get_cluster_capacity()
-    with mock.patch.object(sizing, "check_capacity", wraps=sizing.check_capacity) as check:
-        assert _deploy_check(cfg_file, client).passed
-    assert check.call_args.kwargs["sizing_capacity"] == workers
+    # Continuous mode caps its streams to what the cluster holds, so the
+    # capacity the config is sized against changes the verdict. Eight 40-core
+    # / 402 GiB workers, each 5 cores / 64 GiB free: sized against the
+    # allocatable (as the deploy engine and run size it) the plan does not fit
+    # what is free and is refused; sized against the free capacity it would be
+    # shrunk to a degraded plan that passes.
+    cfg_file.write_text(CONFIG.replace("mode: batch", "mode: continuous"))
+    nodes = [_worker(f"w{i}", "40", "402Gi") for i in range(8)]
+    busy = [_busy_pod(f"w{i}", "35", "338Gi") for i in range(8)]
+    result = _deploy_check(cfg_file, _client(nodes, pods=busy))
+    assert not result.passed, result.message

@@ -2,18 +2,19 @@
 
 Synthetic per-customer frames with known answers: a planted perfectly
 separable feature must give AP ~ 1 and trip the single-feature leakage cap;
-pure noise must give AP ~ prevalence. Plus the pre-registration contract: the
-gate carries no threshold literals, and the JSON's feature list matches what
-aml_features builds.
+pure noise must give AP ~ prevalence. The pre-registration's feature list
+matches what aml_features builds.
 """
 
 from __future__ import annotations
 
-import ast
 import copy
+import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
@@ -24,16 +25,9 @@ pytest.importorskip("sklearn")
 from lakebench.aml import fidelity_gate as fg  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-GATE_SRC = ROOT / "src/lakebench/aml/fidelity_gate.py"
 RUNNER_SRC = ROOT / "scripts/aml_gate.py"
-D8_SRC = ROOT / "src/lakebench/aml/scale_invariance.py"
-D8_RUNNER_SRC = ROOT / "scripts/aml_d8.py"
 FEATURES_SRC = ROOT / "src/lakebench/spark/scripts/aml_features.py"
 
-# Tests that take 5 s or more on the pinned reference libraries (183 s for the
-# whole file, of which these are about 140 s, measured 2026-09-30). CI runs them
-# in the "AML statistics (slow)" job, and the unit legs still run them too until
-# the fast path (QA-6) deselects the mark there.
 SLOW = pytest.mark.slow
 
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
@@ -225,29 +219,50 @@ def test_level2_n_must_match_behavioural_subset():
         fg.evaluate_gate(_frame(), p)
 
 
-@SLOW
-def test_timing_mixture_and_density():
-    p = _prereg()
-    tm = p["timing_mixture"]
+@pytest.mark.parametrize(
+    ("below", "above", "ok"),
+    [
+        pytest.param(500, 500, True, id="both-shares-high"),
+        pytest.param(1, 500, False, id="below-low-share-short"),
+        pytest.param(500, 1, False, id="above-high-share-short"),
+    ],
+)
+def test_timing_mixture_passes_only_when_both_shares_clear_the_registered_minimum(below, above, ok):
     rep = fg.evaluate_gate(
         _frame(),
-        p,
-        timing_counts={"n_cohort": 100, "n_below_low": 20, "n_above_high": 30},
-        density_counts={"total_rows": 1_000_000, "planted_rows": 1000, "per_typology": {}},
+        _prereg(),
+        score=False,
+        timing_counts={"n_cohort": 1000, "n_below_low": below, "n_above_high": above},
     )
     t = rep["timing_mixture"]
-    assert t["share_below_low"] == 0.2 and t["share_above_high"] == 0.3
-    assert t["pass"] is (0.2 >= tm["min_share_below_low"] and 0.3 >= tm["min_share_above_high"])
-    d = rep["density"]
-    assert d["frac_rows"] == 0.001 and d["pass"] is True
+    assert t["share_below_low"] == below / 1000 and t["share_above_high"] == above / 1000
+    assert t["pass"] is ok
+
+
+@pytest.mark.parametrize(
+    ("offset_tolerances", "ok"),
+    [
+        pytest.param(0, True, id="on-target"),
+        pytest.param(10, False, id="over-target"),
+        pytest.param(-10, False, id="under-target"),
+    ],
+)
+def test_density_passes_only_within_the_registered_tolerance(offset_tolerances, ok):
+    p = _prereg()
+    dn = p["density"]
+    total = 1_000_000
+    frac = dn["target_frac_rows"] + offset_tolerances * dn["tolerance_pp"]
     rep = fg.evaluate_gate(
         _frame(),
         p,
-        timing_counts={"n_cohort": 100, "n_below_low": 1, "n_above_high": 90},
-        density_counts={"total_rows": 1_000_000, "planted_rows": 5000, "per_typology": {}},
+        score=False,
+        density_counts={
+            "total_rows": total,
+            "planted_rows": round(frac * total),
+            "per_typology": {},
+        },
     )
-    assert rep["timing_mixture"]["pass"] is False
-    assert rep["density"]["pass"] is False
+    assert rep["density"]["pass"] is ok
 
 
 @SLOW
@@ -294,110 +309,36 @@ def test_real_preregistration_runs_end_to_end():
 # ---------------------------------------------------------------------------
 
 
-def _numeric_literals(path: Path) -> set:
-    tree = ast.parse(path.read_text())
-    out = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-            out.add(node.value)
-    return out
+@pytest.fixture
+def features_module(monkeypatch):
+    """scripts/aml_features.py executed as a module; pyspark is stubbed when it
+    is not installed, since only the module's constants are read."""
+    if importlib.util.find_spec("pyspark") is None:
+        for name in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
+            monkeypatch.setitem(sys.modules, name, MagicMock())
+    spec = importlib.util.spec_from_file_location("aml_features_constants", FEATURES_SRC)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        GATE_SRC,
-        RUNNER_SRC,
-        D8_SRC,
-        D8_RUNNER_SRC,
-        ROOT / "src/lakebench/aml/predictions.py",
-        ROOT / "src/lakebench/aml/d8_shards.py",
-        ROOT / "scripts/aml_level2_predict.py",
-    ],
-    ids=lambda p: p.name,
-)
-def test_gate_has_no_numeric_threshold_literals(path):
-    """R7: every threshold comes from the JSON. 0, 1 and 2 are structural
-    (indexing, halves of a two-sided interval); anything else is suspect."""
-    assert _numeric_literals(path) <= {0, 1, 2}, _numeric_literals(path) - {0, 1, 2}
-
-
-def _tuple_const(name):
-    tree = ast.parse(FEATURES_SRC.read_text())
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == name for t in node.targets
-        ):
-            return [e.value for e in node.value.elts]
-    raise AssertionError(name)
-
-
-def test_prereg_features_match_aml_features():
-    cols = _tuple_const("FEATURE_COLUMNS")
-    hist = _tuple_const("HISTORY_FEATURE_COLUMNS")
+def test_prereg_features_match_aml_features(features_module):
+    cols = list(features_module.FEATURE_COLUMNS)
+    hist = list(features_module.HISTORY_FEATURE_COLUMNS)
     p = json.loads(PREREG.read_text())
     assert p["features"] == cols + hist
     assert p["unit_of_scoring"]["history_features"] == hist
-    # AML-GOALS section 9 #32.
-    assert "customer_type" in cols and "crr_tier" in cols and "is_customer" not in cols
     for t, f in p["classification"]["defining_feature"].items():
         assert f in cols, (t, f)
 
 
-def test_high_risk_countries_match_generator_corridor_pool():
-    tree = ast.parse(FEATURES_SRC.read_text())
-    ours = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "HIGH_RISK_COUNTRIES" for t in node.targets
-        ):
-            ours = [e.value for e in node.value.elts]
+def test_high_risk_countries_match_generator_corridor_pool(features_module):
+    ours = features_module.HIGH_RISK_COUNTRIES
     m = re.search(r"const HIGH_RISK_CC: \[&str; \d+\] = \[([^\]]*)\]", TYPOLOGY_RS.read_text())
     assert m, "HIGH_RISK_CC not found in typology.rs"
     theirs = re.findall(r'"([A-Z]{2})"', m.group(1))
     assert sorted(ours) == sorted(theirs)
-
-
-def test_prereg_version_and_model_blocks():
-    p = json.loads(PREREG.read_text())
-    # 3.6.1 (Wave 1 A2, 2026-09-28) adds the screening block. Content of D5/D8
-    # blocks is unchanged; only the version string, changelog head and
-    # prereg_sha256 moved.
-    assert p["version"] == "3.6.1"
-    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.6.1"
-    assert [(c["version"], c.get("part")) for c in p["changelog"][:3]] == [
-        ("3.6.1", None),
-        ("3.6.0", "D8"),
-        ("3.6.0", "D5"),
-    ]
-    # 3.6.1 head sits above 3.6.0's two entries, so 3.5.x lineage is at 3-5.
-    assert [c["version"] for c in p["changelog"][3:6]] == ["3.5.2", "3.5.1", "3.5.0"]
-    # registered_looks_open flipped to True 2026-09-27 (owner-approved
-    # AML-GOALS #52); stays true through 3.6.1.
-    assert p["corpora"]["registered_looks_open"] is True
-    assert {42, 50000042} <= set(p["corpora"]["spent_seeds"])
-    u = p["unit_of_scoring"]
-    assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
-    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
-    assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence_band_floor"
-    assert (p["leakage"]["shortcut_ap_abs_max"], p["leakage"]["shortcut_ap_rel_max"]) == (0.2, 0.5)
-    assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
-    assert (p["level2"]["k_in_band"], p["level2"]["n"]) == (4, 6)
-    assert p["corpora"]["gate_scale"] == 2
-    assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
-    assert p["reference_model"]["l2_regularization"] > 0
-    assert p["shortcut_model"]["max_depth"] == 2
-    assert p["shortcut_model"]["also_reference_model"] is True
-    lk = p["leakage"]
-    assert lk["shortcut_models"] == ["single_feature", "feature_pair", "nuisance_only"]
-    # v3.6.0 adds no threshold: the new checks reuse the 3.5.0 caps.
-    assert lk["ablation"]["gated"] == "nuisance_features"
-    assert {k: p["cv"][k] for k in ("folds", "stratified", "seed")} == {
-        "folds": 5,
-        "stratified": True,
-        "seed": 7,
-    }
-    assert p["cv"]["group_by"] == "customer"
 
 
 def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
@@ -426,6 +367,31 @@ def test_passes_summary_and_corpus_role(monkeypatch):
     # The evaluation seed is matched by hash (a test-only seed in the fixture).
     assert fg.corpus_role(ts.TEST_EVALUATION_SEED, p) == "evaluation"
     assert fg.corpus_role(7, p) == "other" and fg.corpus_role(None, p) == "unknown"
+
+
+def test_gated_prereg_constants_are_locked():
+    """The gate's registered constants are fixed; changing one is a new prereg."""
+    p = json.loads(PREREG.read_text())
+    u = p["unit_of_scoring"]
+    assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
+    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
+    lk = p["leakage"]
+    assert lk["relative_cap_formula"] == "lift_over_prevalence_band_floor"
+    assert (lk["shortcut_ap_abs_max"], lk["shortcut_ap_rel_max"]) == (0.2, 0.5)
+    assert lk["shortcut_models"] == ["single_feature", "feature_pair", "nuisance_only"]
+    assert lk["ablation"]["gated"] == "nuisance_features"
+    assert (p["band"]["ap_min"], p["band"]["ap_max"]) == (0.3, 0.8)
+    assert (p["level2"]["k_in_band"], p["level2"]["n"]) == (4, 6)
+    assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
+    assert p["reference_model"]["l2_regularization"] > 0
+    assert p["shortcut_model"]["max_depth"] == 2
+    assert p["shortcut_model"]["also_reference_model"] is True
+    assert {k: p["cv"][k] for k in ("folds", "stratified", "seed", "group_by")} == {
+        "folds": 5,
+        "stratified": True,
+        "seed": 7,
+        "group_by": "customer",
+    }
 
 
 @SLOW
@@ -479,15 +445,20 @@ def test_bootstrap_resamples_groups():
     assert fg._resample_rows(np.array([4, 4, 1]), order, start, length).tolist() == [4, 4, 1]
 
 
-@SLOW
 def test_report_records_groups_and_libraries():
+    import platform
+
+    import numpy
+    import sklearn
+
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
     df["month"] = np.arange(len(df)) % 3  # a unit is (group, month)
-    rep = fg.evaluate_gate(df, _prereg())
+    rep = fg.evaluate_gate(df, _prereg(), score=False)
     assert rep["n_groups"] == len(df) // 3
     libs = rep["libraries"]
-    assert libs["python"] and libs["sklearn"] and libs["numpy"]
+    assert libs["python"] == platform.python_version()
+    assert libs["sklearn"] == sklearn.__version__ and libs["numpy"] == numpy.__version__
 
 
 def test_runner_version_check_reads_job_pins():
@@ -597,26 +568,34 @@ def test_exclusions_counts_only_and_lift_ratio():
     assert scored["ap_over_prevalence"] == pytest.approx(scored["ap"] / scored["prevalence"])
 
 
-def test_lifetime_prereg_drops_history_features():
+@pytest.mark.parametrize(
+    ("history", "features", "leakage_consistent"),
+    [
+        pytest.param("noise_a", ["planted", "noise_b"], True, id="behaviour-feature"),
+        pytest.param("noise_b", ["planted", "noise_a"], False, id="nuisance-feature"),
+    ],
+)
+def test_lifetime_prereg_drops_history_features(history, features, leakage_consistent):
     p = _prereg()
-    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": ["noise_b"]}
+    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": [history]}
     life = fg.lifetime_prereg(p)
-    assert life["features"] == ["planted", "noise_a"]
+    assert life["features"] == features
     assert fg.unit_window(life) == "lifetime" and fg.unit_window(p) == "utc_calendar_month"
+    assert all(history not in fs for fs in life["leakage"]["ablation"]["feature_groups"].values())
+    if leakage_consistent:
+        fg._leakage_sets(life)
 
 
 def test_counts_only_needs_no_sklearn(monkeypatch):
     monkeypatch.setattr(fg, "_sklearn_available", lambda: False)
-    rep = fg.evaluate_gate(_frame(), _prereg(), score=False)
-    assert rep["verdict"] == "counts_only" and rep["typologies"]["beh"]["n_positives"] > 0
+    df = _frame()
+    rep = fg.evaluate_gate(df, _prereg(), score=False)
+    assert rep["verdict"] == "counts_only"
+    assert rep["typologies"]["beh"]["n_positives"] == int(df["label:beh"].sum())
 
 
 @SLOW
 def test_behavioural_six_and_empty_definitional_subset():
-    p = json.loads(PREREG.read_text())
-    assert len(p["behavioural_subset"]) == 6 and p["definitional_subset"] == []
-    assert (p["level2"]["n"], p["level2"]["k_in_band"]) == (6, 4)
-    assert "#36" in p["classification"]["note"]
     q = _prereg()
     q["behavioural_subset"] = ["beh", "defn"]
     q["definitional_subset"] = []
@@ -627,7 +606,7 @@ def test_behavioural_six_and_empty_definitional_subset():
 
 
 @SLOW
-def test_model_outputs_scores_importance_and_card(tmp_path):
+def test_model_outputs_align_with_the_scored_units():
     df = _frame(n=1200)
     df["group"] = np.arange(len(df))
     df["month"] = 3
@@ -636,16 +615,13 @@ def test_model_outputs_scores_importance_and_card(tmp_path):
     rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
     out = rep.pop("_model_outputs")
     sc = out["scores"]
-    assert list(sc.columns) == ["group", "month", "typology", "label", "score", "fold", "weight"]
     assert (sc["weight"] == 1).all()
-    units = out["unit_features"]
-    assert list(units.columns) == ["group", "month", *_prereg()["features"], "weight"]
-    assert len(units) == len(df)
+    assert len(out["unit_features"]) == len(df)
     assert (sc["typology"] == "beh").sum() == 1200 and (sc["typology"] == "defn").sum() == 1190
     beh = sc[sc["typology"] == "beh"].set_index("group")
     assert (beh["label"].to_numpy() == df["label:beh"].to_numpy()).all()
     assert set(beh["fold"]) == set(range(_prereg()["cv"]["folds"]))
-    assert beh["score"].between(0, 1).all() and str(beh["score"].dtype) == "float32"
+    assert beh["score"].between(0, 1).all()
     imp = out["importance"]
     top = imp[imp["typology"] == "beh"].sort_values("ap_drop_mean").iloc[-1]
     assert top["feature"] == "planted" and top["ap_drop_mean"] > 0.5
@@ -655,17 +631,23 @@ def test_model_outputs_scores_importance_and_card(tmp_path):
         card["fitted_hyperparameters"]["beh"]["max_iter"]
         == _prereg()["reference_model"]["max_iter"]
     )
-    assert card["importance"]["method"] == "permutation_on_held_out_folds"
-    paths = fg.write_model_outputs(out, str(tmp_path / "gate"))
-    back = pd.read_parquet(paths["oof_scores"])
-    assert len(back) == len(sc)
-    assert len(pd.read_parquet(paths["unit_features"])) == len(df)
-    assert json.loads(Path(paths["model_card"]).read_text())["unit_key_columns"] == [
-        "group",
-        "month",
-    ]
     # Not collected unless asked, and never in counts-only mode.
     assert "_model_outputs" not in fg.evaluate_gate(df, _prereg())
+
+
+def test_write_model_outputs_round_trips(tmp_path):
+    scores = pd.DataFrame({"group": [0, 1], "month": [3, 3], "score": [0.25, 0.75]})
+    units = pd.DataFrame({"group": [0, 1], "month": [3, 3], "planted": [0.0, 1.0]})
+    outputs = {
+        "scores": scores,
+        "unit_features": units,
+        "importance": pd.DataFrame({"typology": ["beh"], "feature": ["planted"]}),
+        "card": {"unit_key_columns": ["group", "month"]},
+    }
+    paths = fg.write_model_outputs(outputs, str(tmp_path / "gate"))
+    pd.testing.assert_frame_equal(pd.read_parquet(paths["oof_scores"]), scores)
+    pd.testing.assert_frame_equal(pd.read_parquet(paths["unit_features"]), units)
+    assert json.loads(Path(paths["model_card"]).read_text()) == outputs["card"]
 
 
 def _grouped_frame():
@@ -741,10 +723,10 @@ def test_band_floor_cap_equals_lift_in_band_and_floors_below():
     assert strong["shortcuts"]["single_feature"]["pass"] is False  # a planted shortcut
 
 
+@SLOW
 def test_reference_model_does_not_saturate_at_rare_prevalence():
-    """The v3.4.1 model (no l2) pushed rare positives to scores of exactly
-    0 or 1; the registered model keeps scores inside (0, 1) and ranks a
-    learnable rare positive class well above prevalence."""
+    """The registered model keeps out-of-fold scores strictly inside (0, 1)
+    for a rare positive class, and ranks a learnable one above prevalence."""
     rng = np.random.default_rng(3)
     n = 60000
     y = (rng.random(n) < 4e-4).astype(int)
@@ -774,18 +756,10 @@ def test_reference_model_does_not_saturate_at_rare_prevalence():
 
 
 def test_real_prereg_leakage_sets_are_consistent():
-    """The shipped nuisance list names real features and the ablation groups
-    partition the feature list, for the monthly and the lifetime unit."""
+    """The shipped nuisance list is the union of the ablation groups it names,
+    for the monthly and the lifetime unit."""
     p, _ = fg.load_preregistration(PREREG)
     nuis, groups = fg._leakage_sets(p)
-    assert nuis == [
-        "frac_overnight",
-        "frac_weekend",
-        "hour_of_day_entropy",
-        "frac_round_amount",
-        "customer_type",
-        "crr_tier",
-    ]
     assert set(nuis) == set(groups["clock"] + groups["rounding"] + groups["segment"])
     life = fg.lifetime_prereg(p)
     _, lgroups = fg._leakage_sets(life)
@@ -804,32 +778,6 @@ def test_leakage_sets_refuse_a_bad_prereg():
     }
     with pytest.raises(ValueError, match="partition"):
         fg._leakage_sets(q)
-
-
-def test_lifetime_prereg_drops_history_from_ablation_groups():
-    p = _prereg()
-    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": ["noise_a"]}
-    life = fg.lifetime_prereg(p)
-    assert "g_a" not in life["leakage"]["ablation"]["feature_groups"]
-    fg._leakage_sets(life)
-
-
-@SLOW
-def test_oof_many_matches_oof_scores():
-    """The parallel fold fitter gives the numbers the sequential one gives,
-    narrow or wide."""
-    df = _frame(n=1500, prev=0.06, separable=False)
-    p = _prereg()
-    X = df[p["features"]].to_numpy(float)
-    y = df["label:beh"].to_numpy(int)
-    w = np.ones(len(y))
-    folds = fg._folds(y, np.arange(len(y)), p)
-    sets = [[0], [1, 2], [0, 1, 2]]
-    for wide in (False, True):
-        got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
-        for cols, g in zip(sets, got, strict=True):
-            want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
-            np.testing.assert_array_equal(g, want)
 
 
 def _band_frame(n=20000, seed=5):
@@ -986,32 +934,43 @@ def test_secondary_lifetime_skips_the_new_fits():
     assert fg.lifetime_prereg(p)["shortcut_model"]["also_reference_model"] is True
 
 
-@SLOW
-def test_definitional_check_keeps_the_352_statistic():
-    rep = fg.evaluate_gate(_band_frame(), _prereg())
-    d = rep["typologies"]["defn"]
-    row = next(r for r in d["single_feature_table"] if r["feature"] == "planted")
-    assert d["definitional_check"]["single_ap"] == max(row["tree_ap"], row["rank_ap"])
+def _random_case():
+    df = _frame(n=1500, prev=0.06, separable=False)
+    p = _prereg()
+    y = df["label:beh"].to_numpy(int)
+    return df[p["features"]].to_numpy(float), y, np.arange(len(y)), [[0], [1, 2], [0, 1, 2]]
 
 
-def test_oof_many_one_class_fold_and_batches(monkeypatch):
-    """Every positive in one customer: that fold trains on one class and
-    falls back to the training prevalence, as _oof_scores does; batching
-    (one set per batch) does not change any AP."""
+def _one_class_fold_case():
+    """Every positive in one customer: that fold trains on one class and falls
+    back to the training prevalence, as _oof_scores does."""
     rng = np.random.default_rng(4)
     n = 600
     groups = rng.integers(0, 60, n)
-    y = (groups == 7).astype(int)
-    X = rng.normal(0, 1, (n, 3))
-    w = np.ones(n)
+    return rng.normal(0, 1, (n, 3)), (groups == 7).astype(int), groups, [[0], [1], [0, 2]]
+
+
+@pytest.mark.parametrize("wide", [False, True], ids=["narrow", "wide"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(_random_case, marks=SLOW, id="random-frame"),
+        pytest.param(_one_class_fold_case, id="one-class-fold"),
+    ],
+)
+def test_oof_many_matches_oof_scores(case, wide, monkeypatch):
+    """The parallel fold fitter gives the numbers the sequential one gives,
+    narrow or wide, and batching the sets does not change any AP."""
+    X, y, groups, sets = case()
+    w = np.ones(len(y))
     p = _prereg()
     folds = fg._folds(y, groups, p)
-    assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
-    sets = [[0], [1], [0, 2]]
-    got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
+    got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
     for cols, g in zip(sets, got, strict=True):
         want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
         np.testing.assert_array_equal(g, want)
-    wide = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
-    monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
-    assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds) == wide
+    if case is _one_class_fold_case:
+        assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
+        batched = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
+        monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
+        assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide) == batched

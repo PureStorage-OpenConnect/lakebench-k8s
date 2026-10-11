@@ -11,8 +11,6 @@ from unittest.mock import MagicMock, patch
 
 from rich.console import Console
 
-from tests.fixtures.maintenance_timeout_helpers import loop_call_keywords as loop_call_keywords
-
 
 def test_maintenance_journals_the_budgeted_timeout():
     """The chosen timeout reaches exec_sql and the journal; a timeout is its own count."""
@@ -93,6 +91,16 @@ def test_maintenance_and_compaction_record_what_ran():
     assert expire["kind"] == "expire" and expire["succeeded"] == expire["total"] > 0
     assert compaction["kind"] == "compaction" and compaction["succeeded"] == 0
     assert compaction["failed"] == compaction["total"] > 0
+    assert [f["error"] for f in compaction["failures"]] == ["compaction failed"] * compaction[
+        "total"
+    ]
+    assert all("optimize" in f["statement"].lower() for f in compaction["failures"])
+    assert expire["failed"] == 0 and "failures" not in expire
+
+
+def test_duckdb_maintenance_is_recorded_as_skipped():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+    from tests.conftest import make_config
 
     duck = make_config(architecture={"query_engine": {"type": "duckdb"}})
     skipped: list = []

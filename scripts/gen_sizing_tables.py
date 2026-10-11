@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the sizing tables in README.md and docs/getting-started.md.
+"""Regenerate the sizing tables in README.md and docs/sizing.md.
 
 The tables are the minimum cluster per workload x mode x scale, computed
 by ``lakebench.config.sizing.plan_requirements`` (the one sizing source

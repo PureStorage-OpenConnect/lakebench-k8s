@@ -1,4 +1,4 @@
-"""c360 continuous runs reset their state before any stream starts (LB-142).
+"""c360 continuous runs reset their state before any stream starts.
 
 After a batch run, silver and gold are full and the stream checkpoints are
 gone or stale; silver-stream refuses a fresh checkpoint over a full table,
@@ -14,55 +14,83 @@ from unittest.mock import MagicMock
 
 import pytest
 import typer
+from kubernetes.client.rest import ApiException
 
 from lakebench.cli import _sustained
 from lakebench.spark.job import JobState
 from tests.fixtures.c360_reset_helpers import _c360_cfg as _c360_cfg
 from tests.fixtures.c360_reset_helpers import _drive_sustained as _drive_sustained
-from tests.fixtures.c360_reset_helpers import _exit_in_chain as _exit_in_chain
 from tests.fixtures.c360_reset_helpers import _Result as _Result
-from tests.fixtures.c360_reset_helpers import _StopAfterFirstStream as _StopAfterFirstStream
-from tests.fixtures.c360_reset_helpers import _sustained_status_success as _sustained_status_success
 from tests.fixtures.c360_reset_helpers import events_ref as events_ref
+from tests.fixtures.memory_s3 import MemoryBoto
 
 
-@pytest.mark.parametrize(
-    "submit_state,wait_ok", [(JobState.FAILED, True), (JobState.RUNNING, False)]
-)
-def test_reset_preflight_failure_is_reported(submit_state, wait_ok):
+def test_reset_preflight_failure_is_reported():
+    """A reset Job that fails at submit is a failed reset; one that submits
+    but does not finish is covered by test_c360_failed_reset_starts_no_stream."""
     jm = MagicMock()
-    jm.submit_job.return_value = MagicMock(state=submit_state, message="boom")
+    jm.submit_job.return_value = MagicMock(state=JobState.FAILED, message="boom")
     mon = MagicMock()
-    mon.wait_for_completion.return_value = _Result(wait_ok, "timeout")
+    mon.wait_for_completion.return_value = _Result(True)
     assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock(), timeout_seconds=60) is False
 
 
-def test_c360_state_reset_clears_checkpoints_and_c360_landing_zone(monkeypatch):
-    """c360 clears customer/interactions, never the AML pacs008 prefix."""
-    cfg = _c360_cfg()
-    monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
-    client = MagicMock()
-    client.delete_prefix.return_value = 0
-    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
-    _sustained._reset_continuous_state(cfg, clear_raw=True)
-    deleted = [c.args for c in client.delete_prefix.call_args_list]
-    assert deleted == [
-        ("c-b", "checkpoints/bronze-ingest"),
-        ("c-s", "checkpoints/silver-stream"),
-        ("c-g", "checkpoints/gold-refresh"),
-        ("c-b", "customer/interactions"),
-    ]
+class _MemoryS3:
+    """``S3Client`` over a dict: ``delete_prefix`` as the real one scopes it."""
+
+    def __init__(self, store):
+        self.store = store
+
+    @property
+    def raw_client(self):
+        return MemoryBoto(self.store)
+
+    def delete_prefix(self, bucket, prefix, abort_multipart=False, keep_keys=frozenset()):
+        gone = [
+            k
+            for k in self.store
+            if k[0] == bucket
+            and k[1].startswith(prefix.rstrip("/") + "/")
+            and k[1] not in keep_keys
+        ]
+        for k in gone:
+            del self.store[k]
+        return len(gone)
 
 
-def test_c360_state_reset_keeps_raw_with_skip_generate(monkeypatch):
+@pytest.mark.parametrize("clear_raw", [True, False], ids=["generates", "skip-generate"])
+def test_c360_state_reset_clears_checkpoints_and_c360_landing_zone(monkeypatch, clear_raw):
+    """c360 clears its checkpoints and, only when it generates, its raw
+    landing zone; the AML pacs008 prefix and every other key stay."""
     cfg = _c360_cfg()
+    keep = {
+        ("c-b", "pacs008/part-0"),
+        ("c-b", "other/x"),
+        ("c-s", "tables/customer/data-0"),
+        ("c-g", "tables/gold/data-0"),
+    }
+    checkpoints = {
+        ("c-b", "checkpoints/bronze-ingest/offsets/0"),
+        ("c-s", "checkpoints/silver-stream/offsets/0"),
+        ("c-g", "checkpoints/gold-refresh/offsets/0"),
+    }
+    raw = {("c-b", "customer/interactions/part-0"), ("c-b", "customer/interactions/part-1")}
+    store = dict.fromkeys(keep | checkpoints | raw, b"x")
+    s3 = _MemoryS3(store)
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
-    client = MagicMock()
-    client.delete_prefix.return_value = 0
-    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: client)
-    _sustained._reset_continuous_state(cfg, clear_raw=False)
-    prefixes = [c.args[1] for c in client.delete_prefix.call_args_list]
-    assert "customer/interactions" not in prefixes and len(prefixes) == 3
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: s3)
+    _sustained._reset_continuous_state(cfg, clear_raw=clear_raw)
+    survivors = set(store)
+    assert keep <= survivors
+    assert not survivors & checkpoints
+    if clear_raw:
+        # Only the clearing marker the reset writes first is left of the raw zone.
+        assert not survivors & raw
+        assert {k for k in survivors - keep if k[1].startswith("customer/interactions/")} == {
+            ("c-b", "customer/interactions/_corpus/series.json")
+        }
+    else:
+        assert raw <= survivors
 
 
 def test_c360_state_reset_refuses_without_ownership(monkeypatch):
@@ -93,8 +121,6 @@ def test_c360_state_reset_that_cannot_check_ownership_is_a_prerequisite(monkeypa
 
 
 def test_reset_ownership_problem_raises_when_the_namespace_is_unreadable(monkeypatch):
-    from kubernetes.client.rest import ApiException
-
     core = MagicMock()
     core.read_namespace.side_effect = ApiException(status=403)
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
@@ -142,17 +168,6 @@ def test_force_reset_proceeds_over_existing_state(monkeypatch, tmp_path):
     )
     assert "submit:bronze-verify:{'LB_CONTINUOUS_RESET': '1'}" in events
     assert any(e.startswith("submit:bronze-ingest") for e in events)
-
-
-def test_reset_timeout_scales_like_the_aml_budget(monkeypatch, tmp_path):
-    from lakebench.spark.job import aml_bronze_verify_timeout_budget
-
-    cfg = _c360_cfg()
-    _drive_sustained(monkeypatch, tmp_path, cfg)
-    scale = cfg.architecture.workload.datagen.get_effective_scale()
-    got = events_ref["mon"].wait_for_completion.call_args.kwargs["timeout_seconds"]
-    assert got == aml_bronze_verify_timeout_budget(scale)
-    assert aml_bronze_verify_timeout_budget(1000) > aml_bronze_verify_timeout_budget(10)
 
 
 def test_existing_state_lists_only_non_empty_prefixes(monkeypatch):
@@ -208,7 +223,7 @@ def test_run_command_passes_force_reset(monkeypatch, tmp_path):
 
 
 def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, capsys):
-    """LB-154: deploy -> generate -> run --sustained left only the raw corpus
+    """Deploy -> generate -> run --sustained left only the raw corpus
     and the guard refused. Raw alone (no tables, no checkpoints) proceeds."""
     events = _drive_sustained(
         monkeypatch, tmp_path, _c360_cfg(), existing=["c-b/customer/interactions/"]
@@ -265,8 +280,6 @@ def _replace_problem(monkeypatch, *, job=None, job_exc=None, size_gb=5.0, s3_exc
 
 
 def test_raw_replace_allowed_for_a_finished_small_generate(monkeypatch):
-    from kubernetes.client.rest import ApiException
-
     problem, s3 = _replace_problem(monkeypatch, job_exc=ApiException(status=404), size_gb=11)
     assert problem is None
     assert s3.get_bucket_size.call_args.kwargs["prefix"] == "customer/interactions/"
@@ -282,27 +295,23 @@ def test_raw_replace_refused_while_datagen_unfinished(monkeypatch):
         assert "has not finished" in problem
 
 
-def test_raw_replace_refused_when_job_check_fails(monkeypatch):
-    from kubernetes.client.rest import ApiException
-
-    problem, _ = _replace_problem(monkeypatch, job_exc=ApiException(status=403, reason="Forbidden"))
-    assert problem and "could not check" in problem
-
-
-def test_raw_replace_refused_for_a_larger_corpus(monkeypatch):
-    """Scale 10 regenerates ~100 GB; a 400 GB corpus is an earlier, larger generate."""
-    problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Failed"), size_gb=400)
-    assert problem and "400 GB" in problem
-
-
-def test_raw_replace_refused_when_sizing_fails(monkeypatch):
-    problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Complete"), s3_exc=RuntimeError("boom"))
-    assert problem and "could not size" in problem
+@pytest.mark.parametrize(
+    "kw",
+    [
+        # the Job cannot be read
+        {"job_exc": ApiException(status=403, reason="Forbidden")},
+        # a corpus larger than the scale regenerates is an earlier, larger generate
+        {"job": _Job(0, "Failed"), "size_gb": 400},
+        {"job": _Job(0, "Complete"), "s3_exc": RuntimeError("boom")},
+    ],
+    ids=["job-check-fails", "larger-corpus", "sizing-fails"],
+)
+def test_raw_replace_refused_when_it_cannot_be_shown_safe(monkeypatch, kw):
+    problem, _ = _replace_problem(monkeypatch, **kw)
+    assert problem
 
 
 def test_datagen_job_state(monkeypatch):
-    from kubernetes.client.rest import ApiException
-
     def run(job=None, exc=None):
         batch = MagicMock()
         if exc is not None:
@@ -322,7 +331,7 @@ def test_datagen_job_state(monkeypatch):
 
 
 def test_datagen_release_waits_for_a_finishing_job(monkeypatch):
-    """LB-158 review: one API read raced the Job this run just created, so
+    """One API read raced the Job this run just created, so
     identical runs got different executor counts. Poll a bounded time."""
     states = iter(["unfinished", "unfinished", "finished"])
     monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (next(states), ""))

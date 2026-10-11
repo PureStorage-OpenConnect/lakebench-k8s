@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("pyspark")
 
+from lakebench.metrics.stage_profile import parse_stage_profile
+
 # A store that keeps only 3 jobs and 3 stages, so eviction is reachable.
 pytestmark = pytest.mark.spark_static_conf(
     {
@@ -41,10 +43,11 @@ def test_profile_of_one_job(spark_session, load_script, capsys):
     )
     assert isinstance(mark["jobs"], int) and mark["dropped"] == 0, mark
     assert rows and rows[0]["tasks"] >= 1 and rows[0]["max_task_s"] is not None, rows
-    out = capsys.readouterr().out
-    assert "[stage-profile] rule=WX group=g-one stage=" in out
-    assert "truncated=false complete=true lossy=false profile_s=" in out
-    assert "status=COMPLETE" in out
+    parsed, unavailable, _cost = parse_stage_profile(capsys.readouterr().out)
+    assert not unavailable, unavailable
+    stages = parsed["WX"]
+    assert stages and stages[0]["tasks"] >= 1, stages
+    assert all(not r["truncated"] and r["complete"] and not r["lossy"] for r in stages), stages
 
 
 def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, capsys):
@@ -56,5 +59,6 @@ def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, cap
 
     _, rows = _profile(spark_session, common, "g-many", many_jobs)
     assert rows, rows
-    out = capsys.readouterr().out
-    assert "truncated=true" in out and "truncated=false" not in out, out
+    parsed, unavailable, _cost = parse_stage_profile(capsys.readouterr().out)
+    stages = parsed.get("WX") or []
+    assert stages and all(r["truncated"] for r in stages), (parsed, unavailable)

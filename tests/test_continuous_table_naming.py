@@ -15,6 +15,7 @@ import re
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -140,14 +141,44 @@ def test_every_stream_job_env_names_a_defined_catalog(recipe):
         assert _env(manifest)["LB_ICEBERG_CATALOG"] in _spark_catalogs(manifest), (recipe, job)
 
 
-def test_reset_clears_the_path_bronze_ingest_creates(scripts, monkeypatch):
-    """The reset's explicit-location list is the Delta bronze target, and
-    empty for Iceberg (whose DROP ... PURGE removes the files)."""
+class _NamespaceCatalog:
+    """A Spark session whose namespaces each sit in their own bucket."""
+
+    def sql(self, statement):
+        ns = statement.rsplit(" ", 1)[-1].rsplit(".", 1)[-1]
+        return SimpleNamespace(
+            collect=lambda: [
+                {"info_name": "Location", "info_value": f"s3a://lb-{ns}/warehouse/{ns}.db"}
+            ]
+        )
+
+
+def test_reset_clears_the_paths_continuous_tables_can_leave(scripts, monkeypatch):
+    """The reset's explicit-location list is, for Delta + Hive, the bronze
+    target and the managed paths of silver and gold (where a write that
+    never registered leaves a log the stream cannot adopt); empty for
+    Iceberg (whose DROP ... PURGE removes the files)."""
     for recipe in _RECIPES:
         manifest = _manifest(recipe, JobType.BRONZE_VERIFY)
         _use_env(monkeypatch, manifest)
         import bronze_ingest_delta
         import bronze_verify
 
-        got = bronze_verify.continuous_reset_explicit_locations()
-        assert got == ([bronze_ingest_delta.bronze_target()] if "-delta-" in recipe else [])
+        got = bronze_verify.continuous_reset_explicit_locations(_NamespaceCatalog())
+        if "-delta-" not in recipe:
+            assert got == []
+            continue
+        assert got[0] == bronze_ingest_delta.bronze_target()
+        import os
+
+        for ns in ("silver", "gold"):
+            fq = next(t for t, _ in got[1:] if t.split(".")[-2] == ns)
+            name = fq.split(".")[-1]
+            uri = os.environ[f"LB_{ns.upper()}_URI"].rstrip("/") + "/"
+            paths = {loc for t, loc in got if t == fq}
+            # The catalog's managed path, the stream's and the batch build's.
+            assert paths == {
+                f"s3a://lb-{ns}/warehouse/{ns}.db/{name}",
+                f"{uri}warehouse/{name}",
+                f"{uri}warehouse/{ns}.db/{name}",
+            }, (recipe, paths)

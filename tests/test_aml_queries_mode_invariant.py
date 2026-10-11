@@ -13,13 +13,11 @@ against tables laid out the two ways by hand:
   numbered and balanced in arrival order, each micro-batch continuing from
   the account's last stored balance (silver_stream_financial's rule).
 
-Batch answers are unchanged from the previous SQL, continuous answers equal
-the batch ones, and the previous SQL reads the two layouts differently.
+The answers on the continuous layout equal the batch ones.
 """
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -46,32 +44,6 @@ MICRO_BATCHES = [
     [("T11", 1, "S", "A", "50.00"), ("T12", 2, "A", "B", "20.00")],
     [("T21", 20, "A", "B", "10.00"), ("T22", 21, "A", "C", "7.00"), ("T23", 21, "B", "C", "1.00")],
 ]
-
-OLD_FQ4 = """\
-WITH top_accts AS (
-  SELECT account_id
-  FROM {catalog}.{silver_account_statements}
-  GROUP BY account_id
-  ORDER BY COUNT(*) DESC, account_id
-  LIMIT 50
-)
-SELECT
-  s.account_id,
-  s.book_ts,
-  s.cdt_dbt_ind,
-  s.amt,
-  s.bal_after,
-  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts, s.entry_seq) AS entry_ord
-FROM {catalog}.{silver_account_statements} s
-JOIN top_accts t ON t.account_id = s.account_id
-ORDER BY s.account_id, entry_ord"""
-
-OLD_IQ3_HOP2 = """hop2 AS (
-  SELECT h.cp AS via_entity_id, e.target_entity_id AS hop2_entity_id,
-         e.cumulative_amount_usd AS amount_usd
-  FROM {catalog}.{silver_counterparty_edges} e
-  JOIN hop1 h ON e.source_entity_id = h.cp
-),"""
 
 
 def _entries(batch):
@@ -174,9 +146,7 @@ def _sql():
         if q.name == "FQ4_running_balance_window"
     )
     iq3 = next(q.sql for q in INVESTIGATOR_QUERIES if q.name == "IQ3_counterparty_two_hop")
-    old_iq3, n = re.subn(r"hop2 AS \(.*?\n\),", OLD_IQ3_HOP2, iq3, count=1, flags=re.S)
-    assert n == 1
-    return {"FQ4": {"new": fq4, "old": OLD_FQ4}, "IQ3": {"new": iq3, "old": old_iq3}}
+    return {"FQ4": fq4, "IQ3": iq3}
 
 
 def _answer(conn, text, mode):
@@ -193,18 +163,15 @@ def _answer(conn, text, mode):
 
 
 @pytest.mark.parametrize("query", ["FQ4", "IQ3"])
-def test_batch_answer_unchanged_and_continuous_matches_it(conn, query):
+def test_continuous_answer_matches_batch(conn, query):
     sql = _sql()[query]
-    got = {(v, m): _answer(conn, sql[v], m) for v in ("new", "old") for m in ("batch", "stream")}
-    assert got[("new", "batch")], got
-    assert got[("new", "batch")] == got[("old", "batch")]
-    assert got[("new", "stream")] == got[("new", "batch")]
-    # The fixture has the layout difference the previous SQL read.
-    assert got[("old", "stream")] != got[("old", "batch")]
+    batch = _answer(conn, sql, "batch")
+    assert batch
+    assert _answer(conn, sql, "stream") == batch
 
 
 def test_fq4_balances_are_the_ledger_order_ones(conn):
-    rows = _answer(conn, _sql()["FQ4"]["new"], "stream")
+    rows = _answer(conn, _sql()["FQ4"], "stream")
     ia = [r for r in rows if r[0] == "12"]
     # IA: opening 2000, +50 (T11), -20 (T12), +100 (T01), -40 (T02), -30 (T03),
     # -10 (T21), -7 (T22), in book_ts order.

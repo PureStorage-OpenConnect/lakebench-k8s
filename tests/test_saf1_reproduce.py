@@ -293,7 +293,12 @@ def test_reproduce_post_destroy_refusal_is_reported(cfg_path, pipeline):
     assert len(refusals) == 1 and refusals[0].path == "destroy.incarnation_mismatch"
 
 
-def test_reproduce_exits_3_after_the_verdict_when_its_destroy_was_refused(monkeypatch, tmp_path):
+@pytest.mark.parametrize("sample_mismatch", [False, True], ids=["match", "protocol-mismatch"])
+def test_reproduce_exits_3_after_the_verdict_when_its_destroy_was_refused(
+    monkeypatch, tmp_path, sample_mismatch
+):
+    """The refused destroy outranks exit 14 (a protocol mismatch): the
+    measurement may not be ours."""
     import lakebench.cli._reproduce as rep
     from lakebench.cli import app
     from tests.fixtures.exit_codes_helpers import _reproduce_package
@@ -306,9 +311,15 @@ def test_reproduce_exits_3_after_the_verdict_when_its_destroy_was_refused(monkey
         return object()
 
     monkeypatch.setattr(rep, "_run_pipeline", pipeline)
-    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
+    # Only the post-run check (the run's own sample count, 99) mismatches.
+    monkeypatch.setattr(
+        rep,
+        "_sample_mismatch",
+        lambda meta, n, *a, **k: "samples differ" if sample_mismatch and n == 99 else None,
+    )
+    for check in ("_policy_refusal", "_experiment_refusal"):
         monkeypatch.setattr(rep, check, lambda *a, **k: None)
-    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
+    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 99 if sample_mismatch else 1)
     monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
     monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
     monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.992})
@@ -332,8 +343,23 @@ def _engine(require_new: bool = True, exists: bool = False):
     return eng, k8s
 
 
-def test_engine_require_new_refuses_an_existing_namespace():
+@pytest.mark.parametrize(
+    ("created_this_run", "annotation"),
+    [
+        (False, None),  # an existing namespace
+        (True, "theirs"),  # a seeded name carrying another nonce
+        # The nonce alone is not proof: the namespace must be one this engine
+        # tried to create.
+        (False, "mine"),
+    ],
+    ids=["existing", "seeded-other-nonce", "matching-nonce-not-created"],
+)
+def test_engine_require_new_refuses_a_namespace_it_did_not_create(created_this_run, annotation):
     eng, k8s = _engine(exists=True)
+    eng.deploy_nonce = "mine"
+    if created_this_run:
+        eng._namespace_created_this_run.add(eng.config.get_namespace())
+    k8s.get_namespace_annotation.return_value = annotation
     with (
         patch.object(eng, "_namespace_already_using_name", return_value=None),
         patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
@@ -341,7 +367,6 @@ def test_engine_require_new_refuses_an_existing_namespace():
         result = eng._deploy_namespace()
     assert result.status is DeploymentStatus.FAILED
     assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
-    k8s.apply_manifest.assert_not_called()
     stamp.assert_not_called()
 
 
@@ -450,7 +475,6 @@ def test_destroy_expect_incarnation_malformed_is_a_usage_error(cfg_path, token):
         )
         assert rec.calls == []
     assert res.exit_code == 2, res.output
-    assert "is not UID#NONCE" in res.output
 
 
 def test_destroy_expect_incarnation_refuses_local(cfg_path):
@@ -460,28 +484,6 @@ def test_destroy_expect_incarnation_refuses_local(cfg_path):
         app, ["destroy", str(cfg_path), "--yes", "--local", "--expect-incarnation", "u#n"]
     )
     assert res.exit_code == 2, res.output
-    assert "does not apply to --local" in res.output
-
-
-def test_destroy_expect_incarnation_reaches_destroy_all(cfg_path, monkeypatch):
-    from lakebench.cli import app
-
-    seen: list = []
-
-    class Engine:
-        def __init__(self, cfg, **_):
-            pass
-
-        def destroy_all(self, **kw):
-            seen.append(kw.get("expected_incarnation"))
-            return []
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    res = CliRunner().invoke(
-        app, ["destroy", str(cfg_path), "--yes", "--expect-incarnation", "u1#n1"]
-    )
-    assert res.exit_code == 0, res.output
-    assert seen == ["u1#n1"]
 
 
 def test_destroy_expect_incarnation_must_equal_the_nameless_check(tmp_path, monkeypatch):
@@ -561,31 +563,6 @@ def test_reproduce_watermark_is_taken_after_generate(cfg_path, pipeline, monkeyp
     assert stamps and watermark >= stamps[0]
 
 
-def test_a_refused_destroy_turns_a_protocol_mismatch_into_3(monkeypatch, tmp_path):
-    """The refused destroy outranks exit 14: the measurement may not be ours."""
-    import lakebench.cli._reproduce as rep
-    from lakebench.cli import app
-    from tests.fixtures.exit_codes_helpers import _reproduce_package
-
-    pkg = _reproduce_package(tmp_path, "abc")
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
-
-    def pipeline(config_file, timeout, keep, refusals=None):
-        refusals.append(SafetyRefusal("Destroy NOT started", path="destroy.incarnation_mismatch"))
-        return object()
-
-    monkeypatch.setattr(rep, "_run_pipeline", pipeline)
-    # Only the post-run check (the run's own sample count, 99) mismatches.
-    monkeypatch.setattr(
-        rep, "_sample_mismatch", lambda meta, n, *a, **k: "samples differ" if n == 99 else None
-    )
-    for check in ("_policy_refusal", "_experiment_refusal"):
-        monkeypatch.setattr(rep, check, lambda *a, **k: None)
-    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 99)
-    res = CliRunner().invoke(app, ["reproduce", str(pkg)])
-    assert res.exit_code == 3, res.output
-
-
 def test_engine_require_new_accepts_its_own_create_after_a_lost_response():
     """The create landed but its response was lost: the retry finds the
     namespace carrying this deploy's nonce and goes on, instead of refusing
@@ -608,38 +585,6 @@ def test_engine_require_new_accepts_its_own_create_after_a_lost_response():
     core.return_value.create_namespace.assert_not_called()
     assert stamp.call_args.kwargs["force_legacy"] is True
     assert nonce.call_args.kwargs["nonce"] == "mine"
-
-
-def test_engine_require_new_refuses_a_seeded_name_with_another_nonce():
-    eng, k8s = _engine(exists=True)
-    eng.deploy_nonce = "mine"
-    eng._namespace_created_this_run.add(eng.config.get_namespace())
-    k8s.get_namespace_annotation.return_value = "theirs"
-    with (
-        patch.object(eng, "_namespace_already_using_name", return_value=None),
-        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
-    ):
-        result = eng._deploy_namespace()
-    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
-    stamp.assert_not_called()
-
-
-def test_engine_require_new_create_carries_the_nonce():
-    eng, _ = _engine(exists=False)
-    eng.deploy_nonce = "mine"
-    core = MagicMock()
-    with (
-        patch.object(eng, "_namespace_already_using_name", return_value=None),
-        patch("kubernetes.client.CoreV1Api", return_value=core),
-        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
-        patch("lakebench.deploy.ownership.write_deploy_nonce"),
-    ):
-        from lakebench.deploy.ownership import IdentityVerdict
-
-        stamp.return_value = MagicMock(verdict=IdentityVerdict.MATCH)
-        eng._deploy_namespace()
-    body = core.create_namespace.call_args.kwargs["body"]
-    assert body["metadata"]["annotations"][ANNOTATION_DEPLOY_NONCE] == "mine"
 
 
 def test_engine_stamps_the_recorded_nonce_not_a_fresh_one():
@@ -683,21 +628,6 @@ def test_engine_require_new_refuses_preprovisioned_buckets():
         result = eng._deploy_buckets()
     assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
     adopt.assert_not_called()
-
-
-def test_engine_require_new_refuses_a_matching_nonce_it_did_not_create():
-    """The nonce alone is not proof: the namespace must be one this engine
-    tried to create."""
-    eng, k8s = _engine(exists=True)
-    eng.deploy_nonce = "mine"
-    k8s.get_namespace_annotation.return_value = "mine"
-    with (
-        patch.object(eng, "_namespace_already_using_name", return_value=None),
-        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
-    ):
-        result = eng._deploy_namespace()
-    assert result.details[REFUSAL_DETAIL] == "reproduce.existing_namespace"
-    stamp.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

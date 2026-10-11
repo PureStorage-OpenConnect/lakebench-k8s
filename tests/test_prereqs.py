@@ -151,16 +151,25 @@ def test_stackable_crds_without_running_operator_fail():
 
 
 def test_kube_reader_makes_only_reads():
-    """Every API method KubeClusterReader calls is a read (list/read)."""
-    import ast
-    import inspect
+    """Every Kubernetes API method a KubeClusterReader call reaches is a read."""
+    import re
+    from unittest import mock
 
-    tree = ast.parse(inspect.getsource(pr.KubeClusterReader))
+    client = mock.MagicMock()
+    reader = object.__new__(pr.KubeClusterReader)
+    reader._client = client
+    reader._crds = None
+    reader.crd_names()
+    reader.storage_class_names()
+    reader.default_storage_class_names()
+    reader.pvc_storage_class("ns", "pvc")
+    reader.deployments("a=b")
+    reader.deployments("a=b", namespace="ns")
+    reader.running_pod_exists("a=b")
+    reader.cluster_role_exists("role")
+    reader.is_openshift()
     called = {
-        n.func.attr
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        m.group(1) for name, _, _ in client.mock_calls if (m := re.search(r"Api\(\)\.(\w+)$", name))
     }
-    writes = sorted(c for c in called if c.startswith(("create_", "delete_", "patch_", "replace_")))
-    assert writes == []
     assert {"list_custom_resource_definition", "read_cluster_role"} <= called
+    assert [c for c in called if not c.startswith(("list_", "read_", "get_"))] == []

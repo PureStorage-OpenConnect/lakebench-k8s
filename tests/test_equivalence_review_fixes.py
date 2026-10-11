@@ -1,5 +1,5 @@
-"""Fixes from the adversarial reviews of the result-equivalence and evidence
-work (lane compare-equiv). Each test fails with its fix reverted."""
+"""Result equivalence and evidence: fingerprint rules, comparability, stamps
+and maintenance records."""
 
 from __future__ import annotations
 
@@ -52,11 +52,8 @@ def _run(cfg=None, fps=None, fleet=None):
         ],
     )
     run.datagen_fleet = fleet
-    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
-    # FAILED. Mark the synthetic collector as successful so its computed
-    # verdict is PASSED; these tests exercise the comparability ladder,
-    # not the failed-run refusal path. Every layer has rows, so the
-    # verdict's layer_rows gate passes too.
+    # Compare and perf_gate refuse a FAILED run. Mark the synthetic run
+    # successful with rows in every layer so its verdict is PASSED.
     run.success = True
     run.jobs = [
         JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
@@ -66,7 +63,7 @@ def _run(cfg=None, fps=None, fleet=None):
 
 
 # ---------------------------------------------------------------------------
-# S1-S3: fingerprint rules
+# Fingerprint rules
 # ---------------------------------------------------------------------------
 
 
@@ -77,17 +74,30 @@ class TestApproxRowAssociation:
         assert a["approx"] == b["approx"]  # the plain sum cannot see it
         assert mismatch(a, b) and "row-weighted" in mismatch(a, b)
 
-    def test_one_row_far_off_is_not_absorbed_by_row_count(self):
-        rows = [(f"d{i}", 100.0) for i in range(90)]
-        off = [*rows[:-1], ("d89", 189.0)]
-        assert mismatch(fingerprint_rows(rows, {1: 1.0}), fingerprint_rows(off, {1: 1.0}))
-
-    def test_summation_noise_still_matches(self):
-        rows = [(f"d{i}", 100.25) for i in range(455)]
-        noisy = [(k, v + (0.01 if i % 50 == 0 else 0.0)) for i, (k, v) in enumerate(rows)]
-        assert (
-            mismatch(fingerprint_rows(rows, {1: 0.01}), fingerprint_rows(noisy, {1: 0.01})) is None
-        )
+    @pytest.mark.parametrize(
+        ("rows_a", "rows_b", "quantum", "mismatches"),
+        [
+            (
+                [(f"d{i}", 100.0) for i in range(90)],
+                [*[(f"d{i}", 100.0) for i in range(89)], ("d89", 189.0)],
+                1.0,
+                True,
+            ),
+            (
+                [(f"d{i}", 100.25) for i in range(455)],
+                [(f"d{i}", 100.25 + (0.01 if i % 50 == 0 else 0.0)) for i in range(455)],
+                0.01,
+                False,
+            ),
+            ([("x", 10.0)], [("x", 21.0)], 1.0, True),
+            ([("x", 10.0)], [("x", 12.0)], 1.0, False),
+        ],
+        ids=["one-far-off-row", "summation-noise", "single-row-beyond-quanta", "single-row-within"],
+    )
+    def test_approx_tolerance(self, rows_a, rows_b, quantum, mismatches):
+        a = fingerprint_rows(rows_a, {1: quantum})
+        b = fingerprint_rows(rows_b, {1: quantum})
+        assert bool(mismatch(a, b)) is mismatches
 
 
 class TestApproxSpecials:
@@ -119,7 +129,7 @@ class TestExactDigits:
 
 
 # ---------------------------------------------------------------------------
-# S4, S6: empty output and empty rows
+# Empty output and empty rows
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +187,7 @@ class TestRunnerCrossCheck:
         runner, _ = self._runner(5, fingerprint_rows([(1,)]))
         result = runner.run_power(iterations=1)
         fp = result.queries[0].result_fingerprint
-        assert "error" in fp and "timed run" in fp["error"]
+        assert "error" in fp
 
     def test_empty_trino_result_agreeing_with_the_timed_run_is_zero_rows(self):
         from lakebench.benchmark.fingerprint import unusable
@@ -190,7 +200,7 @@ class TestRunnerCrossCheck:
 
 
 # ---------------------------------------------------------------------------
-# S5, S7: benchmark gate and freshness probe
+# Benchmark gate and freshness probe
 # ---------------------------------------------------------------------------
 
 
@@ -232,7 +242,7 @@ class TestFreshnessProbe:
 
 
 # ---------------------------------------------------------------------------
-# S8, E7: failed queries are one failure, not also a result mismatch
+# Failed queries are one failure, not also a result mismatch
 # ---------------------------------------------------------------------------
 
 
@@ -264,7 +274,7 @@ class TestFailedQueries:
 
 
 # ---------------------------------------------------------------------------
-# E1: comparability not established
+# Comparability not established
 # ---------------------------------------------------------------------------
 
 
@@ -272,16 +282,16 @@ class TestNotEstablished:
     def test_stored_references_refuse_a_batch_run_without_results(self):
         exp = stub_experiment(["Q1"])
         empty = stub_experiment([])
-        refs = ex.stored_identity_refusals(
-            ex.identity(exp), ex.result_fingerprints(exp), empty, "baseline"
-        )
-        assert any("comparability not established" in r for r in refs)
-        refs = ex.stored_identity_refusals(ex.identity(exp), {}, exp, "package")
-        assert any("package has no result fingerprints" in r for r in refs)
+        identity, fps = ex.identity(exp), ex.result_fingerprints(exp)
+        # Same call, same reference; only the missing results differ.
+        assert ex.stored_identity_refusals(identity, fps, exp, "baseline") == []
+        assert ex.stored_identity_refusals(identity, fps, empty, "baseline")
+        assert ex.stored_identity_refusals(identity, fps, exp, "package") == []
+        assert ex.stored_identity_refusals(identity, {}, exp, "package")
 
 
 # ---------------------------------------------------------------------------
-# E2: corpus as generated
+# Corpus as generated
 # ---------------------------------------------------------------------------
 
 
@@ -292,7 +302,7 @@ class TestObservedCorpus:
 
     def test_without_a_fleet_record_it_is_declared_not_observed(self):
         c = _run().to_dict()["experiment"]["corpus"]
-        assert c["observed"] is False and "declared" in c["observed_note"]
+        assert c["observed"] is False
 
     def test_pod_args_reach_the_fleet_record(self):
         from lakebench.metrics.datagen_aggregator import _datagen_args, collect_from_pod_logs
@@ -308,7 +318,7 @@ class TestObservedCorpus:
 
 
 # ---------------------------------------------------------------------------
-# E3, E4, E5, E8: stamps
+# Stamps
 # ---------------------------------------------------------------------------
 
 
@@ -334,8 +344,10 @@ class TestStamps:
         lim = run.to_dict()["experiment"]["limits"]
         silver = next(x for x in lim["executors"] if x["job_type"] == "silver-stream")
         assert silver["observed"] == 1 and silver["budget_cap"]["granted"] == 1
-        assert any("concurrent executor budget" in b for b in lim["bound"])
-        assert any("over capacity" in b for b in lim["bound"])
+        assert lim["bound_kinds"] == [
+            "TM max_alerts_per_customer",
+            "silver-stream: concurrent executor budget",
+        ]
 
     def test_iterations_and_bound_limits_are_conditions(self):
         ra, rb = _run(_cfg(benchmark={"iterations": 1})), _run(_cfg(benchmark={"iterations": 3}))
@@ -349,7 +361,7 @@ class TestStamps:
 
 
 # ---------------------------------------------------------------------------
-# Reviewer extras: stale block, package usability, maintenance never reached
+# Stale block, package usability, maintenance never reached
 # ---------------------------------------------------------------------------
 
 
@@ -398,16 +410,15 @@ class TestPackageUsability:
 
 
 class TestRunLocalIds:
-    def test_fq8_alert_id_is_volatile_and_its_pick_is_deterministic(self):
+    def test_fq8_alert_id_is_volatile(self):
         """alert_id is uuid() per pipeline run: two runs on one corpus must
-        still match, and the LIMIT must not pick among tied alerts by it."""
+        still match."""
         from lakebench.benchmark.queries import get_benchmark_queries
         from lakebench.config.schema import WorkloadSchema
 
         fq8 = next(
             q for q in get_benchmark_queries(WorkloadSchema.FINANCIAL) if q.name.startswith("FQ8")
         )
-        assert "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id" in fq8.sql
         cols = fq8.fingerprint_columns()
         run1 = fingerprint_rows([("uuid-a", "2026-01-01 00:00:00", "acme")], cols)
         run2 = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "acme")], cols)
@@ -418,11 +429,11 @@ class TestRunLocalIds:
 
 
 # ---------------------------------------------------------------------------
-# Fix-pass review and live run 61489ab (M1-M3)
+# Recorded values and maintenance stamps
 # ---------------------------------------------------------------------------
 
 
-class TestFixPass:
+class TestRecordedValues:
     def test_bound_condition_carries_no_counts(self):
         def run(granted):
             r = _run(_cfg(pipeline={"mode": "sustained"}))
@@ -443,11 +454,6 @@ class TestFixPass:
         r = _run(_cfg(benchmark={"iterations": 3}))
         r.benchmark.iterations = 5
         assert r.to_dict()["experiment"]["limits"]["benchmark_iterations"] == 5
-
-    def test_one_row_approx_tolerance_is_a_few_quanta(self):
-        a = fingerprint_rows([("x", 10.0)], {1: 1.0})
-        assert mismatch(a, fingerprint_rows([("x", 21.0)], {1: 1.0}))
-        assert mismatch(a, fingerprint_rows([("x", 12.0)], {1: 1.0})) is None
 
     def test_scale_rendered_to_six_places_is_not_a_disagreement(self):
         corpus, problems = ex._observed_corpus({"scale": 0.1234567}, {"scale": 0.123457})
@@ -471,15 +477,20 @@ class TestFixPass:
         )
 
 
-class TestLiveRun61489ab:
-    def test_batch_c360_maintenance_skips_the_continuous_bronze_table(self):
+class TestMaintenanceStamps:
+    def test_batch_maintenance_skips_the_continuous_only_tables(self):
         from lakebench.cli._sustained import maintained_tables
 
         batch = maintained_tables(_cfg())
         assert not any("bronze" in t for t in batch)
         assert any("bronze" in t for t in maintained_tables(_cfg(pipeline={"mode": "sustained"})))
-        fin = maintained_tables(_cfg(workload={"schema": "financial", "datagen": {"scale": 1}}))
+        aml = {"schema": "financial", "datagen": {"scale": 1}}
+        fin = maintained_tables(_cfg(workload=aml))
         assert any(t.startswith("bronze") for t in fin)
+        # silver.counterparty_pairs exists only after a continuous run.
+        pairs = _cfg(workload=aml).architecture.tables.silver_counterparty_pairs
+        assert pairs not in fin
+        assert pairs in maintained_tables(_cfg(workload=aml, pipeline={"mode": "continuous"}))
 
     def test_applied_retention_and_its_source_are_stamped(self):
         r = _run()

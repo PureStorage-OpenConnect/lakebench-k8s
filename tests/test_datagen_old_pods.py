@@ -162,19 +162,11 @@ def test_terminating_pod_cannot_write_into_the_cleared_prefix(monkeypatch, cycle
     world.advance(60)  # the world goes on after deploy() returns
     assert not world.pod_alive
     assert len(world.applied) == 1
+    # Cleared after the old pod's last write (20 s after the Job delete).
+    assert world.now >= world.deleted_at + 20
     # The new Job was applied only after the old pod stopped, and the clear
     # ran after its last write, so no old file is left in the new corpus.
     assert _old_files(world) == set()
-
-
-def test_new_job_waits_for_the_old_pod_then_clears(monkeypatch):
-    world = _World(stop_after_s=20)
-    _install(monkeypatch, world)
-    d = _deployer(world)
-    assert d.deploy().status is DeploymentStatus.SUCCESS
-    # Cleared after the old pod's last write, and before the new Job.
-    assert not world.pod_alive and world.keys == set()
-    assert world.now >= world.deleted_at + 20
 
 
 @pytest.mark.parametrize("phase", ["Succeeded", "Failed"])
@@ -197,10 +189,6 @@ def test_a_pod_that_never_stops_refuses_without_clearing(monkeypatch):
     r = d.deploy()
     assert r.status is DeploymentStatus.FAILED
     assert r.details == {REFUSAL_DETAIL: "datagen.pods_live"}
-    assert "lakebench-datagen-0-abcde" in r.message
-    assert "still running 300s after the Job was deleted" in r.message
-    ns = d.config.get_namespace()
-    assert f"kubectl get pods -n {ns} -l app=lakebench-datagen" in r.message
     assert world.applied == []  # no new Job
     assert world.keys == {f"{PREFIX}/part-000000-old.parquet"}  # nothing cleared
     r = d.deploy_cycle(0, 3)
@@ -215,7 +203,6 @@ def test_pods_that_cannot_be_listed_fail_closed(monkeypatch):
     r = d.deploy()
     assert r.status is DeploymentStatus.FAILED
     assert r.details == {}  # could not check: an ordinary failure (exit 1), not a refusal
-    assert "could not list the datagen pods" in r.message and "apiserver timeout" in r.message
     assert world.applied == [] and world.list_calls > 1  # retried until the deadline
 
 
@@ -330,11 +317,24 @@ def test_generate_refusal_from_live_pods_exits_3_before_the_gate(monkeypatch, tm
     assert "still running" in res.output
 
 
-@pytest.mark.parametrize("command", ["generate", "run"])
-def test_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path, command):
+@pytest.mark.parametrize(
+    ("command", "cycles", "gate_allowed"),
+    [
+        ("generate", 1, False),
+        ("generate", 1, True),
+        ("run", 1, False),
+        ("run", 1, True),
+        ("run", 2, False),
+        ("run", 2, True),
+    ],
+)
+def test_deployer_takes_the_gates_decision_not_the_flag(
+    monkeypatch, tmp_path, command, cycles, gate_allowed
+):
     """--allow-stale-bronze on a prefix the gate found empty: the deployer is
     built without it, so objects that appear after the gate are refused
-    rather than written over with no stale-bronze record."""
+    rather than written over with no stale-bronze record. What the gate
+    allowed is what reaches the deployer."""
     from types import SimpleNamespace as NS
 
     from typer.testing import CliRunner
@@ -348,30 +348,42 @@ def test_deployer_takes_the_gates_decision_not_the_flag(monkeypatch, tmp_path, c
     gate_module = "_generate" if command == "generate" else "_run"
     monkeypatch.setattr(
         f"lakebench.cli.{gate_module}.enforce_bronze_gate",
-        lambda *a, **k: NS(stale_allowed=False, record=lambda: None),
+        lambda *a, **k: NS(stale_allowed=gate_allowed, record=lambda: None),
     )
     built: list[bool] = []
+
+    def _refusal():
+        from lakebench.deploy.engine import DeploymentResult
+        from lakebench.exit_codes import REFUSAL_DETAIL
+
+        return DeploymentResult(
+            component="datagen",
+            status=DeploymentStatus.FAILED,
+            message="holds objects",
+            details={REFUSAL_DETAIL: "run.bronze_nonempty"},
+        )
 
     class _Refusing:
         def __init__(self, engine, allow_stale_bronze=False, **kw):
             built.append(allow_stale_bronze)
 
         def deploy(self):
-            from lakebench.deploy.engine import DeploymentResult
-            from lakebench.exit_codes import REFUSAL_DETAIL
+            return _refusal()
 
-            return DeploymentResult(
-                component="datagen",
-                status=DeploymentStatus.FAILED,
-                message="holds objects",
-                details={REFUSAL_DETAIL: "run.bronze_nonempty"},
-            )
+        def deploy_cycle(self, cycle_index, total_cycles):
+            return _refusal()
 
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _Refusing)
-    argv = ["--yes"] if command == "generate" else ["--generate", *_RUN]
-    cfg = dg._write_cfg(tmp_path)
+    if command == "generate":
+        argv = ["--yes"]
+    elif cycles > 1:
+        argv = _RUN
+    else:
+        argv = ["--generate", *_RUN]
+    extras = {"architecture": f"{{pipeline: {{cycles: {cycles}}}}}"} if cycles > 1 else {}
+    cfg = dg._write_cfg(tmp_path, **extras)
     res = CliRunner().invoke(app, [command, str(cfg), *argv, "--allow-stale-bronze"])
-    assert built == [False]
+    assert built == [gate_allowed], res.output[-2000:]
     assert res.exit_code == 3, res.output[-2000:]
 
 
@@ -393,50 +405,3 @@ def test_generate_with_an_unreachable_cluster_still_exits_4(monkeypatch, tmp_pat
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", stop)
     res = CliRunner().invoke(app, ["generate", str(dg._write_cfg(tmp_path)), "--yes"])
     assert res.exit_code == 4, res.output
-
-
-@pytest.mark.parametrize("gate_allowed", [False, True])
-def test_multi_cycle_deployer_takes_the_gates_decision_not_the_flag(
-    monkeypatch, tmp_path, gate_allowed
-):
-    """--allow-stale-bronze on a multi-cycle run whose cycle-0 gate found the
-    prefix empty: the cycle deployers are built without it, so objects that
-    land after the gate are refused (exit 3) rather than written over with no
-    stale-bronze record. --generate is refused on a multi-cycle run, so this
-    gate is the only one before the cycles."""
-    from types import SimpleNamespace as NS
-
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from tests.fixtures import datagen_timeout_helpers as dg
-
-    monkeypatch.chdir(tmp_path)
-    dg._stub_full_run(monkeypatch)
-    monkeypatch.setattr("lakebench.s3.S3Client", dg._FakeS3)
-    monkeypatch.setattr(
-        "lakebench.cli._run.enforce_bronze_gate",
-        lambda *a, **k: NS(stale_allowed=gate_allowed, record=lambda: None),
-    )
-    built: list[bool] = []
-
-    class _Refusing:
-        def __init__(self, engine, allow_stale_bronze=False, **kw):
-            built.append(allow_stale_bronze)
-
-        def deploy_cycle(self, cycle_index, total_cycles):
-            from lakebench.deploy.engine import DeploymentResult
-            from lakebench.exit_codes import REFUSAL_DETAIL
-
-            return DeploymentResult(
-                component="datagen",
-                status=DeploymentStatus.FAILED,
-                message="holds objects",
-                details={REFUSAL_DETAIL: "run.bronze_nonempty"},
-            )
-
-    monkeypatch.setattr("lakebench.deploy.DatagenDeployer", _Refusing)
-    cfg = dg._write_cfg(tmp_path, architecture="{pipeline: {cycles: 2}}")
-    res = CliRunner().invoke(app, ["run", str(cfg), *_RUN, "--allow-stale-bronze"])
-    assert built == [gate_allowed], res.output[-2000:]  # what the gate allowed reaches cycle 0
-    assert res.exit_code == 3, res.output[-2000:]

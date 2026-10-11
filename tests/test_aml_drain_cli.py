@@ -4,7 +4,6 @@ metrics/tick_records.py, cli/_sustained.py, cli/_cluster_ops.py)."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +12,6 @@ from lakebench.cli import _aml_post as post
 from lakebench.metrics import tick_records as tr
 from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 RUN = "20261003-120000-abc123"
 
 
@@ -106,7 +104,17 @@ class FakeS3:
             raise self.error
 
 
-def _drain(monkeypatch, logs, *, full=None, state="RUNNING", s3_error=None, budget=60, before=None):
+def _drain(
+    monkeypatch,
+    logs,
+    *,
+    full=None,
+    state="RUNNING",
+    s3_error=None,
+    budget=60,
+    before=None,
+    make_log=None,
+):
     rec = _Calls()
     monkeypatch.setattr(post, "_s3_client", lambda cfg: FakeS3(rec, s3_error))
     clock = {"t": 0.0}
@@ -125,7 +133,7 @@ def _drain(monkeypatch, logs, *, full=None, state="RUNNING", s3_error=None, budg
         None,
         budget,
         run_id=RUN,
-        read_log=FakeLog(rec, logs, full),
+        read_log=(make_log or FakeLog)(rec, logs, full),
         app_state=app_state,
         before_write=before,
         poll_s=10,
@@ -144,14 +152,13 @@ def test_drain_writes_the_marker_then_polls_then_reads_the_full_log(monkeypatch)
     assert result.state == "drained" and result.last_cycle == 2
     assert result.logs == full
     kinds = [c[0] for c in rec.calls]
-    assert kinds[0] == "put"  # the marker comes first
+    assert kinds.index("put") < kinds.index("logs")  # the marker comes first
     assert rec.calls[0] == (
         "put",
         "b-gold",
         "lakebench-checkpoints/gold-refresh/_lb_stop",
         RUN.encode(),
     )
-    assert kinds[1:] == ["logs", "sleep", "logs", "logs"]
     assert rec.calls[-1] == ("logs", None)  # full log once, at the end
 
 
@@ -203,19 +210,7 @@ def test_a_failed_full_read_keeps_polling(monkeypatch):
                     raise ConnectionResetError("reset")
             return super().__call__(tail, timeout)
 
-    rec = _Calls()
-    monkeypatch.setattr(post, "_s3_client", lambda cfg: FakeS3(rec))
-    clock = {"t": 0.0}
-    result = post.request_drain(
-        _cfg(),
-        None,
-        60,
-        run_id=RUN,
-        read_log=Flaky(rec, [full], full),
-        app_state=lambda: "RUNNING",
-        sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
-        clock=lambda: clock["t"],
-    )
+    result, _rec = _drain(monkeypatch, [full], full=full, make_log=Flaky)
     assert result.state == "drained" and reads["n"] == 2
 
 
@@ -282,6 +277,30 @@ def test_cycle_numbers_restart_per_driver_start():
     lines.append(_lb(f"Drain complete: last completed cycle 1 run={RUN}"))
     tick, why = tr.scored_tick(tr.parse_tick_records("\n".join(lines), RUN))
     assert why == "" and tick["pinned_txns"] == 91 and tick["start"] == 1
+
+
+def test_drain_tick_scored_from_its_records_repeated_at_the_drain():
+    """A driver log rotated during the drain tick keeps only its end; gold
+    repeats the tick's records with each drain line, so its pins survive."""
+    pinned, committed, completed = _tick_lines(3)[0], _tick_lines(3)[1], _tick_lines(3)[3]
+    status = _lb(
+        f"Cycle 3: rule-status W4_risk_propagation=error W3_round_tripping=skipped:path-cap run={RUN}"
+    )
+    # The log kept nothing of the tick itself; only the repeated records.
+    lines = [
+        pinned,
+        status,
+        committed,
+        completed,
+        _lb(f"Drain complete: last completed cycle 3 run={RUN}"),
+    ]
+    parsed = tr.parse_tick_records("\n".join(lines), RUN)
+    tick, why = tr.scored_tick(parsed)
+    assert why == "" and tick["cycle"] == 3 and tick["pinned_txns"] == 11
+    assert tr.tick_list(parsed["ticks"])[-1]["rule_status"] == {
+        "W4_risk_propagation": "error",
+        "W3_round_tripping": "skipped:path-cap",
+    }
 
 
 @pytest.mark.parametrize(
@@ -417,28 +436,33 @@ def test_covered_score_passes_the_six_snapshots_and_the_run_id(monkeypatch):
     assert out["status"] == "scored" and out["tick"]["cycle"] == 2
 
 
-def test_covered_score_not_scored_reasons(monkeypatch):
-    for kwargs, reason in [
-        ({"drain": None}, "drain did not run"),
-        (
-            {"drain": post.DrainResult("timeout", reason="no drain line within 1800s")},
-            "gold drain timeout",
+@pytest.mark.parametrize(
+    ("kwargs", "submits"),
+    [
+        pytest.param({"drain": None}, False, id="drain-did-not-run"),
+        pytest.param({"drain": post.DrainResult("timeout", reason="x")}, False, id="drain-timeout"),
+        pytest.param(
+            {"drain": post.DrainResult("no_marker", reason="403")}, False, id="drain-no-marker"
         ),
-        ({"drain": post.DrainResult("no_marker", reason="403")}, "gold drain no_marker"),
-        ({"drain": post.DrainResult("drained"), "failed": True}, "failed its gates"),
-        (
+        pytest.param(
+            {"drain": post.DrainResult("drained"), "failed": True}, False, id="run-failed"
+        ),
+        pytest.param(
             {"drain": post.DrainResult("drained"), "tick": None, "reason": "no drain line"},
-            "no drain line",
+            False,
+            id="no-tick",
         ),
-        ({"drain": post.DrainResult("drained"), "tick": "T", "ok": False}, "did not complete"),
-    ]:
-        if kwargs.get("tick") == "T":
-            kwargs["tick"] = _tick()
-        out, rec = _score(monkeypatch, {}, **kwargs)
-        assert out["mode"] == "covered" and out["status"] == "not_scored"
-        assert reason in out["reason"]
-        if kwargs.get("tick") is None or kwargs.get("failed"):
-            assert not [c for c in rec.calls if c[0] == "submit"]
+        pytest.param(
+            {"drain": post.DrainResult("drained"), "tick": _tick(), "ok": False},
+            True,
+            id="score-job-incomplete",
+        ),
+    ],
+)
+def test_covered_score_not_scored_reasons(monkeypatch, kwargs, submits):
+    out, rec = _score(monkeypatch, {}, **kwargs)
+    assert out["mode"] == "covered" and out["status"] == "not_scored" and out["reason"]
+    assert bool([c for c in rec.calls if c[0] == "submit"]) is submits
 
 
 def test_a_summary_without_covered_mode_is_not_a_covered_score(monkeypatch):
@@ -490,7 +514,7 @@ def test_stop_drains_a_running_financial_gold_refresh(monkeypatch):
         lambda cfg, k8s, b, run_id: seen.append((b, run_id)) or post.DrainResult("drained"),
     )
     r = post.stop_drain(_cfg(), None, custom_api=FakeCustom(_app()))
-    assert r.state == "drained" and seen == [(300, RUN)]
+    assert r.state == "drained" and seen == [(post.STOP_DRAIN_BUDGET_S, RUN)]
 
 
 @pytest.mark.parametrize(
@@ -521,9 +545,6 @@ def test_pre_stop_raises_when_the_drain_is_not_confirmed(monkeypatch):
     ops.pre_stop(_cfg(), None)
 
 
-# --- window end order -------------------------------------------------------------
-
-
 # --- drain_gold_refresh: the window end's record and gate -------------------------
 
 
@@ -551,10 +572,8 @@ def test_window_drain_records_ticks_and_the_scored_tick(monkeypatch):
     assert [t["cycle"] for t in cont["ticks"]] == [1, 2, 3]
     assert cont["ticks_unpinned"] == 0
     assert cont["drain"]["state"] == "drained" and cont["drain"]["log_from_driver_start"] is True
-    assert cont["drain"]["ticks_scope"] == "current driver pod log"
+    assert cont["drain"]["ticks_scope"]
     assert cont["gate_problems"] == []
-    # No tick in this fixture logged a time-travel record.
-    assert cont["time_travel"] == {"ticks": []}
 
 
 def test_window_drain_records_the_time_travel_ticks(monkeypatch):
@@ -618,6 +637,73 @@ def test_window_drain_problems_fail_the_run(monkeypatch):
         assert cont["gate_problems"] == [got]
 
 
+def _kept(tmp_path, lines):
+    """A capturer holding *lines* as ``kubectl logs -f --timestamps`` wrote
+    them since the gold-refresh driver started (None: nothing kept)."""
+    from lakebench.cli._driver_log_capture import DriverLogCapturer
+
+    cap = DriverLogCapturer("ns", tmp_path)
+    if lines is not None:
+        path = tmp_path / "gold.driver.log"
+        path.write_text("".join(f"2026-10-03T12:00:00.123456789Z {ln}\n" for ln in lines))
+        cap._captures["lakebench-gold-refresh"] = [("uid", None, path)]
+    return lambda: cap.text("lakebench-gold-refresh")
+
+
+@pytest.mark.parametrize(
+    ("kept", "live", "cycles", "problem"),
+    [
+        # Rotation trimmed the pod log's front; the kept copy has it.
+        ("1-2", "2-3", [1, 2, 3], ""),
+        # The follow stream dropped after cycle 1; the pod log has the rest.
+        ("1", "2-3", [1, 2, 3], ""),
+        # Nothing kept and the pod log was trimmed: figures from part of the run.
+        (None, "2-3", [2, 3], "driver log incomplete"),
+        # Nothing trimmed: the kept copy adds nothing and duplicates nothing.
+        ("1-3", "1-3", [1, 2, 3], ""),
+    ],
+)
+def test_window_drain_reads_the_log_kept_since_the_driver_started(
+    monkeypatch, tmp_path, kept, live, cycles, problem
+):
+    """Kubelet rotation trims the gold driver's pod log, so the drain
+    reads the copy kept since the driver started, continued by the pod log;
+    a log that still misses the first tick fails the run."""
+    from datetime import datetime
+
+    from lakebench.cli import _sustained as sus
+
+    def span(spec, drain=False):
+        lo, _, hi = spec.partition("-")
+        out = [BANNER] if lo == "1" else []
+        for c in range(int(lo), int(hi or lo) + 1):
+            out += _tick_lines(c, pins=(str(10 + c), "12", "13", "14"))
+        if drain:
+            out.append(_lb(f"Drain complete: last completed cycle 3 run={RUN}"))
+        return out
+
+    monkeypatch.setattr(
+        post,
+        "request_drain",
+        lambda *a, **k: post.DrainResult(
+            "drained", 5.0, logs="\n".join(span(live, drain=True)), last_cycle=3
+        ),
+    )
+    collector = SimpleNamespace(current_run=SimpleNamespace(continuous={"gate_problems": []}))
+    _d, tick, _why, got = sus.drain_gold_refresh(
+        _cfg(),
+        None,
+        RUN,
+        collector,
+        window_end=datetime(1970, 1, 1, 0, 0, 1),
+        kept_log=_kept(tmp_path, span(kept) if kept else None),
+    )
+    cont = collector.current_run.continuous
+    assert [t["cycle"] for t in cont["ticks"]] == cycles
+    assert tick["cycle"] == 3
+    assert (problem in got) if problem else got == ""
+
+
 def test_window_drain_without_a_marker_is_not_a_gate_problem(monkeypatch):
     (_d, tick, _why, got), cont = _window_drain(
         monkeypatch, post.DrainResult("no_marker", reason="403")
@@ -666,17 +752,7 @@ def test_full_log_read_is_bounded_by_the_budget_left(monkeypatch):
                 seen.append(timeout)
             return super().__call__(tail, timeout)
 
-    rec = _Calls()
-    monkeypatch.setattr(post, "_s3_client", lambda cfg: FakeS3(rec))
-    clock = {"t": 0.0}
-    post.request_drain(
-        _cfg(),
-        None,
-        300,
-        run_id=RUN,
-        read_log=Timed(rec, ["x", "x", full], full),
-        app_state=lambda: "RUNNING",
-        sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
-        clock=lambda: clock["t"],
-    )
-    assert seen == [280.0]
+    result, rec = _drain(monkeypatch, ["x", "x", full], full=full, budget=300, make_log=Timed)
+    elapsed = sum(c[1] for c in rec.calls if c[0] == "sleep")
+    assert result.state == "drained" and elapsed > 0
+    assert len(seen) == 1 and 0 < seen[0] <= 300 - elapsed

@@ -1,6 +1,7 @@
 """Executed: continuous time to detect counts only newly raised alerts, keys
-them by content (alert_id is a uuid redrawn every tick), and measures each
-from the newest bronze ingest of its related transactions."""
+them by content (alert_id is a uuid redrawn every tick), measures each from
+the newest arrival of its related transactions, and calls it late only when
+all of them were in silver for the previous pass."""
 
 from __future__ import annotations
 
@@ -40,11 +41,19 @@ def _epoch(s):
 
 
 def _txns(spark):
-    # ingest_ts in epoch seconds from 1_000_000.
-    rows = [("t1", 100), ("t2", 160), ("t3", 50), ("t4", 300), ("t5", None)]
+    # ingest_ts in epoch seconds from 1_000_000, and the silver batch each
+    # row came in. t6 landed early but reached silver in a later batch.
+    rows = [
+        ("t1", 100, 1),
+        ("t2", 160, 2),
+        ("t3", 50, 1),
+        ("t4", 300, 3),
+        ("t5", None, 3),
+        ("t6", 90, 3),
+    ]
     return spark.createDataFrame(
-        [(u, _epoch(1_000_000 + s) if s is not None else None) for u, s in rows],
-        "uetr string, ingest_ts timestamp",
+        [(u, _epoch(1_000_000 + s) if s is not None else None, "s", b) for u, s, b in rows],
+        "uetr string, ingest_ts timestamp, _stream_id string, _batch_id long",
     )
 
 
@@ -72,6 +81,9 @@ def test_only_new_content_is_measured_from_its_newest_transaction(spark):
             ("new-uuid-d", "W4_risk_propagation", 4, ["missing"]),
             # Only a transaction with no ingest_ts.
             ("new-uuid-e", "W4_risk_propagation", 5, ["t5"]),
+            # Its evidence landed early but reached silver after the
+            # previous pass: not late.
+            ("new-uuid-f", "W2_structuring", 6, ["t6"]),
         ],
         _ALERTS,
     )
@@ -79,25 +91,28 @@ def test_only_new_content_is_measured_from_its_newest_transaction(spark):
         r["_key"]: r["arrival_ts"]
         for r in new_alert_arrivals(new_alert_txns(current, prior), _txns(spark)).collect()
     }
-    assert len(arrivals) == 4
+    assert len(arrivals) == 5
     # collect() returns naive local times; timestamp() reads them as local.
     got = sorted(v.timestamp() for v in arrivals.values() if v is not None)
-    assert got == [1_000_160, 1_000_300]
+    assert got == [1_000_090, 1_000_160, 1_000_300]
     assert sum(v is None for v in arrivals.values()) == 2
 
-    # Broadcast and shuffled lookups agree. late_before_s = 200: alert c's
-    # newest transaction (160) was in silver before the previous pass.
+    # Broadcast and shuffled lookups agree. The previous pass read up to
+    # batch 2: alert c's evidence (batches 1 and 2) was all in silver then.
     for small in (True, False):
-        arrivals = new_alert_arrivals(new_alert_txns(current, prior), _txns(spark), small=small)
-        stats = ttd_stats(arrivals, 1_000_425.0, late_before_s=1_000_200.0, bin_s=10)
-        # ttd: c = 425 - 160 = 265 -> bin 26; b = 425 - 300 = 125 -> bin 12.
+        arrivals = new_alert_arrivals(
+            new_alert_txns(current, prior), _txns(spark), small=small, seen={"s": 2}
+        )
+        stats = ttd_stats(arrivals, 1_000_425.0, bin_s=10)
+        # ttd: c = 425 - 160 = 265 -> bin 26; b = 425 - 300 = 125 -> bin 12;
+        # f = 425 - 90 = 335 -> bin 33.
         assert stats == {
-            "alerts": 2,
+            "alerts": 3,
             "late": 1,
             "unmatched": 2,
-            "max_s": pytest.approx(265.0),
+            "max_s": pytest.approx(335.0),
             "bin_s": 10,
-            "bins": {12: 1, 26: 1},
+            "bins": {12: 1, 26: 1, 33: 1},
         }
 
 
@@ -148,12 +163,13 @@ def test_each_alert_is_measured_at_its_own_rule_commit(spark):
     }
     from gold_refresh_financial import ttd_detail_lines
 
-    lines = ttd_detail_lines(4, stats)
-    assert (
-        lines[0]
-        == "Cycle 4: time to detect at pass end alerts=3 max=800.0s bin=10s bins=60:1,74:1,80:1"
-    )
-    assert (
-        "Cycle 4: time to detect rule=W4_risk_propagation alerts=1 max=20.0s bin=10s bins=2:1"
-        in lines
-    )
+    from lakebench.metrics.collector import _TTD_DETAIL_LINE
+
+    # The collector's parser reads these lines: what it recovers is what the report shows.
+    parsed = [m for m in map(_TTD_DETAIL_LINE.search, ttd_detail_lines(4, stats)) if m]
+    by_rule = {m["rule"]: m for m in parsed}
+    pass_end = by_rule[None]
+    assert (pass_end["cycle"], pass_end["alerts"], float(pass_end["max"])) == ("4", "3", 800.0)
+    assert pass_end["bins"] == "60:1,74:1,80:1"
+    w4 = by_rule["W4_risk_propagation"]
+    assert (w4["alerts"], float(w4["max"]), w4["bins"]) == ("1", 20.0, "2:1")

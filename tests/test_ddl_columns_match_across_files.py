@@ -1,36 +1,23 @@
-"""H1: DDL sync across silver definitions.
+"""DDL sync across silver definitions.
 
 The silver-table DDLs are declared twice: once for the deployer (creates the
-table on deploy) and once inline in the batch build script (creates the table
-on first run when nothing deployed it). Two copies is a maintenance hazard --
-any new column that lands in one must land in the other or a reused catalog
-falls out of schema between deploy-created and script-created tables. This
-test greps both definitions and asserts column-by-column equality.
-
-Scope: the AML silver tables that both files own --
-transactions, entities, accounts, account_statements, counterparty_edges,
-entity_profiles. Deployer DDL constants live in
-``src/lakebench/deploy/financial_ddl.py``; the batch script's inline DDLs
-live in ``src/lakebench/spark/scripts/silver_build_financial.py``.
-
-Notes for the next diff:
-
-* When B2 lands, ``_stream_id STRING`` is added to ``SILVER_TRANSACTIONS_DDL``
-  and ``SILVER_COUNTERPARTY_EDGES_DDL`` in the deployer and to ``DDL_TXNS``
-  and ``DDL_EDGES`` in the batch script. This test then already passes -- it
-  compares the two files symmetrically, not against a hardcoded list -- so
-  the guard survives B2 without editing.
+table on deploy, ``lakebench.deploy.financial_ddl``) and once inline in the
+batch build script (creates the table on first run when nothing deployed it,
+``silver_build_financial``). A column that lands in one and not the other
+leaves a reused catalog out of schema between deploy-created and
+script-created tables. The two are compared column by column, not against a
+hardcoded list.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
+import sys
+from unittest.mock import MagicMock
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-FINANCIAL_DDL = REPO_ROOT / "src/lakebench/deploy/financial_ddl.py"
-SILVER_BUILD = REPO_ROOT / "src/lakebench/spark/scripts/silver_build_financial.py"
+import pytest
 
+from lakebench.deploy import financial_ddl
 
 # Table pairs to compare: (deployer-constant-name, batch-script-constant-name).
 _PAIRS = (
@@ -40,24 +27,8 @@ _PAIRS = (
     ("SILVER_ACCOUNT_STATEMENTS_DDL", "DDL_STATEMENTS"),
     ("SILVER_COUNTERPARTY_EDGES_DDL", "DDL_EDGES"),
     ("SILVER_ENTITY_PROFILES_DDL", "DDL_PROFILES"),
-    # I10 sealed-batch sidecar: keeps deploy + inline DDLs in lock-step.
     ("SILVER_BATCH_VERSIONS_DDL", "DDL_BATCH_VERSIONS"),
 )
-
-
-_ASSIGN_RE = re.compile(
-    r'^(?P<name>[A-Z_][A-Z0-9_]*)\s*=\s*f?"""(?P<body>.*?)"""',
-    re.MULTILINE | re.DOTALL,
-)
-
-
-def _load_ddls(path: Path) -> dict[str, str]:
-    """Extract triple-quoted DDL string assignments keyed by constant name."""
-    text = path.read_text(encoding="utf-8")
-    out: dict[str, str] = {}
-    for m in _ASSIGN_RE.finditer(text):
-        out[m.group("name")] = m.group("body")
-    return out
 
 
 def _extract_columns(ddl_body: str) -> list[tuple[str, str]]:
@@ -146,39 +117,22 @@ def _extract_columns(ddl_body: str) -> list[tuple[str, str]]:
     return columns
 
 
-def test_silver_ddl_columns_match_across_files():
-    deployer_ddls = _load_ddls(FINANCIAL_DDL)
-    build_ddls = _load_ddls(SILVER_BUILD)
+@pytest.mark.parametrize(("deployer_name", "build_name"), _PAIRS)
+def test_silver_ddl_columns_match_across_files(deployer_name, build_name, monkeypatch, load_script):
+    for mod in (
+        "pyspark",
+        "pyspark.sql",
+        "pyspark.sql.functions",
+        "pyspark.sql.types",
+        "pyspark.sql.window",
+    ):
+        monkeypatch.setitem(sys.modules, mod, MagicMock())
+    build = load_script("silver_build_financial")
 
-    mismatches: list[str] = []
-    for deployer_name, build_name in _PAIRS:
-        assert deployer_name in deployer_ddls, (
-            f"{deployer_name} not found in {FINANCIAL_DDL}; test needs updating."
-        )
-        assert build_name in build_ddls, (
-            f"{build_name} not found in {SILVER_BUILD}; test needs updating."
-        )
-        deployer_cols = _extract_columns(deployer_ddls[deployer_name])
-        build_cols = _extract_columns(build_ddls[build_name])
-        assert deployer_cols, f"{deployer_name} parsed no columns"
-        assert build_cols, f"{build_name} parsed no columns"
-
-        deployer_names = [c[0] for c in deployer_cols]
-        build_names = [c[0] for c in build_cols]
-        if deployer_names != build_names:
-            mismatches.append(
-                f"{deployer_name} vs {build_name}: column set differs.\n"
-                f"  deployer: {deployer_names}\n"
-                f"  build:    {build_names}"
-            )
-            continue
-
-        for (d_name, d_type), (b_name, b_type) in zip(deployer_cols, build_cols, strict=True):
-            # Types compared case-insensitively; whitespace already normalised.
-            if d_type.lower() != b_type.lower():
-                mismatches.append(
-                    f"{deployer_name}.{d_name} type '{d_type}' != "
-                    f"{build_name}.{b_name} type '{b_type}'"
-                )
-
-    assert not mismatches, "DDL column drift:\n" + "\n".join(mismatches)
+    deployer_cols = _extract_columns(getattr(financial_ddl, deployer_name))
+    build_cols = _extract_columns(getattr(build, build_name))
+    assert deployer_cols, f"{deployer_name} parsed no columns"
+    assert build_cols, f"{build_name} parsed no columns"
+    assert [c[0] for c in deployer_cols] == [c[0] for c in build_cols]
+    # Types compared case-insensitively; whitespace already normalised.
+    assert [(n, t.lower()) for n, t in deployer_cols] == [(n, t.lower()) for n, t in build_cols]

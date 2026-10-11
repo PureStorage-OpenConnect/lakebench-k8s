@@ -4,7 +4,7 @@ Maintainer material. Describes the Pushgateway path as shipped in v1.6.
 
 Datagen pods and the Spark pipeline stages are batch jobs that can finish
 inside one Prometheus scrape interval, and the Spark PrometheusServlet is off
-(`spark.ui.enabled=false`, the LB-049 driver-OOM fix), so Prometheus pull
+(`spark.ui.enabled=false`, the driver-OOM fix), so Prometheus pull
 alone gives no live signal for them. Each deployment therefore runs a
 Prometheus Pushgateway that those jobs push to. The Pushgateway is a
 best-effort live view only. `metrics.json`, built from the stdout and stderr
@@ -119,8 +119,8 @@ Batch-stage series are completion-only final totals; panels never apply
 ## Grafana
 
 The Lakebench Overview dashboard (`templates/grafana/dashboard-configmap.yaml.j2`)
-is rendered once into `lakebench-observability`, not per namespace (LB-192:
-a fixed uid rendered per namespace collided in the shared Grafana). It is
+is rendered once into `lakebench-observability`, not per namespace
+(a fixed uid rendered per namespace collided in the shared Grafana). It is
 applied idempotently on every deploy and left in place by `destroy`.
 Template variables `namespace` and `run_id` come from `label_values(...)` on
 `lakebench_stage_elapsed_seconds`. Every Pushgateway panel filters on

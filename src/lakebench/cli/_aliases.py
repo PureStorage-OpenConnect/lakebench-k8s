@@ -120,11 +120,6 @@ REFUSED: dict[str, Refusal] = {
     ),
     "clean metrics": _EVIDENCE,
     "clean journal": _EVIDENCE,
-    "compare": Refusal(
-        "lakebench report RUN_A and lakebench report RUN_B, then read the two reports side by side",
-        "comparing runs is left to the reader, and each report states the data, recipe, "
-        "versions, result fingerprints and caps needed to judge a comparison",
-    ),
 }
 
 _INIT_CREDENTIALS = Refusal(
@@ -221,20 +216,9 @@ def results(
     )
 
 
-def compare(ctx: typer.Context) -> None:
-    """Removed in 1.7: refused with the replacement, whatever it is given."""
-    raise refusal("compare")
-
-
 def register(app: typer.Typer) -> None:
     """Add the top-level aliases and refused commands to *app*, hidden from
     help and the generated reference. The ``admin`` aliases live in
     ``cli/_admin.py`` and ``config upgrade`` in ``cli/_config.py``; both read
     these tables."""
     app.command("results", hidden=True)(results)
-    app.command(
-        "compare",
-        hidden=True,
-        add_help_option=False,
-        context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    )(compare)

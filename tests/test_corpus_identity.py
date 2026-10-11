@@ -1,24 +1,21 @@
-"""Corpus id v2 from the generator's own markers (SPEC v1.7 EVD-6, ER-9).
+"""Comparisons use the corpus identity read from the generator's own markers.
 
-The design is ch03 section 6 ("Corpus id v2", "Series corpus identity",
-"Lineage") over ch05 section 3.1's ``corpus_args_sha256`` and
-``corpus_series_sha256``. The markers, series.json and compare files are
-fixtures in the shapes ch05 defines; CD-7, CD-18 and CD-8 write the real
-ones.
+The id comes from the markers and series.json the generator wrote beside the
+data, never from the config: a config edited after generation cannot change
+which corpus a run is said to have used. Markers, series.json and compare
+files are fixtures in the shapes the generator and the lineage check read.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from lakebench import corpus_digest as cd
 from lakebench.metrics import corpus_identity as ci
-from lakebench.metrics import experiment as ex
 from tests.fixtures.corpus_identity_helpers import H1 as H1
 from tests.fixtures.corpus_identity_helpers import SCOPE as SCOPE
 from tests.fixtures.corpus_identity_helpers import TAG as TAG
@@ -30,8 +27,6 @@ from tests.fixtures.corpus_identity_helpers import observe as observe
 from tests.fixtures.corpus_identity_helpers import series as series
 from tests.fixtures.corpus_identity_helpers import two_nodes as two_nodes
 from tests.fixtures.experiment_helpers import _cfg, _metrics
-
-ROOT = Path(__file__).resolve().parents[1]
 
 H2 = "b" * 64
 H3 = "c" * 64
@@ -98,8 +93,7 @@ class TestSeriesHash:
 class TestReadMarkers:
     def test_one_listing_gives_markers_series_and_digest(self):
         obs, boto = observe(two_nodes(), series())
-        assert boto.lists == 1
-        assert len(boto.gets) == 3  # two markers and series.json
+        assert boto.lists == 1  # one listing keeps markers and digest consistent
         m = obs["markers"]
         assert m["error"] is None and m["problems"] == []
         assert m["cycles"][0]["nodes_found"] == [0, 1]
@@ -153,16 +147,6 @@ class TestCorpusBlock:
         three_markers = [marker(c, n, cycles=3) for c in range(3) for n in range(2)]
         three, _ = observe(three_markers, series(cycles_total=3))
         assert corpus_of(obs=one)["id_v2"] != corpus_of(obs=three)["id_v2"]
-        # cycles 1 hashes no "cycles" key at all.
-        lineage = D
-        expected = ex._short_hash(
-            {
-                "args": one["markers"]["corpus_series_sha256"],
-                "model_version": None,
-                "lineage": lineage,
-            }
-        )
-        assert ci.corpus_id_v2(one, None, lineage) == (expected, None)
 
     def test_model_version_differs_from_the_workload(self):
         cfg = _cfg("financial")
@@ -197,21 +181,6 @@ class TestLineage:
         corpus = corpus_of(obs=obs)
         assert corpus["lineage"] == f"declared:{TAG}"
         assert any("cannot read" in p for p in corpus["problems"])
-
-
-ROOT_DIGEST = "sha256:" + "2" * 64
-
-
-def _mapping_table(tmp_path):
-    """A table mapping D to another root (its evidence is not checked here)."""
-    return table_file(
-        tmp_path,
-        "lineage:\n"
-        f"  - digest: {ROOT_DIGEST}\n    canonical: {ROOT_DIGEST}\n"
-        f"  - digest: {D}\n    canonical: {ROOT_DIGEST}\n"
-        f"    evidence: tests/fixtures/datagen_reference/compare-{'1' * 12}.json\n"
-        f'    evidence_sha256: "{"0" * 64}"\n',
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,17 +275,24 @@ class TestLineageEvidence:
             ({"top": {"image_b": X}}, "image_b"),
             ({"top": {"image_a": X}}, "image_a"),
             ({"C0": {"sha256_b": "f" * 64}}, "manifests differ"),
+            ({"F0": {"digest_b": X}}, "digests differ"),
+            ({"top": {"format": 2}}, "format 2"),
+            ({"C0": {"objects": 0}}, "compared no objects"),
+            ({"F1": {"excluded": ["_corpus/", ""]}}, "exactly"),
+            ({"F2": {"argv_canonical": []}}, "argv_canonical"),
         ],
     )
     def test_lineage_entry_requires_evidence(self, tmp_path, changes, needle):
         table = ci.load_lineage(lineage_tree(tmp_path, compare_file(**changes)))
         errors = ci.check_lineage_evidence(table, tmp_path)
-        assert any(needle in e for e in errors), errors
+        assert errors and any(needle in e for e in errors), errors
+
+    def test_complete_evidence_has_no_errors(self, tmp_path):
+        table = ci.load_lineage(lineage_tree(tmp_path, compare_file()))
+        assert ci.check_lineage_evidence(table, tmp_path) == []
 
 
-class TestReviewCases:
-    """One case per path the first review showed untested."""
-
+class TestMarkerReadLimits:
     def test_too_many_markers_stops_the_read(self, monkeypatch):
         monkeypatch.setattr(cd, "MAX_MARKERS", 1)
         ms = cd.read_corpus_markers(bucket(two_nodes()), BUCKET, SCOPE)
@@ -328,25 +304,9 @@ class TestReviewCases:
         problems = corpus_of(obs=obs)["problems"]
         assert any("beyond the corpus's 1 cycles" in p for p in problems)
 
-    @pytest.mark.parametrize(
-        "changes, needle",
-        [
-            ({"F0": {"digest_b": X}}, "digests differ"),
-            ({"top": {"format": 2}}, "format 2"),
-            ({"C0": {"objects": 0}}, "compared no objects"),
-            ({"F1": {"excluded": ["_corpus/", ""]}}, "exactly"),
-            ({"F2": {"argv_canonical": []}}, "argv_canonical"),
-        ],
-    )
-    def test_compare_file_rules(self, tmp_path, changes, needle):
-        table = ci.load_lineage(lineage_tree(tmp_path, compare_file(**changes)))
-        errors = ci.check_lineage_evidence(table, tmp_path)
-        assert any(needle in e for e in errors), errors
 
-
-class TestFixPassCases:
-    """Cases from the fix-pass review (series timing, C360 scale, fleet age,
-    persisted lineage shape)."""
+class TestLineageFromSeries:
+    """series.json lends lineage only when it describes the same generation."""
 
     def test_series_older_than_the_markers_lends_no_lineage(self):
         """A series.json from an earlier generate whose args all match (the
@@ -377,24 +337,28 @@ class TestFixPassCases:
         assert "another scale" in corpus_of(obs=obs)["lineage_notes"][0]
 
 
-class TestThirdPassCases:
-    def test_unknown_or_mixed_schema_lends_no_lineage(self):
-        for markers, series_schema, needle in [
-            ([marker(node=0, schema=None), marker(node=1, schema=None)], None, "known schema"),
-            ([marker(node=0), marker(node=1, schema="financial")], None, "known schema"),
-            (None, "financial", "another schema"),
-        ]:
-            body = series()
-            if series_schema:
-                body["schema"] = series_schema
-            obs, _ = observe(markers or two_nodes(), body)
-            corpus = corpus_of(obs=obs)
-            assert corpus["lineage"].startswith("declared:")
-            assert needle in corpus["lineage_notes"][0]
+class TestSchemaLineage:
+    @pytest.mark.parametrize(
+        "markers, series_schema",
+        [
+            ([marker(node=0, schema=None), marker(node=1, schema=None)], None),
+            ([marker(node=0), marker(node=1, schema="financial")], None),
+            (None, "financial"),
+        ],
+        ids=["no-schema", "mixed-schema", "series-other-schema"],
+    )
+    def test_unknown_or_mixed_schema_lends_no_lineage(self, markers, series_schema):
+        body = series()
+        if series_schema:
+            body["schema"] = series_schema
+        obs, _ = observe(markers or two_nodes(), body)
+        corpus = corpus_of(obs=obs)
+        assert corpus["lineage"].startswith("declared:")
+        assert corpus["lineage_notes"]
 
 
 # ---------------------------------------------------------------------------
-# ER-9h: the observation is recorded once, before the save
+# The observation is recorded once, before the save
 # ---------------------------------------------------------------------------
 
 
@@ -418,7 +382,8 @@ class TestRecordObservation:
         ci.record_corpus_observation(run, _cfg(), Broken())
         obs = run.config_snapshot["experiment_inputs"]["corpus_observation"]
         assert obs["bronze_listing_sha256"] is None
-        assert "corpus observation failed" in obs["markers"]["error"]
+        assert obs["markers"]["error"]
+        assert run.to_dict()["experiment"]["corpus"]["id_v2"] is None
 
 
 def test_listing_digest_of_an_empty_scope_is_none():

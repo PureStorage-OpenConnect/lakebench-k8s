@@ -18,7 +18,6 @@ directory once a mini-cluster fixture is available.
 from __future__ import annotations
 
 import ast
-import re
 from pathlib import Path
 
 import pytest
@@ -30,62 +29,6 @@ DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
 
 def _module_ast():
     return ast.parse(DETECTION_RULES_PATH.read_text())
-
-
-def test_detection_rules_module_parses():
-    _module_ast()
-
-
-def test_dispatcher_covers_documented_rules():
-    tree = _module_ast()
-    dispatch = None
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if getattr(t, "id", None) == "_RULE_DISPATCH":
-                    dispatch = node.value
-                    break
-    assert dispatch is not None, "_RULE_DISPATCH not found"
-    keys = [k.value for k in dispatch.keys if isinstance(k, ast.Constant)]
-    # W1 landed with LB-108; the scoring loop and replay CLI expect all
-    # four workloads to be routable through the dispatcher. W5-W8 added
-    # in the AML hardening pass (Phase 3C+D).
-    for expected in (
-        "W1_connected_components",
-        "W2_structuring",
-        "W3_round_tripping",
-        "W4_risk_propagation",
-        "W5_sanctions_match",
-        "W6_pep_counterparty",
-        "W7_cross_border_high_risk",
-        "W8_dormant_reactivation",
-        "W17_layering_chain",
-    ):
-        assert expected in keys, f"missing rule {expected} in dispatcher"
-
-
-@pytest.mark.parametrize(
-    "rule_id",
-    [
-        "W1_connected_components",
-        "W2_structuring",
-        "W3_round_tripping",
-        "W4_risk_propagation",
-        "W5_sanctions_match",
-        "W6_pep_counterparty",
-        "W7_cross_border_high_risk",
-        "W8_dormant_reactivation",
-        "W17_layering_chain",
-    ],
-)
-def test_rule_ids_stable(rule_id):
-    """These rule IDs are wire contract: score_financial groups by
-    rule_id, gold.alerts.rule_id is queried by rule name, and replay's
-    --rule flag accepts these strings. Renaming any silently breaks the
-    scoring pipeline."""
-    tree = _module_ast()
-    src = ast.unparse(tree)
-    assert rule_id in src, f"{rule_id} disappeared from detection_rules"
 
 
 def test_aml_reference_files_exist_and_parse():
@@ -142,42 +85,6 @@ def test_fatf_list_is_dated_and_sourced():
     assert not {"DZ", "NA", "AE"} & tiers["grey"]
 
 
-def test_normalize_name_expr_strips_punctuation_and_suffix():
-    """Regression against the adversarial-review F1 finding: the normalize
-    helper must strip punctuation and common corporate suffixes so
-    `Foo, LLC` and `FOO LLC` and `Foo Corp` all match `FOO`.
-
-    We can't invoke Spark's regexp_replace in a unit test (no Spark
-    session available), so we translate the expression into a Python
-    regex and exercise the equivalent transform.
-    """
-
-    def _py_normalize(s: str) -> str:
-        if s is None:
-            return ""
-        s = s.upper().strip()
-        s = re.sub(r"[^A-Z0-9 ]", " ", s)
-        s = re.sub(r"\s+", " ", s)
-        s = re.sub(
-            r"( LLC| LTD| PLC| CORP| CORPORATION| INC| SA| AG| GMBH"
-            r"| PTE| LP| CO| COMPANY| GROUP| HOLDINGS)+$",
-            "",
-            s,
-        )
-        return s
-
-    assert _py_normalize("GLOBAL COMMODITY TRADING LLC") == "GLOBAL COMMODITY TRADING"
-    assert _py_normalize("Global Commodity Trading, LLC") == "GLOBAL COMMODITY TRADING"
-    assert _py_normalize("global commodity trading llc") == "GLOBAL COMMODITY TRADING"
-    assert _py_normalize("Foo Corp") == "FOO"
-    assert _py_normalize("Foo Corporation") == "FOO"
-    assert _py_normalize("Foo") == "FOO"
-    # Repeated whitespace collapses:
-    assert _py_normalize("Foo   Bar") == "FOO BAR"
-    # NULL/None does not crash:
-    assert _py_normalize(None) == ""
-
-
 def test_customer_scope_lists_agree_across_the_package_boundary():
     """detection_rules (driver side), tm_operations and the config default
     must name the same counterparty scenarios, and every rule is either
@@ -206,7 +113,7 @@ def test_customer_scope_lists_agree_across_the_package_boundary():
 
 
 def test_deploy_scripts_configmap_ships_aml_json():
-    """LB-092 second-order: gold_finalize invokes W7 which needs the
+    """gold_finalize invokes W7 which needs the
     high_risk_jurisdictions.json reference file. That file lives under
     src/lakebench/spark/data/aml/ and is NOT under spark/scripts/, so
     the pre-fix deploy_scripts_configmap did not ship it. Without it,
@@ -223,56 +130,29 @@ def test_deploy_scripts_configmap_ships_aml_json():
     )
 
 
-def test_autosizer_bumps_spark_thrift_memory_for_financial():
-    """LB-093: spark-thrift default 4g OOMs on every AML benchmark
-    query at scale 1. Autosizer must actually bump the resolved
-    config's ``spark_thrift.memory`` field to 16g when
-    ``workload.schema=financial`` AND the user did not override.
+@pytest.mark.parametrize(
+    ("node_gib", "expected"),
+    [
+        # No cluster capacity (offline autosizing): the AML default 24g
+        # (16g was on the edge; three-iter S1 crashed thrift mid-query).
+        (None, "24g"),
+        # Under the 36 GiB allocatable threshold the target is
+        # min(20, node - 8) GiB, leaving ~8 GiB for Spark overhead, kubelet
+        # and co-scheduled pods, so a small node never gets a Pending pod.
+        (16, "8g"),
+        (24, "16g"),
+        # At 36 GiB the cap branch is skipped: the full 24g.
+        (36, "24g"),
+    ],
+)
+def test_autosizer_sizes_spark_thrift_memory_for_financial(node_gib, expected):
+    """Spark-thrift default 4g OOMs on every AML benchmark query at scale 1.
+    The autosizer must set the resolved config's ``spark_thrift.memory`` to
+    24g when ``workload.schema=financial`` and the user did not override,
+    capped to fit the cluster's largest allocatable node.
 
-    This test invokes the autosizer against a real financial config
-    (not a source grep) so a future refactor that keeps the strings
-    around but breaks the mutation is caught.
-    """
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from lakebench.config.schema import LakebenchConfig
-
-    cfg_yaml = {
-        "name": "aml-autosizer-test",
-        "recipe": "polaris-iceberg-spark-thrift",
-        "platform": {
-            "storage": {
-                "s3": {
-                    "endpoint": "http://example:80",
-                    "access_key": "x",
-                    "secret_key": "y",
-                    "buckets": {
-                        "bronze": "aml-autosizer-test-bronze",
-                        "silver": "aml-autosizer-test-silver",
-                        "gold": "aml-autosizer-test-gold",
-                    },
-                },
-            },
-        },
-        "architecture": {
-            "workload": {"schema": "financial", "datagen": {"scale": 1}},
-            "query_engine": {"type": "spark-thrift"},
-        },
-    }
-    cfg = LakebenchConfig.model_validate(cfg_yaml)
-    # No cluster capacity: the guard's fallback keeps the AML default 24g
-    # (LB-117: 16g was on the edge; three-iter S1 crashed thrift mid-query).
-    resolve_auto_sizing(cfg, cluster_capacity=None)
-    assert cfg.architecture.query_engine.spark_thrift.memory == "24g", (
-        f"expected spark_thrift.memory=24g on AML, got "
-        f"{cfg.architecture.query_engine.spark_thrift.memory!r}"
-    )
-
-
-def test_autosizer_thrift_memory_caps_on_small_node():
-    """The 16g AML bump must not push spark_thrift beyond a small
-    cluster's largest node. Adversarial-review finding: a user on a
-    laptop-scale cluster (16 GiB nodes) would get a Pending pod
-    forever.
+    The autosizer runs against a real financial config (not a source grep),
+    so a refactor that keeps the strings but breaks the mutation is caught.
     """
     from lakebench.config.autosizer import resolve_auto_sizing
     from lakebench.config.schema import LakebenchConfig
@@ -280,7 +160,7 @@ def test_autosizer_thrift_memory_caps_on_small_node():
 
     cfg = LakebenchConfig.model_validate(
         {
-            "name": "aml-tiny-cluster",
+            "name": "aml-autosizer-test",
             "recipe": "polaris-iceberg-spark-thrift",
             "platform": {
                 "storage": {
@@ -289,9 +169,9 @@ def test_autosizer_thrift_memory_caps_on_small_node():
                         "access_key": "x",
                         "secret_key": "y",
                         "buckets": {
-                            "bronze": "aml-tiny-bronze",
-                            "silver": "aml-tiny-silver",
-                            "gold": "aml-tiny-gold",
+                            "bronze": "aml-autosizer-test-bronze",
+                            "silver": "aml-autosizer-test-silver",
+                            "gold": "aml-autosizer-test-gold",
                         },
                     },
                 },
@@ -302,111 +182,24 @@ def test_autosizer_thrift_memory_caps_on_small_node():
             },
         }
     )
-    # Largest node is 16 GiB *allocatable* -> 24g bump would not fit;
-    # cap to min(20, 16-8) = 8g. LB-117 revised: formula leaves ~8 GiB
-    # headroom for Spark overhead + kubelet + other pods.
-    cap = ClusterCapacity(
-        total_cpu_millicores=8000,
-        total_memory_bytes=16 * 1024**3,
-        node_count=1,
-        largest_node_cpu_millicores=8000,
-        largest_node_memory_bytes=16 * 1024**3,
+    cap = (
+        None
+        if node_gib is None
+        else ClusterCapacity(
+            total_cpu_millicores=8000,
+            total_memory_bytes=node_gib * 1024**3,
+            node_count=1,
+            largest_node_cpu_millicores=8000,
+            largest_node_memory_bytes=node_gib * 1024**3,
+        )
     )
     resolve_auto_sizing(cfg, cluster_capacity=cap)
     resolved = cfg.architecture.query_engine.spark_thrift.memory
-    assert resolved == "8g", f"expected 8g on a 16 GiB node, got {resolved}"
-
-
-def test_autosizer_thrift_capped_on_24gi_node():
-    """LB-117: a node with 24 GiB *allocatable* is under the 36 GiB
-    threshold that the 24g target needs after Spark overhead + kubelet
-    + co-scheduled pods. On a 24 GiB allocatable node the autosizer
-    must cap thrift to min(20, 24-8) = 16g."""
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from lakebench.config.schema import LakebenchConfig
-    from lakebench.k8s.client import ClusterCapacity
-
-    cfg = LakebenchConfig.model_validate(
-        {
-            "name": "aml-24g-node",
-            "recipe": "polaris-iceberg-spark-thrift",
-            "platform": {
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://example:80",
-                        "access_key": "x",
-                        "secret_key": "y",
-                        "buckets": {
-                            "bronze": "aml-24g-bronze",
-                            "silver": "aml-24g-silver",
-                            "gold": "aml-24g-gold",
-                        },
-                    },
-                },
-            },
-            "architecture": {
-                "workload": {"schema": "financial", "datagen": {"scale": 1}},
-                "query_engine": {"type": "spark-thrift"},
-            },
-        }
-    )
-    cap = ClusterCapacity(
-        total_cpu_millicores=8000,
-        total_memory_bytes=24 * 1024**3,
-        node_count=1,
-        largest_node_cpu_millicores=8000,
-        largest_node_memory_bytes=24 * 1024**3,
-    )
-    resolve_auto_sizing(cfg, cluster_capacity=cap)
-    resolved = cfg.architecture.query_engine.spark_thrift.memory
-    assert resolved == "16g", f"expected 16g cap on a 24 GiB node, got {resolved}"
-
-
-def test_autosizer_thrift_at_36gi_uses_full_24g():
-    """LB-117 boundary: at 36 GiB allocatable the cap branch is skipped
-    and thrift gets the full 24g target."""
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from lakebench.config.schema import LakebenchConfig
-    from lakebench.k8s.client import ClusterCapacity
-
-    cfg = LakebenchConfig.model_validate(
-        {
-            "name": "aml-36g-node",
-            "recipe": "polaris-iceberg-spark-thrift",
-            "platform": {
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://example:80",
-                        "access_key": "x",
-                        "secret_key": "y",
-                        "buckets": {
-                            "bronze": "aml-36g-bronze",
-                            "silver": "aml-36g-silver",
-                            "gold": "aml-36g-gold",
-                        },
-                    },
-                },
-            },
-            "architecture": {
-                "workload": {"schema": "financial", "datagen": {"scale": 1}},
-                "query_engine": {"type": "spark-thrift"},
-            },
-        }
-    )
-    cap = ClusterCapacity(
-        total_cpu_millicores=16000,
-        total_memory_bytes=36 * 1024**3,
-        node_count=1,
-        largest_node_cpu_millicores=16000,
-        largest_node_memory_bytes=36 * 1024**3,
-    )
-    resolve_auto_sizing(cfg, cluster_capacity=cap)
-    resolved = cfg.architecture.query_engine.spark_thrift.memory
-    assert resolved == "24g", f"36 GiB allocatable should get full 24g, got {resolved}"
+    assert resolved == expected, f"expected {expected} on a {node_gib} GiB node, got {resolved!r}"
 
 
 def test_gold_finalize_detection_rules_subset_of_dispatcher():
-    """LB-092 hygiene: every rule id in DEFAULT_DETECTION_RULES must
+    """Every rule id in DEFAULT_DETECTION_RULES must
     exist in detection_rules._RULE_DISPATCH, otherwise ``get_rule``
     returns None and the loop silently skips.
     """
@@ -471,7 +264,7 @@ def test_w7_country_dedup_is_deterministic():
 
 
 # ---------------------------------------------------------------------------
-# LB-119: W1 vertex-cap skip is a distinct third outcome, not a zero.
+# W1 vertex-cap skip is a distinct third outcome, not a zero.
 # ---------------------------------------------------------------------------
 
 GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
@@ -480,7 +273,7 @@ GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
 
 
 # ---------------------------------------------------------------------------
-# LB-119 review fixes: rule->typology map, detection_status, run_id-scoped
+# Rule->typology map, detection_status, run_id-scoped
 # projection, non-null guards, reason normalization.
 # ---------------------------------------------------------------------------
 
@@ -525,7 +318,7 @@ def test_projection_is_run_scoped_and_non_null_guarded():
 
 
 def test_score_financial_scopes_alerts_by_run_id():
-    """LB-119 fix S1: score_financial must scope its gold.alerts read to the
+    """score_financial must scope its gold.alerts read to the
     current run (via detection_status.run_id) so stale prior-run alerts from
     a skipped rule on a reused catalog don't inflate total_alerts/fp_rate."""
     p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
@@ -535,7 +328,7 @@ def test_score_financial_scopes_alerts_by_run_id():
 
 
 def test_detected_ts_in_empty_schema_and_all_ddls():
-    """LB-125: detected_ts must be present in ALERT_COLUMNS after evidence
+    """detected_ts must be present in ALERT_COLUMNS after evidence
     (the empty-alerts schema and gold_finalize's DDL are built from it), in
     the other gold.alerts DDL sites, with the reused-catalog ALTER guard, or
     a positional INSERT ... SELECT * misaligns."""

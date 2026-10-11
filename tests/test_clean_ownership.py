@@ -1,15 +1,14 @@
-"""`lakebench clean` ownership and confirmation regressions (2026-09-24 audit).
+"""`lakebench clean` ownership and confirmation.
 
-1. On a backend without bucket tagging (FlashBlade) every bucket reports
-   UNSUPPORTED, and clean fell straight through to empty_bucket with no name
-   check. It must apply the same longest-prefix rule destroy uses, and refuse
-   when that cannot be checked.
-2. Answering "no" to the running-jobs prompt was swallowed (click.Abort is a
-   RuntimeError caught by a broad except), so the clean went ahead.
+- On a backend without bucket tagging (FlashBlade) every bucket reports
+  UNSUPPORTED. Clean must apply destroy's longest-prefix name rule and refuse
+  when that cannot be checked.
+- Declining the running-jobs prompt aborts the clean.
 """
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,19 +16,7 @@ import click
 import pytest
 import typer
 
-CFG = (
-    "name: my-clean\n"
-    "platform:\n"
-    "  storage:\n"
-    "    s3:\n"
-    "      endpoint: http://minio:9000\n"
-    "      access_key: k\n"
-    "      secret_key: s\n"
-    "      buckets:\n"
-    "        bronze: my-clean-bronze\n"
-    "        silver: my-clean-silver\n"
-    "        gold: my-clean-gold\n"
-)
+from tests.fixtures.clean_helpers import CFG, verified_namespace
 
 
 def _cfg(tmp_path: Path) -> Path:
@@ -57,28 +44,11 @@ def _s3():
 
 
 def _verified_namespace():
-    """Patches that make the deployment's namespace present and verified,
-    so these tests exercise the bucket-level checks after the gate."""
-    from contextlib import ExitStack
-
-    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
-
+    """A present, verified namespace and no engine pod: clean empties the
+    buckets and leaves the catalog, with a warning (tests/test_clean_unregister.py
+    covers the unregister step)."""
     stack = ExitStack()
-    stack.enter_context(patch("kubernetes.client.CoreV1Api"))
-    stack.enter_context(
-        patch(
-            "lakebench.deploy.ownership.verify_namespace_identity",
-            return_value=IdentityReport(
-                verdict=IdentityVerdict.MATCH,
-                resource_name="lakebench",
-                expected_deployment="my-clean",
-                hint="",
-            ),
-        )
-    )
-    stack.enter_context(patch("lakebench.deploy.ownership.build_identity_from_config"))
-    # No engine pod: clean empties the buckets and leaves the catalog, with a
-    # warning (tests/test_clean_unregister.py covers the unregister step).
+    stack.enter_context(verified_namespace())
     stack.enter_context(
         patch(
             "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
@@ -156,12 +126,15 @@ def test_declining_running_jobs_prompt_aborts(s3_cls, verify, batch, _crd, _k8s,
     s3_cls.return_value = s3
     batch.return_value.read_namespaced_job.return_value.status.active = 2
 
-    # Answer yes to the general "are you sure" prompt and no to the
-    # running-jobs prompt, so the test exercises the latter.
-    def _confirm(text, *a, **k):
-        if "still writing" in text.lower() or "running" in text.lower():
-            raise click.Abort()
-        return True
+    # The first prompt (are you sure) is answered yes; the next one, about
+    # running jobs, is declined.
+    answers = iter([True])
+
+    def _confirm(*_a, **_k):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise click.Abort() from None
 
     with patch("typer.confirm", side_effect=_confirm):
         with pytest.raises(click.Abort):

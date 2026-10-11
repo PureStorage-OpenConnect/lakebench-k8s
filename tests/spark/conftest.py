@@ -4,12 +4,11 @@ missing jar, one Spark session per module and one way to run a Spark child.
 Jars come from ``LB_SPARK_TEST_JARS`` (comma-separated jar files). A test
 that needs one says so with ``@pytest.mark.requires_jars("iceberg")`` (or
 ``"delta"``, or both); without the jar it skips with a reason starting
-``LB-JARS missing:``.
+``LB-JARS missing:``, and with ``LB_REQUIRE_JARS=1`` (``make test-spark``)
+it fails instead, so a release run cannot pass on skips.
 
-CI runs one PySpark line (4.1.1 forward) in two shards via
-``pytest-xdist --dist loadfile``, so each file runs in its own worker and
-its own JVM. The shard splitter, leak detector, reverse-order mode and
-known-bug machinery that lived here are all gone.
+CI does not run this tier; run it locally with ``make test-spark`` on each
+supported PySpark line.
 """
 
 from __future__ import annotations
@@ -62,20 +61,37 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     for mark in item.iter_markers("requires_jars"):
         missing = [k for k in mark.args if not _has(k)]
         if missing:
-            pytest.skip(f"{SKIP_PREFIX} {','.join(missing)}")
+            reason = f"{SKIP_PREFIX} {','.join(missing)}"
+            if os.environ.get("LB_REQUIRE_JARS") == "1":
+                pytest.fail(f"{reason} (LB_REQUIRE_JARS=1)")
+            pytest.skip(reason)
 
 
 def _module_jar_kinds(request: pytest.FixtureRequest) -> set[str]:
+    """Jar kinds named by any ``requires_jars`` mark in the requesting module
+    (module level or on a test), so one session serves the whole module."""
     kinds: set[str] = set()
-    for item in (
-        request.node.iter_markers("requires_jars") if hasattr(request.node, "iter_markers") else []
-    ):
-        kinds.update(item.args)
-    for item in getattr(request, "session", request).items if hasattr(request, "session") else []:
-        if item.module is request.module:
+    for item in request.session.items:
+        if getattr(item, "module", None) is request.module:
             for mark in item.iter_markers("requires_jars"):
                 kinds.update(mark.args)
     return kinds
+
+
+@pytest.fixture(scope="module")
+def spark() -> Iterator[Any]:
+    """A plain local session for tests that need no jars."""
+    from pyspark.sql import SparkSession
+
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    s = (
+        SparkSession.builder.master("local[1]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
+    yield s
+    s.stop()
 
 
 @pytest.fixture(scope="module")
@@ -121,16 +137,11 @@ def spark_session(
 
 
 class _SparkJars:
-    """The jar list currently on the classpath. ``classpath`` is a comma-joined
-    string suitable for ``--jars`` or ``spark.jars``, so a child process can be
-    given the same classpath as this session."""
+    """``classpath`` is the comma-joined jar list, for ``--jars``, ``spark.jars``
+    or a child process that must see the same jars as this session."""
 
     def __init__(self, jars: list[Path]) -> None:
-        self.jars = jars
         self.classpath = ",".join(str(j) for j in jars)
-
-    def has(self, kind: str) -> bool:
-        return any(kind in j.name.lower() for j in self.jars)
 
 
 @pytest.fixture(scope="session")

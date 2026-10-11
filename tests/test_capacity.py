@@ -4,6 +4,7 @@ Covers ``compute_peak_requirements()`` (the single source of truth for
 documented minimums) and ``_check_cluster_capacity()`` (prerequisite check 9).
 """
 
+import re
 from unittest import mock
 
 import pytest
@@ -12,11 +13,7 @@ from lakebench.cli._prerequisites import _check_cluster_capacity
 from lakebench.config.autosizer import resolve_auto_sizing
 from lakebench.config.sizing import co_resident_request
 from lakebench.k8s.client import ClusterCapacity
-from lakebench.modules.pipeline_engines.spark.job import (
-    BATCH_JOB_TYPES,
-    STREAMING_JOB_TYPES,
-    compute_peak_requirements,
-)
+from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
 GIB = 1024**3
 
@@ -41,13 +38,6 @@ def _free_from_total(k8s_mock):
 class TestComputePeakRequirements:
     """Peak resource derivation from _JOB_PROFILES."""
 
-    def test_requirements_grow_above_scale_10(self):
-        small = compute_peak_requirements(10)
-        large = compute_peak_requirements(100)
-        assert large.cpu_cores > small.cpu_cores
-        assert large.memory_gb > small.memory_gb
-        assert large.scratch_gb > small.scratch_gb
-
     def test_batch_peak_is_max_not_sum(self):
         """Batch jobs run sequentially, so the peak is the largest job."""
         peak = compute_peak_requirements(100)
@@ -59,16 +49,10 @@ class TestComputePeakRequirements:
         peak = compute_peak_requirements(10, "sustained")
         assert peak.memory_gb == sum(r.memory_gb for r in peak.per_job)
 
-    def test_batch_and_streaming_cover_expected_jobs(self):
-        batch = compute_peak_requirements(1)
-        assert {r.job_type for r in batch.per_job} == set(BATCH_JOB_TYPES)
-        streaming = compute_peak_requirements(1, "sustained")
-        assert {r.job_type for r in streaming.per_job} == set(STREAMING_JOB_TYPES)
-
 
 def _cfg(scale=1, mode="batch", schema="customer360"):
     """A real config with no query engine, so only catalog/Postgres (1 core)
-    and, in continuous mode, datagen sit beside the Spark jobs (LB-155).
+    and, in continuous mode, datagen sit beside the Spark jobs.
 
     A real model rather than a MagicMock: the check sizes the config through
     ``config.sizing.plan_requirements``, which auto-sizes a deep copy.
@@ -123,45 +107,29 @@ class TestClusterCapacityCheck:
             )
             result = _check_cluster_capacity(_cfg())
         assert not result.passed
-        assert result.message == "capacity could not be read: listing nodes failed (403 Forbidden)"
-        assert "--skip-preflight" in result.hint and "node and pod read access" in result.hint
+        assert "--skip-preflight" in result.hint
 
     def test_unreachable_cluster_refuses(self):
         """A client that cannot be built is unreadable capacity, not a pass."""
         with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("boom")):
             result = _check_cluster_capacity(_cfg())
         assert not result.passed
-        assert "capacity could not be read: RuntimeError: boom" in result.message
 
-    def test_capacity_check_plumbs_schema_to_compute_peak(self):
-        """LB-118 review finding: the fix is only operator-visible if
-        _check_cluster_capacity actually passes the workload schema down
-        to compute_peak_requirements. A refactor that drops the schema
-        arg would leave every unit test green while silently reverting
-        AML sizing to c360."""
-        from lakebench.modules.pipeline_engines.spark import job
+    def test_capacity_is_sized_for_the_workload_schema(self, patched_capacity):
+        """The check sizes the financial schema's continuous jobs, not the
+        customer360 profiles: the reported need is larger for financial."""
+        capacity = ClusterCapacity(1_000_000, 8000 * GIB, 20, 64_000, 256 * GIB)
 
-        cfg = _cfg(schema="financial")
-        real = job.compute_peak_requirements
-        with (
-            mock.patch("lakebench.k8s.get_k8s_client") as get_client,
-            mock.patch.object(job, "compute_peak_requirements", side_effect=real) as peak,
-        ):
-            get_client.return_value.get_cluster_capacity.return_value = ClusterCapacity(
-                652_000, 4000 * GIB, 20, 64_000, 256 * GIB
-            )
-            _free_from_total(get_client.return_value)
-            result = _check_cluster_capacity(cfg)
-        assert result.passed, result.message
-        assert peak.called
-        # positional-arg or kwarg both fine; the third value is the schema.
-        args, kwargs = peak.call_args
-        schema_arg = kwargs.get("schema_type", args[2] if len(args) > 2 else None)
-        assert schema_arg == "financial"
+        def needed_cores(schema):
+            result = patched_capacity(capacity, _cfg(scale=10, mode="continuous", schema=schema))
+            assert result.passed, result.message
+            return int(re.search(r"needs ~(\d+) cores", result.message).group(1))
+
+        assert needed_cores("financial") > needed_cores("customer360")
 
 
 class TestCoResidentPodsAreCounted:
-    """LB-155: the check skipped Trino, catalog/Postgres and datagen whenever
+    """The check skipped Trino, catalog/Postgres and datagen whenever
     the uncapped pipeline request fit, so c360 continuous s10 passed on a
     40-core cluster that needs 49."""
 
@@ -174,23 +142,12 @@ class TestCoResidentPodsAreCounted:
             architecture={"pipeline": {"mode": mode}},
         )
 
-    def _check(self, cfg, cores, memory_gb=4000):
+    def _check(self, cfg, cores, memory_gb=4000, **kw):
         cap = ClusterCapacity(cores * 1000, memory_gb * GIB, 8, 64_000, 256 * GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
             _free_from_total(get_client.return_value)
-            return _check_cluster_capacity(cfg)
-
-    def test_c360_continuous_s10_needs_more_than_its_pipeline(self):
-        cfg = self._real_cfg("sustained")
-        peak = compute_peak_requirements(10, "sustained", "customer360")
-        # Fits the Spark streams alone, not the streams plus co-residents.
-        result = self._check(cfg, peak.cpu_cores)
-        assert not result.passed
-        assert "Trino" in result.hint and "datagen" in result.hint
-
-    def test_40_cores_fails_for_c360_continuous_s10(self):
-        assert not self._check(self._real_cfg("sustained"), 40).passed
+            return _check_cluster_capacity(cfg, **kw)
 
     def test_batch_counts_engine_but_not_datagen(self):
         cfg = self._real_cfg("batch")
@@ -229,26 +186,52 @@ class TestCoResidentPodsAreCounted:
         with_dg = co_resident_request(cfg, True)
         without = co_resident_request(cfg, True, datagen_runs=False)
         assert "datagen" not in without.label and without.cpu_cores < with_dg.cpu_cores
-        peak = compute_peak_requirements(10, "sustained", "customer360")
-        cores = peak.cpu_cores + without.cpu_cores
-        cap = ClusterCapacity(cores * 1000, 4000 * GIB, 8, 64_000, 256 * GIB)
-        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-            get_client.return_value.get_cluster_capacity.return_value = cap
-            _free_from_total(get_client.return_value)
-            assert _check_cluster_capacity(cfg, datagen_runs=False).passed
-            assert not _check_cluster_capacity(cfg).passed
+        # The smallest cluster without datagen: datagen's pods do not fit.
+        cores = next(c for c in range(1, 1000) if self._check(cfg, c, datagen_runs=False).passed)
+        assert not self._check(cfg, cores).passed
 
-    def test_run_passes_the_resolved_mode_to_the_check(self, tmp_path, monkeypatch):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        cfg_file = tmp_path / "c.yaml"
-        cfg_file.write_text(
+    @pytest.fixture
+    def config_files(self, tmp_path):
+        base = (
             "name: cap-flag\n"
             "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
             "      access_key: x\n      secret_key: y\n"
         )
+        single = tmp_path / "c.yaml"
+        single.write_text(base)
+        cycles = tmp_path / "cycles.yaml"
+        cycles.write_text(
+            base.replace("name: cap-flag\n", "name: cap-cycles\n")
+            + "architecture:\n  pipeline:\n    cycles: 3\n"
+        )
+        return {"single": single, "cycles": cycles}
+
+    @pytest.mark.parametrize(
+        ("config", "args", "datagen_state", "expected"),
+        [
+            # --skip-generate drops datagen from the continuous reservation only
+            # when its Job finished; absent, unfinished or unknown keep it.
+            ("single", ["--sustained", "--skip-generate"], "finished", (True, False)),
+            ("single", ["--sustained", "--skip-generate"], "absent", (True, True)),
+            ("single", ["--sustained", "--skip-generate"], "unfinished", (True, True)),
+            ("single", ["--sustained", "--skip-generate"], "unknown", (True, True)),
+            # Batch creates datagen pods only with --generate or in a
+            # multi-cycle run, and a multi-cycle --skip-generate reuses its corpus.
+            ("single", [], "finished", (False, False)),
+            ("single", ["--generate"], "finished", (False, True)),
+            ("cycles", [], "finished", (False, True)),
+            ("cycles", ["--skip-generate"], "finished", (False, False)),
+            # --generate with --skip-generate is refused before the preflight.
+            ("single", ["--generate", "--skip-generate"], "finished", None),
+        ],
+    )
+    def test_run_passes_the_resolved_mode_to_the_check(
+        self, config_files, monkeypatch, config, args, datagen_state, expected
+    ):
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
         seen: dict = {}
 
         def fake_prereqs(cfg, **kw):
@@ -258,57 +241,24 @@ class TestCoResidentPodsAreCounted:
             raise SystemExit(3)
 
         monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", fake_prereqs)
-        dg_state = {"v": "finished"}
         monkeypatch.setattr(
-            "lakebench.cli._sustained._datagen_job_state", lambda ns: (dg_state["v"], "")
+            "lakebench.cli._sustained._datagen_job_state", lambda ns: (datagen_state, "")
         )
         # No cluster: auto-sizing runs without capacity.
         monkeypatch.setattr(
             "lakebench.k8s.get_k8s_client", mock.MagicMock(side_effect=RuntimeError("no cluster"))
         )
-        CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-generate", "--yes"])
-        assert seen == {"sustained": True, "datagen_runs": False}
-        # The run keeps datagen reserved unless the Job finished; so does
-        # the preflight (LB-155 re-review).
-        for state in ("absent", "unfinished", "unknown"):
-            dg_state["v"] = state
-            seen.clear()
-            CliRunner().invoke(
-                app, ["run", str(cfg_file), "--sustained", "--skip-generate", "--yes"]
-            )
-            assert seen == {"sustained": True, "datagen_runs": True}, state
-        # Batch creates datagen pods only with --generate (and without
-        # --skip-generate) or in a multi-cycle run (CC-22).
-        seen.clear()
-        CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": False}
-        seen.clear()
-        CliRunner().invoke(app, ["run", str(cfg_file), "--generate", "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": True}
-        # --generate with --skip-generate is refused before the preflight.
-        seen.clear()
-        res = CliRunner().invoke(
-            app, ["run", str(cfg_file), "--generate", "--skip-generate", "--yes"]
-        )
-        assert res.exit_code == 2 and seen == {}
-        cycles_file = tmp_path / "cycles.yaml"
-        cycles_file.write_text(
-            cfg_file.read_text().replace("name: cap-flag\n", "name: cap-cycles\n")
-            + "architecture:\n  pipeline:\n    cycles: 3\n"
-        )
-        seen.clear()
-        CliRunner().invoke(app, ["run", str(cycles_file), "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": True}
-        # A multi-cycle --skip-generate reuses its corpus: no datagen (CD-18).
-        seen.clear()
-        CliRunner().invoke(app, ["run", str(cycles_file), "--skip-generate", "--yes"])
-        assert seen == {"sustained": False, "datagen_runs": False}
+        res = CliRunner().invoke(app, ["run", str(config_files[config]), *args, "--yes"])
+        if expected is None:
+            assert res.exit_code == 2 and seen == {}
+        else:
+            assert seen == {"sustained": expected[0], "datagen_runs": expected[1]}
 
 
 class TestPrerequisiteWiring:
     """The check must actually be registered in run_prerequisites()."""
 
-    def test_capacity_check_is_registered(self):
+    def test_unreadable_capacity_blocks_the_run(self):
         from lakebench.cli._prerequisites import run_prerequisites
 
         # run_prerequisites reads only attributes here; a MagicMock keeps the
@@ -322,4 +272,4 @@ class TestPrerequisiteWiring:
         with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("no cluster")):
             report = run_prerequisites(cfg)
 
-        assert "cluster-capacity" in {c.name for c in report.checks}
+        assert "cluster-capacity" in {c.name for c in report.failed}

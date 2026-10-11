@@ -219,20 +219,20 @@ def test_bad_checksum_exits_nonzero(release, make_env):
     assert list(env.tmpdir.iterdir()) == []
 
 
-def test_missing_sha256sums_on_a_1_7_or_later_release_is_refused(release, make_env):
-    for version in ["v1.7.0", "1.7.1", "v1.10.0", "2.0.0", "v7", "vnext"]:
-        rel, _ = release
-        rel.tag = "v" + version.removeprefix("v")
-        rel.assets["lakebench-linux-amd64"] = FAKE_BINARY  # no SHA256SUMS
-        env = make_env()
-        env.vars["VERSION"] = version
+@pytest.mark.parametrize("version", ["v1.7.0", "1.7.1", "v1.10.0", "2.0.0", "v7", "vnext"])
+def test_missing_sha256sums_on_a_1_7_or_later_release_is_refused(release, make_env, version):
+    rel, _ = release
+    rel.tag = "v" + version.removeprefix("v")
+    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY  # no SHA256SUMS
+    env = make_env()
+    env.vars["VERSION"] = version
 
-        result = _run(env)
+    result = _run(env)
 
-        assert result.returncode != 0
-        assert "has no SHA256SUMS; refusing" in result.stderr
-        assert "UNVERIFIED" not in result.stderr
-        assert list(env.install_dir.iterdir()) == []
+    assert result.returncode != 0
+    assert "has no SHA256SUMS; refusing" in result.stderr
+    assert "UNVERIFIED" not in result.stderr
+    assert list(env.install_dir.iterdir()) == []
 
 
 def test_pre_1_7_release_with_sha256sums_is_still_checked(release, make_env):
@@ -250,19 +250,23 @@ def test_pre_1_7_release_with_sha256sums_is_still_checked(release, make_env):
     assert list(env.install_dir.iterdir()) == []
 
 
-def test_pre_1_7_release_with_a_failing_sha256sums_fetch_is_refused(release, make_env):
-    # Only a 404 means "no SHA256SUMS"; a server error is not a reason to skip the check.
+@pytest.mark.parametrize(("status", "shown"), [(500, "HTTP 500"), (0, "HTTP 000")])
+def test_pre_1_7_release_with_a_failing_sha256sums_fetch_is_refused(
+    release, make_env, status, shown
+):
+    # Only a 404 means "no SHA256SUMS"; a server error or a dropped connection
+    # is not a reason to skip the check.
     rel, _ = release
     rel.tag = "v1.6.0"
     rel.assets["lakebench-linux-amd64"] = FAKE_BINARY
-    rel.status["SHA256SUMS"] = 500
+    rel.status["SHA256SUMS"] = status
     env = make_env()
     env.vars["VERSION"] = "1.6.0"
 
     result = _run(env)
 
     assert result.returncode != 0
-    assert "HTTP 500" in result.stderr
+    assert shown in result.stderr
     assert "UNVERIFIED" not in result.stderr
     assert list(env.install_dir.iterdir()) == []
 
@@ -286,8 +290,23 @@ def test_truncated_script_runs_nothing(release, make_env):
     _publish(rel, **{"lakebench-linux-amd64": FAKE_BINARY})
     env = make_env()
     script = INSTALL_SH.read_bytes()
-    cuts = [i + 1 for i, byte in enumerate(script) if byte == ord("\n")][:-1]
-    assert len(cuts) > 50
+    ends = [i + 1 for i, byte in enumerate(script) if byte == ord("\n")][:-1]
+    # Cut at every fifth line, and on both sides of each line that fetches,
+    # moves or runs something.
+    risky = (b"curl", b"mv ", b"cp ", b"install", b"chmod", b"exec", b"main")
+    lines = script.split(b"\n")
+    starts = [0, *ends]
+    cuts = sorted(
+        {c for n, c in enumerate(ends) if n % 5 == 0}
+        | {
+            starts[n + k]
+            for n, line in enumerate(lines[:-1])
+            if any(w in line for w in risky)
+            for k in (0, 1)
+            if n + k < len(starts) and 0 < starts[n + k] < len(script)
+        }
+        | set(ends[-1:])
+    )
 
     for cut in cuts:
         _run(env, script[:cut])
@@ -316,22 +335,6 @@ def test_shasum_is_used_when_sha256sum_is_absent(release, make_env):
     result = _run(env)
     assert result.returncode != 0
     assert "checksum mismatch" in result.stderr
-    assert list(env.install_dir.iterdir()) == []
-
-
-def test_pre_1_7_release_with_an_unreachable_sha256sums_is_refused(release, make_env):
-    rel, _ = release
-    rel.tag = "v1.6.0"
-    rel.assets["lakebench-linux-amd64"] = FAKE_BINARY
-    rel.status["SHA256SUMS"] = 0
-    env = make_env()
-    env.vars["VERSION"] = "1.6.0"
-
-    result = _run(env)
-
-    assert result.returncode != 0
-    assert "HTTP 000" in result.stderr
-    assert "UNVERIFIED" not in result.stderr
     assert list(env.install_dir.iterdir()) == []
 
 

@@ -58,6 +58,12 @@ nothing measured under this one):
   leaves the cycles' datagen out. The release takes ``c360-3``, never
   ``c360-2`` again, so no release record shares an identity with a pre-``dev1`` one
   (2026-10-03).
+- ``aml-3``: W3 and W17 treat an account as a hub (not an intermediary)
+  only in the weeks it sends more than ``max_out_degree`` transfers, not
+  for the whole corpus once any week does, so their alerts, recall and
+  false positives change in batch and continuous alike. Hub status is then
+  local in time, which lets continuous gold re-detect only the weeks new
+  rows can reach (2026-10-08).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -94,7 +100,7 @@ V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
     "customer360": "c360-2.dev1",
-    "financial": "aml-2",
+    "financial": "aml-3",
     "custom": "custom-1",
 }
 
@@ -103,7 +109,7 @@ WORKLOAD_VERSIONS: dict[str, str] = {
 #: no model version of its own; its identity is the image reference, whose
 #: tag is the datagen_rs commit it was built from.
 DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
-    "financial": "datagen-v2-rs-0.3",
+    "financial": "datagen-v2-rs-0.4",
     "customer360": None,
     "custom": None,
 }
@@ -446,7 +452,8 @@ def experiment_inputs(
                 }
             ),
         },
-        "mode": arch.pipeline.mode.value,
+        # The config file's mode; run_mode is what the command line ran.
+        "mode": (arch.pipeline._configured_mode or arch.pipeline.mode).value,
         **({"run_mode": _canonical_mode(run_mode)} if run_mode else {}),
         "support": _frozen_support(cfg, run_mode, system),
         "config_limits": {
@@ -491,6 +498,9 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
         if snapshot.get("local")
         else ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
     )
+    # A continuous stage's planned count includes its balance need and may
+    # use grown executors (job.streaming_shape).
+    shapes = (snapshot.get("spark") or {}).get("streaming_shape") or {}
     out = []
     job_types = [j.job_type for j in metrics.jobs] + [s.job_type for s in metrics.streaming]
     for job_type in dict.fromkeys(job_types):
@@ -498,6 +508,9 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
         if not profile or "base_executors" not in profile:
             continue
         uncapped = executor_count(profile, scale, capped=False)
+        shape = shapes.get(job_type)
+        if shape:
+            uncapped = int(shape.get("uncapped") or uncapped)
         override = overrides.get(EXECUTOR_OVERRIDE_FIELDS.get(job_type, ("", ""))[1])
         cap = int(profile["max_executors"])
         observed = next(
@@ -573,6 +586,15 @@ def _rules(metrics: Any) -> dict[str, Any]:
     for s in metrics.streaming:
         for rule in s.ttd_by_rule or {}:
             ran.setdefault(rule, 0)
+    if metrics.streaming:
+        from lakebench.metrics.verdict import scored_rule_status
+
+        # Continuous: the rules behind the scored alerts, not every rule that
+        # alerted on some tick.
+        scored = scored_rule_status(metrics)
+        if scored is not None:
+            ran = dict.fromkeys(scored[0], 0)
+            skipped, errors = scored[1], scored[2]
     if not (ran or skipped or errors):
         return {}
     return {
@@ -943,6 +965,10 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         limits["trickle_bound"] = trickle_bound(metrics)
         if limits["trickle_bound"] is not None:
             limits["bound"].append(trickle_line(limits["trickle_bound"]))
+        from lakebench.metrics.bounds import trigger_lines
+
+        trickled = ((getattr(metrics, "continuous", None) or {}).get("trickle") or {}).get("value")
+        limits["trigger_bound"] = trigger_lines(snapshot, trickle=bool(trickled))
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark

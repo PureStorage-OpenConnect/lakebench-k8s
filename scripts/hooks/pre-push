@@ -4,7 +4,7 @@
 # 1. Refuses any pushed ref that reaches a pre-rewrite commit carrying the
 #    leaked FlashBlade keys, or the pre-rewrite integrate tip.
 # 2. Scans the pushed range with gitleaks, using the .gitleaks.toml from
-#    origin/integrate/v1.5.0, never the pushing branch's own copy (an old
+#    origin/main, never the pushing branch's own copy (an old
 #    branch may predate the FlashBlade rule).
 #
 # Prints the refused ref and the rule, never a secret value.
@@ -30,7 +30,7 @@ done
 
 # Only a remote-tracking ref may supply the config, so a local branch or tag
 # named like it (or an override pointing at a weakened copy) cannot shadow it.
-cfg_ref="${LB_PREPUSH_CONFIG_REF:-refs/remotes/origin/integrate/v1.5.0}"
+cfg_ref="${LB_PREPUSH_CONFIG_REF:-refs/remotes/origin/main}"
 case "$cfg_ref" in
   refs/remotes/*) ;;
   *) echo "pre-push: LB_PREPUSH_CONFIG_REF must be under refs/remotes/; push refused" >&2; exit 1 ;;

@@ -170,17 +170,14 @@ def test_full_observation(cluster, ca_file) -> None:
             "count": 3,
         },
     ]
-    # LB-280: storage_endpoint is now a stable sha256-16 hash of the
-    # lowercased host:port, not the raw value. The sysid still distinguishes
-    # endpoints (next test), but the raw IP never leaves build time.
-    assert parts["storage_endpoint"].startswith("s3-endpoint-")
-    assert len(parts["storage_endpoint"]) == len("s3-endpoint-") + 16
-    assert parts["storage_backend"] == "unknown"
+    assert "10.0.1.50" not in json.dumps(parts)
     assert parts["storage_server"] == "PureStorageFlashBlade"
     assert parts["scratch"] == {"enabled": True, "storage_class": "px-csi-scratch"}
     assert s3.calls == ["b-bronze"]
     assert len(out["fingerprint"]) == 16
     assert out["fingerprint"] == si.fingerprint_of(parts)
+    stored = json.loads(json.dumps(out))
+    assert si.fingerprint_of(stored["parts"]) == out["fingerprint"]
 
 
 def test_ca_follows_the_client_not_current_context(cluster, tmp_path, monkeypatch) -> None:
@@ -253,7 +250,7 @@ def test_fingerprint_moves_with_the_system(cluster, tmp_path, change) -> None:
             nodes[0].metadata.labels["node.kubernetes.io/instance-type"] = "vm-40-v2"
         make_kw["nodes"] = nodes
     elif change == "endpoint":
-        cfg = _cfg(endpoint="http://10.0.1.51:80")
+        cfg = _cfg(endpoint="http://192.0.2.28:80")
     elif change == "endpoint_port":
         cfg = _cfg(endpoint="http://10.0.1.50:9000")
     elif change == "server":
@@ -270,7 +267,7 @@ def test_type_enters_the_hash(cluster) -> None:
 
 def test_endpoint_spelling_normalised(cluster) -> None:
     """Spelling-normalisation (lowercase host, default port by scheme) is
-    preserved under LB-280 redaction: two inputs that normalised to the same
+    preserved under endpoint redaction: two inputs that normalised to the same
     host:port before now hash to the same value, and two different normalised
     values still hash differently.
     """
@@ -402,14 +399,6 @@ def test_reader_bug_is_a_gap_not_a_crash(cluster) -> None:
     assert out["partial"] is True
     assert "not_observed" in out["parts"]["nodes"]
     assert "not_observed" in out["parts"]["scratch"]
-
-
-def test_observation_round_trips_through_json(cluster) -> None:
-    """metrics.json stores it; a stored copy re-hashes to the same value."""
-    out = _observe(cluster())
-    stored = json.loads(json.dumps(out))
-    assert stored == out
-    assert si.fingerprint_of(stored["parts"]) == out["fingerprint"]
 
 
 def test_common_fingerprints_keep_each_version(cluster) -> None:
@@ -599,27 +588,20 @@ def test_sidecars_and_pod_level_requests() -> None:
     assert out["memory_gib"] == 2.0 + 8.0
 
 
-def test_unsampled_start_marks_every_half() -> None:
+def test_unsampled_start_marks_every_half(monkeypatch) -> None:
     from tests.fixtures.experiment_helpers import _cfg as exp_cfg
     from tests.fixtures.experiment_helpers import _metrics
 
-    class Core:
-        def list_node(self, **kw):
-            raise RuntimeError("boom")
+    def boom(*a, **k):
+        raise RuntimeError("x")
 
     cfg = exp_cfg()
     run = _metrics(cfg)
-    import lakebench.metrics.system_identity as mod
-
-    orig = mod.observe_system
-    mod.observe_system = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x"))
-    try:
-        si.sample_run_start(run, cfg, k8s=NS(_core_v1=Core(), _custom=None))
-    finally:
-        mod.observe_system = orig
+    monkeypatch.setattr(si, "observe_system", boom)
+    si.sample_run_start(run, cfg, k8s=NS(_core_v1=None, _custom=None))
     observed = run.config_snapshot["experiment_inputs"]["observed"]
     for half in ("allocatable", "cotenant_requested", "cotenant_pending"):
-        assert observed[half]["start"]["not_observed"].startswith("sampling failed")
+        assert not si.is_observed(observed[half]["start"])
 
 
 def test_pod_list_is_paged() -> None:

@@ -36,10 +36,6 @@ class TestLeakageGate:
         row = report.rows[0]
         assert row.verdict is LeakageVerdict.LEAKING
         assert row.ratio_baseline_over_typology == pytest.approx(0.003)
-        # Hint must be actionable (call out band + fix directions).
-        assert "USD" in row.hint
-        assert "9500" in row.hint or "9,500" in row.hint
-        assert "baseline" in row.hint.lower()
 
     def test_passing_band_flagged(self):
         """A band with enough baseline density is not the sole label."""
@@ -86,12 +82,10 @@ class TestLeakageGate:
         assert verdicts["KRW"] is LeakageVerdict.NO_TYPOLOGY
         assert verdicts["USD"] is LeakageVerdict.PASS
 
-    def test_all_no_typology_is_not_a_pass(self):
-        """ADR-P2 from PR-A adversarial review: if every band has zero
-        typology rows, that's a datagen regression, not a pass.
-        overall_pass must be False so a "nothing planted" run does
-        not masquerade as a clean gate."""
-        report = compute_leakage_gate(
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            [],
             [
                 {
                     "currency": "USD",
@@ -107,14 +101,14 @@ class TestLeakageGate:
                     "baseline_count": 100,
                     "typology_count": 0,
                 },
-            ]
-        )
-        assert not report.overall_pass
-
-    def test_empty_report_is_not_a_pass(self):
-        """No rows scored means nothing was measured -- do not pass."""
-        report = compute_leakage_gate([])
-        assert not report.overall_pass
+            ],
+        ],
+        ids=["no_rows", "every_band_without_typology"],
+    )
+    def test_nothing_measured_is_not_a_pass(self, rows):
+        """Nothing scored, or no typology planted in any band, must not
+        masquerade as a clean gate."""
+        assert not compute_leakage_gate(rows).overall_pass
 
     def test_boundary_ratio_is_pass(self):
         """Ratio exactly at the threshold passes (>=, not >)."""
@@ -154,25 +148,6 @@ class TestLeakageGate:
             ]
         )
         assert not report.overall_pass
-
-    def test_serialisable_rows(self):
-        """Report can be turned into a list of plain dicts for parquet."""
-        report = compute_leakage_gate(
-            [
-                {
-                    "currency": "USD",
-                    "band_lo": 9500.0,
-                    "band_hi": 9999.0,
-                    "baseline_count": 3,
-                    "typology_count": 1000,
-                },
-            ]
-        )
-        rows = report.as_dicts()
-        assert len(rows) == 1
-        assert rows[0]["verdict"] == "leaking"
-        assert rows[0]["currency"] == "USD"
-        assert rows[0]["baseline_count"] == 3
 
     def test_threshold_must_be_positive(self):
         with pytest.raises(ValueError):

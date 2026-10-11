@@ -42,56 +42,60 @@ SILVER_PER_CYCLE = 9
 ICEBERG_CATALOG = "ice"
 
 
-def _submit_args(jars, work, fmt="delta"):
+def submit_args(jars, work, fmt="delta"):
+    confs = {"spark.ui.enabled": "false", "spark.sql.shuffle.partitions": "2"}
     if fmt == "iceberg":
-        confs = {
-            "spark.ui.enabled": "false",
-            "spark.sql.shuffle.partitions": "2",
-            "spark.sql.extensions": (
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
-            ),
-            f"spark.sql.catalog.{ICEBERG_CATALOG}": "org.apache.iceberg.spark.SparkCatalog",
-            f"spark.sql.catalog.{ICEBERG_CATALOG}.type": "hadoop",
-            f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse": f"file://{work}/ice-wh",
-        }
-        parts = ["--master", "local[2]", "--jars", jars]
-        for k, v in confs.items():
-            parts += ["--conf", f"{k}={v}"]
-        return " ".join(parts) + " pyspark-shell"
-    confs = {
-        "spark.ui.enabled": "false",
-        "spark.sql.shuffle.partitions": "2",
-        "spark.sql.catalogImplementation": "hive",
-        "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
-        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
-        "spark.sql.warehouse.dir": f"file://{work}/warehouse",
-        "spark.hadoop.javax.jdo.option.ConnectionURL": (
-            f"jdbc:derby:;databaseName={work}/metastore_db;create=true"
-        ),
-        "spark.driver.extraJavaOptions": f"-Dderby.system.home={work}",
-        # A checkpoint every 2 commits, so the transaction ids are also read
-        # back from checkpoints, as on a long-lived table (default 10).
-        "spark.databricks.delta.properties.defaults.checkpointInterval": "2",
-    }
+        confs.update(
+            {
+                "spark.sql.extensions": (
+                    "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+                ),
+                f"spark.sql.catalog.{ICEBERG_CATALOG}": "org.apache.iceberg.spark.SparkCatalog",
+                f"spark.sql.catalog.{ICEBERG_CATALOG}.type": "hadoop",
+                f"spark.sql.catalog.{ICEBERG_CATALOG}.warehouse": f"file://{work}/ice-wh",
+            }
+        )
+    else:
+        confs.update(
+            {
+                "spark.sql.catalogImplementation": "hive",
+                "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+                "spark.sql.catalog.spark_catalog": (
+                    "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+                ),
+                "spark.sql.warehouse.dir": f"file://{work}/warehouse",
+                "spark.hadoop.javax.jdo.option.ConnectionURL": (
+                    f"jdbc:derby:;databaseName={work}/metastore_db;create=true"
+                ),
+                "spark.driver.extraJavaOptions": f"-Dderby.system.home={work}",
+                # A checkpoint every 2 commits, so the transaction ids are also
+                # read back from checkpoints, as on a long-lived table (default 10).
+                "spark.databricks.delta.properties.defaults.checkpointInterval": "2",
+            }
+        )
     parts = ["--master", "local[2]", "--jars", jars]
     for k, v in confs.items():
         parts += ["--conf", f"{k}={v}"]
     return " ".join(parts) + " pyspark-shell"
 
 
-def stage_bronze(spark, work, run, cycle):
-    """Write one cycle's bronze file under the name datagen_rs gives it."""
+def write_part(df, work, name):
+    """Write *df* as the single bronze file *name* under the customer
+    interactions prefix."""
     base = Path(work) / "bronze" / "customer" / "interactions"
     base.mkdir(parents=True, exist_ok=True)
-    name = f"part-{run:06d}.parquet" if cycle == 0 else f"part-c{cycle:03d}-{run:06d}.parquet"
     tmp = Path(work) / "bronze-tmp"
-    start = 100_000 * (run + 1) + 1_000 * cycle
-    bronze_df(spark, ROWS_PER_CYCLE, start=start).coalesce(1).write.mode("overwrite").parquet(
-        str(tmp)
-    )
+    df.coalesce(1).write.mode("overwrite").parquet(str(tmp))
     (part,) = tmp.glob("part-*.parquet")
     shutil.move(str(part), str(base / name))
     shutil.rmtree(tmp)
+
+
+def stage_bronze(spark, work, run, cycle):
+    """Write one cycle's bronze file under the name datagen_rs gives it."""
+    name = f"part-{run:06d}.parquet" if cycle == 0 else f"part-c{cycle:03d}-{run:06d}.parquet"
+    start = 100_000 * (run + 1) + 1_000 * cycle
+    write_part(bronze_df(spark, ROWS_PER_CYCLE, start=start), work, name)
 
 
 def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=None, fmt="delta"):
@@ -101,7 +105,7 @@ def silver_job(jars, work, cycle, epoch, force=False, strategy="simple", log=Non
     env = dict(os.environ)
     env.update(
         {
-            "PYSPARK_SUBMIT_ARGS": _submit_args(jars, work, fmt),
+            "PYSPARK_SUBMIT_ARGS": submit_args(jars, work, fmt),
             "LB_ICEBERG_CATALOG": ICEBERG_CATALOG if fmt == "iceberg" else "spark_catalog",
             "LB_BRONZE_URI": f"file://{work}/bronze/",
             "LB_SILVER_URI": f"file://{work}/silver/",
@@ -145,6 +149,14 @@ def _table_dir(work, fmt="delta"):
     if fmt == "iceberg":
         return f"{work}/ice-wh/silver/customer_interactions_enriched"
     return f"{work}/warehouse/silver.db/customer_interactions_enriched"
+
+
+def table_files(work):
+    return sorted(
+        os.path.relpath(os.path.join(d, f), work)
+        for d, _, fs in os.walk(_table_dir(work))
+        for f in fs
+    )
 
 
 def checkpoints(work):
@@ -199,11 +211,16 @@ def run(
     return rcs
 
 
-def _fresh(root, name):
+def fresh(root, name):
     work = os.path.join(root, name)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     return work
+
+
+# silver_rebuild_scenarios imports these names.
+_fresh = fresh
+_submit_args = submit_args
 
 
 def _clear_bronze(work):
@@ -231,7 +248,7 @@ def main():
     #    log survive (silver-state lost, or job.py's read falling back to 0),
     #    and the next run is a --force-rebuild. Run 0 committed epoch 0 at
     #    cycle 1, so run 1's cycle 1 reuses that (appId, version) key.
-    work = _fresh(root, "epoch-reset")
+    work = fresh(root, "epoch-reset")
     log = []
     first = run(spark, jars, work, 0, [0, 0], log=log)
     _clear_bronze(work)
@@ -245,7 +262,7 @@ def main():
     # 2. One later cycle reads a stale epoch (the ConfigMap read in job.py
     #    falls back to 0) while cycles 0 and 2 read the bumped epoch 1.
     #    STREAMING strategy, so both write functions are covered.
-    work = _fresh(root, "stale-cycle")
+    work = fresh(root, "stale-cycle")
     log = []
     first = run(spark, jars, work, 0, [0, 0, 0], strategy="streaming", log=log)
     _clear_bronze(work)
@@ -263,13 +280,20 @@ def main():
 
     # 3. The BUGS-row staging: the catalog entry goes (metastore dropped,
     #    bucket kept) and the next deployment starts again at epoch 0.
-    work = _fresh(root, "catalog-lost")
+    work = fresh(root, "catalog-lost")
     log = []
     first = run(spark, jars, work, 0, [0, 0], log=log)
     shutil.rmtree(os.path.join(work, "metastore_db"))
     _clear_bronze(work)
+    files_before = table_files(work)
     second = run(spark, jars, work, 1, [0, 0], log=log)
-    refused = "already holds a Delta log" in log[-1]["tail"]
+    # Refused for the orphan log, not for an unrelated failure, and the
+    # surviving table's files are untouched.
+    refused = (
+        second[-1] != 0
+        and table_files(work) == files_before
+        and "already holds a Delta log" in log[-1]["tail"]
+    )
     held_after_refusal = silver_cycles(spark, work)
     # The refusal's remedy: delete the table directory. Cycle 1 then finds
     # no table and builds it from the whole prefix (cycles 0 and 1 of run

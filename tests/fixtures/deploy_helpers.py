@@ -1,20 +1,15 @@
-"""Shared test helpers moved from tests/test_deploy.py (imported by several test files)."""
+"""Config and K8s-client builders for the deploy tests."""
 
 from unittest.mock import MagicMock
 
 from lakebench.config import LakebenchConfig
+from tests.conftest import make_config
 
 
 def _make_config(**overrides) -> LakebenchConfig:
-    """Create a LakebenchConfig with sensible defaults for testing.
-
-    Auto-fills the Polaris client_secret for tests whose
-    architecture selects the Polaris catalog, mirroring the top-level
-    conftest helper. Production configs must supply their own.
-    """
-    from lakebench.config.schema import CatalogType
-
-    base = {
+    """``make_config`` named test-deploy, with explicit bucket names (the default
+    is <name>-<layer>)."""
+    base: dict = {
         "name": "test-deploy",
         "platform": {
             "storage": {
@@ -22,7 +17,6 @@ def _make_config(**overrides) -> LakebenchConfig:
                     "endpoint": "http://minio:9000",
                     "access_key": "minioadmin",
                     "secret_key": "minioadmin",
-                    # Explicit: the default is now <name>-<layer>.
                     "buckets": {
                         "bronze": "lakebench-bronze",
                         "silver": "lakebench-silver",
@@ -32,14 +26,7 @@ def _make_config(**overrides) -> LakebenchConfig:
             }
         },
     }
-    base.update(overrides)
-    cfg = LakebenchConfig(**base)
-    if (
-        cfg.architecture.catalog.type == CatalogType.POLARIS
-        and not cfg.architecture.catalog.polaris.client_secret
-    ):
-        cfg.architecture.catalog.polaris.client_secret = "test-only-secret"
-    return cfg
+    return make_config(**{**base, **overrides})
 
 
 def _mock_k8s():

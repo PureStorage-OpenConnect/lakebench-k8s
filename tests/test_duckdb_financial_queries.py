@@ -1,22 +1,14 @@
 """DuckDB runs every financial benchmark query, and failures say why.
 
-A live AML run on hive-iceberg-spark-duckdb failed FQ3, FQ4, FQ5, FQ6 and
-FQ8, and the runner showed only ``Traceback (most recent call last): File
-"<string>", line 1`` for each. Three separate causes:
-
-- the auxiliary tables (silver_entities, gold_alerts, ...) were never
-  rewritten to ``iceberg_scan``, so DuckDB saw ``lakehouse.silver.entities``
-  and failed with ``Catalog "lakehouse" does not exist`` (FQ3, FQ4, FQ5, FQ8);
-- Spark writes TIMESTAMP as Iceberg timestamptz, and handing a TIMESTAMP WITH
-  TIME ZONE to Python needs pytz, which the pod lacks (FQ4, FQ6, FQ8);
-- DuckDB's ``cardinality`` only takes a MAP (FQ8).
-
-The executed tests below build the exact script the pod runs and execute it
-with pytz blocked, against in-memory tables of the same shape.
+The executed tests build the exact script the pod runs and execute it with
+pytz blocked, against in-memory tables of the same shape: auxiliary tables
+resolve to ``iceberg_scan``, TIMESTAMPTZ values reach Python without pytz, and
+``cardinality`` is rewritten for lists.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -29,11 +21,6 @@ from lakebench.benchmark.result import summarise_engine_error
 from lakebench.config.schema import TableNamesConfig
 from lakebench.modules.query_engines.duckdb.executor import DuckDBExecutor
 from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExecutor
-
-# ---------------------------------------------------------------------------
-# Error surfacing
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # Table resolution and dialect
@@ -63,7 +50,7 @@ def _executor(catalog_type: str = "hive") -> DuckDBExecutor:
     return DuckDBExecutor(
         namespace="t",
         catalog_name="lakehouse",
-        s3_endpoint="http://10.0.0.1:80",
+        s3_endpoint="http://10.0.1.50:80",
         s3_buckets={"silver": "sb", "gold": "gb"},
         table_names=_financial_table_names(),
         catalog_type=catalog_type,
@@ -222,8 +209,19 @@ _EXPECTED_ROWS = {
 }
 
 
-def _run_pod_script(executor: DuckDBExecutor, sql: str) -> subprocess.CompletedProcess:
-    """Run the script the pod would run, with S3 setup swapped for local tables."""
+def _run_pod_script(
+    executor: DuckDBExecutor,
+    sql: str,
+    *,
+    tz: str = "UTC",
+    setup: str | None = None,
+    pre: str = "",
+) -> subprocess.CompletedProcess:
+    """Run the script the pod would run, with S3 setup swapped for local tables.
+
+    *tz* is the process time zone, *setup* replaces the default tables and *pre*
+    is Python run before the script's own session settings.
+    """
     script = executor._build_python_script(sql)
     # iceberg_scan(\'s3://bucket/warehouse/ns.db/tbl\', ...) -> s.tbl
     script = re.sub(
@@ -234,15 +232,13 @@ def _run_pod_script(executor: DuckDBExecutor, sql: str) -> subprocess.CompletedP
     marker = "conn.execute('SET unsafe_enable_version_guessing = true'); "
     assert marker in script
     body = script.split(marker, 1)[1]
-    setup = " ".join(_SETUP.split()).replace("'", "\\'")
+    setup = " ".join((_SETUP if setup is None else setup).split()).replace("'", "\\'")
     # Block pytz the way a python:3.11-slim pod with only duckdb installed does.
     prelude = (
         "import sys; sys.modules['pytz'] = None; "
-        f"import duckdb, json; conn = duckdb.connect(); conn.execute('{setup}'); "
+        f"import duckdb, json; conn = duckdb.connect(); conn.execute('{setup}'); {pre}"
     )
-    # The pod image runs in UTC. Pin it so date_trunc over a TIMESTAMPTZ
-    # buckets months the same way on a developer machine in another zone.
-    env = {**os.environ, "TZ": "UTC"}
+    env = {**os.environ, "TZ": tz}
     return subprocess.run(
         [sys.executable, "-c", prelude + body],
         capture_output=True,
@@ -254,8 +250,6 @@ def _run_pod_script(executor: DuckDBExecutor, sql: str) -> subprocess.CompletedP
 
 @pytest.mark.parametrize("query", _FINANCIAL_QUERIES, ids=lambda q: q.name)
 def test_every_financial_query_runs_on_duckdb(query):
-    import json
-
     executor = _executor()
     proc = _run_pod_script(executor, executor.adapt_query(_render(query)))
     assert proc.returncode == 0, summarise_engine_error(proc.stderr)
@@ -270,9 +264,62 @@ def test_cast_projection_keeps_order_and_duplicate_names():
     )
     proc = _run_pod_script(executor, sql)
     assert proc.returncode == 0, summarise_engine_error(proc.stderr)
-    import json
-
     data = json.loads(proc.stdout)["data"]
     assert [row.split(",")[0] for row in data] == ["(4", "(3", "(2", "(1", "(0"]
-    # Rendered in the session time zone, so match the date loosely.
-    assert "'2026-01-0" in data[0]
+    assert "2026-01-05 00:00:00+00" in data[0]
+
+
+def test_script_pins_utc_whatever_the_process_zone():
+    """A pod in another zone must still render and bucket in UTC: only the
+    script's own SET TimeZone can produce these values under Pacific/Auckland."""
+    sql = (
+        "SELECT TIMESTAMPTZ '2026-01-05 00:00:00+00' AS ts, "
+        "date_trunc('month', TIMESTAMPTZ '2026-01-31 23:00:00+00') AS month"
+    )
+    proc = _run_pod_script(_executor(), sql, tz="Pacific/Auckland")
+    assert proc.returncode == 0, summarise_engine_error(proc.stderr)
+    row = json.loads(proc.stdout)["data"][0]
+    assert "2026-01-05 00:00:00+00" in row
+    assert "2026-01-01 00:00:00+00" in row
+
+
+def test_script_output_is_one_json_payload_when_a_query_is_slow():
+    """DuckDB prints a progress bar to stdout once a query passes its threshold
+    (2 s by default, 50 ms here); the script must turn it off."""
+    sql = "SELECT sum(x * x) AS s FROM range(40000000) t(x)"
+    proc = _run_pod_script(_executor(), sql, pre="conn.execute('SET progress_bar_time = 50'); ")
+    assert proc.returncode == 0, summarise_engine_error(proc.stderr)
+    assert json.loads(proc.stdout)["rows"] == 1
+
+
+def _fq8_setup(alert_ids: list[str]) -> str:
+    inserts = ", ".join(
+        f"('{a}', 1, 'W2', 'high', 'open', 0.9, TIMESTAMPTZ '2026-01-05 00:00:00+00', NULL)"
+        for a in alert_ids
+    )
+    return f"""
+CREATE SCHEMA s;
+{_duckdb_ddl("silver_entities", "entities")}
+INSERT INTO s.entities BY NAME SELECT 1 AS entity_id, 'Person' AS entity_type, 'n1' AS name;
+CREATE TABLE s.alerts(alert_id VARCHAR, entity_id BIGINT, rule_id VARCHAR, priority VARCHAR,
+  status VARCHAR, alert_score DOUBLE, alert_ts TIMESTAMPTZ, related_txn_ids VARCHAR[]);
+INSERT INTO s.alerts VALUES {inserts};
+"""
+
+
+def test_fq8_pick_among_tied_alerts_does_not_depend_on_row_order():
+    """FQ8 takes 100 of 102 alerts that share alert_ts, entity and rule; the
+    pick must not follow insertion order or two runs would disagree."""
+    fq8 = next(q for q in _FINANCIAL_QUERIES if q.name.startswith("FQ8"))
+    executor = _executor()
+    sql = executor.adapt_query(_render(fq8))
+    ids = [f"a{i:03d}" for i in range(102)]
+    results = []
+    for order in (ids, ids[::-1]):
+        proc = _run_pod_script(executor, sql, setup=_fq8_setup(order))
+        assert proc.returncode == 0, summarise_engine_error(proc.stderr)
+        payload = json.loads(proc.stdout)
+        assert payload["rows"] == 100
+        results.append(payload["data"])
+    assert results[0] == results[1]
+    assert "a099" in results[0][-1] and "a100" not in "".join(results[0])

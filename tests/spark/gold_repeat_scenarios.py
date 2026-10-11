@@ -78,18 +78,14 @@ def _same(a, b):
 
 
 def stale_days(spark, silver_tbl, gold_tbl):
-    """``(day, field)`` pairs where gold differs from a fresh aggregation of
-    silver (field None for a day missing on one side)."""
-    want = fresh_gold(spark, silver_tbl)
-    got = gold_rows(spark, gold_tbl)
-    out = []
-    for d in sorted(set(want) | set(got)):
-        a, b = want.get(d), got.get(d)
-        if a is None or b is None:
-            out.append((d, None))
-        elif not _same(a, b):
-            out.append((d, sorted(k for k in a if not _same({k: a[k]}, {k: b.get(k)}))))
-    return out
+    """Why gold differs from a fresh aggregation of silver, by the rule the
+    batch/stream parity tests use (``c360_gold_compare``); [] when it does not."""
+    from c360_gold_compare import gold_differences
+    from common import get_daily_kpi_aggregations
+    from table_fingerprint import table_rows
+
+    fresh = spark.table(silver_tbl).groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
+    return gold_differences(table_rows(spark.table(gold_tbl)), table_rows(fresh))
 
 
 def run_main(mod, capsys):

@@ -159,7 +159,7 @@ class TestNamespaceAbsent:
         assert "--force-legacy" in msg
         # Destroy went on to the namespace delete, which is what the
         # escape hatch is for.
-        # The delete carries the namespace UID read at destroy start (LB-157).
+        # The delete carries the namespace UID read at destroy start.
         engine.k8s.delete_namespace.assert_called_once_with(
             "lb-test", uid=str(engine.k8s.get_namespace_uid.return_value)
         )

@@ -1,16 +1,11 @@
-"""Batch stages report SUBMISSION_FAILED instead of waiting through it silently.
-
-Live 2026-09-27: a controller eviction made bronze-verify go SUBMISSION_FAILED
-and wait ~60 s for the operator's retry. The monitor waited with no line and
-the run metrics carried only start and end, so the stage read 141-150 s
-against 52-71 s with no reason. These tests pin the record, the print, the
-journal entry and the metrics fields.
-"""
+"""A batch stage that went through SUBMISSION_FAILED records the failure and the time it lost."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _MAVEN = (
     "failed to run spark-submit: ... [FAILED     ] "
@@ -43,6 +38,12 @@ def _status(state, message="", attempts=0):
     from lakebench.spark.job import JobStatus
 
     return JobStatus(name="j", state=state, message=message, submission_attempts=attempts)
+
+
+def _status_row(state, message="", attempts=0):
+    from lakebench.spark.job import JobState
+
+    return (JobState[state], message, attempts)
 
 
 def _wait(statuses, **kwargs):
@@ -81,27 +82,28 @@ def test_submission_failure_is_recorded_with_time_lost():
     assert len(seen) == 1 and seen[0]["reason"] == f["reason"]
 
 
-def test_each_retry_that_fails_again_is_its_own_record():
-    from lakebench.spark.job import JobState
-
-    r = _wait(
-        [
-            _status(JobState.SUBMISSION_FAILED, "driver pod already exist", 1),
-            _status(JobState.SUBMISSION_FAILED, "driver pod already exist", 2),
-            _status(JobState.RUNNING),
-            _status(JobState.COMPLETED),
-        ]
-    )
-    assert [f["attempt"] for f in r.submission_failures] == [1, 2]
-    assert r.submission_retry_seconds == 40.0
-
-
-def test_clean_stage_has_no_failures():
-    from lakebench.spark.job import JobState
-
-    r = _wait([_status(JobState.RUNNING), _status(JobState.COMPLETED)])
-    assert r.submission_failures == []
-    assert r.submission_retry_seconds == 0.0
+@pytest.mark.parametrize(
+    ("states", "attempts", "retry_seconds"),
+    [
+        # each retry that fails again is its own record
+        (
+            [
+                _status_row("SUBMISSION_FAILED", "driver pod already exist", 1),
+                _status_row("SUBMISSION_FAILED", "driver pod already exist", 2),
+                _status_row("RUNNING"),
+                _status_row("COMPLETED"),
+            ],
+            [1, 2],
+            40.0,
+        ),
+        # a clean stage has no failures and no retry time
+        ([_status_row("RUNNING"), _status_row("COMPLETED")], [], 0.0),
+    ],
+)
+def test_each_failed_submission_is_its_own_record(states, attempts, retry_seconds):
+    r = _wait([_status(*row) for row in states])
+    assert [f["attempt"] for f in r.submission_failures] == attempts
+    assert r.submission_retry_seconds == retry_seconds
 
 
 def test_failure_still_open_at_the_end_is_closed():
@@ -175,5 +177,12 @@ def test_report_marks_elapsed_that_includes_retries():
             submission_retry_seconds=59.0,
         )
     )
+    run.jobs.append(
+        JobMetrics(job_name="lakebench-silver-build", job_type="silver-build", elapsed_seconds=52.0)
+    )
     gen = ReportGenerator.__new__(ReportGenerator)
-    assert "incl. 59s on 1 failed submission" in gen._generate_jobs_table(run)
+    rows = gen._generate_jobs_table(run).split("<tr")
+    (retried,) = [r for r in rows if "lakebench-bronze-verify" in r]
+    (clean,) = [r for r in rows if "lakebench-silver-build" in r]
+    assert "59" in retried
+    assert "59" not in clean and "failed submission" not in clean

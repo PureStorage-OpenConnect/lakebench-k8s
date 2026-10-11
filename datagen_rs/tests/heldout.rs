@@ -128,14 +128,6 @@ fn seed_hash_matches_the_python_definition() {
 }
 
 #[test]
-fn compiled_floor_is_initialised() {
-    assert_eq!(FLOOR_SALT.len(), 64);
-    for r in Role::ALL {
-        assert!(FLOOR.iter().any(|(f, h)| *f == r && h.len() == 64));
-    }
-}
-
-#[test]
 fn compiled_floor_is_the_tracked_file() {
     // Every role hash of the tracked hash file, in order, under the file's
     // salt, is compiled in (SPEC section 10), and the production floor loads
@@ -261,15 +253,4 @@ fn customer360_runs_without_the_file() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-}
-
-#[test]
-fn env_names_match_the_literals_the_generator_reads() {
-    // generate.rs reads both variables by literal name (so a source scan sees
-    // every environment read); the constants must name the same variables.
-    assert_eq!(datagen_rs::heldout::ENV, "LB_HELDOUT_HASHES");
-    let src = include_str!("../src/bin/generate.rs");
-    assert!(src.contains("std::env::var(\"LB_HELDOUT_HASHES\")"));
-    assert!(src.contains("const SEED_ENV: &str = \"LB_DATAGEN_SEED\";"));
-    assert!(src.contains("std::env::var(\"LB_DATAGEN_SEED\")"));
 }

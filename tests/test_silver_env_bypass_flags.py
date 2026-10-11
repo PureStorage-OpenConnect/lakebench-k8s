@@ -1,4 +1,4 @@
-"""A1 (LB-044 gate) production-safety: job.py's env builder must never set
+"""A1 (zero-row gate) production-safety: job.py's env builder must never set
 LB_SILVER_TEST_ALLOW_EMPTY or LB_TESTING for any silver job type.
 
 If either leaks into a production driver env, the bypass in

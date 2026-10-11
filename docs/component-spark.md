@@ -1,16 +1,17 @@
-# Component: Apache Spark
+# Spark
 
-Apache Spark is the compute engine for the Lakebench medallion pipeline. Lakebench
-uses the Kubeflow Spark Operator v2.x to submit `SparkApplication` custom resources
-on Kubernetes. Spark runs PySpark scripts that move data through three layers:
+Reference: configure and size the Apache Spark pipeline engine: Spark Operator, config keys, job profiles, executor scaling, scratch storage, RBAC and OpenShift SCC.
 
-- **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` -- run sequentially,
-  each job starts after the previous one completes.
-- **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
-  concurrently as structured streaming jobs with configurable trigger intervals.
+## What it does
 
-The scripts are deployed as one ConfigMap per role and projected together, as
-one flat directory, at `/opt/spark/scripts` in both driver and executor pods:
+Spark is the compute engine for the medallion pipeline in every recipe ([Recipes](recipes.md)). Lakebench submits `SparkApplication` resources through the Kubeflow Spark Operator v2.x. Spark runs PySpark scripts:
+
+- **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` run one after another.
+- **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` run at the same time as structured streaming jobs with configurable trigger intervals.
+
+### Script ConfigMaps
+
+The scripts ship as one ConfigMap per role, projected as one flat directory at `/opt/spark/scripts` in driver and executor pods. The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
 
 | ConfigMap | Contents |
 |---|---|
@@ -21,43 +22,43 @@ one flat directory, at `/opt/spark/scripts` in both driver and executor pods:
 | `lakebench-scripts-aml-gate` | the reference scorer and the pre-registered gate modules |
 | `lakebench-scripts-aml-data` | the AML reference and pre-registration JSON |
 
-The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
-`run` (and `lakebench financial`) applies every map, reads each back and checks
-that its data still hashes to its `lakebench.io/scripts-sha256` annotation, and
-only then submits jobs. It refuses to change a map that another deployment
-owns, or one that a still-running SparkApplication mounts (Kubernetes would
-swap the files under the running pods), and it re-checks the maps before each
-later job, so no stage is submitted on scripts other than the ones its run
-applied. A listed file missing from the installed
-package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, counting
-key and value bytes), stops the run with one line naming the file or map. The
-single `lakebench-spark-scripts` map used by 1.6 and earlier is deleted on the
-first 1.7 run, unless a SparkApplication that is still running mounts it, and
-`destroy` deletes all of them, including when `create_namespace: false` keeps
-the namespace.
+- `run` and `lakebench financial` apply every map, read each back and check that its data hashes to its `lakebench.io/scripts-sha256` annotation before submitting jobs.
+- They refuse to change a map that another deployment owns, or one that a running SparkApplication mounts (Kubernetes would swap the files under the running pods).
+- They re-check the maps before each later job, so every stage runs on the scripts its run applied.
+- A listed file missing from the installed package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, key and value bytes), stops the run with one line naming the file or map.
+- The single `lakebench-spark-scripts` map of 1.6 and earlier is deleted on the first 1.7 run, unless a running SparkApplication mounts it.
+- `destroy` deletes all the maps, also when `create_namespace: false` keeps the namespace.
 
 ## Spark Operator
 
-Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
-default). ConfigMap volumes cannot use Spark's native
-`spark.kubernetes.*.volumes.*` conf properties, because Spark's
-`KubernetesVolumeUtils` has no `configMap` volume type, so lakebench defines
-its volumes (the projected scripts volume, the work-dir emptyDir and, on the
-driver, the `lb-deps-dl` emptyDir the jars are downloaded into)
-in `driver.template`/`executor.template` pod templates; see `_build_manifest()`
-in `modules/pipeline_engines/spark/job.py`. Only the executor scratch PVC uses
-the conf-property path. The operator's webhook injection was checked against
-its source through 2.5.1 and is unchanged from 2.4.0, so the pod-template
-route stays. The v1.x line has broken volume
-injection entirely and is not supported.
+Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). The v1.x line breaks volume injection and is not supported.
 
-`lakebench deploy` always checks the operator and adds the deployment's
-namespace to the operator's watch list (`spark.jobNamespaces`). It never
-installs the operator: a missing one fails the deploy, and a cluster admin
-installs the shared operator once with `lakebench admin install --component
-spark-operator`, at `version` in `namespace`. An installed operator keeps its
-version whatever the config says. `install: true` (v1.6) is refused by the
-commands that change data (`destroy`, `status` and `admin` load it as false).
+- Spark's `spark.kubernetes.*.volumes.*` conf properties cannot mount a ConfigMap: `KubernetesVolumeUtils` has no `configMap` volume type.
+- Lakebench therefore defines its volumes in `driver.template`/`executor.template` pod templates (`_build_manifest()` in `modules/pipeline_engines/spark/job.py`): the projected scripts volume, the work-dir emptyDir and, on the driver, the `lb-deps-dl` emptyDir the jars download into.
+- Only the executor scratch PVC uses the conf-property path.
+- The operator's webhook injection is unchanged from 2.4.0 through 2.5.1 (checked against its source), so the pod-template route stays.
+- v1.x (tested: v1.1.27) does not inject volumes from `spec.volumes` into pods.
+- The operator version is not the Spark runtime version.
+- `mainApplicationFile` uses `local://` URIs, so scripts must be in the container filesystem.
+
+`lakebench deploy` checks the operator. It never installs the operator; a missing one fails the deploy.
+
+- `deploy` adds the deployment's namespace to the operator's watch list (`spark.jobNamespaces`) and `destroy` removes it, both under the `lakebench-cluster-lock` lease in `lakebench-system`. Do not edit `spark.jobNamespaces` by hand.
+- An installed operator keeps its version whatever the config says.
+- `operator.install: true` is refused by the commands that change data; `destroy`, `status` and `admin` load it as false.
+
+A cluster admin installs the shared operator once with Lakebench, not raw Helm:
+
+```bash
+lakebench admin install --component spark-operator lakebench.yaml \
+  --version spark-operator=<version> \
+  --controller-tmp-size 8Gi
+```
+
+- `--version` defaults to `platform.compute.spark.operator.version`. The namespace is `platform.compute.spark.operator.namespace`.
+- `--controller-tmp-size` and the version rules: [CLI reference](cli-reference.md) (`admin install`, `admin repair-operator`).
+- On OpenShift, Lakebench grants the `anyuid` SCC to the `spark-operator-controller` and `spark-operator-webhook` service accounts.
+- It also patches `fsGroup` and `seccompProfile` out of the operator Deployments. The chart hardcodes them and Helm values cannot remove them.
 
 ```yaml
 platform:
@@ -68,156 +69,54 @@ platform:
         version: "2.5.1"            # Chart a fresh admin install uses; must be v2.x
 ```
 
-## YAML Configuration
+## Version and image
 
-All Spark-related settings live under `platform.compute.spark`, `platform.storage.scratch`,
-`images.spark`, and the top-level `spark` section. Below is every configurable field
-with its default value.
+`images.spark` defaults to the recipe's image ([version matrix](compatibility-matrix.md#component-version-matrix), `config/recipes.py`).
 
-### Image
+- A config with no recipe takes the image of the recipe its components name, so a recipe-less Polaris config gets the Polaris recipes' image.
+- The Spark 4.0 image is also chosen when the config sets a table format version Spark 4.1 cannot run (Delta 4.0.0).
+- Supported: Spark 3.5.x, 4.0.x and 4.1.x. Spark 4.2 is not: no Iceberg release ships a runtime that works with it.
+- The tag must contain `-python3`. Unsupported versions, non-Python images and unparseable tags are rejected at config load.
+- Format versions, Hadoop AWS, runtime jars and the Java 17 rule for Iceberg 1.11.0: [Spark + Table Format Version Matrix](compatibility-matrix.md#spark--table-format-version-matrix).
 
-```yaml
-images:
-  spark: "apache/spark:4.1.1-python3"   # Spark 4.1.x (default for the Hive recipes)
-  # spark: "apache/spark:4.0.2-python3" # Spark 4.0.x (default for Polaris, hive-delta-spark-thrift, hive-delta-spark-none)
-  # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
-```
+The Spark version parsed from the tag also picks:
 
-The default image follows each recipe's release-matrix row: the Hive recipes
-(`hive-iceberg-*`, `hive-delta-spark-trino`) default to Spark 4.1.1; the
-Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`
-default to 4.0.2. A config with no recipe takes the image of the recipe its
-components name, so a recipe-less Polaris config also runs 4.0.2. The table
-format version follows the Spark minor when left at `auto`: Delta 4.1.0 on
-4.1 and 4.0.0 on 4.0; Iceberg 1.11.0 on both, with its native 4.1 runtime on
-Spark 4.1.
+| Spark | AWS SDK | Driver memory (silver/gold) |
+|-------|---------|---|
+| 3.5.x | 1.12.262 | 24g |
+| 4.0.x, 4.1.x | 1.12.720 | 32g |
 
-**Supported versions:** Spark 3.5.x, 4.0.x, and 4.1.x. Spark 4.2 is not
-supported: no Iceberg release ships a runtime that works with it. The image
-tag must contain `-python3` (PySpark scripts require a Python-enabled image).
-Unsupported versions, non-Python images, and unparseable tags are rejected at
-config load time with a clear error.
+Spark 4 drivers get 32g: `hadoop-aws:3.4.1` pulls a 558MB AWS SDK v2 bundle (280MB SDK v1 on 3.5.x), and the driver's netty file server serves those jars to executors.
 
-The default Iceberg version is 1.11.0, which needs Java 17. The plain
-`apache/spark:3.5.x-python3` images ship Java 11, so on those lakebench falls
-back to Iceberg 1.10.1 and logs a warning; use a `-java17-python3` 3.5 tag to
-run Iceberg 1.11.0. An explicitly configured Iceberg 1.11+ on a Java 11 image
-is rejected.
-
-The Spark version is parsed from the image tag to resolve the correct
-dependency coordinates and driver resource profiles:
-
-| Spark | Scala | Hadoop AWS | AWS SDK | Iceberg runtime | Driver memory (silver/gold) |
-|-------|-------|-----------|---------|------------------------|---|
-| 3.5.x | 2.12 | 3.3.4 | 1.12.262 | `iceberg-spark-runtime-3.5_2.12` | 24g |
-| 4.0.x | 2.13 | 3.4.1 | 1.12.720 | `iceberg-spark-runtime-4.0_2.13` | 32g |
-| 4.1.x | 2.13 | 3.4.2 | 1.12.720 | `iceberg-spark-runtime-4.1_2.13` (1.11.0+) or `-4.0_2.13` (1.10.x) | 32g |
-
-Spark 4.0.x needs more driver memory because `hadoop-aws:3.4.1` pulls a
-558MB AWS SDK v2 bundle (vs 280MB SDK v1 on Spark 3.5.x). The extra heap
-pressure from serving larger jars to executors via the driver's netty file
-server requires the bump from 24g to 32g. This is handled automatically --
-the driver memory column above shows the default for each version.
-
-### Operator
+`lb-deps` resolves the runtime and Hadoop AWS jars and serves them by URL. Example for a Java 11 Spark 3.5 image such as `apache/spark:3.5.4-python3` on Hive: it gets `iceberg-spark-runtime-3.5_2.12:1.10.1` and `hadoop-aws:3.3.4`. Other Spark minors: [which runtime jar](compatibility-matrix.md#which-runtime-jar-gets-requested).
 
 ```yaml
-platform:
-  compute:
-    spark:
-      operator:
-        namespace: "spark-operator"  # Operator namespace
-        version: "2.5.1"            # Chart a fresh `admin install` uses (v2.x required)
+spark.jars: http://lb-deps.<namespace>.svc.cluster.local:8080/sets/<pinset>/jars/org.apache.iceberg_iceberg-spark-runtime-3.5_2.12-1.10.1.jar,...
+spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.lakehouse.type: hive
+spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 ```
 
-### Driver Resources
+## Configuration keys
 
-Each job's driver is sized by its job profile (see
-[Job Profiles](#job-profiles) below). Two global overrides apply to every
-Spark job:
+Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, `images.spark` and the top-level `spark` section. Defaults are from `config/schema.py`.
 
-```yaml
-platform:
-  compute:
-    spark:
-      driver_cores: null             # Override driver cores (e.g. 2)
-      driver_memory: null            # Override driver memory (e.g. "16g")
-```
+| Key | Default | Effect |
+|---|---|---|
+| `platform.compute.spark.driver_cores` | `null` | Replaces the profile's driver cores for every job. At most 16. |
+| `platform.compute.spark.driver_memory` | `null` | Replaces the profile's driver memory for every job (e.g. `16g`). Must be a whole number with unit k, m, g or t. Use on small nodes or at scale 500+, where the driver holds more Iceberg commit metadata. |
+| `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Batch executor count. Set, it bypasses the scaling formula for that job. |
+| `bronze_ingest_executors`, `silver_stream_executors`, `gold_refresh_executors` | `null` | Continuous executor count. Set, it bypasses the scaling formula and the shared-cluster Lakebench cap. |
+| `bronze_ingest_executor_cores`, `silver_stream_executor_cores`, `gold_refresh_executor_cores` | `null` | Continuous executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. |
+| `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above turns it on. |
+| `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
+| `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
 
-When `driver_cores` or `driver_memory` is set, the override replaces the
-per-job profile default for every job. Use this when cluster nodes have
-limited resources or at extreme scales (500+) where the driver needs more
-memory to handle Iceberg commit metadata.
+- Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
+- Unset `*_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless their `*_executors` count is set. gold-refresh is never grown.
+- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed in [UPGRADING-1.7.md](../UPGRADING-1.7.md#sizing-settings-that-sized-nothing-are-removed).
 
-### Executor Resources
-
-Per-executor sizing (cores, memory, overhead, scratch PVC) comes from the job
-profiles. Batch jobs take only a count override (below). The continuous
-streams also take a size:
-
-```yaml
-platform:
-  compute:
-    spark:
-      bronze_ingest_executor_cores: null   # 1-16
-      silver_stream_executor_cores: null   # 1-16
-      gold_refresh_executor_cores: null    # 1-16
-```
-
-A set value keeps the profile's memory and scratch per core, and shrinks the
-scale's executor count by the same ratio, so total cores stay the same.
-Unset, bronze-ingest and silver-stream grow to 8 or 16 cores when the offered
-load needs more executors than the cap, unless their `*_executors` count is
-set. gold-refresh is never grown automatically.
-
-The v1.6
-`platform.compute.spark.driver` and `.executor` blocks sized nothing (the
-manifests never read them), so v1.7 removed them: a command that changes
-data refuses a config that sets either, with the fix, and `destroy`,
-`status` and the read-only commands load it and say the block is ignored.
-
-### Per-Job Executor Count Overrides
-
-```yaml
-platform:
-  compute:
-    spark:
-      # Batch jobs (null = auto-derived from scale factor)
-      bronze_executors: null         # Override bronze-verify executor count
-      silver_executors: null         # Override silver-build executor count
-      gold_executors: null           # Override gold-finalize executor count
-
-      # Continuous-mode jobs (null = auto-derived from scale factor)
-      bronze_ingest_executors: null  # Override bronze-ingest executor count
-      silver_stream_executors: null  # Override silver-stream executor count
-      gold_refresh_executors: null   # Override gold-refresh executor count
-```
-
-When set, these values bypass the auto-scaling formula entirely for that job.
-They change the count only; the continuous `*_executor_cores` keys above
-change the size.
-
-### Scratch Storage (Shuffle PVCs)
-
-```yaml
-platform:
-  storage:
-    scratch:
-      # enabled: true                # Portworx scratch PVCs; unset, it turns on for a batch run at scale 50 and above
-      storage_class: "px-csi-scratch"  # Must be repl=1
-```
-
-When enabled, each executor gets a dynamically provisioned PVC mounted at
-`/tmp/spark-local` for shuffle spill. The PVC size comes from the per-job
-profile (`scratch_size`); `metrics.json` records it per job as
-`config_snapshot.scratch.size_per_job`. `scratch.size` sized nothing and is
-refused like the removed executor block. The StorageClass must use `repl=1` --
-using `repl=2+` doubles storage consumption with zero benefit for
-recomputable shuffle data. `lakebench deploy` only verifies that the
-StorageClass exists; it never creates it. A cluster admin creates it once with
-`lakebench admin install --component scratch-storage-class`.
-
-### Spark Configuration Overrides (S3A, Shuffle, Memory)
+### Spark conf (S3A, shuffle, memory)
 
 ```yaml
 spark:
@@ -226,10 +125,7 @@ spark:
     spark.hadoop.fs.s3a.retry.limit: "20"  # replaces a job default
 ```
 
-Each job's conf is the job defaults, then `spark.conf`, then the keys
-Lakebench sets for the job. The defaults (`SPARK_CONF_DEFAULTS` in
-`src/lakebench/modules/pipeline_engines/spark/conf_keys.py`), which a
-`spark.conf` value replaces:
+Each job's conf is the job defaults, then `spark.conf`, then the keys Lakebench sets. Defaults (`SPARK_CONF_DEFAULTS` in `modules/pipeline_engines/spark/conf_keys.py`), which `spark.conf` can replace:
 
 | Key | Default |
 |---|---|
@@ -241,9 +137,7 @@ Lakebench sets for the job. The defaults (`SPARK_CONF_DEFAULTS` in
 | `spark.memory.fraction` | `0.8` |
 | `spark.memory.storageFraction` | `0.3` |
 
-Lakebench then sets its own keys for every job, and `spark.conf` cannot
-change them: the commands that change data refuse a config that sets one,
-naming what controls it. They include:
+Keys Lakebench sets for every job (`LAKEBENCH_OWNED_SPARK_KEYS`). The commands that change data refuse a `spark.conf` that sets one, naming what controls it:
 
 | Key | Value that runs |
 |---|---|
@@ -255,64 +149,47 @@ naming what controls it. They include:
 | `spark.hadoop.fs.s3a.max.total.tasks` | `200` |
 | `spark.hadoop.fs.s3a.block.size` | `268435456` |
 | `spark.hadoop.fs.s3a.connection.timeout` | `60000` |
-| `spark.sql.shuffle.partitions`, `spark.default.parallelism` | per job: at scale 10 or below the job profile's `base_partitions`, unless an executor override raises the count above the profile default; otherwise `executor_count * cores * 2` |
+| `spark.sql.shuffle.partitions`, `spark.default.parallelism` | at scale 10 or below the profile's `base_partitions`, unless an executor override raises the count above the profile default; otherwise `executor_count * cores * 2` |
+| catalog, jar (`spark.jars`, `spark.jars.*`, `spark.submit.pyFiles`), adaptive-execution, stability, Parquet, Spark UI and `spark.kubernetes.*` keys | set per job |
 
-and the catalog, jar (`spark.jars`, `spark.jars.*`, `spark.submit.pyFiles`),
-adaptive-execution, stability, Parquet, Spark UI and `spark.kubernetes.*`
-keys (`LAKEBENCH_OWNED_SPARK_KEYS`). `spark.driver.maxResultSize` is the
-exception: Lakebench sets it from the executor count only when `spark.conf`
-does not.
+Two keys a user may set (`USER_OVERRIDABLE_SPARK_KEYS`): Lakebench sets `spark.driver.maxResultSize` from the executor count only when `spark.conf` does not; `spark.redaction.regex` keeps a user value with Lakebench's terms in front.
 
 ## Job Profiles
 
-The base profiles, proven at 1TB+ scale, live in
-`_JOB_PROFILES` in `src/lakebench/modules/pipeline_engines/spark/job.py`.
+Per-executor sizing comes from `_JOB_PROFILES` in `modules/pipeline_engines/spark/job.py`, proven at 1TB+ scale. Workload overrides live in `_SCHEMA_PROFILE_OVERRIDES` in the same file. Reducing these values causes OOM kills or "No space left on device" failures.
 
 ### Batch Jobs
 
-| Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver (Spark 3) | Driver (Spark 4) |
+| Job | Executor cores | Executor memory | Overhead | Scratch PVC | Driver (Spark 3) | Driver (Spark 4) |
 |---|---|---|---|---|---|---|
-| `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) | 4g | 4g |
-| `silver-build` | 4 | 48g | 12g | 300Gi | 24g | 32g |
-| `gold-finalize` | 4 | 32g | 8g | 300Gi | 24g | 32g |
+| `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360); financial: 50 GiB x scale / executors, 50-500Gi | 4g | 4g |
+| `silver-build` | 4 | 48g | 12g | 60 GiB x scale / executors, 50-300Gi | 24g | 32g |
+| `gold-finalize` | 4 | 32g | 8g | 33 GiB x scale / executors, 50-300Gi | 24g | 32g |
 
-For financial workloads `bronze-verify` also overrides executor
-memory (4g -> 8g), overhead (2g -> 12g), `executors_per_100_scale` (4 -> 8)
-and `max_executors` (20 -> 28), since the CTAS fallback in
-`bronze_verify_financial.py` rewrites the full pacs.008 source above scale 5.
-Overrides live in `_SCHEMA_PROFILE_OVERRIDES` alongside the base profiles.
+- Financial `bronze-verify` also raises `executors_per_100_scale` 4 -> 8 and `max_executors` 20 -> 28 for its CTAS fallback, which rewrites the full pacs.008 source. It registers bronze with zero-copy `add_files` at every scale; CTAS runs only when `add_files` fails or the source exceeds 1.5 TiB or 800,000 files (`LB_BRONZE_ADD_FILES_MAX_BYTES`, `LB_BRONZE_ADD_FILES_MAX_FILES`).
+- Customer 360 `bronze-verify` only validates the data and records the data clock; it registers no table.
+- Per-executor memory is fixed at every scale. Executor counts are fixed up to scale 10, grow linearly above it and stop at `max_executors`, so data per executor grows up to scale 10 and again past the cap.
+- silver-build is the bottleneck: at scale 100 (~1TB) it requests 18 executors at 60g each (48g + 12g overhead).
+- Scratch rules are under [Scratch Storage](#scratch-storage-shuffle-pvcs).
 
-### Continuous-Mode Jobs
+### Continuous-mode jobs
 
-| Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver Memory |
+| Job | Executor cores | Executor memory | Overhead | Scratch PVC | Driver memory |
 |---|---|---|---|---|---|
 | `bronze-ingest` | 2 | 4g | 2g | 20Gi | 4g |
 | `silver-stream` | 4 | 32g | 8g | 100Gi | 8g |
 | `gold-refresh` | 4 | 32g | 8g | 100Gi | 8g |
 
-For financial workloads `bronze-ingest` runs 4 cores, 8g memory and 8g
-overhead per executor. The financial overrides also change the executor
-counts of all three continuous jobs (see the Auto-Scaling section), and set
-base partitions to 80 for `silver-stream` and 96 for `gold-refresh`. Per-executor
-cores, memory and scratch for `silver-stream` and `gold-refresh` are unchanged.
-
-**Why are the batch profiles fixed?** Adding executors keeps data-per-executor constant, so
-per-executor memory and PVC requirements do not change with scale. The silver-build
-job is the bottleneck -- at scale 100 (~1TB) it requests 18 executors at 60g
-each (48g + 12g overhead) plus 300Gi scratch PVCs. Reducing these values causes
-OOM kills or "No space left on device" failures.
+Financial overrides: `bronze-ingest` runs 4 cores, 8g memory and 8g overhead per executor; all three jobs get different executor counts ([Auto-Scaling](#auto-scaling)); base partitions are 80 for `silver-stream` and 96 for `gold-refresh`. Per-executor cores, memory and scratch for `silver-stream` and `gold-refresh` are unchanged.
 
 ## Auto-Scaling
 
-Executor count is derived from the scale factor unless overridden. In
-continuous mode bronze-ingest and silver-stream take the larger of this count
-and what the offered load needs, up to the maximum. The scale formula in
-`_scale_executor_count()`:
+Executor count comes from the scale factor unless a `*_executors` key overrides it (`executor_count()` in `job.py`):
 
-- **Scale <= 10:** Use the base executor count (varies per job).
-- **Scale > 10:** `base + ((scale - 10) * rate) // 100`, capped at a per-job maximum.
+- **Scale <= 10:** the job's base count.
+- **Scale > 10:** `base + ((scale - 10) * rate) // 100`, capped at the job's maximum.
 
-| Job | Base | Rate per 100 scale units | Maximum |
+| Job | Base | Rate per 100 scale | Maximum |
 |---|---|---|---|
 | `bronze-verify` | 4 | 4 | 20 |
 | `silver-build` | 8 | 12 | 28 |
@@ -321,49 +198,72 @@ and what the offered load needs, up to the maximum. The scale formula in
 | `silver-stream` | 4 | 8 | 20 |
 | `gold-refresh` | 2 | 4 | 10 |
 
-Financial (AML) overrides: `bronze-verify` 4 / 8 / 28, `bronze-ingest`
-5 / 4 / 20, `silver-stream` 10 / 8 / 28, `gold-refresh` 12 / 120 / 28.
+Financial (AML) overrides: `bronze-verify` 4 / 8 / 28, `bronze-ingest` 5 / 4 / 20, `silver-stream` 10 / 8 / 28, `gold-refresh` 12 / 120 / 28.
 
-In continuous mode, the three jobs share the cluster concurrently with datagen.
-When the cluster cannot hold every stream (`_streaming_concurrent_budget()`,
-after Trino, the catalog, PostgreSQL and datagen), each executor goes to the
-stream holding the smallest share of what it needs, so the slowest stage keeps
-the largest share the cluster allows. An explicit
-per-job executor override wins over this cap.
+In continuous mode:
 
-To override the auto-derived count for any job:
+- bronze-ingest and silver-stream take the larger of this count and what the offered load needs, up to the maximum.
+- The three jobs share the cluster with datagen. When the cluster cannot hold every stream (`_streaming_concurrent_budget()`, after Trino, the catalog, PostgreSQL and datagen), each executor goes to the stream holding the smallest share of what it needs. The slowest stage keeps the largest share the cluster allows.
+- An explicit per-job executor override wins over this Lakebench cap.
+
+## Scratch Storage (Shuffle PVCs)
 
 ```yaml
 platform:
-  compute:
-    spark:
-      silver_executors: 12           # Force 12 executors for silver-build
-      gold_refresh_executors: 4      # Force 4 executors for gold-refresh
+  storage:
+    scratch:
+      # enabled: true                # unset, it turns on for a batch run at scale 50 and above
+      storage_class: "px-csi-scratch"  # Must be repl=1
 ```
 
-## OpenShift
+When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-local` for shuffle spill (`scratch_executor_size()` in `job.py`):
 
-Spark pods run as **UID 185** (the `spark` user in official `apache/spark`
-images). On OpenShift, this requires the `anyuid` Security Context Constraint
-(SCC) bound to the `lakebench-spark-runner` service account.
+- **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify with 16 executors at scale 10 gets 50Gi each.
+- **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
+- To change scratch, change the executor count (`platform.compute.spark.<job>_executors`). There is no size field.
+- `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
+- The StorageClass must use `repl=1`: `repl=2+` doubles storage with no benefit for recomputable shuffle data.
+- `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.
 
-Lakebench handles this automatically. During `lakebench deploy`, the RBAC
-deployer detects OpenShift and makes the grant that `oc adm policy
-add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>` makes, through
-the Kubernetes API: the RoleBinding `system:openshift:scc:anyuid` in the
-deployment's namespace. `oc` is not needed. If the grant is refused (the
-deploying user cannot bind that ClusterRole), the RBAC step fails and prints
-the `oc adm policy` command for a cluster admin; see
-[Prerequisites](prerequisites.md#openshift-scc-clusterrole). On vanilla
-Kubernetes, the SCC step is skipped.
+## RBAC
 
-Spark is used by all recipes. See the [Recipes Guide](recipes.md) for all
-supported component combinations.
+`deploy` creates the Role `lakebench-spark-runner` (namespace-scoped, not a ClusterRole; `templates/rbac/role.yaml.j2`). `deletecollection` is required for Spark 3.5.x driver cleanup on termination.
 
-## See Also
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+```
 
-- [Recipes](recipes.md) -- all supported component combinations
-- [Architecture](architecture.md) -- system layers and medallion pipeline overview
-- [Running Pipelines](running-pipelines.md) -- step-by-step `lakebench run` usage
-- [Configuration](configuration.md) -- full YAML configuration reference
-- [Troubleshooting](troubleshooting.md) -- common Spark failure modes and fixes
+## OpenShift Security Context Constraints (SCC)
+
+Lakebench detects OpenShift when the `security.openshift.io` API group is served. Otherwise it treats the cluster as vanilla Kubernetes.
+
+- Spark pods run as UID 185 (the `spark` user in `apache/spark` images), so `lakebench-spark-runner` needs the `anyuid` SCC.
+- `deploy` grants `anyuid` to `lakebench-spark-runner` and `lakebench-postgres` in its RBAC and PostgreSQL steps. It uses the RBAC API (the RoleBinding `system:openshift:scc:anyuid`), so no `oc` is needed. A refused grant fails the step. Vanilla Kubernetes gets no grant. See [Prerequisites](prerequisites.md#openshift-scc-clusterrole).
+- `lakebench validate` prints the platform and version and, on OpenShift, whether each SCC is assigned. With `--verbose` it checks the security requirements and shows the `oc adm policy` fix for a missing grant.
+- Manual grant and how to verify it: [OpenShift SCC permission denied](troubleshooting.md#openshift-scc-permission-denied). `oc get events -n <namespace> --sort-by='.lastTimestamp'` shows SCC errors.
+
+## Troubleshooting
+
+- [SparkApplication stuck with no status](troubleshooting.md#sparkapplication-stuck-with-no-status)
+- [Spark Operator volume mounting fails](troubleshooting.md#spark-operator-volume-mounting-fails)
+- ["No space left on device" on silver-build](troubleshooting.md#no-space-left-on-device-on-silver-build)
+- [A stage times out](troubleshooting.md#a-stage-times-out)
+- [OpenShift SCC permission denied](troubleshooting.md#openshift-scc-permission-denied)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| PVC provisioning failed | Storage class does not exist | Use one that exists. A cluster admin installs the scratch default `px-csi-scratch` (Portworx, repl=1) once with `lakebench admin install --component scratch-storage-class`. |
+| deletecollection forbidden | Role lacks `deletecollection` | Add the verb to the Role. |
+
+## See also
+
+[Recipes](recipes.md), [Architecture](architecture.md), [Running Pipelines](running-pipelines.md), [Configuration](configuration.md), [Sizing](sizing.md).

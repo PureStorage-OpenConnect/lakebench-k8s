@@ -1,11 +1,10 @@
-"""Destroy deletes the emptied buckets it owns, and only those (LB-159).
+"""Destroy deletes the emptied buckets it owns, and only those.
 
-Destroy used to empty buckets and stop there; 136 empty ov-* buckets piled up
-on FlashBlade. A bucket is deleted only when this deployment provably owns it
-(ownership tag, or the name-prefix claim on backends without tagging) and
-lakebench manages bucket lifecycle (``create_buckets``). Another deployment's
-bucket, a --force-legacy bucket, and a pre-provisioned bucket are never
-deleted.
+A bucket is deleted only when this deployment provably owns it (ownership
+tag, or the name-prefix claim on backends without tagging) and lakebench
+manages bucket lifecycle (``create_buckets``). Another deployment's bucket, a
+--force-legacy bucket, a pre-provisioned bucket and an adopted bucket are
+emptied at most, never deleted.
 """
 
 from __future__ import annotations
@@ -32,6 +31,26 @@ def _no_real_sleep():
         yield
 
 
+class FakeClock:
+    """One clock for time.monotonic and time.sleep: sleeping advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+
+@pytest.fixture
+def clock():
+    c = FakeClock()
+    with patch("time.monotonic", c.monotonic), patch("time.sleep", c.sleep):
+        yield c
+
+
 class TestS3DeleteBucket:
     def test_deletes_empty_bucket(self):
         boto = FakeBoto({"a-bronze": []})
@@ -41,29 +60,26 @@ class TestS3DeleteBucket:
     def test_already_gone(self):
         assert _s3(FakeBoto({})).delete_bucket("a-bronze") is False
 
-    def test_listing_lag_is_retried(self):
+    def test_listing_lag_is_retried_until_the_bucket_is_deleted(self, clock):
         boto = FakeBoto({"a-bronze": []}, lag=2)
         assert _s3(boto).delete_bucket("a-bronze") is True
-        assert boto.delete_bucket_calls == ["a-bronze"] * 3
+        assert boto.buckets == {}
 
-    def test_refilled_bucket_is_not_re_emptied(self):
+    def test_refilled_bucket_is_not_re_emptied(self, clock):
         """Data that reappears after the verified empty may be a redeploy's."""
         boto = FakeBoto({"a-bronze": ["new-deploy/part-0.parquet"]})
-        with (
-            patch("time.monotonic", side_effect=[0.0, 5.0, 1000.0]),
-            pytest.raises(S3BucketError, match="BucketNotEmpty"),
-        ):
+        with pytest.raises(S3BucketError, match="BucketNotEmpty"):
             _s3(boto).delete_bucket("a-bronze", max_wait=10)
         assert boto.buckets["a-bronze"] == ["new-deploy/part-0.parquet"]
 
-    def test_never_empty_raises_at_the_bound(self):
+    def test_never_empty_raises_at_the_bound(self, clock):
         boto = FakeBoto({"a-bronze": []}, lag=10**6)
-        with patch("time.monotonic", side_effect=[0.0] + [1000.0] * 10):
-            with pytest.raises(S3BucketError, match="BucketNotEmpty"):
-                _s3(boto).delete_bucket("a-bronze", max_wait=120)
+        with pytest.raises(S3BucketError, match="BucketNotEmpty"):
+            _s3(boto).delete_bucket("a-bronze", max_wait=120)
+        assert boto.buckets == {"a-bronze": []}
 
     def test_bucket_deleted_mid_empty_raises_vanished(self):
-        """S-P4: the other destroy deletes the bucket while this one lists it."""
+        """The other destroy deletes the bucket while this one lists it."""
         boto = FakeBoto({"a-bronze": ["x"]})
 
         def vanish(op):
@@ -78,45 +94,6 @@ class TestS3DeleteBucket:
         boto.delete_bucket = MagicMock(side_effect=_err("AccessDenied"))
         with pytest.raises(S3BucketError, match="AccessDenied"):
             _s3(boto).delete_bucket("a-bronze")
-
-
-class TestDeleteOwnedBuckets:
-    def test_owned_deleted_unproven_kept_gone_reported(self):
-        boto = FakeBoto({"a-bronze": [], "a-silver": [], "legacy-gold": []})
-        notes, failed = destroy_mod._delete_owned_buckets(
-            _s3(boto),
-            ["a-bronze", "a-silver", "legacy-gold", "a-gone"],
-            deletable={"a-bronze", "a-silver", "a-gone"},
-            enabled=True,
-            create_buckets=True,
-        )
-        assert not failed
-        assert set(boto.buckets) == {"legacy-gold"}, "an unproven bucket must survive"
-        text = " | ".join(notes)
-        assert "deleted buckets: a-bronze, a-silver" in text
-        assert "already gone: a-gone" in text
-        assert "provenance unknown" in text and "legacy-gold" in text
-
-    def test_pre_provisioned_buckets_are_never_deleted(self):
-        boto = FakeBoto({"shared-bronze": []})
-        notes, failed = destroy_mod._delete_owned_buckets(
-            _s3(boto),
-            ["shared-bronze"],
-            deletable={"shared-bronze"},
-            enabled=True,
-            create_buckets=False,
-        )
-        assert not failed and boto.delete_bucket_calls == []
-        assert "create_buckets=false" in notes[0]
-
-    def test_delete_failure_is_reported(self):
-        boto = FakeBoto({"a-bronze": []})
-        boto.delete_bucket = MagicMock(side_effect=_err("AccessDenied"))
-        notes, failed = destroy_mod._delete_owned_buckets(
-            _s3(boto), ["a-bronze"], deletable={"a-bronze"}, enabled=True, create_buckets=True
-        )
-        assert failed
-        assert "emptied but NOT deleted" in " ".join(notes)
 
 
 class TestDestroyAllBuckets(DestroyAllBucketsHarness):
@@ -153,7 +130,7 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert boto.delete_bucket_calls == []
 
     def test_foreign_bucket_is_left_alone_and_the_rest_still_cleaned(self):
-        """LB-177: one refusal no longer stops the deployment's own buckets."""
+        """One refusal no longer stops the deployment's own buckets."""
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["theirs"], "a-gold": []})
         r = self._run(
             boto,
@@ -719,7 +696,7 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
 
     def test_iceberg_destroy_skips_snapshot_and_orphan_maintenance(self):
-        """LB-186: Trino only unregisters (a DROP deletes every referenced
+        """Trino only unregisters (a DROP deletes every referenced
         file); no maintenance statement runs."""
         ran: list[str] = []
         tables = self._run_tables(ran.append, table_format="iceberg")
@@ -808,7 +785,7 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         )
         assert tables.status is DeploymentStatus.FAILED
 
-    # -- LB-177: config buckets UNION recorded buckets ------------------------
+    # -- Config buckets UNION recorded buckets ------------------------
 
     def test_recorded_bucket_from_an_earlier_config_is_deleted(self):
         """Live: ov-sp-a-bronze recorded, config bronze was ov-sp-a-shared."""

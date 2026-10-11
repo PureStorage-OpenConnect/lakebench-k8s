@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_experiment.py (imported by several test files)."""
+"""Config and metrics builders for the experiment and comparability tests."""
 
 from __future__ import annotations
 
@@ -44,14 +44,7 @@ def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
         ],
     )
     run.datagen_fleet = fleet
-    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
-    # FAILED. PipelineMetrics defaults success to False (the "run in
-    # progress" shape), so a synthetic collector object without an
-    # end_run(success=True) call would compute a FAILED verdict and be
-    # refused by compare. These tests build a synthetic completed run to
-    # exercise the comparability ladder itself, not to test a failed run;
-    # mark it complete so the verdict computes PASSED. Every layer has rows,
-    # so the verdict's layer_rows gate (EVD-1) passes too.
+    # A completed run with rows in every layer so its verdict computes PASSED.
     run.success = True
     run.jobs = [
         JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)

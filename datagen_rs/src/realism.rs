@@ -11,6 +11,74 @@ fn pick<'a>(pool: &'a [&'a str], id: u64, salt: u64) -> &'a str {
     pool[(splitmix64(id ^ salt) % pool.len() as u64) as usize]
 }
 
+// --- Name space ----------------------------------------------------------
+//
+// The surname and company-head pools grow with the population, so the number
+// of entities sharing a name stays flat across scale. With fixed pools the
+// namesakes of a watchlist entry grew with the population while the list grew
+// too, so screening false matches grew with the square of scale. Surnames are
+// synthetic at every scale, so their length mix (which sets how many
+// namesakes clear a similarity cut) is the same at every scale too.
+
+/// Pool size `per_scale * population / 111,111` (the scale-1 population),
+/// at least 1: exactly proportional, so namesakes per name do not step with
+/// the scale.
+fn pool_for(per_scale: u64, population: usize) -> u64 {
+    ((per_scale as f64 * population as f64 / 111_111.0).round() as u64).max(1)
+}
+
+const SYL_ONSET: &[u8] = b"bdfghkjlmnprstvz";
+const SYL_VOWEL: &[u8] = b"aeiou";
+/// Four syllables of 16 x 5: 80^4 = 40,960,000 names, far more than any pool
+/// drawn from it, so two drawn names rarely sit one syllable apart.
+const SYL_SPACE: u64 = 40_960_000;
+/// Odd and not a multiple of 5, so coprime with SYL_SPACE: `j * SYL_STEP`
+/// mod SYL_SPACE is a bijection that scatters consecutive indices.
+const SYL_STEP: u64 = 2_654_435_761;
+
+/// The `j`-th synthetic name of a stream (`offset` separates surnames from
+/// company heads). Distinct for distinct `j` below SYL_SPACE.
+fn synthetic_name(j: u64, offset: u64) -> String {
+    let mut x = (j.wrapping_mul(SYL_STEP).wrapping_add(offset)) % SYL_SPACE;
+    let mut s = String::with_capacity(8);
+    for _ in 0..4 {
+        let syl = (x % 80) as usize;
+        x /= 80;
+        s.push(SYL_ONSET[syl / 5] as char);
+        s.push(SYL_VOWEL[syl % 5] as char);
+    }
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_ascii_uppercase().to_string() + c.as_str(),
+        None => s,
+    }
+}
+
+/// Surnames per unit of name space (the size of the former fixed pool).
+const SURNAMES_PER_SCALE: u64 = 77;
+
+/// Surname `i` of a pool of `surname_pool(population)`.
+pub fn surname(i: u64) -> String {
+    synthetic_name(i, 0)
+}
+
+/// Company head `i` of a pool of `corp_head_pool(population)`: the fixed pool first,
+/// then synthetic names.
+pub fn corp_head(i: u64) -> String {
+    match CORP_HEAD.get(i as usize) {
+        Some(n) => n.to_string(),
+        None => synthetic_name(i - CORP_HEAD.len() as u64, SYL_SPACE / 2),
+    }
+}
+
+pub fn surname_pool(population: usize) -> u64 {
+    pool_for(SURNAMES_PER_SCALE, population)
+}
+
+pub fn corp_head_pool(population: usize) -> u64 {
+    pool_for(CORP_HEAD.len() as u64, population)
+}
+
 // --- Currency ------------------------------------------------------------
 pub fn currency_for_country(cc: &str) -> &'static str {
     match cc {
@@ -114,85 +182,6 @@ pub(crate) const FIRST: &[&str] = &[
     "Ngozi",
     "Sekou",
     "Zainab",
-];
-pub(crate) const LAST: &[&str] = &[
-    "Smith",
-    "Johnson",
-    "Williams",
-    "Brown",
-    "Jones",
-    "Davis",
-    "Miller",
-    "Wilson",
-    "Moore",
-    "Taylor",
-    "Anderson",
-    "Thomas",
-    "Jackson",
-    "White",
-    "Harris",
-    "Martin",
-    "Thompson",
-    "Robinson",
-    "Clark",
-    "Lewis",
-    "Lee",
-    "Walker",
-    "Hall",
-    "Allen",
-    "Young",
-    "King",
-    "Wright",
-    "Scott",
-    "Green",
-    "Baker",
-    "Adams",
-    "Nelson",
-    "Hill",
-    "Campbell",
-    "Garcia",
-    "Rodriguez",
-    "Martinez",
-    "Hernandez",
-    "Lopez",
-    "Gonzalez",
-    "Perez",
-    "Sanchez",
-    "Ramirez",
-    "Torres",
-    "Flores",
-    "Rivera",
-    "Gomez",
-    "Diaz",
-    "Reyes",
-    "Wang",
-    "Zhang",
-    "Liu",
-    "Chen",
-    "Yang",
-    "Huang",
-    "Zhao",
-    "Wu",
-    "Sato",
-    "Suzuki",
-    "Kim",
-    "Park",
-    "Choi",
-    "Patel",
-    "Sharma",
-    "Singh",
-    "Kumar",
-    "Shah",
-    "Gupta",
-    "Khan",
-    "Okafor",
-    "Adebayo",
-    "Mensah",
-    "Diallo",
-    "Al-Saud",
-    "Al-Farsi",
-    "Hassan",
-    "Ibrahim",
 ];
 pub(crate) const CORP_HEAD: &[&str] = &[
     "Meridian",
@@ -303,15 +292,16 @@ pub(crate) fn legal_suffix(cc: &str, id: u64) -> &'static str {
     pool[(splitmix64(id ^ 0x11E6A1) % pool.len() as u64) as usize]
 }
 
-pub fn person_name(id: u64, seed: i64) -> String {
+pub fn person_name(id: u64, seed: i64, population: usize) -> String {
     let f = pick(FIRST, id, (seed as u64).wrapping_add(121));
-    let l = pick(LAST, id, (seed as u64).wrapping_add(131));
+    let l = surname(splitmix64(id ^ (seed as u64).wrapping_add(131)) % surname_pool(population));
     let mi = (b'A' + (splitmix64(id ^ (seed as u64).wrapping_add(141)) % 26) as u8) as char;
     format!("{} {}. {}", f, mi, l)
 }
 
-pub fn company_name(id: u64, cc: &str, seed: i64) -> String {
-    let h = pick(CORP_HEAD, id, (seed as u64).wrapping_add(141));
+pub fn company_name(id: u64, cc: &str, seed: i64, population: usize) -> String {
+    let h =
+        corp_head(splitmix64(id ^ (seed as u64).wrapping_add(141)) % corp_head_pool(population));
     let d = pick(CORP_DESC, id, (seed as u64).wrapping_add(151));
     format!("{} {} {}", h, d, legal_suffix(cc, id))
 }
@@ -708,4 +698,26 @@ pub fn email(name: &str, id: u64, cc: &str, seed: i64) -> String {
         locals[di - GLOBAL_DOMAINS.len()]
     };
     format!("{}{:02}@{}", email_local(name), id % 100, domain)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Namesakes per surname stay flat only if the pool grows with the
+    /// population and its names are distinct.
+    #[test]
+    fn surname_pool_grows_with_population_and_is_distinct() {
+        assert_eq!(surname_pool(111_111), SURNAMES_PER_SCALE);
+        assert_eq!(surname_pool(11_111_100), SURNAMES_PER_SCALE * 100);
+        // Proportional, not stepped: scale 1.5 gets 1.5x the scale-1 pool.
+        assert_eq!(surname_pool(166_667), 116);
+        let n = surname_pool(111_111_000);
+        let names: std::collections::HashSet<String> = (0..n).map(surname).collect();
+        assert_eq!(names.len() as u64, n);
+        let heads: std::collections::HashSet<String> =
+            (0..corp_head_pool(111_111_000)).map(corp_head).collect();
+        assert_eq!(heads.len() as u64, corp_head_pool(111_111_000));
+        assert!(heads.is_disjoint(&names));
+    }
 }

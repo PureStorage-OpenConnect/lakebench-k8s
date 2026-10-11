@@ -10,13 +10,12 @@ These tests drive ``destroy_all`` itself under the recording fixture, so an
 inverted predicate in the code destroy really runs fails them. The earlier
 tests exercised two helpers that ``destroy_all`` never called.
 
-Also here: LB-187, destroy deleting the PostgreSQL claims, which carry no
+Also here: destroy deleting the PostgreSQL claims, which carry no
 labels.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -106,6 +105,11 @@ class TestLegacySecretClassRefcountInline:
         with recording(allow_delete=[f"secretclasses/{n}" for n in LEGACY]) as rec:
             rec.add_namespace("kube-system")
             rec.add_namespace("someone-else", labels={"app.kubernetes.io/managed-by": "helm"})
+            rec.add_namespace(
+                "empty-annotation",
+                annotations={"lakebench.deployment/name": ""},
+                labels={"app": "x"},
+            )
             _destroy(rec)
             assert sorted(_legacy_deletes(rec)) == sorted(LEGACY)
             rec.assert_clean()
@@ -120,35 +124,8 @@ class TestLegacySecretClassRefcountInline:
             assert _legacy_deletes(rec) == []
 
 
-class TestOtherLakebenchNamespaces:
-    @staticmethod
-    def _ns(name, annotations=None, labels=None):
-        return SimpleNamespace(
-            metadata=SimpleNamespace(name=name, annotations=annotations, labels=labels)
-        )
-
-    def test_rules(self):
-        from lakebench.deploy.destroy import _other_lakebench_namespaces
-
-        items = [
-            self._ns(NS, {"lakebench.deployment/name": NS}),
-            self._ns("a", {"lakebench.deployment/name": "a"}),
-            self._ns("b", None, {"app.kubernetes.io/managed-by": "lakebench"}),
-            self._ns("c", None, {"app.kubernetes.io/name": "lakebench"}),
-            self._ns("d", {"lakebench.deployment/name": ""}, {"app": "x"}),
-            self._ns("e", None, None),
-            SimpleNamespace(metadata=None),
-        ]
-        assert _other_lakebench_namespaces(items, NS) == ["a", "b", "c"]
-
-    def test_only_self_is_empty(self):
-        from lakebench.deploy.destroy import _other_lakebench_namespaces
-
-        assert _other_lakebench_namespaces([self._ns(NS, None, None)], NS) == []
-
-
 class TestPostgresClaims:
-    """LB-187: the claim template has no labels; destroy finds the claims by name."""
+    """The claim template has no labels; destroy finds the claims by name."""
 
     @staticmethod
     def _pvc(rec: K8sRecorder, name: str, labels: dict | None = None) -> None:
@@ -187,17 +164,13 @@ class TestPostgresClaims:
     def test_claim_template_stays_unlabelled(self):
         """Labels added to volumeClaimTemplates would make a v1.7 deploy over a
         v1.6 StatefulSet fail: the API server refuses changes to that field."""
-        from pathlib import Path
-
-        import jinja2
         import yaml
 
-        import lakebench
+        from lakebench.deploy.engine import TemplateRenderer
+        from tests.fixtures.functional_templates_helpers import _enrich_context, _make_engine
 
-        tpl = Path(lakebench.__file__).parent / "templates/postgres/statefulset.yaml.j2"
-        rendered = jinja2.Template(tpl.read_text()).render(
-            namespace=NS, name=NS, storage_class="sc", openshift_mode=False
-        )
+        ctx = _enrich_context(_make_engine())
+        rendered = TemplateRenderer().render("postgres/statefulset.yaml.j2", ctx)
         (sts,) = [d for d in yaml.safe_load_all(rendered) if d and d["kind"] == "StatefulSet"]
         claims = sts["spec"]["volumeClaimTemplates"]
         assert [c["metadata"] for c in claims] == [{"name": "data"}]

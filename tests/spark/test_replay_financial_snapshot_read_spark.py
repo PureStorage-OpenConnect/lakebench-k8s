@@ -1,9 +1,5 @@
 """Executed: financial replay reads silver at its resolved snapshot on the
-default Iceberg of Spark 4.x.
-
-Replay read with ``spark.read.option("snapshot-id", ...)``, which Iceberg 1.11
-removed, so on Spark 4.1.1 + Iceberg 1.11.0 it failed before any rule ran.
-"""
+default Iceberg of Spark 4.x."""
 
 from __future__ import annotations
 
@@ -22,13 +18,12 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
 
 
 def test_replay_main_runs_the_rule_on_the_resolved_older_snapshot(spark, load_script, monkeypatch):
-    """AM-27: ``main()`` resolves the snapshot for ``--depth-months`` and
-    hands the rule silver as of that snapshot, through the real read path.
+    """``main()`` resolves the snapshot for ``--depth-months`` and hands the
+    rule silver as of that snapshot, through the real read path.
 
     Two snapshots: rows 1 and 2, then row 3. The clock is set between the
     two commits, so depth 0 resolves to the first snapshot and the rule
-    must see rows 1 and 2 only. With the removed ``snapshot-id`` read
-    option in ``main()`` this raises on Iceberg 1.11 before the rule runs.
+    must see rows 1 and 2 only.
     """
     import sys
     import time
@@ -38,7 +33,7 @@ def test_replay_main_runs_the_rule_on_the_resolved_older_snapshot(spark, load_sc
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.gold")
     txns = f"{replay.CATALOG}.{replay.SILVER_TXNS}"
     versions = f"{replay.CATALOG}.{replay.SILVER_BATCH_VERSIONS}"
-    out = "lakehouse.gold.alerts_replay_am27"
+    out = "lakehouse.gold.alerts_replay_snapshot_read"
     for t in (txns, versions, out):
         spark.sql(f"DROP TABLE IF EXISTS {t}")
     schema = "n bigint, _stream_id string, _batch_id bigint"
@@ -56,8 +51,9 @@ def test_replay_main_runs_the_rule_on_the_resolved_older_snapshot(spark, load_sc
     # second snapshot after it.
     first_at = datetime.fromtimestamp(first_ms / 1000, timezone.utc)
     pivot = first_at.replace(microsecond=0) + timedelta(seconds=1)
-    while datetime.now(timezone.utc) <= pivot + timedelta(milliseconds=200):
-        time.sleep(0.1)
+    time.sleep(
+        max(0.0, (pivot + timedelta(milliseconds=200) - datetime.now(timezone.utc)).total_seconds())
+    )
     spark.createDataFrame([(3, "batch", 1)], schema).writeTo(txns).append()
     snaps = spark.sql(f"SELECT snapshot_id FROM {txns}.snapshots").collect()
     assert len(snaps) == 2

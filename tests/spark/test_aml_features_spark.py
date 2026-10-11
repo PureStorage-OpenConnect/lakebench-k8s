@@ -6,10 +6,9 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,19 +23,8 @@ T0 = datetime(2024, 3, 4, 10, tzinfo=timezone.utc)
 
 
 @pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
+def spark(spark_session):
+    return spark_session
 
 
 TXN_SCHEMA = (
@@ -155,7 +143,6 @@ def test_country_and_kyc_features(feats):
 
 
 def test_feature_columns_match_preregistration(feats):
-    import json
 
     import aml_features as af
 
@@ -215,8 +202,11 @@ ACCOUNT_SCHEMA = "holder_entity_id long, iban string"
 ACCOUNTS = [(i, f"IB{i}") for i in range(1, 7)] + [(3, "IB3-second")]
 
 
-def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
+@pytest.fixture(scope="module")
+def bronze(spark, tmp_path_factory):
     import aml_features as af
+
+    tmp_path = tmp_path_factory.mktemp("aml-bronze")
 
     def party(nm, lei, ctry, iban):
         return (
@@ -269,24 +259,34 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
         tmp_path / "party",
     )
     acct = _write(spark, ACCOUNTS, ACCOUNT_SCHEMA, tmp_path / "acct")
-
+    dup = _write(spark, ACCOUNTS + [(4, "IB5")], ACCOUNT_SCHEMA, tmp_path / "acct-dup")
     txns, ents, id_map = af.bronze_frames(
         spark, pacs_path=pacs, party_path=party_path, account_path=acct
     )
-    assert af.duplicate_ibans(spark, acct) == 0
-    dup = _write(spark, ACCOUNTS + [(4, "IB5")], ACCOUNT_SCHEMA, tmp_path / "acct-dup")
-    assert af.duplicate_ibans(spark, dup) == 1
-    assert dict(id_map.select("dg_id", "key").collect()) == {i: i for i in range(1, 7)}
-    keys = {r["orig_key"] for r in txns.collect()} | {r["bene_key"] for r in txns.collect()}
-    assert keys == {1, 2, 3, 4, 5, 6, None}
-    assert af.unkeyed_rows(txns) == 1
+    return SimpleNamespace(txns=txns, ents=ents, id_map=id_map, acct=acct, dup=dup)
+
+
+def test_bronze_adapter_keys_rows_through_the_account_master(spark, bronze):
+    import aml_features as af
     from pyspark.sql.functions import hour
 
+    assert af.duplicate_ibans(spark, bronze.acct) == 0
+    assert af.duplicate_ibans(spark, bronze.dup) == 1
+    assert dict(bronze.id_map.select("dg_id", "key").collect()) == {i: i for i in range(1, 7)}
+    rows = bronze.txns.collect()
+    keys = {r["orig_key"] for r in rows} | {r["bene_key"] for r in rows}
+    assert keys == {1, 2, 3, 4, 5, 6, None}
+    assert af.unkeyed_rows(bronze.txns) == 1
     # TIMESTAMP_NTZ wall clock 10:00 becomes the 10:00 UTC instant.
-    assert dict(txns.select("uetr", hour("ts")).collect())["u12"] == 10
+    assert dict(bronze.txns.select("uetr", hour("ts")).collect())["u12"] == 10
+
+
+def test_bronze_adapter_labels_by_participant_subject_and_uetr(spark, bronze):
+    import aml_features as af
+
     labels = {
         (r["key"], r["typology_type"])
-        for r in af.labels_from_participants(_manifest(spark), id_map).collect()
+        for r in af.labels_from_participants(_manifest(spark), bronze.id_map).collect()
     }
     assert labels == {
         (1, "stack"),
@@ -298,18 +298,24 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
     # Subject role: stack's first pass-through (index 1), dormant's originator.
     subj = {
         (r["key"], r["typology_type"])
-        for r in af.labels_from_subjects(spark, _manifest(spark), id_map).collect()
+        for r in af.labels_from_subjects(spark, _manifest(spark), bronze.id_map).collect()
     }
     assert subj == {(2, "stack"), (4, "dormant_reactivation")}
     # The UETR route agrees for these instances (every participant is on a row).
-    by_uetr = af.labels_from_uetrs(_manifest(spark), txns)
-    agree = af.label_agreement(af.labels_from_participants(_manifest(spark), id_map), by_uetr)
+    by_uetr = af.labels_from_uetrs(_manifest(spark), bronze.txns)
+    agree = af.label_agreement(
+        af.labels_from_participants(_manifest(spark), bronze.id_map), by_uetr
+    )
     assert agree["stack"] == {"by_participant_id": 3, "by_uetr": 3, "both": 3}
 
-    feats = af.entity_features(txns, ents)
+
+def test_bronze_gate_frame_scores_customers_only(spark, bronze):
+    import aml_features as af
+
+    feats = af.entity_features(bronze.txns, bronze.ents)
     pdf = af.gate_frame(
         feats,
-        af.labels_from_participants(_manifest(spark), id_map),
+        af.labels_from_participants(_manifest(spark), bronze.id_map),
         ["stack", "dormant_reactivation"],
     )
     # Customers only: entity 3 (non-customer participant) is not scored.
@@ -464,11 +470,3 @@ def test_corpus_scale_and_gate_scale(spark, tmp_path):
     prereg = {"corpora": {"entities_per_scale_unit": 11, "gate_scale": 2}}
     assert af.at_gate_scale(info, prereg)
     assert not af.at_gate_scale({"n_entities": 11, "scale": 1.0}, prereg)
-    real = json.loads(
-        (
-            Path(__file__).resolve().parents[2]
-            / "src/lakebench/spark/data/aml/aml_preregistration.json"
-        ).read_text()
-    )
-    assert real["corpora"]["gate_scale"] == 2
-    assert af.at_gate_scale({"n_entities": 222222}, real)

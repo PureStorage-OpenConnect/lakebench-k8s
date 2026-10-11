@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_corpus_identity.py (imported by several test files)."""
+"""A fake corpus bucket with series markers, and observe_corpus over it."""
 
 from __future__ import annotations
 
@@ -70,12 +70,11 @@ def series(
 class FakeBoto:
     """list_objects_v2 paginator (pages of 2) and get_object over a dict."""
 
-    def __init__(self, objects: dict[str, bytes], fail_get: set[str] | None = None):
+    def __init__(self, objects: dict[str, bytes]):
         self.objects = dict(objects)
         self.etags = {k: hashlib.md5(v).hexdigest() for k, v in objects.items()}  # noqa: S324
         self.lists = 0
         self.gets: list[str] = []
-        self.fail_get = fail_get or set()
 
     def get_paginator(self, op):
         assert op == "list_objects_v2"
@@ -101,8 +100,6 @@ class FakeBoto:
 
     def get_object(self, Bucket, Key):  # noqa: N803
         self.gets.append(Key)
-        if Key in self.fail_get:
-            raise ConnectionError("endpoint unreachable")
         return {"Body": io.BytesIO(self.objects[Key])}
 
 

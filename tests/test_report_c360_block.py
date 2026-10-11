@@ -65,10 +65,13 @@ def test_c360_block_absent_without_a_record():
 
 def test_c360_malformed_record_never_breaks_the_page():
     record = load_record("5105a0")
-    record["c360_correctness"]["checks"] = [{"id": object.__name__, "kind": None}, "junk"]
+    record["c360_correctness"]["checks"] = [{"id": "malformed", "kind": None}, "junk"]
     html = _render_dict(record)
     assert "Bottleneck Identification" in html
-    assert "Expected results (Customer 360)" in html or "C360 results could not be rendered" in html
+    assert "C360 results could not be rendered" not in html
+    block = _plain(_block(html))
+    assert "gate: fails the run" in block and "not evaluated" in block
+    assert "junk" not in block
 
 
 def test_c360_block_judges_the_ids_c360_correctness_judges(monkeypatch):

@@ -3,8 +3,6 @@ robustness stamp from a MAP column (lane T2 review). Skipped without pyspark."""
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
 import pytest
@@ -14,22 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
-
-
-def test_stamp_groups_from_a_map_column(spark):
+def test_stamp_groups_from_a_map_column(spark_session):
+    spark = spark_session
     import aml_features as af
     from pyspark.sql.types import MapType, StringType, StructField, StructType
 
@@ -56,9 +40,11 @@ def test_stamp_groups_from_a_map_column(spark):
     assert (s0["n_instances"], s0["n_stamped"]) == (4, 0)
     assert (s1["n_instances"], s1["n_stamped"]) == (4, 4)
     assert s1["multipliers"] == dict.fromkeys(ds.MANIFEST_MULTIPLIER_KEYS.values(), ["1.2"])
-    prereg = ds._corpora()
-    assert ds.perturbation_stamp_error(prereg, "robustness", s1) is None
-    assert ds.perturbation_stamp_error(prereg, "robustness", s0)
+    corpora = {"robustness_perturbation": dict.fromkeys(ds.MANIFEST_MULTIPLIER_KEYS, 1.2)}
+    assert ds.perturbation_stamp_error(corpora, "robustness", s1) is None
+    unstamped = ds.perturbation_stamp_error(corpora, "robustness", s0)
+    assert unstamped is not None
+    assert "carries no robustness stamp" in unstamped
     # A manifest without the column reads as unstamped.
     s2 = ds.summarise_stamp(
         af.manifest_stamp_groups(plain.drop("injection_parameters"), ds.MANIFEST_KEYS)

@@ -1,30 +1,8 @@
-"""A multi-cycle run generates one slice per cycle, never a whole corpus
-first (LB-255).
+"""A multi-cycle run generates one slice per cycle and refuses --generate.
 
-``run --generate`` on a multi-cycle config ran Phase 3's single-shot
-generate (``deploy()``) before the cycle loop, whose ``deploy_cycle(0)`` then
-generated cycle 0 again.
-datagen_rs names cycle-0 files like a single-shot corpus
-(``part-{fid:06}.parquet``, ``datagen_rs::cycle::c360_key``), so:
-
-- on a bronze bucket this deployment owns, cycle 0 cleared the whole
-  corpus first (a wasted generate);
-- on one it did not create, with ``--allow-stale-bronze``, cycle 0 could not
-  clear and wrote its N/c files over the first N/c of the corpus's N; cycle 0's
-  silver (``common.c360_bronze_path``: ``part-[0-9]*.parquet``) then read all
-  N, and the later cycles appended theirs: about (2 - 1/c) times the rows;
-- on one it did not create, without the flag, cycle 0 refused the files
-  Phase 3 had just written.
-
-``run`` now refuses ``--generate`` on a multi-cycle run (exit 2, before any
-cluster call), as the v1.7 design has it: a multi-cycle ``run`` generates in
-its cycles without the flag. On the code before the refusal, the first test
-here read 12 files at cycle 0 instead of 4 (3 cycles), with exit 0.
-
-The tests drive the real ``run`` through the QA-9 harness with bronze held
-as keys: the fake datagen writes the keys datagen_rs would, and cycle 0
-calls the real ``DatagenDeployer._clear_bronze_prefix_if_fresh`` and the
-real bronze gate against a key-level S3.
+The tests drive the real ``run`` through the harness with bronze held as keys:
+the fake datagen writes the keys datagen_rs would, and cycle 0 calls the real
+bronze clear and bronze gate against a key-level S3.
 """
 
 from __future__ import annotations
@@ -48,15 +26,13 @@ CYCLES = 3
 
 
 def _common():
+    """common.py by file path; its pyspark imports are inside functions, so
+    the path helpers load without pyspark."""
     path = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/common.py"
     spec = importlib.util.spec_from_file_location("lb_common_for_test", path)
-    if spec is None or spec.loader is None:  # pragma: no cover
-        pytest.skip("cannot load common.py")
+    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except ImportError:  # pyspark-only imports
-        pytest.skip("common.py needs pyspark")
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -80,7 +56,7 @@ class KeyS3:
     def has_user_objects(self, bucket, prefix=""):
         return any(k.startswith(prefix) and not k.startswith(".lakebench/") for k in self.keys)
 
-    def get_bucket_size(self, bucket, prefix=""):
+    def get_bucket_size(self, bucket, prefix="", exclude_prefix=""):
         n = sum(1 for k in self.keys if k.startswith(prefix))
         return SimpleNamespace(object_count=n, size_bytes=n * 1000)
 
@@ -161,15 +137,14 @@ def _run(tmp_path, monkeypatch, *, owned: bool, argv: list[str]):
     config = dict(SCENARIOS["batch_c360"].config)
     config["architecture"] = {"pipeline": {"mode": "batch", "cycles": CYCLES}}
     scenario = dataclasses.replace(SCENARIOS["batch_c360"], argv=argv, config=config)
-    result, rec = invoke_scenario(scenario, tmp_path, monkeypatch)
-    _run.rec = rec  # type: ignore[attr-defined]
+    result, _rec = invoke_scenario(scenario, tmp_path, monkeypatch)
     return result, keys, calls
 
 
 def _cycle0_silver_reads(keys: set[str], monkeypatch) -> int:
-    common = _common()
+    """Files cycle 0's silver reads: the keys matching the real bronze glob."""
     monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
-    glob = common.c360_bronze_path("s3a://b/", appending=False)[len("s3a://b/") :]
+    glob = _common().c360_bronze_path("s3a://b/", appending=False)[len("s3a://b/") :]
     return sum(1 for k in keys if fnmatch.fnmatchcase(k, glob))
 
 
@@ -206,8 +181,9 @@ def test_foreign_bucket_with_allow_stale_bronze_holds_only_the_cycle_slices(tmp_
     assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]
 
 
-def test_foreign_empty_bucket_without_the_flag_generates(tmp_path, monkeypatch):
-    result, keys, calls = _run(tmp_path, monkeypatch, owned=False, argv=["--yes"])
+@pytest.mark.parametrize("owned", [False, True])
+def test_empty_bucket_without_the_flag_generates(tmp_path, monkeypatch, owned):
+    result, keys, calls = _run(tmp_path, monkeypatch, owned=owned, argv=["--yes"])
     assert result.exit_code == 0, result.output
     assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]
     assert len(keys) == FILES
@@ -231,14 +207,4 @@ def test_owned_corpus_is_replaced_by_the_cycle_slices_with_regenerate(tmp_path, 
     result, keys, calls = _run(tmp_path, monkeypatch, owned=True, argv=["--regenerate", "--yes"])
     assert result.exit_code == 0, result.output
     assert (_cycle0_silver_reads(keys, monkeypatch), len(keys)) == (FILES // CYCLES, FILES)
-    assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]
-
-
-def test_multicycle_run_completes_its_cycle_datagen(tmp_path, monkeypatch):
-    """The cycle datagen wait read a ``_time`` that only the single-shot
-    generate bound, so every multi-cycle run stopped at cycle 1 with
-    "cannot access local variable" (exit 1)."""
-    result, keys, calls = _run(tmp_path, monkeypatch, owned=True, argv=["--yes"])
-    assert "_time" not in result.output, result.output
-    assert result.exit_code == 0, result.output
     assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]

@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_run_args.py (imported by several test files)."""
+"""A run config and the no-cluster fixture for the run-argument tests."""
 
 from __future__ import annotations
 

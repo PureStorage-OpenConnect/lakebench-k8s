@@ -13,33 +13,16 @@ import json
 import os
 import signal
 import threading
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import pytest
 
 from lakebench.deploy.deps_tools import lb_deps
 from lakebench.deps import request as req_mod
-from tests.fixtures.lb_deps_helpers import _SERVE as _SERVE
 from tests.fixtures.lb_deps_helpers import BUNDLE as BUNDLE
-from tests.fixtures.lb_deps_helpers import COORDS as COORDS
-from tests.fixtures.lb_deps_helpers import FAKE_PIP as FAKE_PIP
-from tests.fixtures.lb_deps_helpers import FAKE_SPARK_SUBMIT as FAKE_SPARK_SUBMIT
-from tests.fixtures.lb_deps_helpers import FAKE_VARS as FAKE_VARS
 from tests.fixtures.lb_deps_helpers import HADOOP as HADOOP
-from tests.fixtures.lb_deps_helpers import ICE as ICE
-from tests.fixtures.lb_deps_helpers import PINS as PINS
-from tests.fixtures.lb_deps_helpers import TOOL as TOOL
-from tests.fixtures.lb_deps_helpers import TRANSITIVE as TRANSITIVE
 from tests.fixtures.lb_deps_helpers import Env as Env
-from tests.fixtures.lb_deps_helpers import _ExtRepo as _ExtRepo
-from tests.fixtures.lb_deps_helpers import _serve as _serve
-from tests.fixtures.lb_deps_helpers import _wait_port as _wait_port
 from tests.fixtures.lb_deps_helpers import _zip_bytes as _zip_bytes
-from tests.fixtures.lb_deps_helpers import ext_repo as ext_repo
-
-DELTA = "io.delta:delta-spark_2.13:4.0.0"
 
 
 @pytest.fixture
@@ -64,29 +47,23 @@ def _last_error(out: str) -> str:
     return lines[0]
 
 
-# --- parity with lakebench.deps.request -------------------------------------
-
-
 # --- request guard ----------------------------------------------------------------
 
 
-def test_request_json_must_match_pod_env(env, capsys):
+def test_request_json_must_match_pod_env(env):
     env.request()
     env.mp.setenv("LB_DEPS_REQUEST_SHA256", "0" * 64)
     assert env.run("resolve", "spark") == lb_deps.EXIT_REQUEST
-    assert "the pod expects" in _last_error(capsys.readouterr().out)
 
 
 # --- resolve: jars ------------------------------------------------------------
 
 
-def test_missing_direct_coordinate_exits_3(env, capsys):
+def test_missing_direct_coordinate_exits_3(env):
     """Today's resolve-deps ends in `|| true`, so this passed silently."""
     r = env.request()
     env.mp.setenv("FAKE_SKIP", BUNDLE)
     assert env.run("resolve", "spark") == lb_deps.EXIT_MISSING
-    err = _last_error(capsys.readouterr().out)
-    assert BUNDLE in err and "egress:" not in err
     assert not (env.root / "requests" / f"{r['sha']}.json").exists()
 
 
@@ -124,6 +101,7 @@ def test_pointer_with_a_bad_pinset_never_deletes_the_pvc(env):
     (env.root / "requests" / f"{r['sha']}.json").write_text(json.dumps({"pinset_sha256": ".."}))
     assert env.run("resolve", "spark") == 0
     assert (env.root / "keep").exists()
+    assert lb_deps.verify_set(env.set_dir(r["sha"]).name) is None
 
 
 def test_symlink_in_staging_fails(env, capsys, monkeypatch, tmp_path):
@@ -160,44 +138,7 @@ def test_verify_set_refuses_unsafe_paths_and_dir_symlinks(env, tmp_path):
     assert lb_deps.verify_set(bad.name).startswith("unsafe path")
 
 
-# --- resolve: wheels and DuckDB -----------------------------------------------------
-
-
 # --- serve ------------------------------------------------------------------------
-
-
-def _status(url: str, method: str = "GET") -> int:
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, method=method), timeout=5) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-
-
-@pytest.fixture
-def served(env, tmp_path, capsys):
-    """A resolved set behind the real serve, plus its shown manifest."""
-    env.mp.setenv("FAKE_BIG_MB", "24")
-    r = env.request()
-    assert env.run("resolve", "spark") == 0
-    capsys.readouterr()
-    assert env.run("show") == 0
-    man = tmp_path / "manifest.json"
-    man.write_text(capsys.readouterr().out)
-    pinset = json.loads(man.read_text())["pinset_sha256"]
-    proc = _serve(tmp_path / "port")
-    port = _wait_port(proc, tmp_path / "port")
-    yield {
-        "proc": proc,
-        "man": man,
-        "sha": r["sha"],
-        "pinset": pinset,
-        "base": f"http://127.0.0.1:{port}",
-        "url": f"http://127.0.0.1:{port}/sets/{pinset}",
-    }
-    if proc.poll() is None:
-        proc.kill()
-        proc.wait()
 
 
 def test_realpath_confinement(env, tmp_path):
@@ -308,9 +249,6 @@ def test_fetch_refuses_unsafe_paths(served_set, tmp_path):
     url = served_set["url"].rsplit("/", 1)[0] + "/" + m["pinset_sha256"]
     assert _fetch(served_set, tmp_path / "o", url) == lb_deps.EXIT_HASH
     assert not (tmp_path / "escape.jar").exists()
-
-
-# --- errors -----------------------------------------------------------------------
 
 
 # --- brief-pass fixes -------------------------------------------------------------

@@ -20,29 +20,14 @@ import signal
 
 import pytest
 
+from tests.fixtures.sigterm_sentinel import sentinel_sigterm
 from tests.harness.run_harness import (
     SCENARIOS,
     run_scenario_full,
     saved_record,
 )
 
-
-class SentinelSigterm(Exception):
-    """SIGTERM reached the handler that was installed before the run."""
-
-
-@pytest.fixture(autouse=True)
-def sentinel_sigterm():
-    def handler(signum, frame):
-        raise SentinelSigterm
-
-    previous = signal.signal(signal.SIGTERM, handler)
-    previous_int = signal.getsignal(signal.SIGINT)
-    try:
-        yield handler
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-        signal.signal(signal.SIGINT, previous_int)
+__all__ = ["sentinel_sigterm"]
 
 
 def _run(base: str, tmp_path, monkeypatch, **changes):
@@ -68,48 +53,58 @@ def _assert_handlers_restored(sentinel) -> None:
 
 
 @pytest.mark.parametrize("how", ["SIGINT", "SIGTERM", "raise"])
-def test_interrupt_batch_seals_interrupted(tmp_path, monkeypatch, sentinel_sigterm, how):
-    """A signal while silver-build runs: INTERRUPTED, 130, its app deleted by uid.
-
-    With the change reverted the record reads success true and PASSED, with
-    no interrupted block, and the silver-build application stays in the
-    fake cluster (a SIGTERM reaches the sentinel instead).
-    """
-    trace, rec, record = _run("batch_c360", tmp_path, monkeypatch, interrupt=("silver-build", how))
+@pytest.mark.parametrize(
+    "scenario, stage",
+    [("batch_c360", "silver-build"), ("batch_aml", "score-financial")],
+)
+def test_interrupt_batch_seals_interrupted(
+    tmp_path, monkeypatch, sentinel_sigterm, scenario, stage, how
+):
+    """A signal while a stage runs: INTERRUPTED, 130, its app deleted by uid."""
+    trace, rec, record = _run(scenario, tmp_path, monkeypatch, interrupt=(stage, how))
     assert trace["unscripted"] == []
     assert trace["exit_code"] == 130
     assert record["success"] is False
     assert record["verdict"]["status"] == "INTERRUPTED"
     assert record["verdict"]["gates"]["interrupt"] == "INTERRUPTED"
-    # bronze-verify completed and passed; silver-build is not a failed job.
+    # The stages before it completed and passed; the stopped one is not a failed job.
     assert record["verdict"]["gates"]["pipeline"] == "PASS"
     intr = record["interrupted"]
     assert intr["signal"] == ("SIGINT" if how == "raise" else how)
-    assert intr["at_stage"] == "silver-build"
+    assert intr["at_stage"] == stage
     assert intr["prior_failure"] is False
-    assert intr["stopped"] == ["SparkApplication/lakebench-silver-build"]
+    assert intr["stopped"] == [f"SparkApplication/lakebench-{stage}"]
     assert intr["left"] == [] and intr["skipped"] == []
     # Deleted with the uid of the object this run created, in the background.
     [delete] = _deletes(rec, "SparkApplication")
-    assert delete[3] == "lakebench-silver-build"
-    assert delete[5] == "uid-silver-build-2" and delete[6] == "Background"
-    # The completed stage keeps its application (and its driver logs).
-    assert set(rec.apps) == {"lakebench-bronze-verify"}
-    # Gold never ran; the in-flight stage is recorded as interrupted.
-    assert [s[0] for s in rec.submits] == ["bronze-verify", "silver-build"]
-    jobs = record["jobs"]
-    assert jobs[-1]["job_type"] == "silver-build"
-    assert jobs[-1]["error_message"] == "interrupted"
-    assert jobs[-1]["success"] is False
-    # The corpus observation still runs after an interrupt (it never raises):
-    # one listing of the datagen prefix, and the record carries it.
+    assert delete[3] == f"lakebench-{stage}"
+    assert delete[5] == f"uid-{stage}-{len(rec.submits)}" and delete[6] == "Background"
+    # Completed stages keep their applications (and their driver logs).
+    assert set(rec.apps) == {f"lakebench-{s[0]}" for s in rec.submits[:-1]}
+    # Nothing after the in-flight stage ran; it is recorded as interrupted.
+    assert rec.submits[-1][0] == stage
+    if scenario == "batch_c360":  # the AML score stage is not a pipeline job record
+        jobs = record["jobs"]
+        assert jobs[-1]["job_type"] == stage
+        assert jobs[-1]["error_message"] == "interrupted"
+        assert jobs[-1]["success"] is False
+    _assert_handlers_restored(sentinel_sigterm)
+
+
+def test_the_corpus_and_end_load_are_observed_after_an_interrupt(tmp_path, monkeypatch):
+    """The observations never raise: after an interrupt the datagen prefix is
+    listed once and the record carries the corpus observation and the end
+    load sample."""
+    trace, rec, record = _run(
+        "batch_c360", tmp_path, monkeypatch, interrupt=("silver-build", "SIGINT")
+    )
+    assert trace["exit_code"] == 130
     assert ["S3", "paginate list_objects_v2", "runchar-bronze", "customer/interactions/"] in [
         c[:4] for c in rec.calls
     ]
-    assert "corpus_observation" in record["config_snapshot"]["experiment_inputs"]
-    # The end load sample is taken after an interrupt too.
-    assert "end" in record["config_snapshot"]["experiment_inputs"]["observed"]["allocatable"]
-    _assert_handlers_restored(sentinel_sigterm)
+    inputs = record["config_snapshot"]["experiment_inputs"]
+    assert "corpus_observation" in inputs
+    assert "end" in inputs["observed"]["allocatable"]
 
 
 def test_interrupt_batch_generate_keeps_the_finished_datagen_job(
@@ -288,39 +283,37 @@ def test_sigterm_inside_lease_without_the_deferral_lands_inside_helm(
     assert record["interrupted"]["at_stage"] == "operator-check"
 
 
-def test_interrupt_after_a_gate_failed_reads_failed(tmp_path, monkeypatch, sentinel_sigterm):
+@pytest.mark.parametrize("gate_fails", [True, False])
+def test_interrupt_in_the_benchmark_reads_failed_only_after_a_failed_gate(
+    tmp_path, monkeypatch, sentinel_sigterm, gate_fails
+):
     """A gate that fails the run without stopping it, then Ctrl-C in the
     benchmark: prior_failure is true and the record reads FAILED, not
-    INTERRUPTED."""
+    INTERRUPTED. Without a failed gate it reads INTERRUPTED."""
     import lakebench.metrics.c360_correctness as c360
 
-    monkeypatch.setattr(c360, "gating_problems", lambda rec: ["forced gate problem"])
+    if gate_fails:
+        monkeypatch.setattr(c360, "gating_problems", lambda rec: ["forced gate problem"])
     trace, rec, record = _run(
-        "batch_c360", tmp_path, monkeypatch, interrupt=("benchmark", "SIGINT")
+        "batch_c360",
+        tmp_path,
+        monkeypatch,
+        interrupt=("benchmark", "SIGINT" if gate_fails else "SIGTERM"),
     )
     assert trace["exit_code"] == 130
     intr = record["interrupted"]
-    # The first benchmark is the pre-compaction one, part of Phase 5.
-    assert intr["at_stage"] == "maintenance" and intr["prior_failure"] is True
-    assert record["verdict"]["status"] == "FAILED"
-    # Every stage had completed: nothing to stop.
-    assert intr["stopped"] == [] and not _deletes(rec, "SparkApplication")
-
-
-def test_interrupt_in_the_benchmark_of_a_good_run_reads_interrupted(
-    tmp_path, monkeypatch, sentinel_sigterm
-):
-    trace, rec, record = _run(
-        "batch_c360", tmp_path, monkeypatch, interrupt=("benchmark", "SIGTERM")
-    )
-    assert trace["exit_code"] == 130
-    assert record["interrupted"]["prior_failure"] is False
-    assert record["verdict"]["status"] == "INTERRUPTED"
+    assert intr["prior_failure"] is gate_fails
+    assert record["verdict"]["status"] == ("FAILED" if gate_fails else "INTERRUPTED")
     assert set(rec.apps) == {
         "lakebench-bronze-verify",
         "lakebench-silver-build",
         "lakebench-gold-finalize",
     }
+    if gate_fails:
+        # The first benchmark is the pre-compaction one, part of Phase 5.
+        assert intr["at_stage"] == "maintenance"
+    # Every stage had completed: nothing to stop.
+    assert intr["stopped"] == [] and not _deletes(rec, "SparkApplication")
 
 
 @pytest.mark.parametrize(
@@ -403,17 +396,6 @@ def test_failed_datagen_deploy_registers_no_job(tmp_path, monkeypatch, sentinel_
     assert not _deletes(rec, "Job")
 
 
-def test_interrupt_in_the_score_stage_stops_the_score_app(tmp_path, monkeypatch, sentinel_sigterm):
-    trace, rec, record = _run(
-        "batch_aml", tmp_path, monkeypatch, interrupt=("score-financial", "SIGINT")
-    )
-    assert trace["exit_code"] == 130
-    intr = record["interrupted"]
-    assert intr["at_stage"] == "score-financial"
-    assert intr["stopped"] == ["SparkApplication/lakebench-score-financial"]
-    assert record["verdict"]["status"] == "INTERRUPTED"
-
-
 @pytest.mark.parametrize("how", ["SIGINT", "SIGTERM"])
 def test_a_signal_while_results_are_gathered_keeps_the_record(
     tmp_path, monkeypatch, sentinel_sigterm, how
@@ -452,11 +434,7 @@ def test_a_signal_while_results_are_gathered_keeps_the_record(
 def test_interrupt_continuous_deletes_datagen_job(tmp_path, monkeypatch, sentinel_sigterm, how):
     """A signal in the window while datagen still runs: the three streams and
     the datagen Job this run created are deleted by uid, the record reads
-    INTERRUPTED at the window, and nothing is deleted by name afterwards.
-
-    With the change reverted the datagen Job is never deleted and the record
-    reads FAILED.
-    """
+    INTERRUPTED at the window, and nothing is deleted by name afterwards."""
     trace, rec, record = _run(
         "continuous_c360",
         tmp_path,
@@ -563,7 +541,7 @@ def test_interrupt_continuous_skip_generate_stops_only_streams(
 
 def test_a_refusal_exit_in_continuous_is_never_a_success(tmp_path, monkeypatch, sentinel_sigterm):
     """A continuous run that stops on a scripts-map failure exits 1, and its
-    record says failed (the flag used to stay set, so it saved PASSED)."""
+    record says failed."""
     from tests.harness import run_harness
 
     monkeypatch.setattr(
@@ -573,3 +551,40 @@ def test_a_refusal_exit_in_continuous_is_never_a_success(tmp_path, monkeypatch, 
     assert trace["exit_code"] == 1
     assert record["success"] is False
     assert record["verdict"]["status"] == "FAILED"
+
+
+def test_an_interrupted_run_with_observability_on_says_why_platform_is_missing(
+    tmp_path, monkeypatch, sentinel_sigterm
+):
+    """Observability on, run interrupted: platform collection is skipped and
+    the record says why, so the report never claims observability was off."""
+    from tests.fixtures.report_consistency_helpers import _render_dict
+
+    config = {**SCENARIOS["batch_c360"].config, "observability": {"enabled": True}}
+    trace, rec, record = _run(
+        "batch_c360", tmp_path, monkeypatch, config=config, interrupt=("silver-build", "raise")
+    )
+    assert trace["exit_code"] == 130
+    assert "interrupted" in record["platform_metrics"]["collection_error"]
+    assert "observability was off" not in _render_dict(record)
+    _assert_handlers_restored(sentinel_sigterm)
+
+
+def test_a_continuous_window_listing_that_could_not_count_is_not_repeated(tmp_path, monkeypatch):
+    """The window-end bucket listing ran but could not count every bucket:
+    the count stays unknown and the buckets are not listed again after
+    settle, whose micro-batches would then be counted as the window's."""
+    from lakebench.metrics.collector import MetricsCollector
+
+    real = MetricsCollector.record_actual_sizes
+    calls = []
+
+    def sizes(self, *args, **kwargs):
+        calls.append(1)
+        real(self, *args, **kwargs)
+        return None
+
+    monkeypatch.setattr(MetricsCollector, "record_actual_sizes", sizes)
+    _, _, record = _run("continuous_c360", tmp_path, monkeypatch)
+    assert len(calls) == 1
+    assert record["pipeline_benchmark"]["scores"]["total_s3_objects"] is None

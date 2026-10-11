@@ -140,14 +140,6 @@ def test_customer360_generate_applies_no_map():
     assert kinds == ["Job"]
 
 
-def test_byte_compare_mounts_the_hash_file():
-    from tests.conftest import exec_repo_script
-
-    bc = exec_repo_script(ROOT / "scripts/datagen_byte_compare.py", "datagen_byte_compare_hm")
-    assert bc.HELDOUT_FILE.is_file()
-    assert f"LB_HELDOUT_HASHES={bc.HELDOUT_MOUNT}" in bc.HELDOUT_ARGS
-
-
 def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
     from types import SimpleNamespace
 
@@ -170,10 +162,10 @@ def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
     assert bc.HELDOUT_ARGS[1].endswith(":ro,z")
 
 
-def test_python_and_rust_refuse_a_non_integer_format(tmp_path):
+@pytest.mark.parametrize("bad", [True, 1.0])
+def test_load_heldout_refuses_a_non_integer_format(tmp_path, bad):
     doc = json.loads(ds.heldout_path().read_text())
-    for bad in (True, 1.0):
-        p = tmp_path / "h.json"
-        p.write_text(json.dumps({**doc, "format": bad}))
-        with pytest.raises(ValueError, match="format"):
-            ds.load_heldout(p)
+    p = tmp_path / "h.json"
+    p.write_text(json.dumps({**doc, "format": bad}))
+    with pytest.raises(ValueError, match="format"):
+        ds.load_heldout(p)

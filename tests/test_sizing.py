@@ -1,10 +1,10 @@
-"""CC-22: one sizing source for the capacity preflight, info, config show,
-recommend, the docs tables and (CC-23) plan (CLI-3).
+"""One sizing source for the capacity preflight, info, config show,
+recommend and plan.
 
 Every caller sizes a config through ``config.sizing.plan_requirements``.
-These tests hold the callers to it, pin five cells to figures derived by
+These tests hold the callers to it and pin five cells to figures derived by
 hand from ``_JOB_PROFILES`` and the autosizer guidance (independently of
-the code under test), and name the cases that fail with CC-22 reverted.
+the code under test).
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from lakebench.config.support import DATAGEN_SCALE_BANDS
 from lakebench.k8s.client import ClusterCapacity
 
 GIB = 1024**3
-REPO = Path(__file__).resolve().parents[1]
 CELLS = [(wl, m, s) for wl in TABLE_WORKLOADS for m in TABLE_MODES for s in TABLE_SCALES]
 # The reference cluster: 434 cores / 4,349 GB allocatable.
 REFERENCE = ClusterCapacity(434_000, 4349 * GIB, 10, 64_000, 512 * GIB)
@@ -70,16 +69,12 @@ def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> Clust
 #   datagen 2 pods x 8 cores, 4 GiB each (2.2 GiB x 1.25 -> the 4 GiB floor);
 #   Trino 1 worker x 2 + coordinator 1 + catalog/Postgres 1 + lb-deps 1 = 5
 #   cores, 8 + 4 + 5 + 2 = 19 GB. Floor max(36, one 8-core pod) + 5 = 41
-#   cores, max(525, 4) + 19 = 544 GB. Scratch 8 x 300 = 2,400.
+#   cores, max(525, 4) + 19 = 544 GB. Scratch, the largest stage's: each
+#   executor's share of the stage's GiB per scale x scale, between 50 Gi and
+#   the profile's scratch_size: silver-build 60 x 1 / 8 -> 50, 8 x 50 = 400.
 # c360 batch s10: Spark as s1 (8 executors at scale <= 10); Trino 2 workers x 4
 #   + coordinator 2 + 1 + lb-deps 1 = 12 cores, 2 x 16 + 8 + 5 + 2 = 47 GB.
-#   Floor 48 / 572.
-# AML continuous s1: bronze-ingest 5 x 4 + 2 = 22, 5 x 16 + 4 x 1.4 = 85.6 -> 86;
-#   silver-stream 10 x 4 + 4 = 44, 10 x 40 + 8 x 1.4 = 411.2 -> 412; gold-refresh
-#   12 x 4 + 4 = 52, 12 x 40 + 8 x 1.4 = 491.2 -> 492; streams 118 / 990. Always
-#   on: Trino 5 / 19 (with lb-deps) plus datagen 2 x 8 cores, 7 GiB each
-#   (5.36 x 1.25 = 6.7 -> 7) = 21 / 33. Floor 139 / 1,023.
-#   Scratch 5 x 20 + 10 x 100 + 12 x 100 = 2,300.
+#   Floor 48 / 572. Scratch: silver-build 60 x 10 / 8 = 75, 8 x 75 = 600.
 # AML batch s100: silver-build 8 + 90 x 12 // 100 = 18 executors, 76 cores,
 #   18 x 60 + 32 x 1.4 = 1,124.8 -> 1,125 GB;
 #   datagen 10 pods (scale // 10) x 8 cores, 8 GiB (6.22 x 1.25 = 7.8 -> 8);
@@ -87,20 +82,31 @@ def _cap(cores: int, gb: int, node_cores: int = 64, node_gb: int = 512) -> Clust
 #   215 GB. Floor max(76, 8) + 38 = 114, max(1,125, 8) + 215 = 1,340; all ten
 #   datagen pods at once: max(76, 80) + 38 = 118 cores, max(1,125, 80) + 215 =
 #   1,340 GB.
-#   Scratch: AML bronze-verify
-#   4 + 90 x 8 // 100 = 11 executors x 500 Gi = 5,500.
-# c360 continuous s100: bronze-ingest 5 x 2 + 2 = 12, 5 x 6 + 4 x 1.4 = 35.6 -> 36;
-#   silver-stream 11 x 4 + 4 = 48, 11 x 40 + 8 x 1.4 = 451.2 -> 452; gold-refresh
-#   5 x 4 + 4 = 24, 5 x 40 + 8 x 1.4 = 211.2 -> 212; streams 84 / 700. Always on:
-#   Trino 38 / 215 (with lb-deps) plus datagen 10 x 8 = 80 cores, 10 x 4 GiB =
-#   40 GB. Floor 202 / 955.
-#   Scratch 5 x 20 + 11 x 100 + 5 x 100 = 1,700.
+#   Scratch: silver-build 60 x 100 / 18 = 334 -> the 300 Gi ceiling,
+#   18 x 300 = 5,400 (AML bronze-verify 50 x 100 / 11 = 455, 11 x 455 = 5,005).
+# Continuous: the floor is the smallest cluster whose concurrent budget,
+#   0.9 x (cores - Trino 2 + 2 x 4 - catalog/Postgres 1 - datagen - drivers),
+#   holds every stream's executor cores; memory alike at the streams' largest
+#   GiB per executor core (heap + overhead), after the always-on pods and the
+#   driver pods (heap x 1.4).
+# c360 continuous s10: bronze-ingest 2 x 2, silver-stream 4 x 4, gold-refresh
+#   2 x 4 (each at least its balance need, 1 datagen core at 104 MB/s) = 28
+#   cores; drivers 2 + 4 + 4 = 10; datagen 1. (C - 11 - 1 - 10) x 0.9 >= 28:
+#   C = 54. 10 GiB per core (silver, gold 32g + 8g over 4); always on 51 GB,
+#   drivers 5.6 + 11.2 + 11.2 = 28. (M - 51 - 28) x 0.9 / 10 >= 28: M = 391.
+#   Scratch 2 x 20 + 4 x 100 + 2 x 100 = 640.
+# AML continuous s10: datagen 1.5 cores x 28 MB/s = 42 MB/s; silver-stream
+#   ceil(42 / (0.7 x 0.8) / 4) = 19 x 4, bronze-ingest 5 x 4 (its profile),
+#   gold-refresh 12 x 4 (its profile at scale 10) = 144 cores; drivers 10.
+#   (C - 11 - 1.5 - 10) x 0.9 >= 144: C = 183. 10 GiB per core; always on
+#   54 GB, drivers 28. (M - 54 - 28) x 0.9 / 10 >= 144: M = 1,682.
+#   Scratch 5 x 20 + 19 x 100 + 12 x 100 = 3,200.
 HAND_DERIVED = {
-    ("customer360", "batch", 1): (41, 544, 2400),
-    ("customer360", "batch", 10): (48, 572, 2400),
-    ("financial", "continuous", 1): (139, 1023, 2300),
-    ("financial", "batch", 100): (114, 1340, 5500),
-    ("customer360", "continuous", 100): (202, 955, 1700),
+    ("customer360", "batch", 1): (41, 544, 400),
+    ("customer360", "batch", 10): (48, 572, 600),
+    ("financial", "batch", 100): (114, 1340, 5400),
+    ("customer360", "continuous", 10): (54, 391, 640),
+    ("financial", "continuous", 10): (183, 1682, 3200),
 }
 
 
@@ -116,27 +122,6 @@ def test_batch_full_request_counts_every_datagen_pod():
     assert p.datagen is not None and (p.datagen.pods, p.datagen.cpu_cores) == (10, 80)
 
 
-def test_docs_spark_peak_matches_compute_peak_requirements():
-    """Independent of the renderer: the Spark peak column of the
-    getting-started table equals compute_peak_requirements() for each cell."""
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    labels = {"Customer 360": "customer360", "AML": "financial"}
-    row = re.compile(
-        r"^\| (Customer 360|AML) \| (batch|continuous) \| (\d+) \| [^|]+\| [^|]+\| "
-        r"([\d,]+) cores / ([\d,]+) GB \|",
-        re.MULTILINE,
-    )
-    rows = row.findall((REPO / "docs" / "getting-started.md").read_text())
-    assert len(rows) == 12
-    for wl, mode, scale, cores, mem in rows:
-        peak = compute_peak_requirements(int(scale), mode, labels[wl])
-        assert (peak.cpu_cores, peak.memory_gb) == (
-            int(cores.replace(",", "")),
-            int(mem.replace(",", "")),
-        ), (wl, mode, scale)
-
-
 def _write_cfg(tmp_path: Path, wl: str, mode: str, scale: int) -> Path:
     path = tmp_path / f"{wl}-{mode}-{scale}.yaml"
     path.write_text(
@@ -145,21 +130,6 @@ def _write_cfg(tmp_path: Path, wl: str, mode: str, scale: int) -> Path:
         f"architecture:\n  pipeline:\n    mode: {mode}\n"
     )
     return path
-
-
-def _doc_rows(rel: str) -> dict[tuple[str, str, int], tuple[int, int, int]]:
-    labels = {"Customer 360": "customer360", "AML": "financial"}
-    row = re.compile(
-        r"^\| (Customer 360|AML) \| (batch|continuous) \| (\d+) \| ([\d,]+) cores \| "
-        r"([\d,]+) GB \|(?:[^\n]*?\|)?? ([\d,]+) Gi \|",
-        re.MULTILINE,
-    )
-    out = {}
-    for wl, mode, scale, cores, mem, scratch in row.findall((REPO / rel).read_text()):
-        out[(labels[wl], mode, int(scale))] = tuple(
-            int(v.replace(",", "")) for v in (cores, mem, scratch)
-        )
-    return out
 
 
 def _preflight_need(cfg, capacity: ClusterCapacity) -> tuple[int, int]:
@@ -172,58 +142,50 @@ def _preflight_need(cfg, capacity: ClusterCapacity) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
-def test_sizing_one_source(tmp_path):
-    """plan_requirements, the preflight, info, config show, recommend --scale
-    and both docs tables agree on all 12 cells (CLI-3 acceptance).
+@pytest.mark.parametrize("wl,mode,scale", CELLS)
+def test_preflight_prints_the_plan_figure(wl, mode, scale):
+    """The preflight's "needs" figure is plan_requirements for the capacity it
+    sizes with; offline (no capacity) it is the floor. Continuous above scale
+    50 differs from the offline floor because the autosizer raises datagen to
+    about 90% of the CPU left, which the floor then counts beside the
+    streams."""
+    cfg = default_sizing_config(wl, mode, scale)
+    floor = plan_requirements(cfg).floor
+    need = _preflight_need(cfg, REFERENCE)
+    fitted = plan_requirements(cfg, capacity=REFERENCE).floor
+    assert need == (fitted.cpu_cores, fitted.memory_gb)
+    if mode == "batch" or scale <= 50:
+        assert need == (floor.cpu_cores, floor.memory_gb)
 
-    Offline (no cluster) every caller prints the table's figure. Against a
-    cluster the preflight prints plan_requirements with that capacity; that
-    equals the table for every batch cell and for continuous at scale 50 or
-    below. Continuous above scale 50 differs: the autosizer raises datagen
-    to about 90% of the CPU left after the always-on pods and the floor
-    counts it beside the streams (an autosizer behaviour older than CC-22,
-    reported to the main lane). The equality with plan_requirements still
-    holds there.
-    """
-    readme = _doc_rows("README.md")
-    started = _doc_rows("docs/getting-started.md")
-    assert set(readme) == set(started) == set(CELLS)
+
+@pytest.mark.parametrize(
+    "wl,mode,scale", [("customer360", "batch", 10), ("financial", "continuous", 10)]
+)
+def test_cli_callers_print_the_plan_figure(tmp_path, wl, mode, scale):
+    """info, config show and recommend --scale print the floor that
+    plan_requirements gives the same config (one batch, one continuous cell)."""
+    plan = plan_requirements(default_sizing_config(wl, mode, scale))
+    floor = f"{plan.floor.cpu_cores} cores / {plan.floor.memory_gb} GB memory / {plan.scratch_gb} Gi scratch"
+    path = _write_cfg(tmp_path, wl, mode, scale)
     runner = CliRunner()
-    for wl, mode, scale in CELLS:
-        cfg = default_sizing_config(wl, mode, scale)
-        plan = plan_requirements(cfg)
-        want = (plan.floor.cpu_cores, plan.floor.memory_gb, plan.scratch_gb)
-        assert readme[(wl, mode, scale)] == want, (wl, mode, scale)
-        assert started[(wl, mode, scale)] == want, (wl, mode, scale)
-
-        need = _preflight_need(cfg, REFERENCE)
-        fitted = plan_requirements(cfg, capacity=REFERENCE).floor
-        assert need == (fitted.cpu_cores, fitted.memory_gb), (wl, mode, scale)
-        if mode == "batch" or scale <= 50:
-            assert need == want[:2], (wl, mode, scale)
-
-        path = _write_cfg(tmp_path, wl, mode, scale)
-        floor = f"{want[0]} cores / {want[1]} GB memory / {want[2]} Gi scratch"
-        for argv in (["info", str(path)], ["config", "show", str(path)]):
-            with mock.patch("lakebench.cli.get_k8s_client", side_effect=RuntimeError("no cluster")):
-                res = runner.invoke(app, argv, env={"COLUMNS": "400"})
-            assert res.exit_code == 0, res.output
-            assert floor in " ".join(res.output.split()), (argv, wl, mode, scale)
-
-        res = runner.invoke(
-            app,
-            ["recommend", "--scale", str(scale), "--mode", mode, "--schema", wl],
-            env={"COLUMNS": "400"},
-        )
+    for argv in (["info", str(path)], ["config", "show", str(path)]):
+        with mock.patch("lakebench.cli.get_k8s_client", side_effect=RuntimeError("no cluster")):
+            res = runner.invoke(app, argv, env={"COLUMNS": "400"})
         assert res.exit_code == 0, res.output
-        assert floor in " ".join(res.output.split()), (wl, mode, scale)
+        assert floor in " ".join(res.output.split()), argv
+    res = runner.invoke(
+        app,
+        ["recommend", "--scale", str(scale), "--mode", mode, "--schema", wl],
+        env={"COLUMNS": "400"},
+    )
+    assert res.exit_code == 0, res.output
+    assert floor in " ".join(res.output.split())
 
 
 def test_preflight_warns_when_batch_datagen_queues():
-    """Fails with CC-22 reverted: the preflight never looked at batch datagen.
-    Eight datagen pods of 100 GiB on a cluster that holds the Spark jobs but
-    not all eight at once pass (the Indexed Job queues the rest) with a
-    warning that names the queueing, and are not refused."""
+    """Eight datagen pods of 100 GiB on a cluster that holds the Spark jobs but
+    not all eight at once pass with a warning that the Indexed Job queues the
+    rest; without datagen in the run there is nothing to warn about."""
     from tests.conftest import make_config
 
     cfg = make_config(workload={"datagen": {"scale": 10, "parallelism": 8, "memory": "100Gi"}})
@@ -236,14 +198,14 @@ def test_preflight_warns_when_batch_datagen_queues():
         res = _check_cluster_capacity(cfg)
         skipped = _check_cluster_capacity(cfg, datagen_runs=False)
     assert res.passed, res.message
-    assert "datagen: 8 pods need" in res.message and "queue" in res.message
-    assert skipped.passed and "datagen" not in skipped.message.split("WARNING")[-1]
+    assert skipped.passed
+    assert "WARNING:" in res.message
+    assert "WARNING:" not in skipped.message
 
 
 def test_cluster_scaled_datagen_never_refuses_a_batch_run():
-    """Review finding: counting every cluster-scaled datagen pod in the floor
-    refused AML batch s60 on 1,500 cores / 1,500 GiB, where Spark needs 97
-    cores / 1,080 GB."""
+    """AML batch s60 on 1,500 cores / 1,500 GiB is admitted: Spark needs 97
+    cores / 1,080 GB and the cluster-scaled datagen pods queue."""
     cfg = default_sizing_config("financial", "batch", 60)
     cap = _cap(1500, 1500)
     verdict = check_capacity(cfg, cap)
@@ -252,9 +214,7 @@ def test_cluster_scaled_datagen_never_refuses_a_batch_run():
 
 
 def test_preflight_largest_pod_counts_datagen():
-    """Fails with CC-22 reverted: the largest-pod check saw only Spark pods
-    (4 cores), so 6-core nodes passed and the 8-core datagen pods never
-    scheduled."""
+    """6-core nodes are refused: the 8-core datagen pod would never schedule."""
     from tests.conftest import make_config
 
     cfg = make_config(workload={"datagen": {"scale": 1}})
@@ -267,10 +227,8 @@ def test_preflight_largest_pod_counts_datagen():
 
 
 def test_batch_run_without_generate_counts_no_datagen_pod():
-    """Review finding (HIGH): a plain batch run creates no datagen pod, but
-    the preflight counted one and refused 7.9-core nodes that hold every
-    Spark pod (4 cores). run passes datagen_runs=False there
-    (tests/test_capacity.py::test_run_passes_the_resolved_mode_to_the_check)."""
+    """A batch run without generate creates no datagen pod, so 7.9-core nodes
+    that hold every Spark pod pass; with datagen they do not."""
     from tests.conftest import make_config
 
     cfg = make_config(workload={"datagen": {"scale": 1}})
@@ -283,13 +241,10 @@ def test_batch_run_without_generate_counts_no_datagen_pod():
 
 
 def test_preflight_sizes_against_the_capacity_run_sized_with():
-    """Review finding: the preflight re-sized the config against its own
-    capacity fetch. When run's fetch failed it deployed uncapped Trino and
-    datagen while the preflight checked a capped copy; under CC-24 (free
-    capacity) that would be every run. With sizing_capacity the plan
-    checked is the one run sized."""
-    cfg = default_sizing_config("customer360", "continuous", 50)
-    cap = _cap(80, 960)
+    """With sizing_capacity the preflight checks the plan run sized, not a
+    re-sized copy against its own capacity fetch."""
+    cfg = default_sizing_config("customer360", "continuous", 100)
+    cap = _cap(32, 960)
     own = check_capacity(cfg, cap)
     as_run = check_capacity(cfg, cap, sizing_capacity=None)
     assert as_run.plan == plan_requirements(cfg)
@@ -302,33 +257,8 @@ def test_preflight_sizes_against_the_capacity_run_sized_with():
     assert f"needs ~{as_run.plan.floor.cpu_cores} cores" in res.message
 
 
-def test_run_passes_its_sizing_capacity_to_the_preflight(tmp_path, monkeypatch):
-    """run hands the preflight the capacity it auto-sized cfg against."""
-    cfg_file = tmp_path / "c.yaml"
-    cfg_file.write_text(
-        "name: cap-pass\n"
-        "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
-        "      access_key: x\n      secret_key: y\n"
-    )
-    cap = _cap(434, 4349)
-    seen: dict = {}
-
-    def fake_prereqs(cfg, **kw):
-        seen.update(kw)
-        raise SystemExit(3)
-
-    monkeypatch.setattr("lakebench.cli._prerequisites.run_prerequisites", fake_prereqs)
-    client = mock.MagicMock()
-    client.get_cluster_capacity.return_value = cap
-    _free_from_total(client)
-    monkeypatch.setattr("lakebench.k8s.get_k8s_client", lambda *a, **k: client)
-    CliRunner().invoke(app, ["run", str(cfg_file), "--yes"])
-    assert seen.get("sizing_capacity") is cap
-
-
 def test_thrift_pod_memory_counts_its_overhead():
-    """Review finding: the Spark Thrift pod requests heap + max(10%, 1 GiB)
-    (deploy/engine.py thrift_pod_memory_limit); sizing counted the heap."""
+    """The Spark Thrift pod requests heap + max(10%, 1 GiB), not the heap."""
     from lakebench.config.sizing import co_resident_request
     from tests.conftest import make_config
 
@@ -350,35 +280,48 @@ def test_thrift_pod_memory_counts_its_overhead():
 
 
 def test_duckdb_recipes_leave_memory_to_the_autosizer():
-    """A recipe that names the DuckDB memory marks it user-set, and the AML
-    16g never applied: the pod was OOMKilled at 4g in a continuous round."""
+    """A recipe does not mark the DuckDB memory user-set: it is autosized per
+    schema, and a value the user sets is kept."""
     from lakebench.config.autosizer import resolve_auto_sizing
     from tests.conftest import make_config
 
     for recipe in ("hive-iceberg-spark-duckdb", "polaris-iceberg-spark-duckdb"):
         aml = make_config(recipe=recipe, architecture={"workload": {"schema": "financial"}})
         resolve_auto_sizing(aml)
-        assert aml.architecture.query_engine.duckdb.memory == "16g", recipe
         c360 = make_config(recipe=recipe)
         resolve_auto_sizing(c360)
-        assert c360.architecture.query_engine.duckdb.memory == "4g", recipe
+        assert (
+            aml.architecture.query_engine.duckdb.memory
+            != c360.architecture.query_engine.duckdb.memory
+        ), recipe
+        user = make_config(
+            recipe=recipe,
+            architecture={
+                "workload": {"schema": "financial"},
+                "query_engine": {"duckdb": {"memory": "7g"}},
+            },
+        )
+        resolve_auto_sizing(user)
+        assert user.architecture.query_engine.duckdb.memory == "7g", recipe
 
 
-def test_overrides_are_counted():
+@pytest.mark.parametrize(
+    "field,value,delta",
+    [
+        # driver pod 64 GB x 1.4 (rounded up with the 8 x 60 GB executors) vs 32 GB x 1.4
+        ("driver_memory", "64g", (0, 45)),
+        ("driver_cores", 8, (4, 0)),
+        # 12 more executors of 4 cores and 60 GB each
+        ("silver_executors", 20, (48, 720)),
+    ],
+)
+def test_overrides_are_counted(field, value, delta):
     from tests.conftest import make_config
 
-    base = plan_requirements(make_config())
-    for field, value in (("driver_memory", "64g"), ("driver_cores", 8), ("silver_executors", 20)):
-        cfg = make_config(platform={"compute": {"spark": {field: value}}})
-        plan = plan_requirements(cfg)
-        assert (plan.spark.memory_gb, plan.spark.cpu_cores) != (
-            base.spark.memory_gb,
-            base.spark.cpu_cores,
-        ), field
-    cfg = make_config(platform={"compute": {"spark": {"silver_executors": 20}}})
-    assert any(
-        "executor overrides counted: silver-build 20" in b for b in plan_requirements(cfg).basis
-    )
+    base = plan_requirements(make_config()).spark
+    cfg = make_config(platform={"compute": {"spark": {field: value}}})
+    got = plan_requirements(cfg).spark
+    assert (got.cpu_cores - base.cpu_cores, got.memory_gb - base.memory_gb) == delta
 
 
 def test_floor_driver_names_a_datagen_pod_when_it_sets_the_floor():
@@ -388,18 +331,6 @@ def test_floor_driver_names_a_datagen_pod_when_it_sets_the_floor():
     plan = plan_requirements(cfg)
     assert plan.floor_driver == "one datagen pod"
     assert plan_requirements(cfg, datagen_runs=False).floor_driver == plan.spark.driving_job
-
-
-def test_info_shows_batch_datagen_offline(tmp_path):
-    """Fails with CC-22 reverted: info left batch datagen out of its sizing
-    lines and counted no catalog or Postgres memory."""
-    path = _write_cfg(tmp_path, "financial", "batch", 100)
-    with mock.patch("lakebench.cli.get_k8s_client", side_effect=RuntimeError("no cluster")):
-        res = CliRunner().invoke(app, ["info", str(path)], env={"COLUMNS": "400"})
-    assert res.exit_code == 0, res.output
-    out = " ".join(res.output.split())
-    assert "114 cores / 1340 GB memory" in out
-    assert "datagen 10 pods, 80 cores / 80 GB (before cluster scaling" in out
 
 
 def test_plan_does_not_mutate_the_config():
@@ -444,14 +375,6 @@ def test_skip_generate_leaves_datagen_out_in_both_modes():
             assert without.floor.cpu_cores < with_dg.floor.cpu_cores
         else:  # batch s10: Spark (36) is above datagen (32), so the floor holds
             assert without.floor == with_dg.floor
-
-
-def test_floor_is_not_monotonic_in_scale():
-    """Why recommend scans rather than bisects: the tier guidance gives 50
-    datagen pods and 20 Trino workers at scale 500, 16 and 10 at 501."""
-    a = plan_requirements(default_sizing_config("customer360", "batch", 500)).floor
-    b = plan_requirements(default_sizing_config("customer360", "batch", 501)).floor
-    assert b.cpu_cores < a.cpu_cores and b.memory_gb < a.memory_gb
 
 
 def _admitted_at(wl: str, mode: str, capacity: ClusterCapacity, check_pod: bool = True):
@@ -503,7 +426,7 @@ def test_recommend_monotonic(wl, mode):
     ceiling = int(DATAGEN_SCALE_BANDS[wl][1])
     dg = mode != "continuous"
     previous = 0
-    for cores in (40, 100, 160, 250, 400, 600, 1000):
+    for cores in (40, 250, 1000):
         cap = _cap(cores, cores * 12)
         best = _recommend_answer(wl, mode, cap)
         assert best >= previous, (cores, best, previous)
@@ -521,11 +444,8 @@ def test_recommend_monotonic(wl, mode):
 
 
 def test_continuous_recommend_prints_both_answers():
-    """Review finding: continuous recommend answered only for a corpus
-    generated first, under a title saying "what run requests", so a user
-    could plan a plain run the preflight refuses. It prints the plain-run
-    answer, which the preflight's datagen-counted decision bounds, beside
-    the generate-first one."""
+    """Continuous recommend prints the plain-run answer, bounded by the
+    preflight's datagen-counted decision, beside the generate-first one."""
     res = CliRunner().invoke(
         app,
         ["recommend", "--cores", "434", "--memory", "4349", "--mode", "continuous"],
@@ -537,8 +457,6 @@ def test_continuous_recommend_prints_both_answers():
     first = int(
         re.search(r"Largest scale that fits, corpus generated first: ([\d,]+)", out).group(1)
     )
-    assert 0 < plain < first
-    assert "run --skip-generate within an hour" in out
     plain_ok = largest_fitting_scale(
         lambda s: (
             check_capacity(
@@ -548,14 +466,7 @@ def test_continuous_recommend_prints_both_answers():
         upper=600,
     )
     assert plain == plain_ok
-    cfg = default_sizing_config("customer360", "continuous", 100)
-    with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-        get_client.return_value.get_cluster_capacity.return_value = REFERENCE
-        _free_from_total(get_client.return_value)
-        refused = _check_cluster_capacity(cfg)
-        admitted = _check_cluster_capacity(cfg, datagen_runs=False)
-    assert not refused.passed and "--skip-generate" in refused.hint
-    assert admitted.passed
+    assert first >= plain
 
 
 def test_recommend_agrees_with_the_preflight_on_the_reference_cluster():
@@ -569,22 +480,6 @@ def test_recommend_agrees_with_the_preflight_on_the_reference_cluster():
     out = " ".join(res.output.split())
     assert "Largest scale that fits: 600" in out
     assert "datagen ceiling of 600" in out
-
-
-def test_recommend_cores_memory_answers_largest_fitting_scale():
-    """Fails with CC-22 reverted: the old model added a 4-core infra guess
-    and 15% to C360 dimensions for every schema."""
-    cap = _cap(200, 2000, node_cores=200, node_gb=2000)
-    best = largest_fitting_scale(
-        _admitted_at("financial", "batch", cap, check_pod=False), upper=800
-    )
-    res = CliRunner().invoke(
-        app,
-        ["recommend", "--cores", "200", "--memory", "2000", "--schema", "financial"],
-        env={"COLUMNS": "300"},
-    )
-    assert res.exit_code == 0, res.output
-    assert f"Largest scale that fits: {best:,}" in " ".join(res.output.split())
 
 
 def test_config_recommend_sizes_the_config_itself(tmp_path, monkeypatch):

@@ -24,20 +24,6 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/script
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
-# --- Direct behaviour: the common-only path raises SilverAbort ---
-
-
-def test_silver_abort_symbol_is_public_from_common():
-    """SilverAbort is exported from common.py so silver_build can import it.
-
-    ``common`` comes from this test's load_script namespace, the same copy
-    silver_build.py would import.
-    """
-    common = importlib.import_module("common")
-    assert hasattr(common, "SilverAbort")
-    assert issubclass(common.SilverAbort, RuntimeError)
-
-
 # --- Each script's resolver refuses SALTED before any log line names it ---
 
 

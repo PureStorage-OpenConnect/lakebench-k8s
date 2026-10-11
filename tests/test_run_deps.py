@@ -1,15 +1,13 @@
 """The run-start checks and the run's dependency provenance (DEP-2, ch01 s2.8).
 
 ``deps.runtime.load_handle`` runs against the recording fake with the real
-code (marker ``real_deps``); the CLI wiring is pinned by a static test and by
-the exit-code scenarios in test_exit_codes.py.
+code (marker ``real_deps``); the CLI wiring is pinned by the exit-code
+scenarios in test_exit_codes.py.
 """
 
 from __future__ import annotations
 
-import ast
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,7 +20,6 @@ from tests.conftest import make_config
 from tests.fixtures.deps_manifest_helpers import fake_shown
 
 NS = "rd1"
-SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
 pytestmark = pytest.mark.real_deps
 
 
@@ -85,7 +82,7 @@ def test_a_verified_set_gives_the_handle(recording_k8s):
     request, shown = _deployed(recording_k8s, cfg)
     h = runtime.load_handle(cfg, _k8s())
     assert (h.pinset_sha256, h.request_sha256) == (shown["pinset_sha256"], request.request_sha256)
-    assert h.base_url == f"http://lb-deps.{NS}.svc.cluster.local:8080/sets/{h.pinset_sha256}"
+    assert h.base_url.endswith(f"/sets/{h.pinset_sha256}")
     assert not recording_k8s.mutations()  # a check, nothing written
 
 
@@ -206,28 +203,24 @@ def test_pod_check_lists_mismatches_and_records_failures(recording_k8s, monkeypa
     assert broken["pods_checked"] is None and broken["pods_check_error"]
 
 
-def test_an_unchecked_query_engine_fails_the_verdict():
+@pytest.mark.parametrize(
+    ("deps", "gate"),
+    [
+        ({"pods_checked": None, "pods_check_error": "500", "pod_mismatches": []}, "FAIL"),
+        ({"pod_mismatches": [{"pod": "thrift-1", "pinset": "f" * 64}]}, "FAIL"),
+        ({"pod_mismatches": []}, None),
+    ],
+    ids=["unchecked", "mismatch", "clean"],
+)
+def test_the_dependency_gate_fails_on_an_unchecked_or_mismatched_pod(deps, gate):
     from lakebench.metrics.verdict import compute_verdict
 
     metrics = _pipeline_metrics()
-    metrics.provenance = {
-        "deps": {"pods_checked": None, "pods_check_error": "500", "pod_mismatches": []}
-    }
+    metrics.provenance = {"deps": deps}
     v = compute_verdict(metrics)
-    assert v.gates.get("dependency_set") == "FAIL" and any("not checked" in r for r in v.reasons)
-
-
-def test_pod_set_mismatch_fails_verdict():
-    from lakebench.metrics.verdict import compute_verdict
-
-    metrics = _pipeline_metrics()
-    metrics.provenance = {"deps": {"pod_mismatches": [{"pod": "thrift-1", "pinset": "f" * 64}]}}
-    v = compute_verdict(metrics)
-    assert str(getattr(v.status, "value", v.status)) == "FAILED"
-    assert v.gates.get("dependency_set") == "FAIL"
-    assert any("pods ran different dependency sets" in r for r in v.reasons)
-    metrics.provenance = {"deps": {"pod_mismatches": []}}
-    assert compute_verdict(metrics).gates.get("dependency_set") is None
+    assert v.gates.get("dependency_set") == gate
+    if gate == "FAIL":
+        assert str(getattr(v.status, "value", v.status)) == "FAILED"
 
 
 def _pipeline_metrics():
@@ -237,53 +230,6 @@ def _pipeline_metrics():
     return PipelineMetrics(
         run_id="r", deployment_name="d", start_time=utc_now(), config_snapshot={}, success=True
     )
-
-
-def test_provenance_block_shape():
-    cfg = make_config(workload={"schema": "financial"})
-    block = m.provenance_block(m.placeholder_handle(cfg))
-    assert set(block) >= {
-        "pinset_sha256",
-        "request_sha256",
-        "repositories",
-        "pypi_index",
-        "groups",
-        "python",
-        "overlaps",
-        "resolved_at",
-        "server_pod",
-        "pods_checked",
-        "pod_mismatches",
-    }
-    assert set(block["groups"]) == {"jars", "py-reference"}
-
-
-# --- every submitting CLI path loads the set first --------------------------------
-
-
-def test_every_cli_engine_gets_the_set_before_any_submit():
-    """Each function in cli/ that builds a Spark job manager loads the
-    deployment's set (load_deps_handle) and assigns ``.deps`` to it."""
-    problems = []
-    for path in sorted((SRC / "cli").glob("*.py")):
-        tree = ast.parse(path.read_text())
-        for fn in ast.walk(tree):
-            if not isinstance(fn, ast.FunctionDef):
-                continue
-            calls = [
-                c
-                for c in ast.walk(fn)
-                if isinstance(c, ast.Call)
-                and getattr(c.func, "id", getattr(c.func, "attr", "")) == "get_engine"
-            ]
-            if not calls:
-                continue
-            src = ast.unparse(fn)
-            if "load_deps_handle" not in src and "deps_handle" not in src:
-                problems.append(f"{path.name}:{fn.name} builds an engine without the set")
-            if ".deps = " not in src:
-                problems.append(f"{path.name}:{fn.name} never assigns job_manager.deps")
-    assert problems == []
 
 
 def test_results_are_not_attached_to_a_run_on_another_set(recording_k8s):

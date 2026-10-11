@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_report_consistency.py (imported by several test files)."""
+"""Recompute the derived numbers on a rendered report page from its record."""
 
 from __future__ import annotations
 
@@ -277,7 +277,9 @@ def unit_problems(span: DerivedSpan) -> list[str]:
             out.append(f"{span.inputs!r}: GiB conversion on a field that is not bytes")
         if _HOUR in factors and not any(f.endswith("_seconds") for f in paths):
             out.append(f"{span.inputs!r}: hour conversion on a field that is not seconds")
-        if span.suffix.strip() == "GiB" and _GIB not in factors:
+        # A ``*_gb`` field already holds GiB (bytes / 1024**3 when recorded).
+        gib_field = any(f.endswith("_gb") for f in paths)
+        if span.suffix.strip() == "GiB" and _GIB not in factors and not gib_field:
             out.append(f"{span.inputs!r}: shown in GiB without the byte conversion")
     return out
 
@@ -311,20 +313,18 @@ def _render_dict(record: dict) -> str:
     import tempfile
 
     from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
-    from tests.fixtures.report_goldens import scrub_timestamp
+    from tests.fixtures.report_goldens import render_metrics
 
     with tempfile.TemporaryDirectory() as tmp:
-        metrics = MetricsStorage(tmp)._dict_to_metrics(record)
-        html = ReportGenerator(metrics_dir=tmp)._generate_html(
-            metrics, platform_metrics=metrics.platform_metrics
-        )
-    return scrub_timestamp(html)
+        return render_metrics(MetricsStorage(tmp)._dict_to_metrics(record))
 
 
-def _plain_text(html: str) -> str:
+def plain_text(html: str) -> str:
     """Visible page text, tags removed and whitespace collapsed."""
     from html import unescape
 
     html = re.sub(r"<style>.*?</style>", " ", page_text(html), flags=re.S)
     return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", html)))
+
+
+_plain_text = plain_text

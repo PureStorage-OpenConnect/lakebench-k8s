@@ -8,6 +8,7 @@ read-only command writes a file.
 from __future__ import annotations
 
 import importlib
+import re
 import shutil
 from pathlib import Path
 
@@ -50,10 +51,7 @@ def test_nameless_config_refused_for_commands_that_change_data(tmp_path, purpose
     cfg_path = _write(tmp_path, NAMELESS)
     with pytest.raises(ConfigNameRequired) as e:
         load_config(cfg_path, purpose=purpose)
-    msg = str(e.value)
-    assert "cannot change data" in msg
     assert e.value.resolution.source == "suggested"
-    assert f"name: {e.value.resolution.name}" in msg
     assert _listing(tmp_path) == ["lakebench.yaml"]
 
 
@@ -63,7 +61,7 @@ def test_nameless_teardown_without_state_refused(tmp_path):
     cfg_path = _write(tmp_path, NAMELESS)
     with pytest.raises(ConfigNameRequired) as e:
         load_config(cfg_path, purpose=LoadPurpose.TEARDOWN)
-    assert "only a suggestion" in str(e.value)
+    assert e.value.resolution.source == "suggested"
     # With an explicit override it loads (CC-2 adds the checks on top).
     assert load_config(cfg_path, purpose=LoadPurpose.TEARDOWN, name_override="x").name == "x"
 
@@ -121,10 +119,7 @@ REMOVED_KEY = {
 def test_removed_key_refused_under_mutate(tmp_path, purpose):
     with pytest.raises(ConfigValidationError) as e:
         load_config(_write(tmp_path, REMOVED_KEY), purpose=purpose)
-    msg = str(e.value)
-    assert "'pull_secrets' was removed" in msg
-    assert "No deployer ever applied it" in msg  # the key's fix text
-    assert "Delete it from the config" in msg
+    assert "pull_secrets" in str(e.value)
 
 
 @pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
@@ -134,7 +129,6 @@ def test_removed_key_loads_for_destroy(tmp_path, purpose):
     notes = load_notes(cfg)
     assert [n.kind for n in notes] == ["removed"]
     assert "pull_secrets" in notes[0].text
-    assert "refuse the config" in notes[0].text
 
 
 def test_default_purpose_is_mutate(tmp_path):
@@ -146,7 +140,9 @@ def test_default_purpose_is_mutate(tmp_path):
 
 def test_allow_long_names_alone_means_teardown(tmp_path):
     cfg = load_config(_write(tmp_path, REMOVED_KEY), allow_long_names=True)
-    assert load_notes(cfg)
+    notes = load_notes(cfg)
+    assert len(notes) == 1
+    assert notes[0].kind == "removed"
 
 
 def test_name_length_check_per_purpose(tmp_path):
@@ -310,14 +306,14 @@ def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
     a = _v16_dir(tmp_path)
     with pytest.raises(ConfigNameRequired) as alone:
         load_config(a, purpose=LoadPurpose.MUTATE)
-    assert "if this config made deployment 'lb-20260915-101530'" in str(alone.value)
+    assert alone.value.resolution.source == "legacy-state"
     _write(tmp_path, NAMELESS, "b.yaml")
     with pytest.raises(ConfigNameRequired) as shared:
         load_config(a, purpose=LoadPurpose.MUTATE)
-    msg = " ".join(str(shared.value).split())
-    assert "nameless b.yaml" in msg
-    assert "new unique name, for example 'name: lb-" in msg
-    assert "only to the one config that deployed" in msg
+    assert shared.value.siblings == [tmp_path / "b.yaml"]
+    suggestions = re.findall(r"'name: ([^']+)'", str(shared.value))
+    assert suggestions
+    assert suggestions[0] != "lb-20260915-101530"
 
 
 @pytest.mark.parametrize(

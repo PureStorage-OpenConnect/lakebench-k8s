@@ -1,5 +1,5 @@
 {# Grafana dashboard provisioned via sidecar ConfigMap. #}
-{# LB-192: rendered ONCE cluster-wide into the shared observability namespace,  #}
+{# Rendered ONCE cluster-wide into the shared observability namespace,  #}
 {# NOT per-deployment -- a fixed uid rendered per-namespace collides in the     #}
 {# shared Grafana (last writer wins). A `namespace` + `run_id` template         #}
 {# variable lets one dashboard serve every deployment/run.                      #}
@@ -151,7 +151,7 @@ data:
           "targets": [
             {
               "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "trino_execution_querymanager_RunningQueries{namespace=~\"$namespace\"}",
+              "expr": "trino_execution_querymanager_runningqueries{namespace=~\"$namespace\"}",
               "legendFormat": "Running Queries",
               "refId": "A"
             }
@@ -165,13 +165,13 @@ data:
           "targets": [
             {
               "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "rate(trino_execution_querymanager_CompletedQueries_TotalCount{namespace=~\"$namespace\"}[5m]) * 60",
+              "expr": "rate(trino_execution_querymanager_completedqueries_totalcount{namespace=~\"$namespace\"}[5m]) * 60",
               "legendFormat": "Completed/min",
               "refId": "A"
             },
             {
               "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "rate(trino_execution_querymanager_FailedQueries_TotalCount{namespace=~\"$namespace\"}[5m]) * 60",
+              "expr": "rate(trino_execution_querymanager_failedqueries_totalcount{namespace=~\"$namespace\"}[5m]) * 60",
               "legendFormat": "Failed/min",
               "refId": "B"
             }
@@ -179,13 +179,13 @@ data:
           "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         },
         {
-          "title": "Node CPU Usage (by pod)",
+          "title": "CPU Usage by Pod (cores)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
           "targets": [
             {
               "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\"}[5m])) by (pod)",
+              "expr": "sum by (pod) (max by (pod, container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[5m])))",
               "legendFormat": "{{ "{{" }}pod{{ "}}" }}",
               "refId": "A"
             }

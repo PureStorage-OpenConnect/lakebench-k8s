@@ -224,6 +224,17 @@ def caps_bound_from(metrics: object, *, include_trickle: bool = False) -> list[s
     ]
 
 
+def trigger_caps_from(metrics: object) -> list[str]:
+    """``limits.trigger_bound``: the streams on a timer, which bound the
+    freshness numbers only (``bounds.trigger_lines``)."""
+    exp_block = getattr(metrics, "experiment_block", None)
+    try:
+        exp = exp_block() if callable(exp_block) else None
+    except Exception:  # noqa: BLE001 -- formatting must not raise on a bad record
+        exp = None
+    return [str(x) for x in (((exp or {}).get("limits") or {}).get("trigger_bound") or [])]
+
+
 def trickle_caps_from(metrics: object) -> list[str]:
     """The card label for the trickle when it bounded the run's intake
     (``bounds.record_trickle_bound``: the stored ``limits.trickle_bound``,

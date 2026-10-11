@@ -1,5 +1,5 @@
 """Executed tests: bronze_ingest_financial logs each micro-batch from a real
-StreamingQuery.recentProgress in the collector's format (LB-136), including
+StreamingQuery.recentProgress in the collector's format, including
 across an idle gap, where Spark reports the next batch id with zero rows."""
 
 from __future__ import annotations

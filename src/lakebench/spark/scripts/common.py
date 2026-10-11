@@ -10,6 +10,7 @@ Environment variables set by lakebench job.py:
 
 import os
 import re
+import time
 from datetime import datetime
 
 
@@ -1139,9 +1140,10 @@ class TtdBaseline:
     right after the last measured tick, which is the same point in the
     table's history unless something else wrote to it since.
 
-    Each baseline carries ``late_before_s``: the newest silver ingest time
-    the tick before the baseline had read. An alert whose evidence was all
-    older than that could have been raised on that tick.
+    Each baseline carries ``late_before``: the sealed silver position
+    ({stream_id: newest batch_id}) the tick before the baseline had read. An
+    alert whose evidence was all inside it could have been raised on that
+    tick.
     """
 
     def __init__(self, max_carry=3):
@@ -1150,10 +1152,10 @@ class TtdBaseline:
         self._carries = 0
         self._last_good = None
 
-    def begin(self, prior, late_before_s):
+    def begin(self, prior, late_before):
         """Start a tick: ``prior`` is its pre-detection snapshot id (None:
         no snapshot; TTD_SNAPSHOT_UNKNOWN: lookup failed). Returns the
-        (snapshot, late_before_s) to measure against."""
+        (snapshot, late_before) to measure against."""
         carry = self._carry
         if carry is not None and self._carries >= self.max_carry:
             # The fallback is as old as the carried snapshot: it may be
@@ -1169,7 +1171,7 @@ class TtdBaseline:
             base = carry
             self._carries += 1
         else:
-            base = (prior, late_before_s)
+            base = (prior, late_before)
             self._carries = 0
         self._carry = base
         return base
@@ -1839,46 +1841,149 @@ def await_stream(spark, query):
     log("Streaming query stopped")
 
 
-def refresh_daily_kpis(silver_df, existing_gold, since_ts):
-    """Daily KPIs for a gold refresh, recomputed only for the dates silver
-    changed on since the last refresh.
+def recompute_dates(silver_df, existing_gold, dates):
+    """Gold daily KPIs with *dates* recomputed from all of *silver_df*'s rows
+    on them and every other date kept from *existing_gold*; every date when
+    there is no gold yet (*existing_gold* None). Exact for late rows:
+    continuous datagen pods drift apart, so a row can land on a date older
+    than the newest one seen, and its whole date is recomputed."""
+    from pyspark.sql.functions import col, lit
 
-    Returns ``(gold, newest_ts, dates)``. With no previous refresh
-    (``existing_gold`` or ``since_ts`` None) every date is computed and
-    ``dates`` is None. Otherwise the dates of rows whose
-    ``silver_processing_timestamp`` is after ``since_ts`` are recomputed from
-    all of silver's rows on them and replace those dates in ``existing_gold``;
-    ``gold`` is None when no row is newer. ``newest_ts`` is taken before the
-    KPIs are, so a row committed in between is newer than it and its date is
-    recomputed next time. Exact for late rows: continuous datagen pods drift
-    apart, so a row can land on a date older than the newest one seen.
-    """
+    if existing_gold is None:
+        return silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
+    # Null-safe: a None in isin() would make every kept row's test NULL.
+    day = col("interaction_date")
+    known = [d for d in dates if d is not None]
+    touched = (day.isNotNull() & day.isin(known)) if known else lit(False)
+    if len(known) < len(dates):
+        touched = touched | day.isNull()
+    kpis = silver_df.filter(touched).groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
+    kept = existing_gold.filter(~touched)
+    return kept.unionByName(kpis)
+
+
+def refresh_table(spark, table) -> None:
+    """Drop the session's cached metadata of *table*. Iceberg's caching
+    catalog keeps a table until it goes unread for its expiry (30 s), so a
+    reader that looks every few seconds keeps the snapshot it first loaded
+    and never sees a later commit. Best effort: a table that does not exist
+    yet is left to the read that follows."""
+    try:
+        spark.sql(f"REFRESH TABLE {table}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[refresh] {table} not refreshed: {one_line(e)}")
+
+
+def pinned_read(spark, table, table_format):
+    """``(frame, position)``: *table* at its newest commit, the Iceberg
+    snapshot id or Delta version, so every read in one gold cycle sees one
+    silver state. A table with no commit yet reads as it is (None)."""
+    refresh_table(spark, table)
+    if table_format == "delta":
+        rows = spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").collect()
+        if not rows:
+            return spark.table(table), None
+        version = int(rows[0]["version"])
+        return spark.sql(f"SELECT * FROM {table} VERSION AS OF {version}"), version
+    rows = spark.sql(
+        f"SELECT snapshot_id FROM {table}.history WHERE is_current_ancestor "
+        "ORDER BY made_current_at DESC LIMIT 1"
+    ).collect()
+    if not rows:
+        return spark.table(table), None
+    sid = int(rows[0]["snapshot_id"])
+    return spark.sql(f"SELECT * FROM {table} VERSION AS OF {sid}"), sid
+
+
+def run_c360_gold_stream(spark, silver_tbl, gold_tbl, table_format, write, checkpoint, trigger):
+    """Customer360 continuous gold (DESIGN-CONTINUOUS 2, 5): stream the
+    silver table, so each micro-batch is the silver commits since gold's
+    position (the checkpoint keeps it across restarts); per batch, pin
+    silver, recompute every date the new rows touch and replace them in
+    gold with *write*. Silver's replay deletes and maintenance rewrites
+    carry no new rows and are skipped. Blocks until the stream stops."""
     from pyspark.sql.functions import col, collect_set
     from pyspark.sql.functions import max as max_
 
-    ts = col("silver_processing_timestamp")
-    if existing_gold is None or since_ts is None:
-        newest = silver_df.agg(max_(ts).alias("t")).collect()[0]["t"]
-        return (
-            silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations()),
-            newest,
-            None,
+    state = {"cycle": 0, "newest": None}
+
+    def refresh(batch_df, batch_id):
+        state["cycle"] += 1
+        cycle = state["cycle"]
+        started = time.time()
+        log(f"Refresh cycle {cycle} (batch {batch_id})")
+        # The batch's dates and its newest row's landing (bronze's ingest_ts;
+        # silver's transform time for a silver written without it), in one
+        # pass over the batch.
+        clock = "ingest_ts" if "ingest_ts" in batch_df.columns else "silver_processing_timestamp"
+        seen = batch_df.agg(
+            collect_set("interaction_date").alias("dates"),
+            max_(col(clock).cast("double")).alias("newest"),
+        ).collect()[0]
+        dates = list(seen["dates"] or [])
+        if not dates:
+            log(f"Cycle {cycle}: no new Silver data, skipping")
+            return
+        # A transient catalog error is retried; skipping the batch would move
+        # gold's position past dates it never recomputed.
+        for attempt in range(1, 6):
+            try:
+                silver_df, position = pinned_read(spark, silver_tbl, table_format)
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 5:
+                    raise
+                log(f"Cycle {cycle}: Silver table unreadable ({attempt}/5), retrying: {e}")
+                time.sleep(10 * attempt)
+        # Every silver row gold covers after this cycle (the window gate
+        # reads a cycle as new data when it grows).
+        log(f"Cycle {cycle}: aggregating {silver_df.count():,} Silver records")
+        existing = spark.table(gold_tbl) if table_exists(spark, gold_tbl) else None
+        write(recompute_dates(silver_df, existing, dates))
+        log(
+            f"Cycle {cycle}: "
+            + ("full aggregation" if existing is None else f"recomputed {len(dates)} date(s)")
+            + f" at silver {'version' if table_format == 'delta' else 'snapshot'} {position}"
         )
-    row = (
-        silver_df.filter(ts > since_ts)
-        .agg(collect_set("interaction_date").alias("d"), max_(ts).alias("t"))
-        .collect()[0]
+        kpi_count = spark.table(gold_tbl).count()
+        log(f"Cycle {cycle}: generated {kpi_count:,} daily KPI records")
+        # Freshness once gold is written: age of the newest row this cycle
+        # recomputed gold for. The batch's rows, not the pinned snapshot's: a
+        # later commit in the snapshot is not recomputed until its own batch.
+        # A cycle whose newest row is the previous cycle's saw no new data and
+        # is tagged "(silver idle)".
+        newest = seen["newest"]
+        if newest is None:
+            log(f"Cycle {cycle}: could not compute freshness: no {clock} in the batch")
+        else:
+            idle = state["newest"] is not None and newest == state["newest"]
+            state["newest"] = newest
+            suffix = " (silver idle)" if idle else ""
+            log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest):.0f}s{suffix}")
+        log(
+            f"Cycle {cycle}: refreshed {gold_tbl} in {time.time() - started:.1f}s "
+            f"({kpi_count:,} KPI records)"
+        )
+
+    while not table_exists(spark, silver_tbl):
+        log("Silver table not ready yet; waiting")
+        time.sleep(15)
+    reader = spark.readStream.format(table_format)
+    if table_format == "delta":
+        reader = reader.option("skipChangeCommits", "true")
+    else:
+        reader = reader.option("streaming-skip-delete-snapshots", "true").option(
+            "streaming-skip-overwrite-snapshots", "true"
+        )
+    query = (
+        reader.table(silver_tbl)
+        .writeStream.foreachBatch(refresh)
+        .option("checkpointLocation", checkpoint)
+        .trigger(processingTime=trigger)
+        .start()
     )
-    dates = list(row["d"] or [])
-    if not dates:
-        return None, since_ts, []
-    kpis = (
-        silver_df.filter(col("interaction_date").isin(dates))
-        .groupBy("interaction_date")
-        .agg(*get_daily_kpi_aggregations())
-    )
-    kept = existing_gold.filter(~col("interaction_date").isin(dates))
-    return kept.unionByName(kpis), row["t"], dates
+    log("Streaming query started, awaiting termination...")
+    await_stream(spark, query)
 
 
 def get_daily_kpi_aggregations():
@@ -2756,6 +2861,16 @@ def refuse_orphan_delta_log(spark, fq_table, location=None):
     if location:
         _refuse_existing_delta_log(spark, fq_table, f"{location.rstrip('/')}/_delta_log")
         return
+    location = managed_table_location(spark, fq_table)
+    if not location:
+        return
+    _refuse_existing_delta_log(spark, fq_table, f"{location}/_delta_log")
+
+
+def managed_table_location(spark, fq_table):
+    """Where the catalog puts managed table *fq_table*: its namespace's
+    location plus the table name, or None when the namespace does not exist
+    or has no location."""
     parts = fq_table.split(".")
     name = parts[-1]
     ns_ref = ".".join(parts[:-1]) or "default"
@@ -2764,18 +2879,15 @@ def refuse_orphan_delta_log(spark, fq_table, location=None):
     except Exception as e:  # noqa: BLE001
         text = str(e)
         if "SCHEMA_NOT_FOUND" in text or "NoSuchNamespace" in text or "not found" in text:
-            return  # no namespace yet, so no location either
+            return None  # no namespace yet, so no location either
         raise
-    location = None
     for row in rows:
         d = row.asDict() if hasattr(row, "asDict") else dict(row)
         key = str(d.get("info_name") or d.get("database_description_item") or "")
         if key.strip().lower() == "location":
             location = str(d.get("info_value") or d.get("database_description_value") or "")
-            break
-    if not location:
-        return
-    _refuse_existing_delta_log(spark, fq_table, f"{location.rstrip('/')}/{name.lower()}/_delta_log")
+            return f"{location.rstrip('/')}/{name.lower()}" if location else None
+    return None
 
 
 def _refuse_existing_delta_log(spark, fq_table, log_dir):
@@ -3143,3 +3255,109 @@ def ensure_alert_columns(spark, fq_table, columns):
     if got != want:
         raise _refuse(got)
     return added
+
+
+#: The column a continuous bronze stream adds from each row's arrival
+#: (``arrival_time``). Silver passes it through, and gold measures freshness
+#: from it, so the freshness clock starts at file landing.
+LANDED_COLUMN = "ingest_ts"
+
+
+#: Probe attempts before bronze gives up on the object store clock.
+_CLOCK_PROBES = 3
+
+
+def store_clock_skew(spark, uri) -> float:
+    """Seconds the object store's clock runs ahead of this pod's, from one
+    probe object written under *uri* and read back (modification times are
+    the store's clock; a lab FlashBlade ran 140 s ahead). Landing times are
+    moved onto the pod clock with it, so lags and freshness never mix the
+    two clocks. The probe writes where bronze is about to write: when it
+    keeps failing, bronze could not run either, so it raises."""
+    import uuid
+
+    jvm = spark._jvm
+    for attempt in range(1, _CLOCK_PROBES + 1):
+        try:
+            path = jvm.org.apache.hadoop.fs.Path(
+                uri.rstrip("/") + f"/_lakebench_clock/{uuid.uuid4().hex}"
+            )
+            fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+            before = time.time()
+            fs.create(path, True).close()
+            after = time.time()
+            stamped = fs.getFileStatus(path).getModificationTime() / 1000.0
+            fs.delete(path, False)
+            break
+        except Exception as e:  # noqa: BLE001
+            if attempt == _CLOCK_PROBES:
+                raise RuntimeError(
+                    f"object store clock probe failed {attempt} times: {one_line(e)}"
+                ) from e
+            log(f"[landing] object store clock probe {attempt} failed, retrying: {one_line(e)}")
+            time.sleep(5)
+    skew = stamped - (before + after) / 2
+    log(f"[landing] object store clock is {skew:+.1f}s from this pod's; landing times corrected")
+    return skew
+
+
+def on_pod_clock(column, skew):
+    """*column* (an object-store timestamp) moved onto the pod clock."""
+    from pyspark.sql import functions as F
+
+    return (column.cast("double") - F.lit(float(skew))).cast("timestamp")
+
+
+def arrival_time(spark, uri, checkpoint_uri):
+    """The column of each row's arrival time on the pod clock: its file's
+    landing time, or, for a file that landed before this stream first
+    started (a corpus written before the run), the time bronze took it, since
+    such a file had no arrival in this run. The first start is the
+    checkpoint's metadata file when a restart finds one, else now; call this
+    before waiting for the first file."""
+    from pyspark.sql import functions as F
+
+    skew = store_clock_skew(spark, uri)
+    started = time.time()
+    try:
+        path = spark._jvm.org.apache.hadoop.fs.Path(checkpoint_uri.rstrip("/") + "/metadata")
+        fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+        if fs.exists(path):
+            started = fs.getFileStatus(path).getModificationTime() / 1000.0 - skew
+    except Exception as e:  # noqa: BLE001
+        log(f"[landing] checkpoint start not read, using now: {one_line(e)}")
+    landed = on_pod_clock(F.col("_metadata.file_modification_time"), skew)
+    return F.when(landed >= F.lit(started).cast("timestamp"), landed).otherwise(
+        F.current_timestamp()
+    )
+
+
+def landing_batch(batch_df):
+    """``(df, rows, oldest, newest)`` for a bronze micro-batch read with
+    LANDED_COLUMN: the frame, its row count, and the oldest and newest file
+    landing times in epoch seconds (None without the column)."""
+    from pyspark.sql import functions as F
+
+    if LANDED_COLUMN not in batch_df.columns:
+        return batch_df, batch_df.count(), None, None
+    row = batch_df.agg(
+        F.count(F.lit(1)).alias("n"),
+        F.unix_micros(F.min(LANDED_COLUMN)).alias("lo"),
+        F.unix_micros(F.max(LANDED_COLUMN)).alias("hi"),
+    ).collect()[0]
+    lo = row["lo"] / 1e6 if row["lo"] is not None else None
+    hi = row["hi"] / 1e6 if row["hi"] is not None else None
+    return batch_df, int(row["n"]), lo, hi
+
+
+def log_landing(batch_id, oldest, newest, committed=None) -> None:
+    """One line per committed bronze batch: its files' landing span and the
+    commit time (now unless given), in epoch seconds (the landing-to-bronze
+    lag)."""
+    if oldest is None or newest is None:
+        return
+    committed = time.time() if committed is None else committed
+    log(
+        f"[landing] batch={int(batch_id)} oldest={oldest:.3f} newest={newest:.3f} "
+        f"committed={committed:.3f}"
+    )

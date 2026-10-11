@@ -71,8 +71,6 @@ def _config(path: Path, name: str, bronze: str, gold: str, schema="financial") -
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     pc.use_heldout(monkeypatch)
-    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
-    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
     cfgs = tmp_path / "notes" / "configs"
     cfgs.mkdir(parents=True)
     a = _config(cfgs / "a.yaml", "lb-a", "lb-a-bronze", "lb-a-gold")
@@ -200,8 +198,6 @@ def test_output_holds_no_seed(audit_mod, world, capsys):
 
 def test_clean_world_exits_zero(audit_mod, tmp_path, monkeypatch):
     pc.use_heldout(monkeypatch)
-    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
-    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
     runs = tmp_path / "runs"
     rec = json.loads(RECORD.read_text())
     (runs / "run-x").mkdir(parents=True)
@@ -227,8 +223,6 @@ def test_raw_config_fields_follow_the_loader(audit_mod, tmp_path):
 
 def _env(tmp_path, monkeypatch):
     pc.use_heldout(monkeypatch)
-    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
-    monkeypatch.setenv("LB_AML_CORPORA_LEDGER", str(tmp_path / "corpora.jsonl"))
 
 
 def _journal(dirpath: Path, config: Path | str) -> Path:
@@ -338,12 +332,16 @@ def test_an_unparsable_ledger_section_is_not_clean(audit_mod, tmp_path, monkeypa
     assert _rc(audit_mod, tmp_path, "--ledger", str(led)) == 2
 
 
-def test_a_non_utf8_journal_does_not_crash(audit_mod, tmp_path, monkeypatch):
+def test_a_non_utf8_journal_is_scanned_lossily(audit_mod, tmp_path, monkeypatch):
     _env(tmp_path, monkeypatch)
     j = tmp_path / "j"
     j.mkdir()
-    (j / "session-bin.jsonl").write_bytes(b"\xff\xfe not json\n")
-    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) in (0, 2)
+    journal = j / "session-bin.jsonl"
+    journal.write_bytes(b"\xff\xfe not json\n")
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 0
+    # A held-out seed next to the invalid bytes is still found, not read as clean.
+    journal.write_bytes(b"\xff\xfe " + str(pc.RB).encode() + b"\n")
+    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
 
 
 def _sessions(path: Path, *sessions) -> Path:
@@ -375,21 +373,37 @@ def test_every_session_of_a_journal_is_checked(audit_mod, tmp_path, monkeypatch)
     assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
 
 
-def test_variables_in_the_corpus_fields_are_substituted(audit_mod, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("datagen", "seed_env", "expected"),
+    [
+        ("corpus_role: ${LB_T_ROLE:-evaluation}", None, "corpus_role evaluation"),
+        ("seed: ${LB_T_SEED}", str(pc.RB), "robustness"),
+        # A hex seed in a variable is typed as YAML types it.
+        ("seed: ${LB_T_SEED}", hex(pc.RB), "robustness"),
+        # An unset variable, and a variable whose default is a clean value, are
+        # never read as clean.
+        ("seed: ${LB_T_SEED}", None, None),
+        ("corpus_role: ${LB_T_ROLE:-calibration}", None, None),
+    ],
+    ids=["role-default", "decimal-seed", "hex-seed", "unset-seed", "clean-default-role"],
+)
+def test_variables_in_the_corpus_fields_are_substituted(
+    audit_mod, tmp_path, monkeypatch, datagen, seed_env, expected
+):
     _env(tmp_path, monkeypatch)
+    monkeypatch.delenv("LB_T_SEED", raising=False)
+    monkeypatch.delenv("LB_T_ROLE", raising=False)
+    if seed_env is not None:
+        monkeypatch.setenv("LB_T_SEED", seed_env)
     c = tmp_path / "c.yaml"
-    c.write_text(
-        "name: x\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: ${LB_T_ROLE:-evaluation}\n"
-    )
-    assert audit_mod.raw_config_reason(audit_mod._raw_config(c)) == "corpus_role evaluation"
-    monkeypatch.setenv("LB_T_SEED", str(pc.RB))
-    c.write_text("name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: ${LB_T_SEED}\n")
-    assert "robustness" in audit_mod.raw_config_reason(audit_mod._raw_config(c))
-    monkeypatch.delenv("LB_T_SEED")
-    with pytest.raises(audit_mod.Unresolved):
-        audit_mod.raw_config_reason(audit_mod._raw_config(c))
-    j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {}))
-    assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 2
+    c.write_text(f"name: x\nworkload:\n  schema: financial\n  datagen:\n    {datagen}\n")
+    if expected is None:
+        with pytest.raises(audit_mod.Unresolved):
+            audit_mod.raw_config_reason(audit_mod._raw_config(c))
+        j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {}))
+        assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 2
+    else:
+        assert expected in audit_mod.raw_config_reason(audit_mod._raw_config(c))
 
 
 def test_a_ledger_row_config_naming_a_protected_role_is_found(audit_mod, tmp_path, monkeypatch):
@@ -429,21 +443,6 @@ def test_a_nameless_config_uses_the_session_name_for_its_bucket(audit_mod, tmp_p
     c.write_text("workload:\n  schema: financial\n")
     j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {"config_name": "lb-reg"}))
     assert _rc(audit_mod, tmp_path, "--journal-dir", str(j)) == 1
-
-
-def test_a_variable_corpus_field_is_never_read_as_clean(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
-    c = tmp_path / "c.yaml"
-    c.write_text(
-        "name: x\nworkload:\n  schema: financial\n  datagen:\n"
-        "    corpus_role: ${LB_T_ROLE:-calibration}\n"
-    )
-    with pytest.raises(audit_mod.Unresolved):
-        audit_mod.raw_config_reason(audit_mod._raw_config(c))
-    # A hex seed in a variable is typed as YAML types it.
-    monkeypatch.setenv("LB_T_SEED", hex(pc.RB))
-    c.write_text("name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: ${LB_T_SEED}\n")
-    assert "robustness" in audit_mod.raw_config_reason(audit_mod._raw_config(c))
 
 
 def test_malformed_session_entries_do_not_crash(audit_mod, tmp_path, monkeypatch):

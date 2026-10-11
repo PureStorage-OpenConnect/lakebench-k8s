@@ -261,6 +261,8 @@ def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
     storage = MetricsStorage(runs)
     parent = storage.load_run(PARENT)
     pb = parent.pipeline_benchmark
+    parent_elapsed = pb.total_elapsed_seconds
+    parent_query_s = sum(s.elapsed_seconds for s in pb.stages if s.stage_type == "query")
     pb.pre_compaction_qph, pb.post_compaction_qph = 900.0, 999.0
     pb.maintenance_value_pct, pb.maintenance_paired_queries = 11.0, 8
     pb.pre_compaction_benchmark = {"qph": 900.0}
@@ -274,8 +276,10 @@ def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
     ):
         assert not scores.get(key), key
     assert not data["pipeline_benchmark"].get("pre_compaction_benchmark")
-    stages = data["pipeline_benchmark"]["stages"]
-    assert scores["total_elapsed_seconds"] == round(sum(st["elapsed_seconds"] for st in stages), 2)
+    # Batch elapsed is the run's wall clock: this benchmark's seconds
+    # replace the parent's.
+    want = parent_elapsed - parent_query_s + _bench_result().total_seconds
+    assert scores["total_elapsed_seconds"] == pytest.approx(want, abs=0.01)
 
 
 def test_reproduce_refuses_a_benchmark_record(tmp_path, monkeypatch):

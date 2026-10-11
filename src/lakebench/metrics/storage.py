@@ -512,9 +512,9 @@ class MetricsStorage:
                 "scale": data.get("config_snapshot", {}).get("scale"),
                 "processing_pattern": data.get("config_snapshot", {}).get("processing_pattern"),
                 "qph": data.get("benchmark", {}).get("qph") if data.get("benchmark") else None,
-                "bronze_size_gb": data.get("bronze_size_gb", 0),
-                "silver_size_gb": data.get("silver_size_gb", 0),
-                "gold_size_gb": data.get("gold_size_gb", 0),
+                "bronze_size_gb": data.get("bronze_size_gb"),
+                "silver_size_gb": data.get("silver_size_gb"),
+                "gold_size_gb": data.get("gold_size_gb"),
                 "streaming_count": len(data.get("streaming", [])),
                 "time_to_value_seconds": pb_scores.get("time_to_value_seconds"),
                 "pipeline_throughput_gb_per_second": pb_scores.get(
@@ -670,9 +670,9 @@ class MetricsStorage:
             start_time=datetime.fromisoformat(data.get("start_time", datetime.now().isoformat())),
             success=data.get("success", False),
             total_elapsed_seconds=data.get("total_elapsed_seconds", 0),
-            bronze_size_gb=data.get("bronze_size_gb", 0),
-            silver_size_gb=data.get("silver_size_gb", 0),
-            gold_size_gb=data.get("gold_size_gb", 0),
+            bronze_size_gb=data.get("bronze_size_gb"),
+            silver_size_gb=data.get("silver_size_gb"),
+            gold_size_gb=data.get("gold_size_gb"),
             jobs=jobs,
             queries=queries,
             streaming=streaming,
@@ -805,7 +805,12 @@ class MetricsStorage:
                 )
 
             scores = pb_data.get("scorecard", pb_data.get("scores", {}))
+            _basis = scores.get("composite_qph_basis")
             metrics.pipeline_benchmark = PipelineBenchmark(
+                # A composite recorded before it was over one fixed set:
+                # no basis, or a basis without composite_set.
+                blended_composite_recorded=bool(scores.get("composite_qph"))
+                and not (isinstance(_basis, dict) and "composite_set" in _basis),
                 run_id=pb_data.get("run_id", ""),
                 deployment_name=pb_data.get("deployment_name", ""),
                 pipeline_mode=pb_data.get("pipeline_mode", "batch"),
@@ -863,7 +868,7 @@ class MetricsStorage:
                 time_to_detect_alerts=scores.get("time_to_detect_alerts"),
                 time_to_detect_late_alerts=scores.get("time_to_detect_late_alerts"),
                 time_to_detect_unmeasured_cycles=scores.get("time_to_detect_unmeasured_cycles"),
-                total_s3_objects=scores.get("total_s3_objects", 0),
+                total_s3_objects=scores.get("total_s3_objects"),
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
                 success=pb_data.get("success", False),
@@ -993,9 +998,9 @@ class MetricsStorage:
                     "scale": data.get("config_snapshot", {}).get("scale"),
                     "processing_pattern": data.get("config_snapshot", {}).get("processing_pattern"),
                     "qph": data.get("benchmark", {}).get("qph") if data.get("benchmark") else None,
-                    "bronze_size_gb": data.get("bronze_size_gb", 0),
-                    "silver_size_gb": data.get("silver_size_gb", 0),
-                    "gold_size_gb": data.get("gold_size_gb", 0),
+                    "bronze_size_gb": data.get("bronze_size_gb"),
+                    "silver_size_gb": data.get("silver_size_gb"),
+                    "gold_size_gb": data.get("gold_size_gb"),
                     "streaming_count": len(data.get("streaming", [])),
                 }
 

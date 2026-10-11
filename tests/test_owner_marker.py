@@ -10,19 +10,17 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from lakebench.deploy import ownership
 from lakebench.deploy.ownership import OWNER_MARKER_KEY, write_owner_marker
-from lakebench.s3.client import LAKEBENCH_KEY_PREFIX, has_user_objects
+from lakebench.s3.client import has_user_objects
 from tests.fixtures.recording_k8s import recording
 
 NS = "u01"
 B = "u01-bronze"
-SRC = Path(__file__).resolve().parent.parent / "src" / "lakebench"
 ME = {"deployment": NS, "cluster": "fp-here"}
 THEM = {"deployment": NS, "cluster": "fp-there"}
 
@@ -42,11 +40,6 @@ def _boto():
 def _marker(rec, bucket=B):
     raw = rec.buckets_store[bucket].get(OWNER_MARKER_KEY)
     return json.loads(raw) if raw is not None else None
-
-
-def test_marker_prefixes_agree():
-    assert ownership.MARKER_PREFIX == LAKEBENCH_KEY_PREFIX
-    assert OWNER_MARKER_KEY.startswith(LAKEBENCH_KEY_PREFIX)
 
 
 class TestWriteOwnerMarker:

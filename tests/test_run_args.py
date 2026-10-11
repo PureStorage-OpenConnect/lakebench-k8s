@@ -65,35 +65,33 @@ CASES = [
 SUPPORT_CASES = [(["--local", "--continuous"], "batch mode only")]
 
 
-def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster):
-    for argv, message in CASES + SUPPORT_CASES:
-        monkeypatch.chdir(tmp_path)
-        cfg = tmp_path / "runargs.yaml"
-        text = CONFIG
-        if "--cycles" in argv:  # not a flag: the config's cycle count
-            argv = [a for a in argv if a != "--cycles"]
-            text = text.replace("    mode: batch\n", "    mode: batch\n    cycles: 2\n")
-        if "--financial" in argv:  # not a flag: the config's schema
-            argv = [a for a in argv if a != "--financial"]
-            text = text.replace("  schema: customer360\n", "  schema: financial\n")
-        if "--investigators" in argv:  # not a flag: the config's sessions key
-            argv = [a for a in argv if a != "--investigators"]
-            text = text.replace(
-                "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
-            ).replace("schema: customer360", "schema: financial")
-        cfg.write_text(text)
-        result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
-        assert result.exit_code == ExitCode.USAGE, result.output
-        if argv[:2] != ["--repeat", "0"]:  # the CLI's own range check answers first
-            assert message in result.output, result.output
-        assert no_cluster == []
-        assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
-
-
-def _cfg(mode="batch"):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(architecture=SimpleNamespace(pipeline=SimpleNamespace(mode=mode)))
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    CASES + SUPPORT_CASES,
+    ids=lambda v: " ".join(v) if isinstance(v, list) else "",
+)
+def test_run_validation_zero_cluster_calls(argv, message, tmp_path, monkeypatch, no_cluster):
+    monkeypatch.chdir(tmp_path)
+    cfg = tmp_path / "runargs.yaml"
+    text = CONFIG
+    if "--cycles" in argv:  # not a flag: the config's cycle count
+        argv = [a for a in argv if a != "--cycles"]
+        text = text.replace("    mode: batch\n", "    mode: batch\n    cycles: 2\n")
+    if "--financial" in argv:  # not a flag: the config's schema
+        argv = [a for a in argv if a != "--financial"]
+        text = text.replace("  schema: customer360\n", "  schema: financial\n")
+    if "--investigators" in argv:  # not a flag: the config's sessions key
+        argv = [a for a in argv if a != "--investigators"]
+        text = text.replace(
+            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
+        ).replace("schema: customer360", "schema: financial")
+    cfg.write_text(text)
+    result = CliRunner().invoke(app, ["run", str(cfg), *argv, "--yes"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    if argv[:2] != ["--repeat", "0"]:  # the CLI's own range check answers first
+        assert message in result.output, result.output
+    assert no_cluster == []
+    assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
 
 
 def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatch, no_cluster):

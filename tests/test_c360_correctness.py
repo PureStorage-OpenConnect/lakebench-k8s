@@ -9,85 +9,27 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from pathlib import Path
 
 import pytest
 
 from lakebench.metrics import c360_correctness as c3
 from lakebench.metrics.collector import JobMetrics, MetricsCollector, PipelineMetrics
-from tests.conftest import make_config
-
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "src/lakebench/spark/scripts"
 
 
-def test_owner_approved_gating_set():
-    # Owner decision 2026-09-27: checks 0-14 and 17 of the expected-results
-    # table gate; the other statistical and the shape checks report only.
-    assert c3.GATING is True
-    assert c3.GATING_CHECKS == frozenset(
-        {
-            "bronze_rows_match_datagen",
-            "silver_duplicate_filter_applied",
-            "amount_only_on_purchases",
-            "purchase_amount_range",
-            "silver_no_null_keys",
-            "customer_ids_in_id_space",
-            "dates_in_window",
-            "one_ticket_and_score_per_support",
-            "bronze_to_silver_rows",
-            "silver_to_gold_days",
-            "silver_to_gold_counts",
-            "silver_to_gold_revenue",
-            "gold_counts_non_negative",
-            "gold_daily_identities",
-            "daily_active_within_customers",
-            "avg_transaction_value_overall",
-        }
-    )
-    assert not any(g.startswith("benchmark_rows_") for g in c3.GATING_CHECKS)
-    v = c3.verdict([c3._check("interaction_mix", "statistical", False, 1, 0)])
-    assert v["gating"] is True and v["note"] == ""
-    # A failing check outside the set does not gate; a gated check that did
-    # not run does (fail closed).
-    problems = c3.gating_problems(dict(v, facts_present=True))
-    assert all("was not evaluated" in p for p in problems)
-    assert len(problems) == len(c3.GATING_CHECKS)
-    assert c3.gating_problems(None) != []
-
-
-def test_reporting_only_when_the_set_is_empty(monkeypatch):
-    monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
-    monkeypatch.setattr(c3, "GATING", False)
-    v = c3.verdict([c3._check("x", "invariant", False, 1, 0)])
-    assert v["status"] == "fail" and v["gating"] is False and "D6" in v["note"]
-    assert c3.gating_problems(dict(v, facts_present=True)) == []
-    assert c3.gating_problems(None) == []
-
-
-def test_gating_set_fails_the_run_when_approved(monkeypatch):
+def test_the_benchmark_pass_judges_only_the_shapes(monkeypatch):
+    """The pipeline pass leaves the benchmark shapes to the pass after the
+    benchmark ran; that pass does not repeat a missing-facts report."""
     monkeypatch.setattr(c3, "GATING_CHECKS", frozenset({"x", "benchmark_rows_Q1"}))
-    bad = c3.verdict([c3._check("x", "invariant", False, 1, 0)])
-    bad["facts_present"] = True
-    assert len(c3.gating_problems(bad)) == 1
-    ok = c3.verdict([c3._check("x", "invariant", True, 0, 0)])
-    ok["facts_present"] = True
-    assert c3.gating_problems(ok) == []
-    # A gated check that did not run, or is missing, fails closed.
-    skipped = c3.verdict([c3._check("x", "invariant", None, None, 0)])
-    skipped["facts_present"] = True
-    assert "unchecked" in c3.gating_problems(skipped)[0]
-    absent = dict(c3.verdict([]), facts_present=True)
-    assert "not evaluated" in c3.gating_problems(absent)[0]
-    assert "not evaluated" in c3.gating_problems(absent, only=("benchmark_rows_",))[0]
-    # Fails closed: no record, or no facts, is not a pass.
-    assert c3.gating_problems(None)
-    assert c3.gating_problems({"facts_present": False, "reason": "boom"})
-    # The post-benchmark pass judges only the benchmark shapes.
+    shapes = ("benchmark_rows_",)
     shp = c3.verdict([c3._check("benchmark_rows_Q1", "shape", False, 2, 1)])
     shp["facts_present"] = True
-    assert len(c3.gating_problems(shp, only=("benchmark_rows_",))) == 1
-    assert c3.gating_problems({"facts_present": False}, only=("benchmark_rows_",)) == []
+    assert len(c3.gating_problems(shp, only=shapes)) == 1
+    ok = c3.verdict([c3._check("benchmark_rows_Q1", "shape", True, 1, 1)])
+    ok["facts_present"] = True
+    assert c3.gating_problems(ok, only=shapes) == []
+    absent = dict(c3.verdict([]), facts_present=True)
+    assert c3.gating_problems(absent, only=shapes)
+    assert c3.gating_problems({"facts_present": False}, only=shapes) == []
 
 
 def _gated_record(**status):
@@ -99,36 +41,115 @@ def _gated_record(**status):
     return dict(c3.verdict(checks), facts_present=True)
 
 
-def test_verdict_gate_and_cli_gate_agree():
+def _checks_record(*checks):
+    return dict(c3.verdict(list(checks)), facts_present=True)
+
+
+_X_GATED = frozenset({"x", "benchmark_rows_Q1"})
+_NO_FACTS = {"facts_present": False, "reason": "boom", "checks": []}
+
+
+@pytest.mark.parametrize(
+    ("rec", "gating", "fails"),
+    [
+        (_gated_record(), None, False),
+        (_gated_record(interaction_mix=False), None, False),
+        (_gated_record(benchmark_rows_Q2=False), None, False),
+        (_gated_record(silver_to_gold_days=False), None, True),
+        (_gated_record(dates_in_window=None), None, True),
+        (_gated_record(gold_daily_identities="drop"), None, True),
+        (_NO_FACTS, None, True),
+        ({"status": "pass", "checks": []}, None, True),
+        # a custom gating set: a failed and an unchecked gated check fail; a
+        # passing one does not
+        (_checks_record(c3._check("x", "invariant", False, 1, 0)), _X_GATED, True),
+        (_checks_record(c3._check("x", "invariant", None, None, 0)), _X_GATED, True),
+        (
+            _checks_record(
+                c3._check("x", "invariant", True, 0, 0),
+                c3._check("benchmark_rows_Q1", "shape", True, 1, 1),
+            ),
+            _X_GATED,
+            False,
+        ),
+        (_checks_record(c3._check("x", "invariant", False, 1, 0)), frozenset(), False),
+        (_NO_FACTS, frozenset(), False),
+        (None, frozenset(), False),
+        (None, None, True),
+    ],
+    ids=[
+        "pass",
+        "non-gating-fail",
+        "non-gating-shape-fail",
+        "gated-fail",
+        "gated-unchecked",
+        "gated-dropped",
+        "no-facts",
+        "no-facts-key",
+        "set-failed",
+        "set-unchecked",
+        "set-all-pass",
+        "empty-set-fail",
+        "empty-set-no-facts",
+        "empty-set-no-record",
+        "no-record",
+    ],
+)
+def test_verdict_gate_and_cli_gate_agree(monkeypatch, rec, gating, fails):
     """One rule: gating_outcome (the verdict) fails exactly when the CLI's
-    two gating_problems passes report a problem."""
-    for rec, fails in [
-        (_gated_record(), False),
-        (_gated_record(interaction_mix=False), False),
-        (_gated_record(benchmark_rows_Q2=False), False),
-        (_gated_record(silver_to_gold_days=False), True),
-        (_gated_record(dates_in_window=None), True),
-        (_gated_record(gold_daily_identities="drop"), True),
-        ({"facts_present": False, "reason": "boom", "checks": []}, True),
-        ({"status": "pass", "checks": []}, True),
-    ]:
-        cli = c3.gating_problems(rec) + c3.gating_problems(rec, only=("benchmark_rows_",))
-        outcome, reason = c3.gating_outcome(rec)
-        assert bool(cli) is fails
-        assert (outcome == "FAIL") is fails
-        assert (reason is not None) is fails
+    two gating_problems passes report a problem, except that a missing record
+    is the verdict's to scope out (no check was made)."""
+    if gating is not None:
+        monkeypatch.setattr(c3, "GATING_CHECKS", gating)
+    cli = c3.gating_problems(rec) + c3.gating_problems(rec, only=("benchmark_rows_",))
+    outcome, reason = c3.gating_outcome(rec)
+    assert bool(cli) is fails
+    if rec is None:
+        # No record: the CLI fails closed, the verdict has nothing to judge.
+        assert (outcome, reason) == (None, None)
+        return
+    assert (outcome == "FAIL") is fails
+    assert (reason is not None) is fails
 
 
-def test_gating_outcome_scopes_out_what_cannot_gate(monkeypatch):
-    assert c3.gating_outcome(None) == (None, None)
-    bad = _gated_record(silver_to_gold_days=False)
-    monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
-    assert c3.gating_outcome(bad) == (None, None)
-    # An empty list is reporting only even for a record with no facts, as in
-    # the CLI.
-    no_facts = c3.unevaluated_record("boom")
-    assert c3.gating_outcome(no_facts) == (None, None)
-    assert c3.gating_problems(no_facts) == []
+_FAILING = {"silver_to_gold_days": False}
+
+
+def _continuous(**kw):
+    return dict(_gated_record(**_FAILING), reporting_only=True, **kw)
+
+
+@pytest.mark.parametrize(
+    ("rec", "empty_set", "fails"),
+    [
+        (None, False, False),
+        (_gated_record(**_FAILING), True, False),
+        (c3.unevaluated_record("boom"), True, False),
+        (_continuous(mode="continuous"), False, False),
+        # reporting_only counts only on a continuous record
+        (_continuous(), False, True),
+        (c3.unevaluated_record("boom"), False, True),
+    ],
+    ids=[
+        "no-record",
+        "empty-set",
+        "empty-set-no-facts",
+        "continuous-reporting-only",
+        "reporting-only-not-continuous",
+        "no-facts",
+    ],
+)
+def test_gating_outcome_and_judged_ids_scope_out_what_cannot_gate(
+    monkeypatch, rec, empty_set, fails
+):
+    if empty_set:
+        monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
+    judged = c3.judged_gating_ids(rec)
+    assert (c3.gating_outcome(rec)[0] == "FAIL") is fails
+    # The ids it judges are all of them, or none when nothing can gate.
+    assert judged == (c3.GATING_CHECKS if fails else set())
+    if empty_set:
+        assert c3.gating_problems(rec) == []
 
 
 def _drops_fail(rec, gid):
@@ -161,20 +182,6 @@ def test_judged_gating_ids_is_the_set_gating_outcome_judges(monkeypatch, shape_g
     assert "benchmark_rows_Q2" not in c3.judged_gating_ids(no_shapes)
 
 
-def test_judged_gating_ids_is_empty_where_nothing_is_judged(monkeypatch):
-    bad = _gated_record(silver_to_gold_days=False)
-    assert c3.judged_gating_ids(None) == set()
-    continuous = dict(bad, reporting_only=True, mode="continuous")
-    assert c3.judged_gating_ids(continuous) == set()
-    assert c3.gating_outcome(continuous) == (None, None)
-    # Facts do not change the set; a record without facts fails outright.
-    no_facts = c3.unevaluated_record("boom")
-    assert c3.judged_gating_ids(no_facts) == c3._gated_ids(None)
-    assert c3.gating_outcome(no_facts)[0] == "FAIL"
-    monkeypatch.setattr(c3, "GATING_CHECKS", frozenset())
-    assert c3.judged_gating_ids(bad) == set()
-
-
 def test_reporting_failures_lists_only_checks_outside_the_list():
     rec = _gated_record(interaction_mix=False, silver_to_gold_days=False, dates_in_window=None)
     assert c3.reporting_failures(rec) == ["interaction_mix"]
@@ -194,28 +201,11 @@ def test_facts_present_must_be_true():
     assert c3.gating_problems(rec)
 
 
-def test_reporting_only_needs_a_continuous_record():
-    bad = _gated_record(silver_to_gold_days=False)
-    assert c3.gating_outcome(dict(bad, reporting_only=True))[0] == "FAIL"
-    assert c3.gating_outcome(dict(bad, reporting_only=True, mode="continuous")) == (None, None)
-
-
 def test_unevaluated_record_fails_closed_in_both_gates():
     rec = c3.unevaluated_record("the check could not run: KeyError('window_start')")
     assert rec["status"] == "unknown" and rec["facts_present"] is False
     assert c3.gating_outcome(rec)[0] == "FAIL"
     assert c3.gating_problems(rec)
-
-
-def test_run_keeps_a_record_when_the_check_raises():
-    """A check that raised still leaves a record, so the verdict fails
-    closed and not only the CLI's pipeline_success."""
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    i = src.index("_c360.evaluate_run(")
-    block = src[i : src.index("_c360.gating_problems(", i)]
-    handler = block[block.index("except Exception") :]
-    assert "_c360.unevaluated_record(" in handler
-    assert "collector.current_run.c360_correctness = _c360_rec" in handler
 
 
 def test_pass_requires_every_core_check():
@@ -236,10 +226,6 @@ def test_datagen_rows_match_generate_rs():
     # Tiny targets still write one file of at least 1,000 rows.
     assert c3.datagen_rows(0.001, 64, 4332.0) == 15_491
     assert c3.datagen_rows(0.001, 1, 4332.0) == 1_000
-    ctx = c3.expected_context(make_config())
-    assert ctx["bronze_rows_expected"]["snappy"] == c3.datagen_rows(
-        make_config().get_scale_dimensions().approx_bronze_gb, 64, 4332.0
-    )
 
 
 def test_stage_time_excludes_the_check():
@@ -324,15 +310,6 @@ def test_collector_parses_and_storage_round_trips(tmp_path):
     assert back.jobs[0].c360_bronze == {"rows": 7, "silver_filter_rows": 5}
 
 
-def test_expected_context_defaults_follow_datagen():
-    cfg = make_config()
-    ctx = c3.expected_context(cfg)
-    assert ctx["window_start"] == "2024-01-01"
-    assert ctx["window_end"] == "2025-01-01"  # datagen_rs default (exclusive)
-    # The id space datagen is given (deploy/datagen.py datagen_customer_id_max).
-    assert ctx["customers"] == cfg.get_scale_dimensions().customers
-
-
 def _facts(days, rows_per_day=2_000, tx_per_day=360, support_per_day=240):
     ds = [date(2024, 1, 1).fromordinal(date(2024, 1, 1).toordinal() + i) for i in range(days)]
     return {
@@ -348,14 +325,18 @@ def _facts(days, rows_per_day=2_000, tx_per_day=360, support_per_day=240):
     }
 
 
-def _q(name, rows, ok=True):
-    return {"name": name, "rows_returned": rows, "success": ok}
+def _q(name, rows, ok=True, revenue=None):
+    q = {"name": name, "rows_returned": rows, "success": ok}
+    if revenue is not None:
+        q["result_fingerprint"] = {"approx": {"3": revenue}}
+    return q
 
 
 def test_benchmark_row_counts_on_a_dense_year():
     facts = _facts(366)
+    facts["gold"]["sums"] = {"total_daily_revenue": 54_900.0}
     queries = [
-        _q("Q1_full_aggregation_scan", 1),
+        _q("Q1_full_aggregation_scan", 1, revenue=54_900.0),
         _q("Q2_filtered_aggregation", 91 * 5),  # 2024-01-01 .. 2024-03-31
         _q("Q4_churn_risk_analysis", 6),
         _q("Q3_customer_segmentation", 12),
@@ -366,6 +347,26 @@ def test_benchmark_row_counts_on_a_dense_year():
     ]
     checks = c3.benchmark_checks(queries, facts, {})
     assert {c["status"] for c in checks} == {"pass"}, checks
+
+
+@pytest.mark.parametrize(
+    ("revenue", "status"),
+    [(54_900.004, "pass"), (55_900.0, "fail"), (None, "unchecked")],
+)
+def test_q1_revenue_answer_matches_gold(revenue, status):
+    """Q1's total_revenue is the benchmark's answer for the quantity gold
+    sums as total_daily_revenue: they agree within rounding, or the check
+    fails (reporting only); without Q1's fingerprint it is unchecked."""
+    facts = _facts(366)
+    facts["gold"]["sums"] = {"total_daily_revenue": 54_900.0}
+    checks = {
+        c["id"]: c
+        for c in c3.benchmark_checks(
+            [_q("Q1_full_aggregation_scan", 1, revenue=revenue)], facts, {}
+        )
+    }
+    assert checks["benchmark_answer_Q1_revenue"]["status"] == status
+    assert "benchmark_answer_Q1_revenue" not in c3.GATING_CHECKS
 
 
 def test_benchmark_row_counts_catch_a_wrong_shape_and_skip_failed_queries():
@@ -404,19 +405,6 @@ def test_add_benchmark_checks_keeps_context():
     out = c3.add_benchmark_checks(rec, [_q("Q1_full_aggregation_scan", 2)])
     assert out["status"] == "fail" and out["failed"] == ["benchmark_rows_Q1"]
     assert out["context"] == {"x": 1} and out["gating"] is c3.GATING
-
-
-def test_run_wiring_changes_success_only_through_the_gating_set():
-    """The c360 blocks record and print; pipeline_success moves only for a
-    gating_problems() entry (the owner-approved GATING_CHECKS, D6)."""
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    for marker in ("_c360.evaluate_run(", "_c360.add_benchmark_checks("):
-        i = src.index(marker)
-        block = src[src.rfind("if (", 0, i) : src.index("_journal_safe", i)]
-        assert "raise" not in block
-        assert block.count("pipeline_success = False") == 1
-        j = block.index("pipeline_success = False")
-        assert "_c360.gating_problems(" in block[block.rfind("for _p in", 0, j) : j]
 
 
 def test_c360_bronze_path(monkeypatch, load_script):

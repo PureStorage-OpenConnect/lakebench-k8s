@@ -1,4 +1,4 @@
-"""RPT-1 report fixes R5, R6, R8, R10, R11, R20 and R21 (DESIGN-v1.7 ch03
+"""RPT-1 report fixes R5, R6, R8, R10, R20 and R21 (DESIGN-v1.7 ch03
 section 14), plus two bottleneck numbers found while building R21.
 
 Each test asserts the fixed number or label on a stored record against a
@@ -8,6 +8,8 @@ value the test reads from the record itself.
 from __future__ import annotations
 
 import re
+
+import pytest
 
 from tests.fixtures.report_consistency_helpers import _render_dict
 from tests.fixtures.report_goldens import page_text, render
@@ -120,43 +122,83 @@ def test_r8_continuous_ingest_labels_and_coverage():
     coverage = scores["corpus_ingest_ratio"]
     assert coverage == 0.4374
     text = _text("ebb26f")
-    assert "bronze rows / rows the trickle released" in text
+    # The denominator is a mean-rate estimate of the rows released, and
+    # the label says so; it is never the corpus.
+    assert "Ingest Ratio (estimate)" in text
+    assert "bronze rows / rows released by the window's end" in text
     assert "bronze rows / datagen rows" not in text
     assert f"Corpus coverage {coverage * 100:.1f}%" in text
     assert f"Window {scores['window_seconds']:,.0f}s" in text
     files, trigger = sustained["max_files_per_trigger"], sustained["bronze_trigger_interval"]
-    assert f"Offered load (trickle) {files} file per {trigger} bronze trigger" in text
+    assert f"Offered load trickle {files} file per {trigger} bronze trigger" in text
     assert "Excluded in continuous mode: AML continuous runs detection rules" in text
 
 
 def test_r8_continuous_excluded_rules_are_not_no_data():
-    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+    """A record keeps the rules its run excluded: ebb26f ran before W5 and
+    W6 joined continuous, so they read excluded, never no data."""
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.metrics.verdict import continuous_excluded_rules
 
+    record = load_record("ebb26f")
+    excluded = continuous_excluded_rules(
+        MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(record)
+    )
+    assert {"W5_sanctions_match", "W6_pep_counterparty"} <= excluded
     text = _text("ebb26f")
     table = _section(text, "Detection Scorecard", "Continuous run: counts")
-    for rule in AML_CONTINUOUS_SKIPPED_RULES:
+    for rule in excluded:
         row = re.search(rf"{rule} \S+ (.*?)(?= W\d|$)", table)
         assert row and "excluded in continuous mode" in row.group(1), rule
     assert "no data" not in table
 
 
-def test_r8_ingest_basis_without_released_rows():
-    """A record with no released-row count divides by the corpus rows, and
-    the label says so (65567b)."""
-    scores = load_record("65567b")["pipeline_benchmark"]["scores"]
-    assert scores.get("released_rows") is None
-    text = _text("65567b")
-    assert "bronze rows / generated corpus rows (released rows not recorded)" in text
-    assert "rows the trickle released" not in text
-
-
 def test_r8_continuous_aml_counts_rules_not_run():
-    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.metrics.verdict import continuous_excluded_rules
 
-    executed = set(load_record("ebb26f")["experiment"]["rules"]["executed"])
-    not_run = [r for r in AML_CONTINUOUS_SKIPPED_RULES if r not in executed]
+    record = load_record("ebb26f")
+    executed = set(record["experiment"]["rules"]["executed"])
+    excluded = continuous_excluded_rules(
+        MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(record)
+    )
+    not_run = [r for r in excluded if r not in executed]
     panel = _section(_text("ebb26f"), "What limits interpretation", "Continuous pipeline")
     assert f"{len(not_run)} detection rules not run in continuous mode" in panel
+
+
+@pytest.mark.parametrize(
+    ("run_id", "must_contain", "must_not_contain"),
+    [
+        pytest.param(
+            "65567b",
+            lambda r: "bronze rows / generated corpus rows (released rows not recorded)",
+            lambda r: "rows released by the window's end",
+            id="ingest-basis-without-released-rows",
+        ),
+        pytest.param(
+            "ebb26f",
+            lambda r: (
+                f"bronze bucket {r['bronze_size_gb']:.1f} GiB at run end: "
+                "landing files plus the bronze table"
+            ),
+            lambda r: f"corpus {r['bronze_size_gb']:.1f} GiB",
+            id="continuous-names-window-intake-not-corpus",
+        ),
+        pytest.param(
+            "ebb26f",
+            lambda r: f"commit {r['provenance']['git_sha'][:7]}, clean",
+            lambda r: "uncommitted changes (dirty)",
+            id="clean-tree-is-not-dirty",
+        ),
+    ],
+)
+def test_basis_labels_distinguish_what_the_number_divides(run_id, must_contain, must_not_contain):
+    """A label names its basis and never the misleading neighbour."""
+    record = load_record(run_id)
+    text = _text(run_id)
+    assert must_contain(record) in text
+    assert must_not_contain(record) not in text
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +218,6 @@ def test_r10_provenance_in_the_front_panel():
     assert "produced from a tree with uncommitted changes (dirty)" in panel
 
 
-def test_r10_clean_tree_reads_clean():
-    prov = load_record("ebb26f")["provenance"]
-    assert prov["git_dirty"] is False
-    assert f"commit {prov['git_sha'][:7]}, clean" in _text("ebb26f")
-
-
 def test_r10_aml_recall_labelled_and_skips_counted():
     record = load_record("1320bd")
     skipped = record["experiment"]["rules"]["skipped"]
@@ -197,26 +233,28 @@ def test_r10_aml_recall_labelled_and_skips_counted():
     )
 
 
-def test_r10_look_run_ids_must_be_a_list(monkeypatch):
+@pytest.mark.parametrize("bad", ["substring", 7], ids=["string", "int"])
+def test_r10_look_run_ids_must_be_a_list(monkeypatch, bad):
     """A string or integer run_ids names no run (no substring match, no
-    crash)."""
+    crash); the same look with a real list does."""
     from lakebench.config import datagen_seed
 
     run_id = load_record("1320bd")["run_id"]
-    for bad in (f"x{run_id}x", 7):
+    if bad == "substring":
+        bad = f"x{run_id}x"
+
+    def looks_with(run_ids):
         monkeypatch.setattr(
             datagen_seed,
             "load_looks",
-            lambda path=None, bad=bad: [
-                {"role": "evaluation", "state": "complete", "run_ids": bad}
-            ],
+            lambda path=None: [{"role": "evaluation", "state": "complete", "run_ids": run_ids}],
         )
-        assert "Recall (uncalibrated, in-sample)" in _text("1320bd")
+        return _text("1320bd")
 
-
-# ---------------------------------------------------------------------------
-# R11: an AML block that cannot render says so
-# ---------------------------------------------------------------------------
+    assert "Recall (registered look: evaluation)" in looks_with([run_id])
+    text = looks_with(bad)
+    assert "Recall (uncalibrated, in-sample)" in text
+    assert "Recall (registered look" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -230,8 +268,8 @@ def test_r20_throughput_label_and_corpus_size():
     total = record["pipeline_benchmark"]["scores"]["total_data_processed_gb"]
     assert total > 2 * bronze  # stage inputs count the corpus once per stage
     text = _text("5105a0")
-    assert "stage inputs processed per second (bronze + silver + gold + query reads)" in text
-    assert f"{total:.1f} GB of stage inputs; corpus {bronze:.1f} GB in bronze" in text
+    assert "stage inputs processed per second (bronze, silver and gold reads)" in text
+    assert f"{total:.1f} GiB of stage inputs; corpus {bronze:.1f} GiB in bronze" in text
     assert "data volume / wall-clock time" not in text
 
 
@@ -240,25 +278,30 @@ def test_r20_throughput_label_and_corpus_size():
 # ---------------------------------------------------------------------------
 
 
-def test_r20_continuous_names_the_window_intake_not_the_corpus():
-    bronze = load_record("ebb26f")["bronze_size_gb"]
-    text = _text("ebb26f")
-    assert f"bronze bucket {bronze:.1f} GB at run end: landing files plus the bronze table" in text
-    assert f"corpus {bronze:.1f} GB" not in text
+def _bottleneck_rows(run_id: str) -> dict[str, list[str]]:
+    html = page_text(render(run_id))
+    start = html.index("<h2>Bottleneck Identification</h2>")
+    section = html[start : html.index("</section>", start)]
+    rows = {}
+    for m in re.finditer(r"<tr[^>]*>\s*<td[^>]*>(\w+)</td>(.*?)</tr>", section, flags=re.S):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", m.group(2), flags=re.S)
+        rows[m.group(1)] = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+    return rows
 
 
 def test_bottleneck_continuous_query_stage_has_no_latency_share():
-    """The query stage has no micro-batch latency: it shows "-" and the
-    latency shares are over the stages that have one (ebb26f)."""
+    """The query stage has no micro-batch latency: its latency and share
+    cells are empty and the latency shares are over the stages that have
+    one."""
     stages = load_record("ebb26f")["pipeline_benchmark"]["stages"]
-    timed = [s for s in stages if (s.get("latency_ms") or 0) > 0]
-    assert "query" not in [s["stage_name"] for s in timed]
-    total = sum(s["latency_ms"] for s in timed)
-    silver = next(s for s in timed if s["stage_name"] == "silver")
-    section = _section(_text("ebb26f"), "Bottleneck Identification", "Data Validity")
-    assert f"{silver['latency_ms'] / total * 100:.1f}%" in section
-    assert re.search(r"query - - ", section)
-    assert "70ms" not in section
+    timed = [s["stage_name"] for s in stages if (s.get("latency_ms") or 0) > 0]
+    assert "query" not in timed
+    rows = _bottleneck_rows("ebb26f")
+    assert rows["query"][:2] == ["-", "-"]
+    latency = {s["stage_name"]: s["latency_ms"] for s in stages if s["stage_name"] in timed}
+    total = sum(latency.values())
+    for name, ms in latency.items():
+        assert rows[name][1] == f"{ms / total * 100:.1f}%"
 
 
 def test_bottleneck_thrift_query_stage_not_costed_with_trino_cores():

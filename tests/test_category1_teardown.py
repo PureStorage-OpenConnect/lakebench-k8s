@@ -19,7 +19,6 @@ checks the order that relies on.
 
 from __future__ import annotations
 
-import ast
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -287,7 +286,22 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp
             **(ns.metadata.annotations or {}),
             "lakebench.deployment/state-schema": "lb-state/1",
         }
+        import lakebench.deploy.destroy as destroy_mod
+
+        real_cat1, cat1_at = destroy_mod._category1_step, []
+
+        def _cat1(*args, **kwargs):
+            cat1_at.append(len(rec.calls))
+            return real_cat1(*args, **kwargs)
+
+        monkeypatch.setattr(destroy_mod, "_category1_step", _cat1)
         results = _destroy(rec, cfg)
+        # Spark's runtime objects are garbage collected after the
+        # SparkApplication delete, so every one goes before the registry step.
+        app_deletes = [
+            i for i, c in enumerate(rec.calls) if c.deleting and c.kind == "sparkapplications"
+        ]
+        assert app_deletes and cat1_at and max(app_deletes) < cat1_at[0]
         kept = {(k.kind, k.name) for k in KEPT_ON_DESTROY}
         left = sorted(
             (kind, name)
@@ -304,50 +318,6 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp
         assert statuses.get("category1") == "success", statuses
         # Deploy, the run-time creators and destroy stayed in their lane (SAF-4).
         rec.assert_clean()
-
-
-def test_registry_entries_have_owner():
-    from lakebench.deploy.category1 import CATEGORY1_OBJECTS, KEPT_ON_DESTROY
-
-    steps = set(_step_order(ast.parse((SRC / "deploy" / "destroy.py").read_text())))
-    for e in CATEGORY1_OBJECTS:
-        assert e.owner_wi and e.step in steps, e
-        assert bool(e.name) != bool(e.label_selector), e
-        assert e.when in ("", "observability"), e
-    for k in KEPT_ON_DESTROY:
-        assert k.owner_wi and k.reason, k
-
-
-# Selector entries that are not scoped to the deployment, and why that is
-# acceptable: fixed object names (lakebench-postgres and the rest) already
-# make two deployments in one namespace impossible.
-_NAMESPACE_WIDE_SELECTORS = {
-    "app.kubernetes.io/managed-by=lakebench",  # datagen-jobs, pre-1.7
-    "app.kubernetes.io/component=trino-worker",  # the worker claims, pre-1.7
-}
-
-
-def test_selectors_are_deployment_scoped():
-    """A selector delete can only match this deployment, or is a listed pre-1.7 one."""
-    from lakebench.deploy.category1 import CATEGORY1_OBJECTS
-
-    selectors = [e for e in CATEGORY1_OBJECTS if e.label_selector]
-    assert selectors
-    for e in selectors:
-        assert (
-            "app.kubernetes.io/instance={name}" in e.label_selector
-            or e.label_selector in _NAMESPACE_WIDE_SELECTORS
-        ), e
-        if e.step == "category1":
-            assert "app.kubernetes.io/instance={name}" in e.label_selector, e
-
-
-def test_scripts_entry_is_the_spark_scripts_step_selector():
-    from lakebench.deploy.category1 import CATEGORY1_OBJECTS
-    from lakebench.modules.pipeline_engines.spark.scripts_maps import scripts_label_selector
-
-    (entry,) = [e for e in CATEGORY1_OBJECTS if e.step == "spark-scripts"]
-    assert entry.label_selector == scripts_label_selector("{name}")
 
 
 def test_entry_matching():
@@ -419,8 +389,6 @@ def test_every_template_object_is_registered():
     from lakebench.modules.catalogs.hive.deployer import HiveDeployer
 
     assert set(HiveDeployer.LEGACY_TEMPLATES) - {"hive/service.yaml.j2"} == _UNUSED_TEMPLATES
-    hive_src = (SRC / "modules/catalogs/hive/deployer.py").read_text()
-    assert hive_src.count("LEGACY_TEMPLATES") == 1, "LEGACY_TEMPLATES is rendered now"
     missing = []
     seen = 0
     for tpl, kind, name, ns, labels in _template_objects():
@@ -432,32 +400,6 @@ def test_every_template_object_is_registered():
             missing.append(f"{tpl}: {kind}/{name}")
     assert seen > 30
     assert missing == [], missing
-
-
-def _step_order(tree: ast.Module) -> list[str]:
-    """The ``report("<component>", DeploymentStatus.IN_PROGRESS, ...)`` order in destroy_all."""
-    fn = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "destroy_all"
-    )
-    order: list[str] = []
-    for node in ast.walk(fn):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "report"
-            and len(node.args) >= 2
-            and isinstance(node.args[0], ast.Constant)
-            and ast.unparse(node.args[1]) == "DeploymentStatus.IN_PROGRESS"
-        ):
-            order.append((node.lineno, node.args[0].value))
-    return [name for _, name in sorted(order)]
-
-
-def test_sparkapplications_go_before_category1():
-    """Spark's runtime objects are garbage collected after the SparkApplication delete."""
-    order = _step_order(ast.parse((SRC / "deploy" / "destroy.py").read_text()))
-    assert "spark-jobs" in order and "category1" in order
-    assert order.index("spark-jobs") < order.index("category1")
 
 
 @pytest.mark.parametrize(("ns_goes", "status"), [(False, "failed"), (True, "skipped")])
@@ -574,6 +516,7 @@ def test_two_deployments_isolated(monkeypatch, tmp_path):
     no delete lands outside A's namespace (DEP-2 s2.11)."""
     import copy
 
+    from lakebench.deploy.category1 import CATEGORY1_OBJECTS
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.deps.manifest import ANNOTATION_DEPS_SET, SERVER_NAME
     from lakebench.k8s.client import K8sClient
@@ -603,9 +546,29 @@ def test_two_deployments_isolated(monkeypatch, tmp_path):
         assert ("deployments", "u02", SERVER_NAME) in b_objects
         b_ns = rec.store[("namespaces", None, "u02")].metadata.annotations
         assert b_ns.get(ANNOTATION_DEPS_SET) == engine_b.deps.pinset_sha256
+        # Another deployment's objects in A's namespace, carrying each
+        # instance-scoped selector's labels with a different instance.
+        siblings = []
+        for entry in CATEGORY1_OBJECTS:
+            if not entry.label_selector or "app.kubernetes.io/instance={name}" not in (
+                entry.label_selector
+            ):
+                continue
+            labels = dict(
+                term.split("=", 1)
+                for term in entry.label_selector.replace(
+                    "app.kubernetes.io/instance={name}", "app.kubernetes.io/instance=u02"
+                ).split(",")
+            )
+            sibling = (entry.kind, NS, f"sibling-{len(siblings)}")
+            rec.add(entry.kind, {"metadata": {"name": sibling[2], "labels": labels}}, namespace=NS)
+            siblings.append(sibling)
+        assert siblings
         before = len(rec.calls)
 
         _destroy(rec, a)
+
+        assert all(sibling in rec.store for sibling in siblings)
 
         after = rec.calls[before:]
         assert not [c for c in after if c.mutating and c.namespace == "u02"]

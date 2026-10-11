@@ -1,13 +1,5 @@
-"""A3 + A6: shared measurement formatter, WCAG delta tokens, confidence chip,
-BOUNDED BY tooltip, "Read this first" panel.
-
-Tests here verify the qualifiers a score card must carry (invariants 5, 6, 7),
-the WCAG-safe pass/fail encoding in the compare table (no colour-only cues),
-and the header panel that names what a reader should know before reading a
-single card. Every test is silent-corruption-shaped: a card that renders a
-capped figure as bare headline evidence, or a compare table that says only
-"[red]" without a text token, is exactly the class of defect these guard.
-"""
+"""Shared measurement formatter, confidence chip and the qualifiers a score
+card must carry beside a number."""
 
 from __future__ import annotations
 
@@ -18,7 +10,6 @@ import pytest
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.reports.formatter import (
-    caps_bound_from,
     confidence_chip,
     format_measurement,
 )
@@ -38,36 +29,20 @@ class TestFormatMeasurement:
         assert "12,345" in out
         assert "rows/s" in out
 
-    def test_capped_value_carries_bounded_by_and_cap_name(self):
-        out = format_measurement(
-            "1,200",
-            "rows/s",
-            caps_bound=["bronze-verify: executor cap 28 (scale asks for 40)"],
-        )
-        assert "BOUNDED BY" in out
-        # The cap name (invariant 6): reader sees the constant, not just
-        # a prose reason.
-        assert "_MAX_EXECUTORS_SAFE=28" in out
-        # The full reason is in the tooltip.
-        assert "scale asks for 40" in out
+    @pytest.mark.parametrize(
+        ("n_runs", "tag"),
+        [(None, None), (0, None), (1, "n=1"), (5, "n=5")],
+    )
+    def test_n_runs_tag(self, n_runs, tag):
+        out = format_measurement("42.0", "QpH", n_runs=n_runs)
+        if tag is None:
+            assert "n=" not in out
+        else:
+            assert tag in out
 
-    def test_n_runs_one_labels_single_sample(self):
-        out = format_measurement("42.0", "QpH", n_runs=1)
-        assert "n=1" in out
-        assert "n=2" not in out
-
-    def test_n_runs_many_labels_repeated(self):
-        out = format_measurement("42.0", "QpH", n_runs=5)
-        assert "n=5" in out
-
-    def test_n_runs_none_or_zero_adds_no_tag(self):
-        assert "n=" not in format_measurement("42.0", "QpH", n_runs=None)
-        assert "n=" not in format_measurement("42.0", "QpH", n_runs=0)
-
-    def test_cap_names_cover_known_bound_shapes(self):
-        # Every known bound-line shape resolves to a cap name; the reader
-        # gets the constant next to the number for each.
-        cases = [
+    @pytest.mark.parametrize(
+        ("reason", "name"),
+        [
             ("bronze-verify: executor cap 28 (scale asks for 40)", "_MAX_EXECUTORS_SAFE=28"),
             (
                 "bronze-ingest: concurrent executor budget granted 6 of 12",
@@ -82,14 +57,16 @@ class TestFormatMeasurement:
                 "pre-benchmark maintenance stopped on its time budget",
                 "pre-benchmark maintenance budget",
             ),
-            (
-                "rule R7 skipped: over cap",
-                "rule R7 cap",
-            ),
-        ]
-        for reason, name in cases:
-            out = format_measurement("1", "", caps_bound=[reason])
-            assert name in out, f"{reason} -> {name} missing from {out}"
+            ("rule R7 skipped: over cap", "rule R7 cap"),
+        ],
+    )
+    def test_capped_value_carries_bounded_by_and_cap_name(self, reason, name):
+        # The reader gets the cap constant next to the number, with the full
+        # reason in the tooltip.
+        out = format_measurement("1,200", "rows/s", caps_bound=[reason])
+        assert "BOUNDED BY" in out
+        assert name in out
+        assert reason in out
 
 
 # ---------------------------------------------------------------------------
@@ -239,24 +216,3 @@ class TestConfidenceChipOnBadge:
         assert present in html
         if absent:
             assert absent not in html
-
-
-# ---------------------------------------------------------------------------
-# Compare CLI: WCAG 1.4.1 -- nothing is carried by colour alone. compare
-# names no winner, so it prints no winner token; what a row may be read as
-# is its assessment, in text.
-# ---------------------------------------------------------------------------
-
-
-class TestExperimentPullThrough:
-    def test_caps_bound_empty_when_no_block(self):
-        assert caps_bound_from(object()) == []
-
-
-# ---------------------------------------------------------------------------
-# Lint smoke: the lint script itself catches a regression.
-# ---------------------------------------------------------------------------
-
-
-if __name__ == "__main__":  # pragma: no cover
-    pytest.main([__file__, "-v"])

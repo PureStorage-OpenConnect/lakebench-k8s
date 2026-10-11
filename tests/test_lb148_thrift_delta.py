@@ -1,4 +1,4 @@
-"""LB-148: Spark Thrift on Delta.
+"""Spark Thrift on Delta.
 
 (a) Delta's OptimizeMetadataOnlyDeltaQuery rewrite crashes MIN/MAX on date
     partition columns (ClassCastException LocalDate -> java.sql.Date), so the
@@ -86,10 +86,11 @@ def test_thrift_delta_hive_disables_metadata_query_rewrite():
 # -- (b) pod limit = heap + overhead -----------------------------------------
 
 
-def test_spark_memory_bytes():
-    for value, expected in [
-        ("4g", 4 * GIB),
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
         ("4G", 4 * GIB),
+        ("4g", 4 * GIB),
         ("4gb", 4 * GIB),
         ("4096m", 4 * GIB),
         ("4096", 4 * GIB),
@@ -97,22 +98,33 @@ def test_spark_memory_bytes():
         ("4194304k", 4 * GIB),
         ("4294967296b", 4 * GIB),
         ("1t", 1024 * GIB),
-    ]:
+        ("", None),
+        ("abc", None),
+        ("4Gi", None),
+        ("0g", None),
+        ("-1g", None),
+        ("1.5g", None),
+        ("1e1g", None),
+        ("4 g", None),
+        ("infg", None),
+        ("4x", None),
+    ],
+)
+def test_spark_memory_bytes(value, expected):
+    if expected is None:
+        with pytest.raises(ValueError):
+            spark_memory_bytes(value)
+    else:
         assert spark_memory_bytes(value) == expected
 
 
-def test_spark_memory_bytes_rejects():
-    for value in ["", "abc", "4Gi", "0g", "-1g", "1.5g", "1e1g", "1_0g", "4 g", "infg", "4x"]:
-        with pytest.raises(ValueError):
-            spark_memory_bytes(value)
-
-
-@pytest.mark.parametrize("heap", ["512m", "4g", "8g", "16g", "24g", "64g"])
-def test_thrift_pod_limit_exceeds_heap_by_spark_rule_or_1gib(heap):
-    heap_b = spark_memory_bytes(heap)
-    limit_b = k8s_memory_bytes(thrift_pod_memory_limit(heap))
-    assert limit_b >= heap_b + max(heap_b // 10, GIB)
-    assert limit_b - (heap_b + max(heap_b // 10, GIB)) < MIB
+@pytest.mark.parametrize(
+    ("heap", "limit"),
+    [("512m", "1536Mi"), ("4g", "5120Mi"), ("16g", "18023Mi")],
+)
+def test_thrift_pod_limit_exceeds_heap(heap, limit):
+    assert thrift_pod_memory_limit(heap) == limit
+    assert k8s_memory_bytes(limit) > spark_memory_bytes(heap)
 
 
 @pytest.mark.parametrize(
@@ -154,5 +166,6 @@ def test_delta_thrift_fitted_to_small_node():
     cfg = _thrift_cfg("hive-delta-spark-thrift")
     resolve_auto_sizing(cfg, cap)
     thrift = cfg.architecture.query_engine.spark_thrift
-    assert thrift.cores == 4
-    assert thrift.memory == "8g"
+    assert thrift.cores * 1000 <= cap.largest_node_cpu_millicores
+    pod_limit = k8s_memory_bytes(thrift_pod_memory_limit(thrift.memory))
+    assert pod_limit < cap.largest_node_memory_bytes

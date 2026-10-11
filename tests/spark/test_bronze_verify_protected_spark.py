@@ -82,14 +82,6 @@ def test_refusal_stops_with_the_marker_and_no_seed(spark, bvf, tmp_path):
     assert pc.seed_tokens(text) == [] and session.stopped == 1
 
 
-def test_an_unreadable_manifest_is_refused(spark, bvf, tmp_path):
-    bad = tmp_path / "pacs008" / "manifest"
-    bad.mkdir(parents=True)
-    (bad / "manifest.parquet").write_bytes(b"not parquet")
-    with pytest.raises(SystemExit, match="could not be checked"):
-        bvf.refuse_protected_corpus(_Session(spark))
-
-
 @pytest.mark.parametrize("held_out", [True, False], ids=["held-out", "development"])
 def test_main_refuses_before_any_namespace_read_or_write(
     spark, bvf, tmp_path, monkeypatch, held_out

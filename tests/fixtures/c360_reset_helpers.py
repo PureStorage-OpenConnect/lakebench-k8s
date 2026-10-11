@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/test_c360_continuous_reset.py (imported by several test files)."""
+"""Drive the continuous runner with every cluster and S3 edge mocked."""
 
 from __future__ import annotations
 
@@ -62,6 +62,7 @@ def _drive_sustained(
     first stream submit, unless *deploy_result* is given: datagen starts
     after the streams, so those runs go on to its deploy."""
     monkeypatch.chdir(tmp_path)
+    events_ref.clear()
     events: list[str] = []
 
     op = MagicMock()
@@ -132,7 +133,7 @@ def _drive_sustained(
 
     # The run ends at the first stream submit (or an Exit); the finally
     # block may then fail on mocked metrics, which is irrelevant here.
-    with pytest.raises(Exception) as ei:  # noqa: B017
+    with pytest.raises(Exception) as ei:  # noqa: B017 -- narrowed by the chain check below
         _sustained._run_sustained(
             cfg,
             tmp_path / "cfg.yaml",
@@ -143,7 +144,19 @@ def _drive_sustained(
             force_reset=force_reset,
         )
     events_ref["exc"] = _exit_in_chain(ei.value)
+    assert hasattr(events_ref["exc"], "exit_code") or _stopped_in_chain(ei.value), (
+        f"the run ended on an unrelated {type(ei.value).__name__}: {ei.value}"
+    )
     return events
+
+
+def _stopped_in_chain(exc) -> bool:
+    seen = exc
+    while seen is not None:
+        if isinstance(seen, _StopAfterFirstStream):
+            return True
+        seen = seen.__context__
+    return False
 
 
 def _exit_in_chain(exc):

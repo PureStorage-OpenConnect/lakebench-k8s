@@ -26,7 +26,9 @@ from lakebench.metrics.collector import (
 from lakebench.metrics.continuous_window import (
     StreamEvent,
     arrival_seconds,
+    balance,
     classify_submission_failure,
+    freshness_summary,
     parse_events,
     settle_state,
     window_gate_problems,
@@ -53,12 +55,22 @@ def bronze_log(batches: list[tuple[float, int]]) -> str:
     return "\n".join(out) + "\n"
 
 
-def silver_log(batches: list[tuple[float, int, int]]) -> str:
+def silver_log(batches: list[tuple[float, int, int]], seconds: float = 8.0) -> str:
     out = []
     for i, (t, rows_in, rows_out) in enumerate(batches):
         out.append(_line(t, f"Batch {i}: transforming {rows_in:,} rows"))
         out.append(_line(t + 2, f"Batch {i}: {rows_out:,} rows after transforms (filtered ~2%)"))
-        out.append(_line(t + 8, f"Batch {i}: committed to ice.silver.t in 8.0s"))
+        out.append(_line(t + seconds, f"Batch {i}: committed to ice.silver.t in {seconds:.1f}s"))
+    return "\n".join(out) + "\n"
+
+
+def back_to_back_silver(durations: list[float]) -> str:
+    """Silver batches that each start as the previous one commits."""
+    out, t = [], 0.0
+    for i, d in enumerate(durations):
+        out.append(_line(t, f"Batch {i}: transforming 52,000 rows"))
+        out.append(_line(t + d, f"Batch {i}: committed to ice.silver.t in {d:.1f}s"))
+        t += d
     return "\n".join(out) + "\n"
 
 
@@ -421,6 +433,15 @@ def test_settled_needs_every_row_through_silver_and_a_gold_read_after():
     ev["gold-refresh"] = parse_events(gold_log([(599, 510_000, 40, False)]), "gold-refresh")
     ok, why = settle_state(ev, bronze_rows)
     assert ok, why
+    # Bronze stopped mid-write inside the window: its last batch logged
+    # "writing" and never committed, so those rows never reached the table.
+    # Settled all the same, and the stage's rows exclude them.
+    cut = HEALTHY["bronze-ingest"] + _line(595, "Batch 20: writing 700,000 rows to ice.bronze.raw")
+    stopped = {**ev, "bronze-ingest": parse_events(cut, "bronze-ingest")}
+    ok, why = settle_state(stopped, bronze_rows)
+    assert ok, why
+    stats = window_stats(stopped["bronze-ingest"], "bronze-ingest", W0, W1)
+    assert stats["output_rows"] == stats["window_input_rows"] == bronze_rows
     # A drain: bronze stopped (its log gone) after taking its rows. Silver
     # must still have committed every one of them.
     drained = {k: v for k, v in ev.items() if k != "bronze-ingest"}
@@ -648,7 +669,7 @@ def test_healthy_run_passes_with_window_scores(monkeypatch, tmp_path):
     assert code is None, saved.continuous.get("gate_problems")
     assert saved.success is True
     assert saved.continuous["gate_problems"] == []
-    assert saved.continuous["result_check"] == {"not_checked": "no benchmark (--skip-benchmark)"}
+    assert saved.continuous["result_check"]["cause"] == "declared"
     gold = next(s for s in saved.streaming if s.job_type == "gold-refresh")
     assert gold.window_new_data_cycles == 3 and gold.freshness_seconds == 25
 
@@ -746,8 +767,10 @@ def test_a_window_too_short_for_two_gold_refreshes_is_refused():
     from lakebench.cli._sustained import short_window_problem
     from tests.conftest import make_config
 
-    cfg = make_config()  # gold_refresh_interval 5 minutes
-    assert "at least 900s" in short_window_problem(cfg, 600)
+    cfg = make_config(
+        architecture={"pipeline": {"continuous": {"gold_refresh_interval": "5 minutes"}}}
+    )
+    assert short_window_problem(cfg, 600) is not None
     assert short_window_problem(cfg, 900) is None
 
 
@@ -864,7 +887,9 @@ def test_a_failed_result_check_query_fails_the_run(monkeypatch, tmp_path):
 
 def test_an_unsettled_corpus_leaves_results_not_established(monkeypatch, tmp_path):
     monkeypatch.setattr("lakebench.cli._sustained.SETTLE_MAX_SECONDS", 1)
-    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=10**9)
+    # Bronze took in 96% of the corpus (ingest is not what is judged); the
+    # rest cannot settle within the limit.
+    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=125_000)
     assert code is None
     assert "settle limit" in saved.continuous["result_check"]["not_checked"]
     assert "not_checked" in saved.experiment_block()["results"]
@@ -1354,3 +1379,322 @@ def test_stream_marker_is_cleared_only_once_the_driver_pod_is_gone(monkeypatch):
     s3.raw_client.delete_object.assert_called_once_with(
         Bucket="ns-silver", Key="checkpoints/silver-stream/_STARTED"
     )
+
+
+def aml_gold_back_to_back(idle_until: float, tick: float, end: float) -> str:
+    """AML gold back to back: quick cycles that find no new silver row until
+    *idle_until*, then cycles of *tick* seconds that each take in new rows."""
+    out, t, i = [], 0.0, 1
+    while t < end:
+        idle = t < idle_until
+        d = 7.0 if idle else tick
+        out.append(_line(t, f"Cycle {i}: aggregating {0 if idle else 52_000 * i:,} Silver records"))
+        cut = "None" if idle else str(1_700_000_000_000_000 + i)
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {cut}"))
+        out.append(_line(t + d, f"Cycle {i}: refreshed lakehouse.gold.alerts in {d:.1f}s"))
+        t, i = t + d, i + 1
+    return "\n".join(out) + "\n"
+
+
+# Silver back to back at a steady 30 s keeps up; one whose batches then grow
+# from 30 s to 80 s (each takes what bronze committed while the last ran) and
+# one whose silver stops halfway build a backlog, so neither is balanced.
+_SILVER_STEADY = {**HEALTHY, "silver-stream": back_to_back_silver([30.0] * 20)}
+_SILVER_SLOWS = {
+    **HEALTHY,
+    "silver-stream": back_to_back_silver([30.0] * 10 + [40.0, 50.0, 60.0, 70.0, 80.0]),
+}
+_SILVER_STOPS = {
+    **HEALTHY,
+    "silver-stream": silver_log([(t, 52_000, 51_000) for t in range(10, 300, 60)]),
+}
+# AML gold back to back whose window opened before data: its idle cycles are
+# not its cadence (live, Polaris AML s1: an 11 s cadence against 95 s ticks).
+_AML_GOLD_LATE_DATA = {
+    **_SILVER_STEADY,
+    "gold-refresh": aml_gold_back_to_back(idle_until=280, tick=95.0, end=600),
+}
+
+
+@pytest.mark.parametrize(
+    ("logs", "balanced", "stage"),
+    [
+        (HEALTHY, True, None),
+        (_SILVER_STEADY, True, None),
+        (_SILVER_SLOWS, False, "silver-stream"),
+        (_SILVER_STOPS, False, "silver-stream"),
+        (_AML_GOLD_LATE_DATA, True, None),
+    ],
+    ids=[
+        "kept-up",
+        "back-to-back-kept-up",
+        "silver-slowing",
+        "silver-stopped",
+        "aml-gold-idle-then-steady",
+    ],
+)
+def test_balance_fails_a_stage_whose_lag_climbs(logs, balanced, stage):
+    """The pass rule (DESIGN-CONTINUOUS 6): a stage keeps up when its per-batch
+    lag trend rose less than one first-half batch time (or trigger interval)
+    across the window's second half; the back-to-back sawtooth and gold's
+    5-minute timer saw without a trend and still keep up."""
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    timer = None if logs is _AML_GOLD_LATE_DATA else 300.0
+    got = balance(events, W0, W1, intervals={"gold-refresh": timer})
+    assert got["measured"] and got["balanced"] is balanced
+    behind = {h["stage"] for h in got["handoffs"].values() if not h["keeps_up"]}
+    assert behind == ({stage} if stage else set())
+
+
+def test_freshness_summary_reads_only_window_cycles_that_saw_data():
+    """The published freshness p50/p95/max: cycles outside the window and
+    idle cycles (a drained corpus) are left out."""
+    cycles = [(30 + 50 * i, 1000, 10 * (i + 1), False) for i in range(10)]
+    cycles += [(560, 1000, 999, True), (700, 1000, 5000, False)]
+    events = parse_events(gold_log(cycles), "gold-refresh")
+    assert freshness_summary(events, W0, W1) == {
+        "p50_s": 50.0,
+        "p95_s": 100.0,
+        "max_s": 100.0,
+        "cycles": 10,
+    }
+
+
+@pytest.mark.parametrize(("tick_line", "busy"), [(True, 1.0), (False, 0.4)])
+def test_aml_gold_busy_share_covers_the_whole_tick(tick_line, busy):
+    """An AML gold tick runs detection, then time to detect and the TM pass;
+    'refreshed' times detection only. Back-to-back 100 s ticks with 40 s of
+    detection are busy the whole window, not 40% of it (the published busy
+    share and the balance verdict read it)."""
+    out, t, i = [], 0.0, 1
+    while t + 100 <= 600:
+        out.append(_line(t, f"Cycle {i}: aggregating {52_000 * i:,} Silver records"))
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {1_700_000_000 + i}"))
+        out.append(_line(t + 40, f"Cycle {i}: refreshed lakehouse.gold.alerts in 40.0s"))
+        if tick_line:
+            out.append(
+                _line(
+                    t + 100,
+                    f"Cycle {i}: tick timing silver_rows=1 W3=30.0s ttd=20.0s tm=40.0s total=100.0s",
+                )
+            )
+        t, i = t + 100, i + 1
+    logs = {**_SILVER_STEADY, "gold-refresh": "\n".join(out) + "\n"}
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    got = balance(events, W0, W1, intervals={"gold-refresh": None})
+    assert got["handoffs"]["silver->gold"]["busy_share"] == pytest.approx(busy, abs=0.02)
+
+
+def _gold_slows_with_tm(tm_s: float) -> str:
+    """AML gold whose ticks grow from 60 s to 150 s, each spending *tm_s*
+    in the TM pass, so its lag climbs."""
+    out, t, i = [], 0.0, 1
+    for d in [60.0] * 4 + [90.0, 120.0, 150.0, 150.0]:
+        out.append(_line(t, f"Cycle {i}: aggregating {52_000 * i:,} Silver records"))
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {1_700_000_000 + i}"))
+        out.append(
+            _line(t + d - tm_s, f"Cycle {i}: refreshed lakehouse.gold.alerts in {d - tm_s:.1f}s")
+        )
+        out.append(
+            _line(t + d, f"Cycle {i}: tick timing silver_rows=1 tm={tm_s:.1f}s total={d:.1f}s")
+        )
+        t, i = t + d, i + 1
+    return "\n".join(out) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("logs", "shape", "ran", "lever"),
+    [
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 19, "balance_need": 12}},
+            {"silver-stream": 12},
+            "cluster capacity",
+        ),
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 28, "balance_need": 40}},
+            {"silver-stream": 28},
+            "platform.compute.spark.silver_stream_executor_cores",
+        ),
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 6, "balance_need": 10}},
+            {"silver-stream": 6},
+            "platform.compute.spark.silver_stream_executors",
+        ),
+        (
+            {**_SILVER_STEADY, "gold-refresh": _gold_slows_with_tm(40.0)},
+            None,
+            None,
+            "workload.tm_operations.continuous_interval_seconds",
+        ),
+    ],
+    ids=["budget-cut", "need-above-cap", "plain-shortfall", "gold-tm-heavy"],
+)
+def test_balance_advice_names_the_lever_that_helps(logs, shape, ran, lever):
+    """The not-balanced line points at a lever that would help: not 'raise
+    executors' when the cluster budget cut them, the per-executor cores when
+    the count would pass the cap, the TM interval when TM takes gold's time."""
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    got = balance(events, W0, W1, shape=shape, ran=ran, intervals={"gold-refresh": None})
+    assert not got["balanced"]
+    assert got["lever"] == lever, got["bottleneck"]
+
+
+# ------------------------------------------------- metrics honesty (1.7.1)
+
+
+def _silver_batches(first_start: float, seconds: float, rows: int, until: float) -> str:
+    """Back-to-back silver batches of *seconds* each, from *first_start*."""
+    out, t, i = [], first_start, 0
+    while t < until:
+        out.append(_line(t, f"Batch {i}: transforming {rows:,} rows"))
+        out.append(_line(t + seconds, f"Batch {i}: committed to ice.silver.t in {seconds:.1f}s"))
+        t, i = t + seconds, i + 1
+    return "\n".join(out) + "\n"
+
+
+def _windowed_run(silver: str, *, bucket_gib: float = 0.0, fleet=None, rounds=(), schema=None):
+    from lakebench.metrics.collector import PipelineMetrics, build_pipeline_benchmark
+
+    m = PipelineMetrics(
+        run_id="20261008-000000-aaaaaa",
+        deployment_name="d",
+        start_time=W0,
+        end_time=W1,
+        success=True,
+        # Bucket listings: retained snapshots, the bronze table, other runs.
+        bronze_size_gb=bucket_gib,
+        silver_size_gb=bucket_gib,
+        gold_size_gb=bucket_gib,
+        config_snapshot={
+            "mode": "continuous",
+            "workload_schema": schema or "customer360",
+            "sustained": {"bronze_trigger_interval": "30 seconds"},
+        },
+    )
+    for job, log in (("bronze-ingest", HEALTHY["bronze-ingest"]), ("silver-stream", silver)):
+        sm = StreamingJobMetrics(job_name=f"lakebench-{job}", job_type=job, elapsed_seconds=600)
+        sm.apply_window(log, W0, W1)
+        m.streaming.append(sm)
+    m.benchmark_rounds = list(rounds)
+    return build_pipeline_benchmark(m, datagen_fleet=fleet)
+
+
+@pytest.mark.parametrize("shift_s", [0.0, 60.0, 120.0, 200.0])
+def test_pace_counts_a_silver_batch_on_the_window_edge_pro_rata(shift_s):
+    """Pace is window seconds per million silver rows in the window (owner,
+    2026-10-08). Whole-batch counting moved it ~25% on which side of the
+    window's end one 250 s batch committed; pro rata it does not move."""
+    pb = _windowed_run(_silver_batches(shift_s - 250, 250.0, 1_000_000, 900))
+    # 600 s of 250 s batches of 1M rows: 2.4M rows, 250 s per million.
+    assert pb.pace_seconds_per_million_rows == pytest.approx(250.0, rel=0.02)
+
+
+@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
+def test_continuous_stage_bytes_never_come_from_a_bucket_listing(bucket_gib):
+    """Bronze and silver input are their window rows at datagen's raw bytes
+    per row; extra bytes in the buckets move no total and no rate."""
+    fleet = {
+        "pods_reported": 1,
+        "total_bytes_written": 2 * 1024**3,
+        "total_rows_written": 1_000_000,
+    }
+    pb = _windowed_run(
+        silver_log([(t, 52_000, 51_000) for t in range(10, 600, 60)]),
+        bucket_gib=bucket_gib,
+        fleet=fleet,
+    )
+    bronze_rows = 20 * 26_000
+    silver_rows = 10 * 52_000
+    expect_gib = (bronze_rows + silver_rows) * 2 * 1024**3 / 1_000_000 / 1024**3
+    assert pb.total_data_processed_gb == pytest.approx(expect_gib)
+    assert pb.pipeline_throughput_gb_per_second == pytest.approx(expect_gib / 600)
+    gold = [s for s in pb.stages if s.stage_name == "gold"]
+    assert all(s.input_size_gb == 0.0 for s in gold)
+
+
+def _round(set_names: list[str], qph: float):
+    from lakebench.benchmark.queries import query_set_id
+    from lakebench.metrics.collector import BenchmarkMetrics
+
+    return BenchmarkMetrics(
+        mode="power",
+        cache="hot",
+        scale=10,
+        qph=qph,
+        total_seconds=3600 * len(set_names) / qph if qph else 0.0,
+        queries=[{"name": n, "elapsed_seconds": 1.0, "success": True} for n in set_names],
+        round_record={
+            "executed_queries": set_names,
+            "executed_query_set_id": query_set_id(set_names),
+        },
+    )
+
+
+def test_aml_continuous_composite_qph_is_the_fixed_set_median():
+    """AML continuous composite QpH is over the fixed 12-query set only
+    (owner, 2026-10-08); the 8-query rounds before the first case stay in
+    the per-set numbers, and a zero-QpH round is in neither."""
+    from lakebench.benchmark.queries import INVESTIGATOR_QUERIES, get_benchmark_queries
+    from lakebench.config.schema import WorkloadSchema
+    from lakebench.metrics.collector import aggregate_benchmark_rounds
+
+    full = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
+    base = [n for n in full if n not in {q.name for q in INVESTIGATOR_QUERIES}]
+    rounds = [_round(base, 900.0), _round(base, 880.0), _round(full, 600.0)]
+    rounds += [_round(full, 640.0), _round(full, 0.0), _round(full, 620.0)]
+    pb = _windowed_run(HEALTHY["silver-stream"], rounds=rounds, schema="financial")
+    scores = pb.to_dict()["scores"]
+    assert scores["composite_qph"] == 620.0
+    assert scores["composite_qph_rounds"] == 3
+    assert scores["composite_qph_basis"]["blended"] is False
+    assert aggregate_benchmark_rounds(rounds).qph == 620.0
+
+
+@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
+def test_batch_elapsed_is_wall_clock_and_stage_bytes_ignore_buckets(bucket_gib):
+    """Batch (beside the continuous rows above, one rule): total elapsed is
+    the run's wall clock, not stage seconds summed over gaps; maintenance is
+    a share of time to value plus maintenance; GiB are what the jobs and
+    datagen's pods reported, whatever the buckets hold."""
+    from lakebench.metrics.collector import JobMetrics, PipelineMetrics, build_pipeline_benchmark
+
+    def job(kind, start_s, seconds, gib):
+        return JobMetrics(
+            job_name=f"lakebench-{kind}",
+            job_type=kind,
+            start_time=W0 + timedelta(seconds=start_s),
+            end_time=W0 + timedelta(seconds=start_s + seconds),
+            elapsed_seconds=seconds,
+            input_size_gb=gib,
+            success=True,
+        )
+
+    m = PipelineMetrics(
+        run_id="20261008-000000-bbbbbb",
+        deployment_name="d",
+        start_time=W0,
+        end_time=W0 + timedelta(seconds=1000),
+        success=True,
+        bronze_size_gb=bucket_gib,
+        silver_size_gb=bucket_gib,
+        gold_size_gb=bucket_gib,
+        config_snapshot={"workload_schema": "customer360"},
+    )
+    # Gold reported no input: unmeasured, not the silver bucket.
+    m.jobs = [job("bronze-verify", 100, 50, 10.0), job("silver-build", 200, 100, 10.0)]
+    m.jobs.append(job("gold-finalize", 400, 50, 0.0))
+    fleet = {"pods_reported": 2, "total_bytes_written": 10 * 1024**3, "total_rows_written": 9}
+    pb = build_pipeline_benchmark(
+        m, datagen_elapsed=60, datagen_output_gb=bucket_gib, datagen_fleet=fleet
+    )
+    pb.maintenance_elapsed_seconds = 350.0
+    scores = pb.to_dict()["scores"]
+    assert scores["total_elapsed_seconds"] == 1000.0
+    assert scores["time_to_value_seconds"] == 350.0
+    assert scores["maintenance_pct_of_pipeline"] == 50.0
+    assert scores["total_data_processed_gb"] == 20.0
+    datagen = next(s for s in pb.stages if s.stage_name == "datagen")
+    assert datagen.output_size_gb == pytest.approx(10.0)

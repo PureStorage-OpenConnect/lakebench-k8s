@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
+from typing import Any
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.bounds import binding_caps as _binding_caps
@@ -75,6 +76,8 @@ def _scale_ratio_pct(ratio: float) -> str:
 
 
 _QUERY_ENGINE_NAMES = {"trino": "Trino", "spark-thrift": "Spark Thrift", "duckdb": "DuckDB"}
+# A platform value Prometheus did not return: never shown as 0.
+_NOT_COLLECTED_CELL = '<span style="color: var(--text-muted);">not collected</span>'
 
 
 def _query_engine_title(metrics) -> str:
@@ -115,6 +118,124 @@ def _recorded_samples(metrics) -> int | None:
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
 
 
+def _qph_spread_note(pb: Any, bench: Any) -> str:
+    """The within-run QpH spread beside a batch QpH (``scores.qph_spread``):
+    the QpH of the round its fastest and slowest samples allow. Samples
+    inside one run, not independent runs, so it never feeds the confidence
+    chip. Empty when the QpH is not the pipeline benchmark's."""
+    if bench is None or bench is not getattr(pb, "query_benchmark", None):
+        return ""
+    queries = getattr(bench, "queries", None) or []
+    from lakebench.benchmark.spread import spread
+
+    sp = spread(queries)
+    n = sp["samples_per_query"]
+    if n <= 0:
+        return ""
+    if n == 1:
+        text = "within-run spread: unmeasured (1 sample/query)"
+    else:
+        from lakebench.reports import derived as dv
+
+        base = "pipeline_benchmark.scores.qph_spread"
+        text = (
+            f"within-run spread over {n} samples/query: QpH "
+            + dv.total(sp["qph_low"], paths=f"{base}.low", fmt=",.1f")
+            + " to "
+            + dv.total(sp["qph_high"], paths=f"{base}.high", fmt=",.1f")
+            + " (fastest and slowest samples; samples in one run, not runs)"
+        )
+    return f'<div class="card-hint2">{text}</div>'
+
+
+def _composite_rounds_html(pb: Any, n: int) -> str:
+    """The count of in-stream rounds behind the composite QpH, as a derived
+    span: every round with a QpH, or for AML (a fixed query set) the
+    recorded ``scores.composite_qph_rounds``."""
+    from lakebench.metrics.collector import composite_query_set
+    from lakebench.reports import derived as dv
+
+    if composite_query_set(pb.config_snapshot) is None:
+        return dv.count(n, path="pipeline_benchmark.benchmark_rounds[*].qph", where="positive")
+    return dv.total(n, paths="pipeline_benchmark.scores.composite_qph_rounds", fmt=",d")
+
+
+def _window_rows_total(pb: Any) -> str:
+    """The one total-rows figure of a continuous run: rows the streaming
+    stages took in inside the window (``scores.total_rows_processed``),
+    labelled because gold re-reads silver every cycle."""
+    if pb is None:
+        return "not recorded"
+    from lakebench.reports import derived as dv
+
+    return (
+        dv.total(
+            pb.total_rows_processed,
+            paths="pipeline_benchmark.scores.total_rows_processed",
+            fmt=",d",
+        )
+        + " across stages (includes gold's re-reads of silver each cycle)"
+    )
+
+
+def _pace_card(pb: Any) -> str:
+    """Window seconds per million rows, bronze and end to end (through
+    silver). A capacity only when datagen stayed ahead of a busy bronze
+    (``datagen_ahead`` and intake_limit ``bronze_capacity``); otherwise the
+    pipeline kept pace with what was offered, so it is the offered load's
+    pace."""
+    bronze = pb.bronze_pace_seconds_per_million_rows
+    through = pb.pace_seconds_per_million_rows
+    if bronze is None and through is None:
+        return ""
+    capacity = pb.datagen_ahead is True and pb.intake_limit == "bronze_capacity"
+    label = (
+        "the pipeline's capacity (datagen ahead, bronze busy)"
+        if capacity
+        else "the offered load's pace, not a capacity"
+    )
+
+    def fmt(v: float | None) -> str:
+        return f"{v:,.0f}s" if v is not None else "not measured"
+
+    return f"""
+            <div class="card">
+                <div class="card-label">Pace (s per million rows)</div>
+                <div class="card-value" style="font-size: 1rem;">end to end {fmt(through)}; bronze {fmt(bronze)}</div>
+                <div class="card-hint">window seconds per million rows taken in, lower is better; {_html_escape(label)}</div>
+                <div class="card-hint2">end to end: rows through silver (edge batches pro rata); gold re-reads silver</div>
+            </div>"""
+
+
+def _time_to_detect_card(pb: Any, metrics: Any) -> str:
+    """AML continuous time to detect: from an alert's newest related
+    transaction landing to the end of the detection pass that raised it."""
+    snap = (pb.config_snapshot or {}) or (getattr(metrics, "config_snapshot", None) or {})
+    if snap.get("workload_schema") != "financial":
+        return ""
+    p50 = pb.time_to_detect_seconds
+    if p50 is None:
+        value = "not measured"
+        hint = "no newly raised alert was timed"
+    else:
+        p95 = pb.time_to_detect_p95_seconds
+        mx = pb.time_to_detect_max_seconds
+        value = f"p50 {p50:,.0f}s"
+        hint = (
+            f"p95 {f'{p95:,.0f}s' if p95 is not None else 'not measured'}, "
+            f"max {f'{mx:,.0f}s' if mx is not None else 'not measured'} over "
+            f"{pb.time_to_detect_alerts if pb.time_to_detect_alerts is not None else 'unknown'}"
+            " newly raised alerts"
+        )
+    return f"""
+            <div class="card">
+                <div class="card-label">Time to detect</div>
+                <div class="card-value">{value}</div>
+                <div class="card-hint">{hint}</div>
+                <div class="card-hint2">newest related transaction landing to the end of the detection pass that raised the alert</div>
+            </div>"""
+
+
 def _corpus_note(metrics) -> str:
     """The data size beside a stage-input total, which counts the data once
     per stage that read it: the corpus in bronze (batch). A continuous run's
@@ -125,13 +246,13 @@ def _corpus_note(metrics) -> str:
         return "corpus size not recorded"
     pb = getattr(metrics, "pipeline_benchmark", None)
     if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
-        return f"bronze bucket {bronze:.1f} GB at run end: landing files plus the bronze table"
-    return f"corpus {bronze:.1f} GB in bronze"
+        return f"bronze bucket {bronze:.1f} GiB at run end: landing files plus the bronze table"
+    return f"corpus {bronze:.1f} GiB in bronze"
 
 
 def _stage_inputs_note(metrics) -> str:
     pb = metrics.pipeline_benchmark
-    return f"{pb.total_data_processed_gb:.1f} GB of stage inputs; {_corpus_note(metrics)}"
+    return f"{pb.total_data_processed_gb:.1f} GiB of stage inputs; {_corpus_note(metrics)}"
 
 
 def _limits_interpretation_html(metrics) -> str:
@@ -574,10 +695,11 @@ class ReportGenerator:
         elif pb.ingest_ratio > 1.05:
             ratio_badge = (
                 f'<span style="color: var(--warning);"'
-                f' title="Ingest ratio above 1.0 means total rows processed exceeds'
-                f" rows generated. Expected when gold refreshes multiple times,"
-                f' re-reading the full silver table each cycle.">'
-                f"{pb.ingest_ratio:.2f} (gold re-reads exceed input)</span>"
+                f' title="Bronze took more rows than the estimate of rows released by'
+                f" the window's end. The denominator is a mean-rate estimate (trickle"
+                f" files x mean rows per file, or continuous datagen's mean rate one"
+                f' bronze trigger before the window end), not a count.">'
+                f"{pb.ingest_ratio:.2f} (bronze above released-rows estimate)</span>"
             )
             ratio_value = f"{pb.ingest_ratio:.2f}"
         else:
@@ -590,7 +712,8 @@ class ReportGenerator:
         # The collector divides by the rows the trickle released when it
         # counted them, else by the generated corpus rows.
         ratio_basis = (
-            "bronze rows / rows the trickle released"
+            "estimate: bronze rows / rows released by the window's end, "
+            "estimated at the mean release rate"
             if pb.released_rows is not None
             else "bronze rows / generated corpus rows (released rows not recorded)"
         )
@@ -607,11 +730,30 @@ class ReportGenerator:
             sustained = (metrics.config_snapshot or {}).get("sustained") or {}
         files = sustained.get("max_files_per_trigger")
         trigger = sustained.get("bronze_trigger_interval")
-        offered = (
-            f"{files} file{'s' if files != 1 else ''} per {trigger} bronze trigger"
+        trickle = (
+            f"trickle {files} file{'s' if files != 1 else ''} per {trigger} bronze trigger"
             if files and trigger
-            else "not recorded"
+            else ""
         )
+        load = (pb.config_snapshot or {}).get("offered_load") or {}
+        if metrics is not None and not load:
+            load = (metrics.config_snapshot or {}).get("offered_load") or {}
+        dg = (pb.stage_capacity or {}).get("datagen") or {}
+        parts: list[str] = []
+        if load.get("declared_mb_s") is not None:
+            parts.append(f"{float(load['declared_mb_s']):.1f} MB/s declared")
+        if load.get("sized_mb_s") is not None:
+            parts.append(f"{float(load['sized_mb_s']):.1f} MB/s datagen sized")
+        if dg.get("measured_mb_s") is not None:
+            parts.append(
+                f"{float(dg['measured_mb_s']):.1f} MB/s datagen measured"
+                + (" (fell short of sized)" if dg.get("fell_short") else "")
+            )
+        if trickle:
+            parts.append(trickle)
+        offered = "; ".join(parts) if parts else "not recorded"
+        pace_card = _pace_card(pb)
+        ttd_card = _time_to_detect_card(pb, metrics)
         excluded_html = ""
         if metrics is not None:
             from lakebench.config.support import MODE_NOTES
@@ -626,7 +768,7 @@ class ReportGenerator:
         return f"""
         <div class="cards" style="margin-top: 1.5rem;">
             <div class="card">
-                <div class="card-label">Ingest Ratio</div>
+                <div class="card-label">Ingest Ratio{" (estimate)" if pb.released_rows is not None else ""}</div>
                 <div class="card-value">{ratio_value}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {ratio_badge}
@@ -644,10 +786,12 @@ class ReportGenerator:
                 <div class="card-hint">measured continuous window</div>
             </div>
             <div class="card">
-                <div class="card-label">Offered load (trickle)</div>
+                <div class="card-label">Offered load</div>
                 <div class="card-value" style="font-size: 1rem;">{e(offered)}</div>
-                <div class="card-hint">Lakebench-imposed intake rate, not a capacity</div>
+                <div class="card-hint">the load Lakebench offered the pipeline, not a capacity</div>
             </div>
+            {pace_card}
+            {ttd_card}
         </div>
         {excluded_html}
         """
@@ -1175,8 +1319,9 @@ class ReportGenerator:
                     (
                         "Ingest Ratio",
                         "status-warning",
-                        f'{ratio:.2f} <span title="Gold re-reads inflate total rows'
-                        f' above datagen output">(gold re-reads exceed input)</span>',
+                        f'{ratio:.2f} <span title="Bronze took more rows than the'
+                        f" estimate of rows released by the window's end (a mean-rate"
+                        f' estimate, not a count)">(above released-rows estimate)</span>',
                     )
                 )
             else:
@@ -1419,10 +1564,13 @@ class ReportGenerator:
             return ""
 
         pb = metrics.pipeline_benchmark
-        if not pb or not pb.benchmark_rounds or len(pb.benchmark_rounds) < 2:
+        if not pb or not pb.benchmark_rounds:
             return ""
-
-        qph_values = [r.qph for r in pb.benchmark_rounds]
+        # The rounds behind the composite (and the degradation figure): a
+        # round with no QpH or, for AML, a smaller query set stays out.
+        qph_values = [r.qph for r in pb.composite_rounds()]
+        if len(qph_values) < 2:
+            return ""
 
         chart = self._render_line_chart_svg(
             series1=qph_values,
@@ -1637,7 +1785,7 @@ class ReportGenerator:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lakebench Scorecard - {metrics.deployment_name}</title>
+    <title>Lakebench Scorecard - {_html_escape(str(metrics.deployment_name))}</title>
     <style>
         :root {{
             --primary: #2563eb;
@@ -1838,7 +1986,7 @@ class ReportGenerator:
         <header>
             <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
-                Deployment: <strong>{metrics.deployment_name}</strong> |
+                Deployment: <strong>{_html_escape(str(metrics.deployment_name))}</strong> |
                 Run ID: <code class="mono">{metrics.run_id}</code> |
                 <span class="status {_badge_cls}" title="{_badge_tip}">
                     {_badge_text}
@@ -1984,6 +2132,7 @@ class ReportGenerator:
             format_measurement,
             support_state_of,
             trickle_caps_from,
+            trigger_caps_from,
         )
 
         total_time = metrics.total_elapsed_seconds
@@ -2003,28 +2152,23 @@ class ReportGenerator:
         qph_rounds: int | None = None
         qph_samples: int | None = None
         if pb and pb.benchmark_rounds:
-            round_qphs = [r.qph for r in pb.benchmark_rounds if r.qph > 0]
-            if round_qphs:
-                import statistics
-
-                from lakebench.reports import derived as dv
-
-                qph = statistics.median(round_qphs)
-                n_html = dv.count(
-                    len(round_qphs),
-                    path="pipeline_benchmark.benchmark_rounds[*].qph",
-                    where="positive",
-                )
+            # Only the rounds behind the composite: QpH > 0 and, for AML,
+            # the fixed full query set.
+            in_stream = pb.in_stream_qph()
+            if in_stream is not None:
+                qph = in_stream
+                n_rounds = pb.qph_rounds()
+                n_html = _composite_rounds_html(pb, n_rounds)
                 qph_note = f"median of {n_html} rounds"
                 qph_rounds_html = n_html
-                qph_rounds = len(round_qphs)
+                qph_rounds = n_rounds
         elif metrics.benchmark and metrics.benchmark.qph > 0:
             qph = metrics.benchmark.qph
             qph_note = "single benchmark"
             qph_samples = _samples_per_query(metrics.benchmark)
 
         freshness_val: float | None = None
-        freshness_hint = "worst-case gold staleness during the continuous window"
+        freshness_hint = "gold freshness at each refresh in the window (readers see up to one refresh interval more)"
         if pb and pb.data_freshness_seconds is not None and pb.data_freshness_seconds > 0:
             freshness_val = pb.data_freshness_seconds
 
@@ -2032,7 +2176,17 @@ class ReportGenerator:
         avg_throughput = pb.pipeline_throughput_gb_per_second if pb else 0.0
         duration_m = int(total_time // 60)
         duration_s = int(total_time % 60)
-        freshness_display = f"{freshness_val:.1f}s" if freshness_val is not None else "N/A"
+        freshness_display = (
+            format_measurement(
+                f"{freshness_val:.1f}s",
+                "",
+                caps_bound=caps_bound + trigger_caps_from(metrics),
+                n_runs=1,
+                support_state=support_state,
+            )
+            if freshness_val is not None
+            else "N/A"
+        )
         if freshness_val is None:
             freshness_hint = "insufficient gold cycles to measure"
         qph_raw = f"{qph:,.1f}" if qph is not None else "N/A"
@@ -2046,13 +2200,52 @@ class ReportGenerator:
             rounds_html=qph_rounds_html,
             support_state=support_state if qph is not None else None,
         )
+        # Rounds ran but none over the composite's fixed query set (an AML
+        # record from before every round ran the full set): not "none ran".
+        _no_qph = (
+            "no round ran the full query set the composite is over"
+            if pb and any(r.qph > 0 for r in (pb.benchmark_rounds or []))
+            else "no benchmark rounds completed"
+        )
         if qph is None:
-            qph_note = "no benchmark rounds completed"
+            qph_note = _no_qph
 
-        throughput_raw = f"{throughput:,.0f} rows/s"
+        # No pipeline benchmark (it failed to build): nothing below was
+        # measured, so no card shows a 0.
+        _no_pb = "not measured (the pipeline benchmark was not built)"
+        throughput_raw = _no_pb if pb is None else f"{throughput:,.0f} rows/s"
         # The trickle bounds intake: the rows/s, GB/s and efficiency figures
         # are the offered load, not capacity (metrics/bounds.py).
         intake_caps = caps_bound + trickle_caps_from(metrics)
+        # Rows went through but no bytes were priced: datagen's bytes per
+        # row were unknown (no fleet record), so the GiB figures are not
+        # measured, never 0.
+        bytes_unmeasured = pb is None or (data_gb == 0 and throughput > 0)
+        _unmeasured = _no_pb if pb is None else "not measured (no datagen fleet record)"
+        efficiency_value = (
+            _unmeasured
+            if bytes_unmeasured
+            else format_measurement(
+                f"{efficiency:.2f} GiB/core-hr",
+                "",
+                caps_bound=intake_caps if efficiency > 0 else None,
+            )
+        )
+        stage_inputs_text = (
+            _unmeasured
+            if bytes_unmeasured
+            else f"{data_gb:.2f} GiB (bronze and silver window rows at datagen's bytes per row; "
+            f"{_corpus_note(metrics)})"
+        )
+        avg_throughput_text = (
+            _unmeasured
+            if bytes_unmeasured
+            else format_measurement(
+                f"{avg_throughput:.2f} GiB/s",
+                "",
+                caps_bound=intake_caps if avg_throughput > 0 else None,
+            )
+        )
         throughput_display = format_measurement(
             throughput_raw,
             "",
@@ -2068,6 +2261,45 @@ class ReportGenerator:
             if freshness_val is not None
             else "< 2 gold refresh cycles completed"
         )
+        cont_record = getattr(metrics, "continuous", None) or {}
+        fr = cont_record.get("freshness") or {}
+        if fr.get("p50_s") is not None:
+            freshness_hint = (
+                f"p50 {fr['p50_s']:.0f}s, p95 {fr['p95_s']:.0f}s, max {fr['max_s']:.0f}s "
+                f"from {_html_escape(str(fr.get('from') or 'unknown'))}"
+            )
+        bal = cont_record.get("balance") or {}
+        balance_card = ""
+        if bal:
+            lags = ", ".join(
+                (
+                    f"{_html_escape(name)} rose {h['second_half_growth_s']:.0f}s "
+                    f"(allowed {h['cadence_s']:.0f}s)"
+                    if h.get("second_half_growth_s") is not None
+                    else f"{_html_escape(name)} {h['end_s']:.0f}s at the end"
+                )
+                + (" not judged" if h.get("not_judged") else "")
+                for name, h in (bal.get("handoffs") or {}).items()
+            )
+            dg = ((pb.stage_capacity if pb else None) or {}).get("datagen") or {}
+            offered = (
+                f"; datagen offered {dg['measured_mb_s']:.1f} MB/s of {dg['sized_mb_s']:.1f} "
+                f"sized ({dg['declared_mb_s']:.1f} declared)"
+                + (
+                    ": it fell short, so the stages were offered less than sized"
+                    if dg.get("fell_short")
+                    else ""
+                )
+                if dg.get("measured_mb_s") is not None
+                else ""
+            )
+            balance_card = f"""
+            <div class="card">
+                <div class="card-label">Balance</div>
+                <div class="card-value">{"balanced" if bal.get("balanced") else ("not balanced" if bal.get("measured") else "not measured")}</div>
+                <div class="card-hint">{_html_escape(str(bal.get("bottleneck") or ""))}</div>
+                <div class="card-hint2">lag over the second half: {lags or "none"}{offered}</div>
+            </div>"""
         throughput_hint2 = _direction_hint(
             "sustained_throughput_rps",
             _cont,
@@ -2076,15 +2308,18 @@ class ReportGenerator:
         qph_hint2 = (
             _direction_hint("in_stream_composite_qph", _cont, f"~{qph / 60:.0f} queries/min")
             if qph is not None
-            else "no benchmark rounds completed"
+            else _no_qph
         )
         # Continuous core-hours follow the window length, so they have no
-        # better side (metrics/metric_registry.py).
+        # better side (metrics/metric_registry.py). They are executors x
+        # cores x window, so the per-day figure divides by the window; the
+        # run's wall clock only when the window was not recorded.
+        core_span = (pb.window_seconds if pb else None) or total_time
         cpu_hint2 = _direction_hint(
             "total_core_hours",
             _cont,
-            f"extrapolates to ~{core_hours * 86400 / total_time:,.0f}/day"
-            if total_time > 0
+            f"extrapolates to ~{core_hours * 86400 / core_span:,.0f}/day"
+            if pb is not None and core_span > 0
             else "",
         )
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", _cont)
@@ -2096,7 +2331,7 @@ class ReportGenerator:
                 <div class="card-value">{freshness_display}</div>
                 <div class="card-hint">{freshness_hint}</div>
                 <div class="card-hint2">{freshness_hint2}</div>
-            </div>
+            </div>{balance_card}
             <div class="card">
                 <div class="card-label">Continuous Throughput</div>
                 <div class="card-value">{throughput_display}</div>
@@ -2105,8 +2340,8 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{format_measurement(f"{efficiency:.2f} GB/core-hr", "", caps_bound=intake_caps if efficiency > 0 else None)}</div>
-                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-value">{efficiency_value}</div>
+                <div class="card-hint">stage-input GiB per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
@@ -2117,15 +2352,15 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">Total CPU-hours</div>
-                <div class="card-value">{core_hours:.1f}</div>
+                <div class="card-value">{_no_pb if pb is None else f"{core_hours:.1f}"}</div>
                 <div class="card-hint">total compute across all stages</div>
                 <div class="card-hint2">{cpu_hint2}</div>
             </div>
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
-            <span>Stage inputs processed: {data_gb:.2f} GB (bronze + silver + gold + query reads; {_corpus_note(metrics)})</span>
-            <span>Avg stage-input throughput: {format_measurement(f"{avg_throughput:.2f} GB/s", "", caps_bound=intake_caps if avg_throughput > 0 else None)}</span>
+            <span>Stage inputs processed: {stage_inputs_text}</span>
+            <span>Avg stage-input throughput: {avg_throughput_text}</span>
         </div>
         """
 
@@ -2170,11 +2405,11 @@ class ReportGenerator:
                 </div>
                 <div class="card">
                     <div class="card-label">Data Processed</div>
-                    <div class="card-value">{dv.total(total_input, paths="jobs[*].input_size_gb", fmt=".2f", suffix=" GB")}</div>
+                    <div class="card-value">{dv.total(total_input, paths="jobs[*].input_size_gb", fmt=".2f", suffix=" GiB")}</div>
                 </div>
                 <div class="card">
                     <div class="card-label">Avg Throughput</div>
-                    <div class="card-value">{dv.ratio(total_input, total_time, a_path="jobs[*].input_size_gb", b_path="total_elapsed_seconds", fmt=".2f", suffix=" GB/s", missing="0.00 GB/s")}</div>
+                    <div class="card-value">{dv.ratio(total_input, total_time, a_path="jobs[*].input_size_gb", b_path="total_elapsed_seconds", fmt=".2f", suffix=" GiB/s", missing="0.00 GiB/s")}</div>
                 </div>
                 {qph_card}
             </div>
@@ -2189,6 +2424,7 @@ class ReportGenerator:
             qph = metrics.benchmark.qph
             qph_bench = metrics.benchmark
         qph_samples = _recorded_samples(metrics) or _samples_per_query(qph_bench)
+        qph_spread_html = _qph_spread_note(pb, qph_bench) if qph > 0 else ""
 
         scale_warning = _scale_warning(pb.scale_ratio)
 
@@ -2212,7 +2448,7 @@ class ReportGenerator:
             support_state=support_state if qph > 0 else None,
         )
         pipeline_throughput_display = format_measurement(
-            f"{pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            f"{pb.pipeline_throughput_gb_per_second:.3f} GiB/s",
             "",
             caps_bound=caps_bound if pb.pipeline_throughput_gb_per_second > 0 else None,
             n_runs=1 if pb.pipeline_throughput_gb_per_second > 0 else None,
@@ -2233,13 +2469,13 @@ class ReportGenerator:
                 <div class="card-delta" style="color: var(--text-muted);">
                     {_stage_inputs_note(metrics)}
                 </div>
-                <div class="card-hint">stage inputs processed per second (bronze + silver + gold + query reads)</div>
+                <div class="card-hint">stage inputs processed per second (bronze, silver and gold reads)</div>
                 <div class="card-hint2">{throughput_hint2}</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GB/core-hr</div>
-                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GiB/core-hr</div>
+                <div class="card-hint">stage-input GiB per core-hour requested</div>
                 <div class="card-hint2">{efficiency_hint2}</div>
             </div>
             <div class="card">
@@ -2247,6 +2483,7 @@ class ReportGenerator:
                 <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
                 <div class="card-hint">queries per hour -- {direction_hint("composite_qph", "batch")}</div>
                 <div class="card-hint2">{qph_hint2}</div>
+                {qph_spread_html}
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
@@ -2299,12 +2536,12 @@ class ReportGenerator:
 
             rows.append(f"""
             <tr>
-                <td><code class="mono">{job.job_name}</code></td>
+                <td><code class="mono">{_html_escape(str(job.job_name))}</code></td>
                 <td><span class="status {status_class}">{status_text}</span></td>
                 <td>{elapsed}</td>
-                <td>{job.input_size_gb:.2f} GB</td>
+                <td>{job.input_size_gb:.2f} GiB</td>
                 <td>{job.output_rows:,}</td>
-                <td>{job.throughput_gb_per_second:.2f} GB/s</td>
+                <td>{job.throughput_gb_per_second:.2f} GiB/s</td>
                 <td>{execs}</td>
                 <td>{cores}</td>
                 <td>{cpu_s}</td>
@@ -2369,7 +2606,6 @@ class ReportGenerator:
         from lakebench.reports import derived as dv
 
         rows = []
-        total_rows = 0
         total_cpu_sec = 0.0
         total_executors = 0
         total_mem_gb = 0.0
@@ -2385,7 +2621,6 @@ class ReportGenerator:
         for si, s in enumerate(metrics.streaming):
             status_class = "status-success" if s.success else "status-failed"
             status_text = "Pass" if s.success else "Fail"
-            total_rows += s.total_rows_processed
 
             if s.throughput_rps > 0:
                 stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
@@ -2398,6 +2633,8 @@ class ReportGenerator:
                     caps_bound=stage_bound,
                     n_runs=1,
                 )
+                if stage_name == "gold":
+                    throughput += " <small>(re-reads of silver)</small>"
             else:
                 throughput = "-"
             freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds else "-"
@@ -2442,7 +2679,7 @@ class ReportGenerator:
 
             rows.append(f"""
             <tr>
-                <td><code class="mono">{s.job_name}</code></td>
+                <td><code class="mono">{_html_escape(str(s.job_name))}</code></td>
                 <td><span class="status {status_class}">{status_text}</span></td>
                 <td>{s.elapsed_seconds:.0f}s</td>
                 <td>{s.total_batches:,}</td>
@@ -2471,7 +2708,7 @@ class ReportGenerator:
         <section>
             <h2>Continuous Pipeline</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                {dv.count(len(metrics.streaming), path="streaming")} continuous jobs | {dv.total(total_rows, paths="streaming[*].total_rows_processed", fmt=",d")} total rows processed
+                {dv.count(len(metrics.streaming), path="streaming")} continuous jobs | rows in the window: {_window_rows_total(metrics.pipeline_benchmark)}
             </div>
             <table>
                 <thead>
@@ -2480,10 +2717,10 @@ class ReportGenerator:
                         <th>Status</th>
                         <th>Duration</th>
                         <th>Batches</th>
-                        <th>Rows Processed</th>
-                        <th>Throughput</th>
+                        <th title="Rows the stage took in by the window's end, before it opened included">Rows to window end</th>
+                        <th title="Rows taken in inside the window per second; gold's are re-reads of silver">Throughput</th>
                         <th title="Average micro-batch processing time">Avg Batch</th>
-                        <th title="Worst-case staleness of stage output">Freshness</th>
+                        <th title="Freshness of the stage output at each commit (readers see up to one cadence more)">Freshness</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
                         <th title="executor_count x cores x elapsed_seconds">CPU-sec</th>
@@ -2518,11 +2755,11 @@ class ReportGenerator:
 
             error_html = ""
             if q.error_message:
-                error_html = f'<div style="color: var(--danger); font-size: 0.75rem;">{q.error_message[:120]}</div>'
+                error_html = f'<div style="color: var(--danger); font-size: 0.75rem;">{_html_escape(q.error_message[:120])}</div>'
 
             rows.append(f"""
             <tr>
-                <td><code class="mono">{q.query_name}</code></td>
+                <td><code class="mono">{_html_escape(str(q.query_name))}</code></td>
                 <td>{q.elapsed_seconds:.2f}s</td>
                 <td>{q.rows_returned:,}</td>
                 <td><span class="status {status_class}">{status_text}</span>{error_html}</td>
@@ -2635,9 +2872,9 @@ class ReportGenerator:
 
             rows.append(f"""
             <tr>
-                <td><code class="mono">{name}</code></td>
-                <td>{display}</td>
-                <td>{qclass}</td>
+                <td><code class="mono">{_html_escape(str(name))}</code></td>
+                <td>{_html_escape(str(display))}</td>
+                <td>{_html_escape(str(qclass))}</td>
                 <td>{elapsed:.2f}s</td>
                 <td>{row_count:,}</td>
                 <td><span class="status {status_class}">{status_text}</span></td>
@@ -2747,12 +2984,10 @@ class ReportGenerator:
         # Build query_name -> [time_per_round] matrix
         query_times: dict[str, list[float | None]] = {qn: [] for qn in query_names}
         query_success: dict[str, list[bool]] = {qn: [] for qn in query_names}
-        qph_values: list[float] = []
         freshness_values: list[float] = []
         contention_count = 0
 
         for rnd in rounds:
-            qph_values.append(rnd.qph)
             meta = rnd.round_meta
             if meta and (meta.gold_event_age_seconds or 0) > 0:
                 freshness_values.append(meta.gold_event_age_seconds)
@@ -2810,7 +3045,7 @@ class ReportGenerator:
                 delta_cell = "<td>-</td>"
 
             rows.append(
-                f"<tr><td><code class='mono'>{qname}</code></td>{''.join(cells)}{delta_cell}</tr>"
+                f"<tr><td><code class='mono'>{_html_escape(qname)}</code></td>{''.join(cells)}{delta_cell}</tr>"
             )
 
         # QpH summary row
@@ -2832,14 +3067,24 @@ class ReportGenerator:
         else:
             qph_delta_cell = "<td>-</td>"
 
-        median_qph = statistics.median(qph_values) if qph_values else 0.0
+        # The headline median covers only the rounds behind the composite
+        # (QpH > 0; AML: the fixed full query set); the table shows every round.
+        pb = metrics.pipeline_benchmark
+        median_qph = pb.in_stream_qph() if pb is not None else None
+        composite_n = pb.qph_rounds() if pb is not None else 0
         median_freshness = statistics.median(freshness_values) if freshness_values else 0.0
 
         from lakebench.reports import derived as dv
 
         summary_parts = [
             f"{dv.count(n_rounds, path='benchmark_rounds')} in-stream rounds in the window",
-            f"Median QpH: <strong>{median_qph:.1f}</strong>",
+            (
+                f"Median QpH: <strong>{median_qph:.1f}</strong> over "
+                + _composite_rounds_html(pb, composite_n)
+                + " composite rounds"
+                if median_qph is not None
+                else "Median QpH: not measured (no round behind the composite)"
+            ),
         ]
         if median_freshness > 0:
             summary_parts.append(
@@ -2905,6 +3150,13 @@ class ReportGenerator:
             in_gb = f"{stage.input_size_gb:.3f}" if stage.input_size_gb > 0 else "-"
             out_gb = f"{stage.output_size_gb:.3f}" if stage.output_size_gb > 0 else "-"
             in_rows = f"{stage.input_rows:,}" if stage.input_rows > 0 else "-"
+            if is_sustained:
+                # The rate beside it is over the rows taken in inside the
+                # window, so the count shown is the same window's.
+                if stage.window_input_rows is not None:
+                    in_rows = f"{stage.window_input_rows:,}" if stage.window_input_rows > 0 else "-"
+                elif stage.input_rows > 0:
+                    in_rows += " (to run end; window not recorded)"
             out_rows = f"{stage.output_rows:,}" if stage.output_rows else "-"
             gb_s = (
                 f"{stage.throughput_gb_per_second:.4f}"
@@ -2923,6 +3175,8 @@ class ReportGenerator:
                     caps_bound=stage_bound,
                     n_runs=1,
                 )
+                if is_sustained and stage.stage_name == "gold":
+                    rows_s += " <small>(re-reads of silver)</small>"
             else:
                 rows_s = "-"
             execs = str(stage.executor_count) if stage.executor_count > 0 else "-"
@@ -2975,7 +3229,7 @@ class ReportGenerator:
             if is_sustained:
                 rows.append(f"""
                 <tr>
-                    <td><strong>{stage.stage_name}</strong></td>
+                    <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
                     <td>{stage.engine}</td>
                     <td>{elapsed}</td>
                     <td>{in_rows}</td>
@@ -2992,7 +3246,7 @@ class ReportGenerator:
             else:
                 rows.append(f"""
                 <tr>
-                    <td><strong>{stage.stage_name}</strong></td>
+                    <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
                     <td>{stage.engine}</td>
                     <td>{stage.elapsed_seconds:.1f}s</td>
                     <td>{in_gb}</td>
@@ -3029,17 +3283,17 @@ class ReportGenerator:
                     ),
                 )
                 + "</strong> | "
-                f"Data: <strong>{pb.total_data_processed_gb:.1f} GB</strong> | "
-                f"Rows: {pb.total_rows_processed:,}"
+                f"Data: <strong>{pb.total_data_processed_gb:.1f} GiB</strong> | "
+                "Rows in the window: " + _window_rows_total(pb)
             )
             header_row = """
                         <th>Stage</th>
                         <th>Engine</th>
                         <th>Time</th>
-                        <th>In Rows</th>
-                        <th title="Rows processed per second">Rows/s</th>
+                        <th title="Rows taken in inside the measurement window">In Rows (window)</th>
+                        <th title="Rows taken in inside the window per second">Rows/s (window)</th>
                         <th title="Average micro-batch processing time">Latency</th>
-                        <th title="Worst-case staleness of stage output">Freshness (s)</th>
+                        <th title="Freshness of the stage output at each commit (readers see up to one cadence more)">Freshness (s)</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
                         <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
@@ -3052,8 +3306,8 @@ class ReportGenerator:
             section_title = "Pipeline Benchmark"
             summary = (
                 f"Time-to-Value: <strong>{pb.time_to_value_seconds:.1f}s</strong> | "
-                f"Stage-input throughput: <strong>{pb.pipeline_throughput_gb_per_second:.3f} GB/s</strong> | "
-                f"Stage inputs: {pb.total_data_processed_gb:.1f} GB ({_corpus_note(metrics)})"
+                f"Stage-input throughput: <strong>{pb.pipeline_throughput_gb_per_second:.3f} GiB/s</strong> | "
+                f"Stage inputs: {pb.total_data_processed_gb:.1f} GiB ({_corpus_note(metrics)})"
             )
             if not passed:
                 summary = f"headline figures not shown: the run is {_html_escape(verdict_status)}"
@@ -3061,11 +3315,11 @@ class ReportGenerator:
                         <th>Stage</th>
                         <th>Engine</th>
                         <th>Time</th>
-                        <th>In (GB)</th>
-                        <th>Out (GB)</th>
+                        <th>In (GiB)</th>
+                        <th>Out (GiB)</th>
                         <th>In Rows</th>
                         <th>Out Rows</th>
-                        <th>GB/s</th>
+                        <th>GiB/s</th>
                         <th>Rows/s</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
@@ -3201,7 +3455,16 @@ class ReportGenerator:
                 f"Raw datagen files in {layer}: {value / (1024**3):.2f} GiB, physical only, "
                 "outside the total."
             )
-            if continuous and isinstance(wall, (int, float)) and wall > 0 and value:
+            # Only a run whose own datagen wrote through the window: a fleet
+            # loaded for a --skip-generate run times a one-off bulk generate.
+            dg_continuous = bool((metrics.config_snapshot or {}).get("datagen_continuous"))
+            if (
+                continuous
+                and dg_continuous
+                and isinstance(wall, (int, float))
+                and wall > 0
+                and value
+            ):
                 per_hour = value / (1024**3) / wall * 3600
                 note += (
                     f" They grew {per_hour:,.0f} GiB per hour of datagen and are kept, "
@@ -3613,19 +3876,30 @@ class ReportGenerator:
         filtering at render time.  Full per-pod data in collapsed detail.
         """
         if not platform_metrics:
-            return ""
+            return """
+        <section>
+            <h2>Platform Metrics</h2>
+            <p style="color: var(--text-muted); font-size: 0.875rem;">
+                Not collected: observability was off for this run, so no per-pod
+                CPU or memory was read from Prometheus. Stage figures above come
+                from the run's own record.</p>
+        </section>
+        """
 
         pods = platform_metrics.get("pods", [])
         if not pods and not platform_metrics.get("collection_error"):
-            return ""
+            platform_metrics = {
+                **platform_metrics,
+                "collection_error": "Prometheus returned no pod series for this namespace",
+            }
 
         duration = platform_metrics.get("duration_seconds", 0)
 
-        # Ghost filter -- render-time only, JSON keeps full list
+        # Ghost filter -- render-time only, JSON keeps full list. A value
+        # that was not collected (None) is unknown, so it never makes a ghost.
         def _is_ghost(p: dict) -> bool:
-            return (
-                p.get("cpu_max_cores", 0) < 0.01 and p.get("memory_max_bytes", 0) < 10 * 1024 * 1024
-            )
+            cpu, mem = p.get("cpu_max_cores"), p.get("memory_max_bytes")
+            return cpu is not None and mem is not None and cpu < 0.01 and mem < 10 * 1024 * 1024
 
         from lakebench.reports import derived as dv
 
@@ -3667,10 +3941,10 @@ class ReportGenerator:
             agg = stage_agg[stage]
             agg["pods"] += 1
             agg["idx"].append(i)
-            agg["cpu_sum"] += pod.get("cpu_avg_cores", 0)
-            agg["cpu_max"] += pod.get("cpu_max_cores", 0)
-            agg["mem_sum"] += pod.get("memory_avg_bytes", 0)
-            agg["mem_max"] += pod.get("memory_max_bytes", 0)
+            agg["cpu_sum"] += pod.get("cpu_avg_cores") or 0
+            agg["cpu_max"] += pod.get("cpu_max_cores") or 0
+            agg["mem_sum"] += pod.get("memory_avg_bytes") or 0
+            agg["mem_max"] += pod.get("memory_max_bytes") or 0
 
         # Render stage rows in logical order
         _STAGE_ORDER = [
@@ -3691,14 +3965,25 @@ class ReportGenerator:
             idx = agg["idx"]
 
             def _sum(key: str, value: float, *, gib: bool = False, _idx=idx) -> str:
+                # Pods without the value are left out of the sum and counted
+                # beside it; with none known the sum is not collected.
+                known = [i for i in _idx if pods[i].get(key) is not None]
+                if not known:
+                    return _NOT_COLLECTED_CELL
+                partial = len(_idx) - len(known)
+                note = (
+                    f" ({partial} pod{'s' if partial > 1 else ''} not collected)" if partial else ""
+                )
                 if gib:
                     return dv.total(
                         value / (1024**3),
-                        paths=[dv.product(_pod_path(i, key), "/1073741824") for i in _idx],
+                        paths=[dv.product(_pod_path(i, key), "/1073741824") for i in known],
                         fmt=".1f",
-                        suffix=" GiB",
+                        suffix=" GiB" + note,
                     )
-                return dv.total(value, paths=[_pod_path(i, key) for i in _idx], fmt=".2f")
+                return dv.total(
+                    value, paths=[_pod_path(i, key) for i in known], fmt=".2f", suffix=note
+                )
 
             stage_rows.append(
                 f"<tr><td><strong>{stage}</strong></td>"
@@ -3729,26 +4014,18 @@ class ReportGenerator:
         error_note = ""
         collection_error = platform_metrics.get("collection_error")
         if collection_error:
-            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Collection warning: {collection_error}</p>'
+            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Not collected or partial: {collection_error}</p>'
 
         # Tier 2 status indicator
         engine = platform_metrics.get("engine")
         tier2_items = []
         if engine:
-            gc = engine.get("spark_gc_seconds_total")
-            if gc is not None:
-                tier2_items.append(f"Spark GC: {gc:.1f}s total")
-            sr = engine.get("spark_shuffle_read_bytes")
-            if sr is not None:
-                tier2_items.append(f"Shuffle read: {sr / (1024**3):.1f} GiB")
-            sw = engine.get("spark_shuffle_write_bytes")
-            if sw is not None:
-                tier2_items.append(f"Shuffle write: {sw / (1024**3):.1f} GiB")
             tc = engine.get("trino_completed_queries")
             tf = engine.get("trino_failed_queries")
             if tc is not None:
                 tier2_items.append(
-                    f"Trino queries completed: {tc}" + (f" | failed: {tf}" if tf else "")
+                    f"Trino queries completed during the run: {tc}"
+                    + (f" | failed: {tf}" if tf else "")
                 )
         tier2_html = ""
         if tier2_items:
@@ -3763,34 +4040,35 @@ class ReportGenerator:
             tier2_html = (
                 '<p style="color: var(--text-muted); font-size: 0.8rem; '
                 'margin-bottom: 0.75rem; font-style: italic;">'
-                "Engine-level metrics not available. Spark Prometheus sink and "
-                "Trino JMX exporter are enabled when observability is on.</p>"
+                "Engine metrics not collected: Spark's are not exported (pipeline "
+                "jobs run with the Spark UI off, which serves them), and Trino's "
+                "JMX exporter returned no series for this run.</p>"
             )
 
         # S3 summary
-        s3_total = platform_metrics.get("s3_requests_total", 0)
-        s3_errors = platform_metrics.get("s3_errors_total", 0)
-        s3_latency = platform_metrics.get("s3_avg_latency_ms", 0)
-        s3_html = ""
-        if s3_total > 0 or s3_errors > 0:
-            s3_html = (
-                f'<div style="margin-bottom: 1rem; font-size: 0.85rem; color: var(--text-muted);">'
-                f"S3: {s3_total:,} requests | {s3_errors} errors | {s3_latency:.1f}ms avg latency"
-                f"</div>"
-            )
+        s3_html = (
+            '<div style="margin-bottom: 1rem; font-size: 0.85rem; color: var(--text-muted);">'
+            "S3 request counts and latency: not collected (no source emits them yet). "
+            "Bytes stored are in the storage section.</div>"
+        )
 
         # Per-pod detail rows (full list minus true ghosts)
         detail_rows = []
+
+        def _cores(v: float | None) -> str:
+            return _NOT_COLLECTED_CELL if v is None else f"{v:.2f}"
+
+        def _gib(v: float | None) -> str:
+            return _NOT_COLLECTED_CELL if v is None else f"{v / (1024**3):.1f} GiB"
+
         for pod in active_pods:
-            cpu_avg = pod.get("cpu_avg_cores", 0)
-            cpu_max = pod.get("cpu_max_cores", 0)
-            mem_avg_gb = pod.get("memory_avg_bytes", 0) / (1024**3)
-            mem_max_gb = pod.get("memory_max_bytes", 0) / (1024**3)
             detail_rows.append(
                 f'<tr><td class="mono">{pod.get("pod_name", "unknown")}</td>'
                 f"<td>{pod.get('component', 'unknown')}</td>"
-                f"<td>{cpu_avg:.2f}</td><td>{cpu_max:.2f}</td>"
-                f"<td>{mem_avg_gb:.1f} GiB</td><td>{mem_max_gb:.1f} GiB</td></tr>"
+                f"<td>{_cores(pod.get('cpu_avg_cores'))}</td>"
+                f"<td>{_cores(pod.get('cpu_max_cores'))}</td>"
+                f"<td>{_gib(pod.get('memory_avg_bytes'))}</td>"
+                f"<td>{_gib(pod.get('memory_max_bytes'))}</td></tr>"
             )
 
         ghost_note = f" ({ghost_count} ghost pods filtered)" if ghost_count > 0 else ""

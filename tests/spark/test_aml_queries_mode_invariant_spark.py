@@ -44,7 +44,7 @@ pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
-# The SQL of query set qs12-4bd2d9416abb, before this change.
+# Reference oracle: the earlier SQL of FQ4 and IQ3, which read the batch layout.
 OLD_FQ4 = """\
 WITH top_accts AS (
   SELECT account_id

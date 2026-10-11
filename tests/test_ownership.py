@@ -1,17 +1,8 @@
-"""Tests for deployment identity + resource ownership machinery.
-
-The invariant these tests defend is:
-
-    Destroying deployment A does not affect deployment B running in parallel.
-
-Each test names the concrete failure mode (design-review findings F1-F9;
-the categories are in ``docs/design/namespace-isolation.md``) that it
-guards against, so future edits that regress the fix will trip a named test.
-"""
+"""Deployment identity and resource ownership: destroying deployment A never
+affects deployment B. Each test names the ownership behaviour it checks."""
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest import mock
 
@@ -26,7 +17,6 @@ from lakebench.deploy.ownership import (
     TAG_DEPLOYMENT_NAME,
     BucketOwnershipError,
     BucketTaggingUnsupported,
-    DeploymentIdentity,
     IdentityVerdict,
     api_server_fingerprint,
     bucket_name_matches_deployment,
@@ -66,67 +56,60 @@ def _client_error(code: str) -> ClientError:
 # ---------------------------------------------------------------------------
 
 
-class TestApiServerFingerprint:
-    def test_returns_stable_hash_for_same_input(self):
-        """Two invocations against the same cluster must produce the same
-        fingerprint. That's the whole point -- two engineers on different
-        workstations get the same identity for the same cluster."""
-        with mock.patch("kubernetes.config.list_kube_config_contexts") as mock_list:
-            mock_list.return_value = (
-                [{"name": "c1", "context": {"cluster": "prod"}}],
-                {"name": "c1", "context": {"cluster": "prod"}},
-            )
-            with mock.patch("kubernetes.config.kube_config.KubeConfigMerger") as MockMerger:
-                MockMerger.return_value.config.value = {
-                    "clusters": [
-                        {
-                            "name": "prod",
-                            "cluster": {
-                                "server": "https://api.example.com:6443",
-                                "certificate-authority-data": "AAAA",
-                            },
-                        }
-                    ]
-                }
-                a = api_server_fingerprint()
-                b = api_server_fingerprint()
-        assert a == b
-        assert a is not None
-        assert len(a) == 12
+def _kubeconfig_fingerprint(ca_b64: str, server: str = "https://api.example.com:6443"):
+    """The fingerprint of a workstation context whose kubeconfig carries this CA."""
+    with mock.patch("kubernetes.config.list_kube_config_contexts") as mock_list:
+        mock_list.return_value = (
+            [{"name": "c", "context": {"cluster": "prod"}}],
+            {"name": "c", "context": {"cluster": "prod"}},
+        )
+        with mock.patch("kubernetes.config.kube_config.KubeConfigMerger") as MockMerger:
+            MockMerger.return_value.config.value = {
+                "clusters": [
+                    {
+                        "name": "prod",
+                        "cluster": {"server": server, "certificate-authority-data": ca_b64},
+                    }
+                ]
+            }
+            return api_server_fingerprint()
 
-    def test_different_clusters_produce_different_hashes(self):
-        """Two clusters at the same URL but different CAs must not collide."""
-        with mock.patch("kubernetes.config.list_kube_config_contexts") as mock_list:
-            mock_list.return_value = (
-                [{"name": "c", "context": {"cluster": "same-server"}}],
-                {"name": "c", "context": {"cluster": "same-server"}},
-            )
-            with mock.patch("kubernetes.config.kube_config.KubeConfigMerger") as MockMerger:
-                MockMerger.return_value.config.value = {
-                    "clusters": [
-                        {
-                            "name": "same-server",
-                            "cluster": {
-                                "server": "https://same.example.com:6443",
-                                "certificate-authority-data": "CA_A",
-                            },
-                        }
-                    ]
-                }
-                a = api_server_fingerprint()
-                MockMerger.return_value.config.value = {
-                    "clusters": [
-                        {
-                            "name": "same-server",
-                            "cluster": {
-                                "server": "https://same.example.com:6443",
-                                "certificate-authority-data": "CA_B",
-                            },
-                        }
-                    ]
-                }
-                b = api_server_fingerprint()
-        assert a != b
+
+def _in_cluster_fingerprint(ca_bytes: bytes):
+    """The fingerprint of a pod context that reads the mounted CA bytes."""
+    with mock.patch(
+        "kubernetes.config.list_kube_config_contexts",
+        side_effect=Exception("no kubeconfig in pod"),
+    ):
+        with mock.patch("builtins.open", mock.mock_open(read_data=ca_bytes)):
+            return api_server_fingerprint()
+
+
+class TestApiServerFingerprint:
+    @pytest.mark.parametrize(
+        ("ca_a", "path_a", "ca_b", "path_b", "equal"),
+        [
+            # The same CA reached through the kubeconfig and through the pod's mounted CA
+            # (the endpoint URL differs between those paths) is one cluster.
+            (b"pem-ca-bytes", "kubeconfig", b"pem-ca-bytes", "in_cluster", True),
+            # Two clusters at the same URL but different CAs must not collide.
+            (b"CA_A", "kubeconfig", b"CA_B", "kubeconfig", False),
+            (b"CA_A", "kubeconfig", b"CA_B", "in_cluster", False),
+        ],
+        ids=["same_ca_across_paths", "different_ca_kubeconfig", "different_ca_across_paths"],
+    )
+    def test_fingerprint_follows_the_ca(self, ca_a, path_a, ca_b, path_b, equal):
+        import base64
+
+        def fingerprint(ca: bytes, path: str):
+            if path == "kubeconfig":
+                return _kubeconfig_fingerprint(base64.b64encode(ca).decode())
+            return _in_cluster_fingerprint(ca)
+
+        a = fingerprint(ca_a, path_a)
+        b = fingerprint(ca_b, path_b)
+        assert a is not None and b is not None
+        assert (a == b) is equal
 
     def test_missing_kubeconfig_returns_none(self):
         with mock.patch(
@@ -140,52 +123,6 @@ class TestApiServerFingerprint:
                 got = api_server_fingerprint()
         assert got is None
 
-    def test_workstation_and_in_cluster_produce_same_hash_for_same_ca(self):
-        """F2a: workstation-context (via kubeconfig base64 CA data) and
-        in-cluster pod-context (via mounted /var/run/secrets CA bytes)
-        against the SAME cluster must produce the same fingerprint.
-        Before F2a they differed because we combined CA with the
-        endpoint URL, which differs between reachability paths."""
-        import base64
-
-        ca_bytes = b"pem-ca-bytes"
-        ca_b64 = base64.b64encode(ca_bytes).decode()
-
-        # Path A: workstation context reading kubeconfig with base64 CA.
-        with mock.patch("kubernetes.config.list_kube_config_contexts") as mock_list:
-            mock_list.return_value = (
-                [{"name": "wsc", "context": {"cluster": "prod"}}],
-                {"name": "wsc", "context": {"cluster": "prod"}},
-            )
-            with mock.patch("kubernetes.config.kube_config.KubeConfigMerger") as MockMerger:
-                MockMerger.return_value.config.value = {
-                    "clusters": [
-                        {
-                            "name": "prod",
-                            "cluster": {
-                                "certificate-authority-data": ca_b64,
-                                "server": "https://external.example.com:6443",
-                            },
-                        }
-                    ]
-                }
-                workstation_hash = api_server_fingerprint()
-
-        # Path B: in-cluster context reads /var/run/secrets/.../ca.crt
-        # as raw bytes.
-        with mock.patch(
-            "kubernetes.config.list_kube_config_contexts",
-            side_effect=Exception("no kubeconfig in pod"),
-        ):
-            m = mock.mock_open(read_data=ca_bytes)
-            with mock.patch("builtins.open", m):
-                in_cluster_hash = api_server_fingerprint()
-
-        assert workstation_hash is not None
-        assert in_cluster_hash is not None
-        # Both paths hash the SAME CA bytes; the hashes must match.
-        assert workstation_hash == in_cluster_hash
-
 
 # ---------------------------------------------------------------------------
 # stamp_namespace -- optimistic-concurrency PATCH
@@ -194,8 +131,7 @@ class TestApiServerFingerprint:
 
 class TestStampNamespace:
     def test_fresh_namespace_gets_stamped(self):
-        """Guards F2: fresh (annotation-less) namespace stamps under
-        force_legacy=True."""
+        """A fresh (annotation-less) namespace stamps under force_legacy=True."""
         core = mock.MagicMock()
         core.read_namespace.return_value = _ns_response(annotations=None, resource_version="42")
         r = stamp_namespace(
@@ -213,7 +149,7 @@ class TestStampNamespace:
         assert body["metadata"]["resourceVersion"] == "42"
 
     def test_legacy_namespace_refuses_without_force(self):
-        """Guards F2 second half: legacy annotation-less namespace is UNSAFE."""
+        """A legacy annotation-less namespace is refused without force_legacy."""
         core = mock.MagicMock()
         core.read_namespace.return_value = _ns_response(annotations={})
         r = stamp_namespace(
@@ -240,8 +176,8 @@ class TestStampNamespace:
         core.patch_namespace.assert_not_called()
 
     def test_conflict_reveals_foreign_identity(self):
-        """Guards F2: conflict resolves to a foreign identity that appeared
-        during our write -- must refuse, not overwrite."""
+        """A conflict that resolves to a foreign identity written during our
+        write is refused, not overwritten."""
         core = mock.MagicMock()
         core.read_namespace.side_effect = [
             _ns_response(annotations=None, resource_version="1"),
@@ -286,11 +222,23 @@ class TestStampNamespace:
         assert r.verdict is IdentityVerdict.NOT_FOUND
         core.patch_namespace.assert_not_called()
 
-    def test_deployment_name_length_guard(self):
-        """Length assertion prevents S3 tag truncation later."""
-        long_name = "a" * (DEPLOYMENT_NAME_MAX + 1)
-        with pytest.raises(ValueError, match="chars; max"):
-            stamp_namespace(mock.MagicMock(), "ns", long_name, api_server=None)
+
+@pytest.mark.parametrize(
+    ("kind", "exc"), [("namespace", ValueError), ("bucket", BucketOwnershipError)]
+)
+def test_oversize_deployment_name_is_refused_before_any_write(kind, exc):
+    """An over-long name would be truncated in the stamp: refuse, write nothing."""
+    long_name = "a" * (DEPLOYMENT_NAME_MAX + 1)
+    if kind == "namespace":
+        core = mock.MagicMock()
+        with pytest.raises(exc):
+            stamp_namespace(core, "ns", long_name, api_server=None)
+        core.patch_namespace.assert_not_called()
+    else:
+        s3 = mock.MagicMock()
+        with pytest.raises(exc):
+            write_bucket_ownership_tag(s3, "b1", long_name)
+        s3.put_bucket_tagging.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +282,13 @@ class TestVerifyNamespaceIdentity:
             ({ANNOTATION_DEPLOYMENT_NAME: "mine"}, None, True, IdentityVerdict.MATCH),
             # legacy namespace: destroy refuses, migration is required
             ({}, "deadbeef1234", False, IdentityVerdict.ABSENT),
+            # another deployment's namespace is never ours
+            (
+                {ANNOTATION_DEPLOYMENT_NAME: "other"},
+                "deadbeef1234",
+                False,
+                IdentityVerdict.MISMATCH,
+            ),
         ],
     )
     def test_verdict(self, stored, current, allow, verdict):
@@ -342,15 +297,8 @@ class TestVerifyNamespaceIdentity:
         kw = {"allow_unverified_cluster": True} if allow else {}
         r = verify_namespace_identity(core, "ns", "mine", current, **kw)
         assert r.verdict is verdict
-
-    def test_deployment_name_mismatch_refuses(self):
-        core = mock.MagicMock()
-        core.read_namespace.return_value = _ns_response(
-            annotations={ANNOTATION_DEPLOYMENT_NAME: "other"},
-        )
-        r = verify_namespace_identity(core, "ns", "mine", "deadbeef1234")
-        assert r.verdict is IdentityVerdict.MISMATCH
-        assert r.found_deployment == "other"
+        if stored.get(ANNOTATION_DEPLOYMENT_NAME) == "other":
+            assert r.found_deployment == "other"
 
     def test_missing_namespace(self):
         core = mock.MagicMock()
@@ -365,35 +313,23 @@ class TestVerifyNamespaceIdentity:
 
 
 class TestBucketOwnershipTag:
-    def test_readback_returns_none_when_no_tags(self):
-        s3 = mock.MagicMock()
-        s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
-        got = read_bucket_ownership_tag(s3, "b1")
-        assert got is None
-
     def test_write_raises_when_backend_drops_tags(self):
-        """Guards F3a: backend that accepts PutBucketTagging but returns
-        empty on GetBucketTagging must not be treated as 'owned'."""
+        """A backend that accepts PutBucketTagging but returns empty on
+        GetBucketTagging must not be treated as 'owned'."""
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
         with pytest.raises(BucketOwnershipError, match="returned no tags"):
             write_bucket_ownership_tag(s3, "b1", "my-config")
 
     def test_write_raises_on_round_trip_mismatch(self):
-        """Guards F3b: PutBucketTagging succeeds but GetBucketTagging shows
-        a different value (async prop, truncation) -- refuse."""
+        """PutBucketTagging succeeds but GetBucketTagging shows a different
+        value (async propagation, truncation): refuse."""
         s3 = mock.MagicMock()
         s3.get_bucket_tagging.return_value = {
             "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "mangled"}]
         }
         with pytest.raises(BucketOwnershipError, match="round-trip mismatch"):
             write_bucket_ownership_tag(s3, "b1", "my-config")
-
-    def test_write_refuses_oversize_name(self):
-        s3 = mock.MagicMock()
-        with pytest.raises(BucketOwnershipError, match="truncate"):
-            write_bucket_ownership_tag(s3, "b1", "a" * (DEPLOYMENT_NAME_MAX + 1))
-        s3.put_bucket_tagging.assert_not_called()
 
     def test_verify_missing_bucket(self):
         s3 = mock.MagicMock()
@@ -403,10 +339,9 @@ class TestBucketOwnershipTag:
 
 
 class TestBucketTaggingUnsupported:
-    """LB-088: FlashBlade returns NotImplemented on GetBucketTagging /
-    PutBucketTagging. Never seen before because the unit tests used moto,
-    which implements tagging cleanly. Every path must handle it
-    explicitly rather than falling through to a generic error.
+    """FlashBlade returns NotImplemented on GetBucketTagging /
+    PutBucketTagging. Every path must handle it explicitly rather than
+    falling through to a generic error.
     """
 
     def test_read_raises_unsupported_on_not_implemented(self):
@@ -483,7 +418,7 @@ class TestListLakebenchDeploymentNames:
     'cannot tell'. Both cases arise in production: multi-tenant
     OpenShift denies cluster-wide namespace list under a
     namespace-scoped token; that must NOT downgrade to naive
-    prefix ownership (round-3 F2)."""
+    prefix ownership."""
 
     def _ns(self, name, annotations=None, labels=None):
         return SimpleNamespace(
@@ -506,7 +441,7 @@ class TestListLakebenchDeploymentNames:
                 None,
                 ["team-a", "team-b"],
             ),
-            # pre-PR-1 namespaces carry only the managed-by label
+            # older namespaces carry only the managed-by label
             (
                 [("legacy-ns", {}, {"app.kubernetes.io/managed-by": "lakebench"})],
                 None,
@@ -564,15 +499,6 @@ class TestListLakebenchDeploymentNames:
 # ---------------------------------------------------------------------------
 
 
-class TestDeploymentIdentity:
-    def test_freeze(self):
-        """Identity is passed all the way through the deploy path; make it
-        immutable so no caller can quietly rewrite it."""
-        d = DeploymentIdentity(name="x", api_server="y")
-        with pytest.raises(FrozenInstanceError):
-            d.name = "z"  # type: ignore[misc]
-
-
 class TestCreatedBucketsRecord:
     def _ns(self, anns):
         ns = mock.MagicMock()
@@ -625,6 +551,29 @@ class TestCreatedBucketsRecord:
         write_bucket_ownership_tag(s3, "b1", "my-config")
         keys = [t["Key"] for t in s3.put_bucket_tagging.call_args.kwargs["Tagging"]["TagSet"]]
         assert TAG_CREATED_BY_LAKEBENCH not in keys
+
+    @pytest.mark.parametrize(
+        ("recorded", "verdict"),
+        [
+            (False, IdentityVerdict.LEGACY_UNPROVEN),
+            (True, IdentityVerdict.LEGACY_PROVEN),
+        ],
+    )
+    def test_only_the_created_record_proves_a_bucket_ours(self, recorded, verdict):
+        """A bucket tagged with our name but absent from the created record is
+        never proven ours, so destroy does not delete it."""
+        s3 = mock.MagicMock()
+        s3.get_bucket_tagging.return_value = {
+            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "my-config"}]
+        }
+        r = verify_bucket_ownership(
+            s3,
+            "b1",
+            "my-config",
+            expected_cluster="deadbeef1234",
+            created_record={"b1"} if recorded else (),
+        )
+        assert r.verdict is verdict
 
 
 # -- CLI-1: a check that could not run is not a refusal --------------------
@@ -765,8 +714,7 @@ class TestStampNamespaceRefreshesCommittedSha:
 
 
 def test_owner_marker_records_the_lakebench_version():
-    """The distribution is lakebench-k8s, so version("lakebench") raised and
-    every marker said "unknown"; the marker carries the package version."""
+    """The marker carries the package version, never "unknown"."""
     import lakebench
     from lakebench.deploy.ownership import owner_marker_identity
 

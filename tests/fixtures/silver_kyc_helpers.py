@@ -1,4 +1,4 @@
-"""Shared test helpers moved from tests/spark/test_silver_kyc_spark.py (imported by several test files)."""
+"""Data builders for the silver KYC Spark tests."""
 
 from __future__ import annotations
 
