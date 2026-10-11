@@ -99,8 +99,9 @@ never selects or alters a workload. Every recipe maps to one entry of
 `_SUPPORTED_COMBINATIONS`.
 
 Components live under `src/lakebench/modules/`. Query engines implement
-`QueryExecutor` (`benchmark/executor.py`); pipeline engines implement
-`PipelineEngine` (`engine/protocol.py`, factory `get_engine`).
+`QueryExecutor` (`benchmark/executor.py`). The pipeline engine is created by
+`get_engine` (`engine/protocol.py`); the `PipelineEngine` interface there
+does not yet match what Spark implements.
 
 ### 2.3 Workload
 
@@ -305,9 +306,11 @@ needs is owned by the workload and passes its correctness contract.
 ### 6.2 Adding a catalog, table format, pipeline engine or query engine
 
 1. Implement the component under `modules/`, alongside the existing ones,
-   and wire it into deployment (`deploy/`) and execution (`QueryExecutor` or
-   `PipelineEngine`). Every resource it creates carries the stamps of
-   `deploy/ownership.py`.
+   and wire it into deployment (`deploy/`) and into where it runs: a query
+   engine through `QueryExecutor`, a pipeline engine through `get_engine`, a
+   table format through its stage scripts (`spark/scripts/`) and its
+   maintenance (`deploy/`).
+   Every resource it creates carries the stamps of `deploy/ownership.py`.
 2. Add the enum value, the structurally valid 4-tuples to
    `_SUPPORTED_COMBINATIONS`, a reason in `_COMBINATION_NOTES` per known-bad
    pairing, version entries in the compatibility tables (verify artifacts by

@@ -199,6 +199,15 @@ remains open only as implementation work.
     `deploy` and `generate` refuse a config above the ceiling. Resolution
     pending owner text for DESIGN.md 6.5 describing the scale layer.
 
+22. **Spark does not implement the `PipelineEngine` interface.** [impl]
+    `PipelineEngine` (`engine/protocol.py`) declares `submit_job(job_type:
+    str, config) -> str`, `wait_for_completion`, `get_logs` and
+    `cancel_job`. `SparkJobManager` (`modules/pipeline_engines/spark/job.py`)
+    has only `engine_name` and a `submit_job` taking a `JobType` and
+    returning `JobStatus`; waiting goes through the monitor. `get_engine`
+    and its callers silence the mismatch with `type: ignore`. Resolution:
+    make the interface describe what callers use, or make Spark satisfy it.
+
 ## Owner decisions, 2026-09-26
 
 - **D1** (item 1), accepted. `compare` shows the evidence, gives a NOT

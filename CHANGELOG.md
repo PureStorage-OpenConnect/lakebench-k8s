@@ -31,6 +31,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **A `datagen.parallelism` set in the config is used exactly**, with a warning where the autosizer would have changed it. A continuous run whose datagen pods do not all fit is refused at preflight, naming `datagen.parallelism`.
 - **`lakebench compare` is gone.** It is now an unknown command. Compare runs from their reports.
 - **A bare `"0"` trigger interval is refused at load.** The three continuous intervals need a whole number and a unit (`"0 seconds"`, `"5 minutes"`). Before, `"0"` went to Spark unchanged for Customer 360 and became 10 s for AML.
+- **`lakebench.modules` no longer exports `CatalogModule`, `QueryEngineModule`, `PipelineEngineModule`, `TableFormatModule` or `ModuleRegistry`.** `modules/base.py` and `modules/registry.py` are removed; nothing in Lakebench used them.
 
 ### New
 
