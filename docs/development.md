@@ -418,11 +418,9 @@ To add one:
 4. For a new component version, add its entries to the compatibility tables
    in `job.py`. Verify each Maven artifact by fetching its POM, not through
    the search API.
-5. Regenerate the generated doc blocks with `python scripts/gen_docs.py`. It
-   runs every generator in `scripts/gen_*.py` and the support-state and
-   recipe-components blocks (`PYTHONPATH=src python -m lakebench.config.support .`).
-   `--check` writes nothing and exits 1 on a stale block, as the drift tests
-   do.
+5. Regenerate the generated doc blocks: run each `scripts/gen_*.py`, and
+   `PYTHONPATH=src python -m lakebench.config.support .` for the
+   support-state and recipe-components blocks.
 6. Leave `src/lakebench/config/validated_combinations.yaml` alone. Only live
    runs on the release tree fill it, so the new recipe starts as unverified.
 
@@ -544,7 +542,7 @@ What not to change without a live test. Each statement names the code or test
 that holds it. Symptoms and fixes: [Troubleshooting](troubleshooting.md).
 Sizing numbers: [Job Profiles](component-spark.md#job-profiles) and
 [Sizing](sizing.md). After changing the code they describe, regenerate the
-generated tables with `scripts/gen_docs.py`.
+generated tables with the matching `scripts/gen_*.py`.
 
 ### Spark job sizing
 
