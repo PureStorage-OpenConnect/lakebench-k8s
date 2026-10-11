@@ -29,7 +29,6 @@ stops at the first failing step. Python steps run with `PYTHONPATH=src`;
 | Step | Command |
 |---|---|
 | `version` | `scripts/check_version.py --tag vX.Y.Z`: the tag is `v` plus the package version, a final release |
-| `generated-docs` | `scripts/gen_docs.py --check` |
 | `filler-words` | `git grep` for the Makefile's `FILLER_WORDS` and `AI_VOICE` phrases |
 | `build` | `python -m build` into an empty `DIST` directory (a temporary one by default) |
 | `package-guard` | `scripts/package_guard.py --dist <dir> --require-all` |

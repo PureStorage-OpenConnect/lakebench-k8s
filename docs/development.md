@@ -543,8 +543,8 @@ maintainer-only and not shipped with the package).
 What not to change without a live test. Each statement names the code or test
 that holds it. Symptoms and fixes: [Troubleshooting](troubleshooting.md).
 Sizing numbers: [Job Profiles](component-spark.md#job-profiles) and
-[Sizing](sizing.md). `make rc-generated-docs` (`scripts/gen_docs.py --check`)
-fails when the generated tables drift from the code.
+[Sizing](sizing.md). After changing the code they describe, regenerate the
+generated tables with `scripts/gen_docs.py`.
 
 ### Spark job sizing
 

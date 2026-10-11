@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Regenerate, or check, every generated block and page in docs/.
 
-One command for the release step ``generated-docs`` (RELEASING.md). It
-generates nothing itself; it runs, in order:
+One command for every generated doc. It generates nothing itself; it
+runs, in order:
 
 - the support-state blocks (``lakebench.config.support.regenerate_docs``);
 - the configuration reference (``scripts/gen_config_reference.py``);

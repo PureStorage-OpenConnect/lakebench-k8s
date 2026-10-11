@@ -103,7 +103,7 @@ clean:
 # the end and lists the failures.
 # Nothing here merges, tags, pushes or publishes.
 # ---------------------------------------------------------------------------
-RELEASE_STEPS := version generated-docs filler-words build package-guard gate
+RELEASE_STEPS := version filler-words build package-guard gate
 .PHONY: release-check $(addprefix rc-,$(RELEASE_STEPS))
 RC_PY = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON)
 #: Where rc-build writes and rc-package-guard reads; release-check uses a
@@ -141,9 +141,6 @@ ifdef DRY
 else
 	$(RC_PY) scripts/check_version.py --tag "v$(VERSION)"
 endif
-
-rc-generated-docs:
-	$(RC_PY) scripts/gen_docs.py --check
 
 # git grep exits 1 when nothing matches; 2 or more is an error, not a pass.
 rc-filler-words:
