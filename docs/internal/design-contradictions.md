@@ -159,11 +159,10 @@ remains open only as implementation work.
     types register for every workload (`job.py:1798-1806`). Resolution:
     resource demands belong to the workload definition.
 
-17. **The registry and part of the protocol surface are unused.** [impl]
-    `modules/registry.py:1-10` states deploy and destroy do not use it;
-    `TableFormatModule.get_pipeline_scripts` (`modules/base.py:188`) has no
-    implementation or caller. Resolution: route through the registry, or
-    delete.
+17. **The registry and part of the protocol surface are unused.** [resolved]
+    Resolved by removing the unused scaffolding: `modules/registry.py`
+    (`ModuleRegistry`) and `modules/base.py` (the module protocols,
+    `Deployer`, `DeployResult`) had no consumers and were deleted.
 
 18. **The code deprecates the product's mode name.** [decided D18]
     `PipelineMode.SUSTAINED` (`config/schema.py:164-175`); `--continuous` is

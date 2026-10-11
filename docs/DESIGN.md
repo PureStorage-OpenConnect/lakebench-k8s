@@ -98,12 +98,9 @@ with `RECIPE_NOTES` for per-recipe caveats). A recipe is architecture only; it
 never selects or alters a workload. Every recipe maps to one entry of
 `_SUPPORTED_COMBINATIONS`.
 
-Components live under `src/lakebench/modules/` against the protocols in
-`modules/base.py` (`CatalogModule`, `TableFormatModule`,
-`PipelineEngineModule`, `QueryEngineModule`, `Deployer`), plus
-`QueryExecutor` (`benchmark/executor.py`) and `PipelineEngine`
-(`engine/protocol.py`, factory `get_engine`). `modules/registry.py` exists but
-orchestration does not route through it yet.
+Components live under `src/lakebench/modules/`. Query engines implement
+`QueryExecutor` (`benchmark/executor.py`); pipeline engines implement
+`PipelineEngine` (`engine/protocol.py`, factory `get_engine`).
 
 ### 2.3 Workload
 
@@ -307,8 +304,10 @@ needs is owned by the workload and passes its correctness contract.
 
 ### 6.2 Adding a catalog, table format, pipeline engine or query engine
 
-1. Implement the protocol in `modules/base.py` and a `Deployer` whose
-   resources carry the stamps of `deploy/ownership.py`.
+1. Implement the component under `modules/`, alongside the existing ones,
+   and wire it into deployment (`deploy/`) and execution (`QueryExecutor` or
+   `PipelineEngine`). Every resource it creates carries the stamps of
+   `deploy/ownership.py`.
 2. Add the enum value, the structurally valid 4-tuples to
    `_SUPPORTED_COMBINATIONS`, a reason in `_COMBINATION_NOTES` per known-bad
    pairing, version entries in the compatibility tables (verify artifacts by
