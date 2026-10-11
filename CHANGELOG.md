@@ -65,6 +65,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 
 ### Fixed
 
+- **kubernetes is held below 37.** A fresh install pulled kubernetes 37, whose validated models Lakebench has not been tested with; the release ran on 35 and 36.
 - **Stage times no longer include Lakebench's own bookkeeping.** AML gold ran a count per rule inside each rule's time and its continuous time to detect; C360 gold recomputed the gold aggregate to count it; AML bronze verify read the data seven times and C360 bronze verify twice more for output nobody read. Each is gone or one pass.
 - **Digest-pinned Spark images** (`apache/spark:4.1.1-python3@sha256:...`) are accepted; the version came from the digest and the config was refused.
 - **A finished command no longer hangs at exit.** After a continuous run wrote its record, Python could wait forever on a logging lock, so a script's next step (`destroy`) never ran.
