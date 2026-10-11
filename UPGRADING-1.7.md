@@ -205,25 +205,25 @@ Customer 360 gold is never silently incremental and a multi-cycle run takes one 
 
 ### System and access path are not execution conditions
 
-Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
+The system and query access path moved to architecture/system groups and no longer affect like-for-like status.
 
-**What to do:** Re-run a baseline under 1.7 before comparing; when the architecture and the system both differ, no difference can be put down to either.
+**What to do:** Re-run baselines under 1.7 before comparing.
 
 ### Continuous pairs with different round counts are not like-for-like
 
-A continuous record without a stored round count reads it from its rounds. A pair with different counts is not like-for-like.
+A pair with different round counts is not like-for-like.
 
-**What to do:** Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
+**What to do:** Compare continuous runs with the same number of in-stream rounds.
 
 ### Perf gate removed
 
-`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.
+`scripts/perf_gate.py`, its pinned configs and the baseline store are gone.
 
 **What to do:** Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
 
 ### Readers take the strictest verdict
 
-`report` reads the stricter of a record's stored verdict and the one recomputed from it. A stored AML batch record without a watchlist now reads FAILED. Three such stored records do; the Hive-versus-Polaris pair among them is not comparable.
+`report` reads the stricter of a record's stored verdict and the one recomputed from it. A stored AML batch record without a watchlist now reads FAILED.
 
 **What to do:** Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed` beside the `verdict` it heads with.
 
@@ -265,142 +265,133 @@ The autosizer no longer cuts a configured `datagen.parallelism` to fit the clust
 
 ### Removed keys are refused by commands that change data
 
-A removed config key is refused by the commands that change data; read and teardown commands drop it with a note.
+Commands that change data refuse a removed config key; read and teardown commands drop it with a note.
 
 **What to do:** Delete the keys the refusal names; `destroy`, `status` and `report` still load the old config.
 
 ### Deploy generates the Polaris client secret
 
-A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
+New deployments generate their own Polaris client secret and database passwords.
 
 **What to do:** Leave `architecture.catalog.polaris.client_secret` unset; an existing deployment keeps its stored secret.
 
 ### run needs a 1.7 deploy
 
-Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
+`run` on a deployment made by 1.6 exits 4.
 
 **What to do:** Run `lakebench deploy CONFIG` once after upgrading.
 
 ### stop drains AML detection first
 
-`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs. A continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+`stop` on an AML deployment waits up to 300 s for gold-refresh to finish before deleting jobs.
 
 **What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
 
 ### continuous AML runs end with time-travel reads
 
-A continuous AML run that passed its gates ends with one more Spark job after the score job. It re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout. Its check is reported beside the verdict and never fails the run.
+A continuous AML run adds one Spark job after the score job to re-read transactions snapshots.
 
 **What to do:** Allow for the extra job at the end of the run; it grows with the corpus and the number of live snapshots, and stops starting scans before the per-job timeout.
 
 ### financial reproduce reruns the alert's rule on what gold read
 
-`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on.
-
-- Exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7.
-- 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`.
-- `--no-wait` now refuses first when the record cannot drive a reproduction.
+`financial reproduce` now reproduces the alert from the snapshots its run's gold read. Exits 0 when reproduced, 1 when not, 2 when no local record, 4 when snapshots are gone.
 
 **What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
 
 ### AML bronze-verify stops on a spent or unverifiable corpus
 
-An AML run stops at bronze-verify with exit 2 over either of these:
-
-- a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset)
-- a bucket that holds a corpus from a held-out or spent seed (such as 42)
-
-1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
+An AML run stops at bronze-verify (exit 2) on a corpus with no manifest or from a held-out or spent seed.
 
 **What to do:** Regenerate the corpus with `lakebench run CONFIG --generate --regenerate` (the calibration seed when `datagen.seed` is unset).
 
 ### A protected AML corpus is refused outside its look
 
-`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
+Commands refuse an evaluation or robustness AML corpus (exit 2) before any cluster call.
 
 **What to do:** Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.
 
 ### Executor overrides are bounded and counted
 
-Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
+Executor overrides take 1 to 28 (`driver_cores` 1 to 16) and keep a run out of release evidence.
 
 **What to do:** Lower overrides above 28; leave counts unset for evidence runs.
 
 ### benchmark writes its own record
 
-`benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
+`benchmark` writes its own record (`record_kind: benchmark`); `query` writes no record.
 
 **What to do:** Read a benchmark by the run id it prints: `lakebench report RUN_ID`.
 
 ### run refuses arguments it used to ignore
 
-`run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
+`run` exits 2 on a flag its mode does not use.
 
 **What to do:** Drop the flag the mode does not use.
 
 ### reproduce never destroys before its run
 
-`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys only what it created.
+`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it.
 
 **What to do:** Run `lakebench destroy CONFIG` first to reuse a deployment's name.
 
 ### init writes a first-day config
 
-`init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
+`init` writes a 12-line config: recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
 
 **What to do:** Set `--scale`, `--recipe` or `--name` on `init`; `--overwrite` is the new spelling of `--force`.
 
 ### A component that contradicts its recipe is refused
 
-A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that change data; 1.6 let it win silently.
+A component contradicting `recipe:` is refused at load; 1.6 let it win silently.
 
 **What to do:** Remove the component keys, or change `recipe:` to the components you mean.
 
 ### VAR is substituted per value
 
-`${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed as YAML.
+`${VAR}` is substituted per value, not in the file text.
 
 **What to do:** Quote references inside flow syntax (`["${A}", "${B}"]`) and close every `${VAR:-default}`.
 
 ### A config with no recipe is deprecated
 
-A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.
+A config with no `recipe:` loads with a note; v1.8 requires it.
 
 **What to do:** Add the recipe the note names.
 
 ### Flat top-level keys are deprecated
 
-Flat top-level keys (`endpoint:`, `scale:` and the rest) load with a note naming the nested key.
+Flat top-level keys load with a note naming the nested key.
 
 **What to do:** Write the nested key the note names.
 
 ### Deploy never installs a shared component
 
-`deploy` only checks the scratch StorageClass, Spark Operator, Stackable and observability stack; `operator.install: true` is refused.
+`deploy` only checks shared components; `operator.install: true` is refused.
 
 **What to do:** A cluster admin runs `lakebench admin install --component all CONFIG` once per cluster.
 
 ### admin install never changes an installed component
 
-`admin install` installs only what is missing and refuses a version change (exit 2, or 3 with `--allow-version-change`).
+`admin install` installs only what is missing and refuses a version change.
 
 **What to do:** Change a shared component's version by hand, after reading what `--allow-version-change` lists.
 
 ### Watch-list edits pin the installed chart
 
-`deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart, or refuse when it cannot be read.
+`deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart.
 
 **What to do:** Re-run once `helm list` answers; a refused removal keeps the namespace.
 
 ### admin doctor exits 1 on a failed check
 
-`admin doctor` runs the prerequisite checks and exits 1 when one fails or cannot run.
+`admin doctor` exits 1 when a check fails or cannot run.
 
 **What to do:** Fix what it names, or ignore its code where you only wanted the report.
 
 ### A config needs a name to change data
 
-A config with no `name:` is refused by the commands that change data, and reads or tears down only a deployment it can prove is its own.
+A nameless config is refused by commands that change data.
 
 **What to do:** Add `name:` with the deployment's name; the refusal names it.
 
@@ -497,201 +488,56 @@ Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_s
 
 ### Multi-cycle runs and reused corpora check a corpus series marker
 
-- A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation. It also exits 3 when the marker is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read).
-- A multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`.
-- `generate` or `run --generate-only` on a multi-cycle config, and `run --skip-generate` on a multi-cycle AML config, exit 2.
+1.7 validates the corpus series marker on multi-cycle and reused-bronze runs. A mismatch or missing marker exits 3; a non-empty bucket needs `--regenerate`.
 
-**What to do:** Keep a finished multi-cycle corpus with `run --skip-generate`; otherwise let `run` generate it, with `--regenerate` (single-cycle: `--generate --regenerate`) on a bucket this deployment created, after `lakebench admin reclaim-bucket` on any other. An AML multi-cycle run generates every cycle.
+**What to do:** Run `lakebench run CONFIG --regenerate` on a non-empty bucket this deployment created. Keep a finished multi-cycle corpus with `--skip-generate`. See [docs/running-pipelines.md](docs/running-pipelines.md).
 
 ## Nameless configs and deploy state
 
-Which commands require `name:` is in
-[docs/configuration.md](docs/configuration.md#minimum-viable-config).
+Every config needs a `name:` and a `recipe:`. Commands that change data
+refuse a nameless config; teardown commands refuse one they cannot prove
+owns the deployment. Use `lakebench init --from OLD.yaml -o NEW.yaml` to
+convert a 1.6 config: it keeps the deployment's name and buckets, moves
+old spellings to current keys, drops removed keys, and replaces plaintext
+credentials with `${VAR}` references.
 
-### A v1.6 directory with `.lakebench/state.json`
+A 1.6 config before conversion:
 
-Before 1.7 a nameless config got a time-based name (`lb-YYYYMMDD-HHMMSS`),
-written to `.lakebench/state.json` in the config's directory. Every nameless
-config in that directory shared it. The file is now only read, and nothing
-ties the name in it to any one config.
+```yaml
+# 1.6 (nameless, flat keys)
+endpoint: http://10.0.1.50:80
+scale: 10
+architecture:
+  catalog: polaris
+  table_format: iceberg
+  pipeline: spark
+  query_engine: trino
+```
 
-- The teardown commands (`destroy`, `stop`, `admin`) and the read-only
-  commands that look at a deployment (`status`, `logs`, `report`) refuse a
-  nameless config in a directory that has the file.
-- `--name NAME` lifts the refusal for `destroy`, `stop`, `status` and
-  `logs`. They then check the namespace's own stamps (check 3 under
-  [Deploy state and nameless teardown](#deploy-state-and-nameless-teardown)).
-- The error gives the v1.6 name and lists the other nameless `*.yaml` and
-  `*.yml` configs beside it.
-- To inspect or tear down a deployment v1.6 made, pass `--name` with that
-  name, or add `name:` with that name to the config that deployed it and
-  use that config.
-- `info`, `config show`, `config storage` and `config recommend` look at no
-  deployment, so they still load a nameless config under the v1.6 name.
+After `init --from`:
 
-Without the file:
+```yaml
+# 1.7 (named, nested, recipe)
+name: my-deployment
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  scale: 10
+platform:
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+```
 
-- `destroy`, `stop` and `admin` refuse a nameless config with no `--name`,
-  because no deployment can be its own.
-- The read-only commands use a suggested name, `lb-<user>-<6 hex>`, which
-  the error for the other commands also offers.
-- No command writes `.lakebench/state.json` any more, and the read-only
-  commands create no files.
+Deploy records a per-deploy nonce in `.lakebench/<name>.json` beside the
+config. A copied directory, or one deployed from another host, is refused
+(exit 3). Use `python -m lakebench.config.deploy_state relocate CONFIG
+NEWDIR` to move a deployment's directory.
 
-### Nameless configs reached through a symbolic link
-
-The v1.6 name is read from `.lakebench/state.json` beside the path given, as
-v1.6 read it, with symbolic links not followed. `--name` is checked against
-that name.
-
-- When the directory of the file a link points to records a different v1.6
-  name (or the link's directory records none), every command that may look
-  at a deployment refuses the config without `--name`. One config then
-  cannot act on, or report, the other directory's deployment.
-- `info`, `config show`, `config storage` and `config recommend` load it
-  under the link directory's name (a suggested name when it records none),
-  with a note.
-- Both directories share the one file, so the fix is not to add `name:` to
-  it. Pass `--name`: when the link's directory records a name, only that
-  name is accepted through the link (reach the other deployment through the
-  file's own path); otherwise the namespace's stamps decide. Or replace the
-  link with a copy and name each copy.
-- `init --overwrite` without `--name` refuses such a file when either
-  directory records a v1.6 name. `relocate` refuses to run through a link
-  when either directory records one.
-- The 1.7 deploy state (`.lakebench/<name>.json`, below) stays with the
-  file the link points to.
-
-### Deploy state and nameless teardown
-
-Every `deploy`, named configs included, records the per-deploy nonce it is
-about to stamp on the namespace in `.lakebench/<name>.json` beside the
-config, before the namespace gets it.
-
-- It writes under a lock file, `.lakebench/<name>.lock`.
-- The file keeps the last five nonces. The one the namespace carries is
-  never dropped, and the next deploy confirms it.
-- `deploy --dry-run` writes no state, lock or `.lakebench/` directory. The
-  command journal is written as for any command.
-- The directory must be on a local disk, or deployed from one host only: the
-  lock is host-local. A deploy waits at most 120 s for another deploy from
-  the same directory.
-- If the state cannot be written or read, deploy stops before changing the
-  cluster (exit 4).
-- A state written for another directory or host (a copied directory,
-  including a `cp -r` copy at the same path) stops deploy with exit 3
-  (`deploy.state_copied`). If the directory was only renamed with `mv`, run
-  `relocate` (below) from it. If the copy is meant to be a new deployment
-  directory, remove only its `.lakebench/<name>.json`; the other files
-  there may be the only record of other deployments.
-- When the config's `platform.kubernetes.namespace` changes, the next deploy
-  starts a fresh nonce list for the new namespace.
-- Deployment names that are not plain file names, and the name `state`,
-  cannot be recorded (exit 4).
-
-`destroy`, `stop`, `status` and `logs` with a nameless config act only on a
-deployment the directory can prove is its own. Otherwise they refuse
-(exit 3) and point at `lakebench init --from`. The checks:
-
-1. It is the only nameless config in its directory, or `--name NAME` is
-   given.
-2. If `.lakebench/<name>.json` exists, it was written for this directory
-   (the same directory, not a copy at the same path) on this host, for the
-   config's namespace, and has not been moved; and the namespace carries
-   one of its nonces. A copied directory, or a namespace redeployed from
-   elsewhere, is refused.
-3. Otherwise (a v1.6 directory, at most `.lakebench/state.json`): `--name`
-   is required and must equal the name in `state.json` when there is one.
-   The namespace must carry `lakebench.deployment/name: NAME`, must not
-   carry the 1.7 `lakebench.deployment/state-schema` annotation, and its
-   `lakebench.deployment/created-buckets` record (or each bucket's ownership
-   tag) must name all three of the config's buckets.
-
-- Destroy then acts only on the namespace incarnation the check proved. A
-  redeploy in between stops it before any delete (exit 3,
-  `destroy.incarnation_mismatch`).
-- For `status` and `logs` a namespace that does not exist passes the check,
-  and the command reports what it finds, as for any missing deployment.
-- Named configs skip these checks and rely on the ownership stamps alone.
-
-### Moving a deployment's directory
-
-To move a deployment's config to another directory without breaking check
-2, run `python -m lakebench.config.deploy_state relocate CONFIG NEWDIR`
-(add `--name NAME` for a nameless config).
-
-- It copies the config (and a v1.6 `state.json`), writes the state for the
-  new directory and marks the old one as moved. Only the new directory is
-  accepted from then on.
-- Only the directory that wrote the state, or that directory renamed with
-  `mv`, can move it. A copy, or a move to another host, is refused.
-- A v1.6 directory has no 1.7 state to move. After relocate, both
-  directories can still tear the deployment down with `--name`, through the
-  namespace's own stamps (check 3).
-
-## Converting a 1.6 config with `init --from`
-
-`lakebench init --from OLD.yaml -o NEW.yaml` rewrites a 1.6 config in the
-current format. It reads OLD as text, so a `${VAR}` reference is copied as
-written (quoted or not) and never expanded. It never writes over OLD: `-o`
-naming OLD, or a link to it, exits 2.
-
-What it does:
-
-- **Keeps the deployment's name.** That is OLD's `name:`, or for a nameless
-  config the name 1.6 recorded in `.lakebench/state.json` beside the path
-  given, where 1.6 read it.
-  - For a link, the file beside its target is read too. Two different
-    names, or a name only beside the target, exit 3, as `destroy` and
-    `status` refuse that config without `--name`.
-  - When other nameless configs share that directory, 1.6 gave all of them
-    that name, so it exits 3 until `--name` says which deployment this file
-    made.
-  - A `--name` that differs from the recorded name is printed with it.
-  - With neither, the new file gets a new name, and the output says to
-    convert again with `--name` if the config deployed something.
-- **Writes out the bucket names** 1.6 and 1.7 derive from the name
-  (`<name>-bronze` and so on), so a later rename cannot move them. A config
-  last deployed by 1.5 or earlier, with no buckets set, used
-  `lakebench-bronze`, `-silver` and `-gold`: set those in NEW to keep them.
-- **Moves the old spellings to the current keys:** flat top-level keys
-  (`endpoint:`, `scale:` and the rest), `architecture.workload` to
-  `workload`, `architecture.processing` to `architecture.pipeline`,
-  `pipeline.sustained` to `pipeline.continuous`, and `mode: sustained` to
-  `continuous`.
-  - A recipe that contradicts the components written becomes the recipe of
-    those components, which is what 1.6 deployed.
-  - A config with no recipe gets the one it resolves to, unless that
-    recipe's defaults would change a setting.
-- **Drops** every removed key, both `operator.install` keys, and the
-  `spark.conf` keys at the 1.6 defaults Lakebench overwrote anyway, each
-  with what to do instead. It drops `benchmark.streams` when it holds the
-  default 4: 1.6 saved configs wrote it, and `run` refuses it written out.
-  A `medallion` block that moved the bronze layout is kept: 1.6 read it,
-  1.7 cannot, and `deploy` and `run` refuse it.
-- **Replaces a plaintext credential** (`access_key`, `secret_key`,
-  `client_secret`, or a `spark.conf` password, token or key) with a `${VAR}`
-  reference: `${LAKEBENCH_S3_ACCESS_KEY}` and `${LAKEBENCH_S3_SECRET_KEY}`
-  for the S3 keys (`--credentials-env` renames them) and
-  `${LAKEBENCH_POLARIS_CLIENT_SECRET}` for Polaris. The value is never
-  printed, and NEW is no more readable than OLD. When one of those
-  variables is already set in the shell, the output says so.
-
-Before writing, it loads OLD (under the name above) and the new file the
-way `status` would. Every referenced variable is set to its own placeholder
-or, when that cannot load, to its value in this shell. It writes nothing
-(exit 3) unless the two give the same settings and the same planned
-experiment, apart from the moved secrets. This checks the rewrite, not the
-name it chose.
-
-- It prints every moved, dropped or derived key.
-- It then prints anything `run` still refuses in the new file (an executor
-  override above 28, `benchmark.mode: throughput`; `deploy` refuses all but
-  the benchmark settings), which it leaves for you to change.
-- `--overwrite` replaces an existing NEW. It refuses (exit 3) when that file
-  resolves to the same deployment in another namespace, bucket, endpoint or
-  recipe, or is a nameless config in a directory 1.6 recorded a name for.
-- Comments in OLD are not carried over.
+See [docs/configuration.md](docs/configuration.md#minimum-viable-config)
+for which commands require `name:` and for edge cases.
 
 ## spark.conf defaults before 1.7
 

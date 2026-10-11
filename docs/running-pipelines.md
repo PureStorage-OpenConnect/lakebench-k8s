@@ -264,10 +264,9 @@ messages. A long run grows its bronze bucket at the datagen rate:
 - Benchmark rounds run during the window (see In-stream benchmarking).
 - After the window, the continuous gate checks that data kept arriving and
   that silver and gold committed continuously inside the window.
-- A run that passes lets the rest of the corpus settle, stops the streams,
-  and runs a result check over the settled tables, so it can be compared
-  with another run. See [Continuous gate](benchmarking/verdict.md#continuous-gate)
-  and [Result check](benchmarking/verdict.md#result-check).
+- The streams stop at window end; the last in-stream round's answers are
+  the run's answer check. See [Continuous gate](benchmarking/verdict.md#continuous-gate)
+  and [After the window](benchmarking/verdict.md#after-the-window).
 - A window much longer than a finite corpus needs to arrive measures an idle
   pipeline. The gate fails a run whose data stopped arriving before half the
   window, and the run warns about this at start.
@@ -361,32 +360,26 @@ lakebench run my-config.yaml --continuous --duration 3600
 ```
 
 Each key's type, range and default is in
-[Configuration](configuration.md). When to change them:
+[Configuration](configuration.md#architecture----pipeline). When to change
+them:
 
-- **Trigger intervals** (`bronze_trigger_interval`,
-  `silver_trigger_interval`, `gold_refresh_interval`): leave at 0 to measure
-  the pipeline. Back to back, a stage starts its next micro-batch as soon as
-  the last one finishes and new input exists, so a batch holds what arrived
-  while the last one ran. A positive interval holds the stage to that cadence and is
-  labelled as a Lakebench cap; a timer only builds backlog or adds waiting.
+- **Trigger intervals**: leave at 0 to measure the pipeline. A positive
+  interval holds the stage to that cadence and is labelled as a Lakebench
+  cap; a timer only builds backlog or adds waiting.
 - **`max_files_per_trigger`**: leave unset while datagen runs. With
   `--skip-generate`, unset is derived so a finite corpus keeps arriving for
-  about 1.2 x `run_duration`, at most 50 files. A fixed files-per-trigger
-  rate needs a cadence, so with bronze back to back it runs bronze every
-  30 s.
-- **`run_duration`**: at least 60. Use 900 s or more for short tests (UAT
-  included). For 5 benchmark rounds:
+  about 1.2 x `run_duration`, at most 50 files.
+- **`run_duration`**: use 900 s or more for short tests (UAT included). For
+  5 benchmark rounds:
   `benchmark_warmup + 4 * (benchmark_interval + round_time) + max(60, 1.2 * round_time)`.
   [Planning round counts](benchmarking/query-benchmark.md#planning-round-counts) has a planning table.
-- **`benchmark_warmup`** (300 to 1800): raise it for a slow first gold
-  refresh.
-- **`benchmark_interval`** (300 to 3600, from the end of the last round):
-  for more rounds, raise `run_duration` instead of lowering the interval.
-  With gold on a longer interval, both are raised to it.
-- **`bronze_target_file_size_mb`, `silver_target_file_size_mb`** (512):
-  reduce to 128-256 MB below scale 10, where 512 MB files are never reached.
-- **`gold_target_file_size_mb`** (128): smaller because gold is a compact
-  table. Rarely needs changing.
+- **`benchmark_warmup`**: raise it for a slow first gold refresh.
+- **`benchmark_interval`**: for more rounds, raise `run_duration` instead of
+  lowering the interval. With gold on a longer interval, both are raised to
+  it.
+- **Target file sizes**: reduce `bronze_target_file_size_mb` and
+  `silver_target_file_size_mb` to 128-256 MB below scale 10, where 512 MB
+  files are never reached. `gold_target_file_size_mb` rarely needs changing.
 
 ### Iceberg Retention
 
@@ -395,18 +388,11 @@ maintenance, snapshot metadata and orphan files grow without bound: a
 24-hour run can produce over a million S3 objects.
 
 Lakebench runs `expire_snapshots` and `remove_orphan_files` (Delta:
-`VACUUM`) during the run on this schedule:
+`VACUUM`) during the run. The `retention_interval` and
+`retention_threshold` fields are in
+[Configuration](configuration.md#architecture----pipeline).
 
-```yaml
-architecture:
-  pipeline:
-    continuous:
-      retention_interval: 600      # Seconds between maintenance rounds (300-7200; unset = run_duration / 3)
-      retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
-```
-
-`retention_threshold` is a whole number and one unit (`s`, `m`, `h` or `d`);
-anything else is rejected at load. It is not applied as-is everywhere:
+`retention_threshold` is not applied as-is everywhere:
 
 - **Snapshot expiry** is floored at 1 h while streams are live, so no stream
   loses the snapshot it is reading.

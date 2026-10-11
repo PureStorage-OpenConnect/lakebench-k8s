@@ -17,10 +17,7 @@ A one-line banner shows pipeline mode, Customer 360 scale factor, the recipe (`c
 **Read this first.** The panel under the header comes before any metric. In order:
 
 - **Verdict** and **headline**. The verdict is the stricter of the stored one and one recomputed today; a record is never promoted. A difference is shown, for example "FAILED (stored PASSED; recomputed FAILED)". The headline is a failed run's first reason, the first warning, or for a clean pass the workload, mode, scale, rules run and n.
-- **Evidence class**, read only from the [registered-look](../glossary.md#look) file (`src/lakebench/spark/data/aml/aml_registered_looks.json`, AML evaluation runs recorded in advance), never the config.
-  - A completed look whose `run_ids` names this run: "registered look: <role>", with the first 12 characters of its report sha256.
-  - An AML calibration corpus: "development (calibration corpus: in-sample ...)": the numbers describe that corpus only, not held-out data.
-  - Every other run, or a missing or unreadable file: "development".
+- **Evidence class**: "development" for standard runs; registered evaluation runs show their role.
 - **Corpus**, **support state**, **binding caps** (or "none"), **n** (runs, samples per query), **provenance** (version, commit, dirty tree), identity **digest**.
 - Qualifiers: rules skipped on a cap, layers without row counts, Customer 360 checks failed outside the gating set.
 - Limits: n=1, rules skipped or errored (and the rules continuous AML does not run), AML recall uncalibrated and in-sample, a dirty tree.
@@ -104,27 +101,15 @@ The `c360_correctness` checks ([gating rules](scorecard.md#customer-360-expected
 
 ## Storage multiple
 
-Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the settle wait (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score (`storage_multiple_total` is diagnostic).
+Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score (`storage_multiple_total` is diagnostic).
 
 - **Physical**: object bytes under each table's location, one listing per bucket. **Logical**: current snapshot data files (Iceberg `$files`, Delta `DESCRIBE DETAIL`).
-- Physical splits into current data, retained-snapshot data (files only an older retained snapshot references; Spark Thrift `all_files`, Trino `$all_entries`), metadata (`metadata/` or `_delta_log/`) and other. Without a retained split (Delta, Trino without `$all_entries`), "retained and unreferenced" is one figure. When orphan removal ran, the unreferenced share is labelled as bounded by its 24 h 10 min floor.
-- Excluded, with bytes: stream checkpoints (any `checkpoints/` segment, and directories under `sustained.checkpoint_base`), datagen markers (`_corpus/`) and manifest, `<gold>/scoring/`, `<gold>/_ml_loop/`.
-- Named without bytes (not in object storage): executor scratch PVCs, the dependency server's `lb-deps` PVC.
-- Raw datagen files in bronze: physical only, outside the total. Continuous adds their growth per datagen hour and the space a 24-hour run needs.
-- Incomplete multipart uploads are not listed or counted.
-- "Not measured", with reason, when:
-  - the catalog does not know the table
-  - its files are registered in place outside its location (AML batch bronze, `add_files`)
-  - the engine cannot read its data size (Delta on Trino)
-  - physical bytes are below referenced bytes
-- Customer 360 batch bronze is the raw corpus, not a table.
-- Trino skips retained-snapshot bytes past 500 snapshots (`$all_entries` is expensive on the coordinator).
-- An engine that cannot read table metadata (DuckDB, `none`): physical bytes per bucket only, with the reason.
-- Listings and queries share a 10-minute budget; a failed bucket leaves its tables not measured, and the total says how many tables it covers.
-- A run that did not pass, and a `run --stage` run (other layers' tables are an earlier run's), record not measured.
+- Physical splits into current data, retained-snapshot data, metadata and other. When orphan removal ran, the unreferenced share is labelled as bounded by its 24 h 10 min floor.
+- Excluded, with bytes: stream checkpoints, datagen markers and manifest, scoring output. Raw datagen files in bronze are physical only, outside the total.
+- "Not measured", with reason, when the catalog does not know the table, its files are registered in place, or the engine cannot read its data size.
+- A run that did not pass, and a `run --stage` run, record not measured.
 
 Record field `storage_multiple`:
 
-- `buckets`: per bucket, name, layers served, physical bytes (every listed object), unattributed bytes, and the listing error (byte figures then null).
-- Unattributed: objects under no exclusion, raw datagen prefix or measured table location; a table the catalog does not know lands here.
+- `buckets`: per bucket, name, layers served, physical bytes, unattributed bytes, and the listing error.
 - A bucket name is a value, never a key, so a record can be scrubbed into a test fixture.

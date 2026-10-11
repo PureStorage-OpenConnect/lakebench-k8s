@@ -193,40 +193,17 @@ days.
   case and IQ4 unchanged, once each.
 - It is not a benchmark round: in-stream QpH and the round count do not move.
   It takes window time, so the round count can be lower than without it.
-- Timing: it runs only when at least twice the baseline round's time is left.
-  - The case pick's timeout is at most 120 s and a fifth of the time left.
-  - Each session query's timeout, from what is left after the pick, is at
-    most 300 s and a quarter of it less a 10 s cleanup margin. So the round
-    ends inside the window (`status: no_time` when that is under 30 s).
-- `continuous.investigators` records:
-  - `sessions_requested`;
-  - `sessions_run` (sessions started: fewer when the run has fewer cases,
-    with `lowered_reason`; a session whose queries failed still counts and
-    shows in `failed` and `status`);
-  - `case_ids`, `rows_per_session`, `seconds_per_session`;
-  - the nearest-rank `latency` p50 and p95 per query over sessions whose
-    query succeeded (with `n` and the `failed` count);
-  - the `baseline` round's time per query;
-  - the session `window` (Lakebench host clock, while `continuous.window` is
-    on the cluster's);
-  - `query_timeout_s`; `session_sql` (a hash of each bound query's SQL);
-  - any `failed` or `empty` queries; and `status`.
+- Each session's query timeouts are derived from the time left in the window
+  so the round ends inside it (`status: no_time` when not enough remains).
+- `continuous.investigators` records `sessions_requested`, `sessions_run`,
+  per-query latency p50 and p95, the baseline round's time per query,
+  failed or empty queries, and `status`.
 - `status`: `pass`; `fail` when a session query failed or a session's IQ1 or
   IQ3 returned no rows (fails the investigators check, not the run);
-  `no_cases`; `no_rounds` (no in-stream round ran, for example under
-  `--skip-benchmark`); `no_time`; `case_query_failed`.
-- Labels: `n=1 per arm` and `shared S3 contention`, plus `BOUNDED BY
-  Lakebench per-query timeout (Ns)` when a session query timed out, and the
-  engine's Lakebench-set memory bound when one failed on memory.
-- After the window, each detection tick that ended inside the continuous
-  window is placed against the session window (its end from the log, shifted
-  to the host clock, minus its `total`). `tick_delta` gives the count and
-  median tick time of ticks with at least half their time inside the
-  sessions' window and of those entirely outside; `load_label`
-  ("investigator load START-END: k of m ticks overlap") states it.
-- The verdict carries the check and the label as its `investigators`
-  qualifier, shown beside the verdict. Time to detect and continuous
-  throughput keep their values and include those ticks.
+  `no_cases`; `no_rounds`; `no_time`; `case_query_failed`.
+- The verdict carries the investigators check and a label noting which
+  detection ticks overlapped the session window. Time to detect and
+  continuous throughput keep their values and include those ticks.
 - `experiment.investigators` holds `{requested, run}`. The identity key
   `investigator sessions` is the number that ran, an outcome condition: runs
   that ran different numbers are not like-for-like.

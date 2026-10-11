@@ -11,33 +11,13 @@ Spark is the compute engine for the medallion pipeline in every recipe ([Recipes
 
 ### Script ConfigMaps
 
-The scripts ship as one ConfigMap per role, projected as one flat directory at `/opt/spark/scripts` in driver and executor pods. The file list is `SCRIPT_MAPS` in `modules/pipeline_engines/spark/scripts_maps.py`.
-
-| ConfigMap | Contents |
-|---|---|
-| `lakebench-scripts-common` | `common.py` |
-| `lakebench-scripts-c360` | the Customer 360 stage scripts, Iceberg and Delta |
-| `lakebench-scripts-aml-rules` | `detection_rules.py`, `tm_operations.py` |
-| `lakebench-scripts-aml-jobs` | the AML stage and operator-action scripts |
-| `lakebench-scripts-aml-gate` | the reference scorer and the pre-registered gate modules |
-| `lakebench-scripts-aml-data` | the AML reference and pre-registration JSON |
-
-- `run` and `lakebench financial` apply every map, read each back and check that its data hashes to its `lakebench.io/scripts-sha256` annotation before submitting jobs.
-- They refuse to change a map that another deployment owns, or one that a running SparkApplication mounts (Kubernetes would swap the files under the running pods).
-- They re-check the maps before each later job, so every stage runs on the scripts its run applied.
-- A listed file missing from the installed package, or a map over 838,860 bytes (80% of the 1 MiB ConfigMap limit, key and value bytes), stops the run with one line naming the file or map.
-- The single `lakebench-spark-scripts` map of 1.6 and earlier is deleted on the first 1.7 run, unless a running SparkApplication mounts it.
-- `destroy` deletes all the maps, also when `create_namespace: false` keeps the namespace.
+Pipeline scripts are deployed as ConfigMaps (one per role), projected together at `/opt/spark/scripts` in every Spark pod. `run` validates them before submitting jobs and refuses to start if a listed file is missing or a map exceeds the ~840KB ConfigMap limit. `destroy` deletes all the maps.
 
 ## Spark Operator
 
 Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). The v1.x line breaks volume injection and is not supported.
 
-- Spark's `spark.kubernetes.*.volumes.*` conf properties cannot mount a ConfigMap: `KubernetesVolumeUtils` has no `configMap` volume type.
-- Lakebench therefore defines its volumes in `driver.template`/`executor.template` pod templates (`_build_manifest()` in `modules/pipeline_engines/spark/job.py`): the projected scripts volume, the work-dir emptyDir and, on the driver, the `lb-deps-dl` emptyDir the jars download into.
-- Only the executor scratch PVC uses the conf-property path.
-- The operator's webhook injection is unchanged from 2.4.0 through 2.5.1 (checked against its source), so the pod-template route stays.
-- v1.x (tested: v1.1.27) does not inject volumes from `spec.volumes` into pods.
+- v1.x does not inject volumes from `spec.volumes` into pods.
 - The operator version is not the Spark runtime version.
 - `mainApplicationFile` uses `local://` URIs, so scripts must be in the container filesystem.
 
@@ -71,7 +51,7 @@ platform:
 
 ## Version and image
 
-`images.spark` defaults to the recipe's image ([version matrix](compatibility-matrix.md#component-version-matrix), `config/recipes.py`).
+`images.spark` defaults to the recipe's image ([version matrix](compatibility-matrix.md#component-version-matrix)).
 
 - A config with no recipe takes the image of the recipe its components name, so a recipe-less Polaris config gets the Polaris recipes' image.
 - The Spark 4.0 image is also chosen when the config sets a table format version Spark 4.1 cannot run (Delta 4.0.0).
@@ -99,7 +79,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 
 ## Configuration keys
 
-Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, `images.spark` and the top-level `spark` section. Defaults are from `config/schema.py`.
+Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, `images.spark` and the top-level `spark` section.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -125,7 +105,7 @@ spark:
     spark.hadoop.fs.s3a.retry.limit: "20"  # replaces a job default
 ```
 
-Each job's conf is the job defaults, then `spark.conf`, then the keys Lakebench sets. Defaults (`SPARK_CONF_DEFAULTS` in `modules/pipeline_engines/spark/conf_keys.py`), which `spark.conf` can replace:
+Each job's conf is the job defaults, then `spark.conf`, then the keys Lakebench sets. Lakebench defaults, which `spark.conf` can replace:
 
 | Key | Default |
 |---|---|
@@ -156,7 +136,7 @@ Two keys a user may set (`USER_OVERRIDABLE_SPARK_KEYS`): Lakebench sets `spark.d
 
 ## Job Profiles
 
-Per-executor sizing comes from `_JOB_PROFILES` in `modules/pipeline_engines/spark/job.py`, proven at 1TB+ scale. Workload overrides live in `_SCHEMA_PROFILE_OVERRIDES` in the same file. Reducing these values causes OOM kills or "No space left on device" failures.
+The built-in profiles set per-executor sizing, proven at 1TB+ scale. Reducing these values causes OOM kills or "No space left on device" failures.
 
 ### Batch Jobs
 
@@ -184,7 +164,7 @@ Financial overrides: `bronze-ingest` runs 4 cores, 8g memory and 8g overhead per
 
 ## Auto-Scaling
 
-Executor count comes from the scale factor unless a `*_executors` key overrides it (`executor_count()` in `job.py`):
+Executor count comes from the scale factor unless a `*_executors` key overrides it:
 
 - **Scale <= 10:** the job's base count.
 - **Scale > 10:** `base + ((scale - 10) * rate) // 100`, capped at the job's maximum.
@@ -216,7 +196,7 @@ platform:
       storage_class: "px-csi-scratch"  # Must be repl=1
 ```
 
-When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-local` for shuffle spill (`scratch_executor_size()` in `job.py`):
+When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-local` for shuffle spill:
 
 - **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify with 16 executors at scale 10 gets 50Gi each.
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
@@ -227,20 +207,7 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 
 ## RBAC
 
-`deploy` creates the Role `lakebench-spark-runner` (namespace-scoped, not a ClusterRole; `templates/rbac/role.yaml.j2`). `deletecollection` is required for Spark 3.5.x driver cleanup on termination.
-
-```yaml
-rules:
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["services", "configmaps", "persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
-  - apiGroups: [""]
-    resources: ["pods/log"]
-    verbs: ["get", "list"]
-```
+Deploy creates a namespace-scoped Role with pod and PVC lifecycle verbs; `deletecollection` is required for Spark 3.5.x cleanup.
 
 ## OpenShift Security Context Constraints (SCC)
 

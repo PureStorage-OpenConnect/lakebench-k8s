@@ -2,7 +2,7 @@
 
 Reference: the measurement window, continuous scores and formulas, offered load, capacity and steady-state runs, intake limits and throughput bounded by `max_files_per_trigger` (the [trickle](../glossary.md#trickle)).
 
-Gate and result check: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](continuous-tuning.md).
+Gate and answer checks: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](continuous-tuning.md).
 
 ## Measurement window
 
@@ -16,7 +16,7 @@ Gate and result check: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](
 **Changed definitions.** Do not compare across these:
 
 - Before 1.6 (2026-09-26), throughput, freshness, `corpus_drained` and `total_rows_processed` counted outside the window. `sustained_throughput_rps` was bronze rows / `run_duration`, pre-window rows included; `corpus_drained` also needed two idle gold cycles.
-- 1.7.1: gold freshness counts from file landing (bronze `ingest_ts`), adding the datagen-to-bronze and bronze-to-silver lag; stages run back to back by default; `arrival_seconds`, `ingest_ratio` and silver's kept-pace check use the stage's cadence (trigger interval, or its median batch time). AML identity catches this (`aml-3`); Customer 360 (`c360-2.dev1`) does not.
+- 1.7.1: gold freshness counts from file landing (bronze `ingest_ts`), adding the datagen-to-bronze and bronze-to-silver lag; stages run back to back by default; `arrival_seconds`, `ingest_ratio` and silver's kept-pace check use the stage's cadence (trigger interval, or its median batch time). AML identity catches this; Customer 360 does not.
 
 ## Scores
 
@@ -45,9 +45,8 @@ Gate and result check: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](
 
 **`released_rows`** (an estimate at the mean rate):
 
-- Trickle: `max_files_per_trigger` files per bronze trigger since bronze's first write, at mean rows per file (datagen rows / files), capped at the corpus.
-- Own datagen: rows datagen had written one bronze cadence before the window's end, at its mean rate. Datagen's total also holds rows written after the window, before pods saw the stop marker.
-- A run whose last batch was in flight can read up to one cycle short (0.983 at an 1800 s window and 30 s cycle).
+- Trickle: rows the trickle had made available by the window's end, at mean rows per file, capped at the corpus.
+- Own datagen: rows datagen had written one bronze cadence before the window's end, at its mean rate.
 
 ## Freshness
 

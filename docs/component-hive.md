@@ -13,8 +13,8 @@ Hive Metastore (HMS) is the metadata catalog for Iceberg and Delta tables. It tr
 
 ## Version and image
 
-- The metastore runs Stackable's image `oci.stackable.tech/sdp/hive:<hive-version>-stackable<sdp-version>`. `STACKABLE_HIVE_VERSION` in `config/schema.py` sets the HiveCluster `productVersion`; run output records it. Version and why Hive 4 is not used: [version matrix](compatibility-matrix.md#component-version-matrix). Hive 4 fails Iceberg `get_table` with TApplicationException.
-- No config key selects it. `images.hive` is removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)): a config that names 3.1.3 there loads with a note; another version is refused by the commands that change data.
+- The metastore runs Stackable's image. Version and why Hive 4 is not used: [version matrix](compatibility-matrix.md#component-version-matrix). Hive 4 fails Iceberg `get_table` with TApplicationException.
+- No config key selects it. `images.hive` is removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)).
 
 ## Stackable operator
 
@@ -55,15 +55,7 @@ Defaults from `HiveConfig` and `HiveResourcesConfig` in `config/schema.py`.
 
 ### Settings fixed in the template
 
-The HiveCluster template sets these `hive-site.xml` values, proven at 1TB+ scale. No YAML field changes them.
-
-- **Thrift server:** `hive.metastore.server.min.threads=10`, `max.threads=50` (up to 50 simultaneous catalog operations), `hive.metastore.client.socket.timeout=300s`.
-- **Connection pool:** maxPoolSize=20, maxActive=15, maxIdle=5, minIdle=2.
-- **Batch retrieval:** batch.retrieve.max=500, table.partition.max=1000.
-- **Reliability:** tcp.keepalive=true, failure.retries=3, connect.retry.delay=5s.
-- **Concurrency:** hive.support.concurrency=true, dynamic.partition.mode=nonstrict.
-
-The removed `hive.thrift` block never changed the thread or timeout values. A config that carries it at those values loads with a note; any other value is refused by the commands that change data.
+The HiveCluster template sets thread and pool parameters proven at 1TB+ scale; no config key changes them.
 
 ## Deploy and destroy
 

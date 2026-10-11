@@ -14,9 +14,9 @@ See also: rules in [4.2](rules.md#42-detection-rules).
 | 4 | gold-finalize | sealed silver | baseline dashboard; nine detection rules; the W1 and W4 projections (`gold.entity_clusters`, `gold.risk_scores`, best effort); TM operations | gold tables ([2.4](data-model.md#24-gold-tables)) |
 | 5 | score-financial | `gold.alerts`, `gold.detection_status`, manifest | recall and false-positive scoring ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) | `recall.parquet`, `recall.json` |
 | 6 | AML batch gate, TM verdict | driver logs, `recall.json` | [5](correctness.md#5-correctness-contract) | pass or fail |
-| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then FQ1 to FQ8, not fingerprinted | `pre_compaction_qph` |
+| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then FQ1 to FQ8 | `pre_compaction_qph` |
 | 8 | table maintenance | maintained tables | expire snapshots and orphan removal, compaction on silver and gold only (never bronze), under policy `m2-2026-09-26` and one shared 1,800 s budget; DuckDB recipes run none | `maintenance_outcomes` |
-| 9 | settle wait (skipped when no maintenance statement ran), then the scored benchmark | silver, gold | 12 queries when TM operations gave a `pass` or `fail` verdict, else FQ1 to FQ8; power mode, hot, `benchmark.iterations` samples per query | QpH, fingerprints |
+| 9 | settle wait (skipped when no maintenance statement ran), then the scored benchmark | silver, gold | 12 queries when TM operations gave a `pass` or `fail` verdict, else FQ1 to FQ8; power mode, hot, `benchmark.iterations` samples per query | QpH, per-query row counts |
 
 - Bronze-verify falls back from `add_files` to CTAS (doubles bronze storage)
   above 1.5 TiB or 800,000 files, or when `add_files` fails.
@@ -168,8 +168,7 @@ in bronze.
      `experiment.support.mode_note` names them.
    - After five consecutive failed ticks (or baseline refreshes) the driver
      exits 1. The operator restarts it under the streams' restart policy.
-5. **In-stream benchmark rounds**: power mode, hot, one sample per query, not
-   fingerprinted.
+5. **In-stream benchmark rounds**: power mode, hot, one sample per query.
    - With TM operations on, each round first probes `gold.cases` for a case
      of this run's `base_run_id` (untimed, 60 s timeout).
    - Once a case exists the round runs all twelve queries. Before that it
@@ -199,9 +198,8 @@ in bronze.
 8. **Gates**: the continuous window gate, the drain check, the AML continuous
    gate, the TM verdict and the record gates ([5](correctness.md#5-correctness-contract)).
 
-The end-of-run result check does not run for AML continuous; the record says
-why in `experiment.results.not_checked`. No published record carries a
-covered score yet; the published continuous record predates the drain.
+No published record carries a covered score yet; the published continuous
+record predates the drain.
 
 ## 4.4 Out-of-run AML commands
 
@@ -228,33 +226,17 @@ recall scorer outside a run. With no run id it scores the run
   `W8_dormant_reactivation`.
 
 **`lakebench financial reproduce CONFIG --alert-id <id>`** (`--run RUN_ID`)
-reruns one batch alert's rule on exactly what that run's gold-finalize read
-(`spark/scripts/reproduce_financial.py`).
+reruns one batch alert's rule on exactly what that run's gold-finalize read.
 
-- Gold-finalize logs the snapshot of `silver.transactions`,
-  `silver.entities` and `silver.silver_batch_versions` it reads.
-- Before maintenance the batch scorer fingerprints every column of each
-  (`financial_scoring.read_snapshots`: table, snapshot, `total_records`,
-  `rows`, `fp`, `cols_sha`), reading all three tables once per run.
-- It reads the run record (`--run`, or the deployment's latest AML batch
-  record on this host; exit 2 when there is none).
-- Before any cluster call it refuses a record from a protected corpus
-  (exit 2) or one with no read snapshots (exit 4: it predates 1.7, or was not
-  scored, like a `run --stage` subset).
-- It reads each table at its recorded snapshot. Once that expired, it reads
-  the current table when its fingerprint is the same (content and batch
-  stamping equal: `basis: equivalent`).
-- It filters transactions to the batches the versions table had sealed when
-  gold read it. It runs the rule with gold's parameters over the whole silver
-  snapshot. It matches the alert on (rule, entity, `alert_ts`) and the set of
-  related transactions.
-
-| Exit | Meaning |
-|---|---|
-| 0 | reproduced |
-| 1 | not reproduced (no match, several, a different set, or the rule declined to run) |
-| 1 | the alert is not in `gold.alerts` for that run (a rule version other than the running code's included) |
-| 4 | a snapshot is gone and the content changed |
+- It reads each silver table at the snapshot gold-finalize logged. When that
+  snapshot expired, it falls back to the current table if its fingerprint
+  matches (content and batch stamping equal: `basis: equivalent`).
+- It filters transactions to the sealed batches, runs the rule, and matches
+  the alert on (rule, entity, `alert_ts`) and related transactions.
+- Exit 0: reproduced. Exit 1: not reproduced or alert not found.
+  Exit 4: a snapshot is gone and the content changed.
+- Refuses a protected corpus (exit 2) or a record with no read snapshots
+  (exit 4).
 
 The result is written to `scoring/reproduce/<alert_id>/result.json`. What is
 not pinned is in [12](limitations.md#12-known-limitations). Continuous alerts

@@ -144,36 +144,7 @@ architecture:
   without editing it.
 - `sustained` is a deprecated alias of `continuous`.
 
-Support is judged per workload x recipe x mode: **supported** (validated on
-the release tree), **unverified** (valid, not release-validated) or
-**unsupported** (refused before a run). Rules:
-[Compatibility Matrix](compatibility-matrix.md#support-states). This table
-is generated from the code:
-
-<!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
-
-| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
-|---|---|---|---|---|
-| `hive-delta-spark-none` | unverified [1] | unverified [1] | unsupported | unsupported |
-| `hive-delta-spark-thrift` | supported (Spark 4.0, Delta 4.0.0) | unverified [1] | unsupported | unsupported |
-| `hive-delta-spark-trino` | supported (Spark 4.1, Delta 4.1.0) | supported (Spark 4.1, Delta 4.1.0) | unsupported | unsupported |
-| `hive-iceberg-spark-duckdb` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-none` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-thrift` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-trino` | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) |
-| `polaris-iceberg-spark-duckdb` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-thrift` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-trino` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | supported (Spark 4.0, Iceberg 1.11.0) | supported (Spark 4.0, Iceberg 1.11.0) |
-
-- [1] unverified: not in this release's validation matrix.
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
-- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
-- A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
-- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W5, W6, W17 each tick and records W1, W7, W8 as not run (from 1.7.1; earlier records name the rules they ran). W4 raises one alert per entity per week, and W5 screens payments as they arrive, with no rescreen of earlier payments when a list version is published. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
-
-<!-- END GENERATED: support-states -->
+See [Compatibility matrix](compatibility-matrix.md) for support states and platform requirements.
 
 ## Using `lakebench config recommend`
 

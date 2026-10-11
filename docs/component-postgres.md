@@ -7,7 +7,7 @@ Reference: configure the PostgreSQL metadata backend: config keys, credentials, 
 PostgreSQL is the metadata backend for every recipe. Hive Metastore, Apache Polaris and Unity Catalog store their catalog metadata (table definitions, partition info, Iceberg snapshots) in it.
 
 - One instance per deployment, as a StatefulSet with a PersistentVolumeClaim, so metadata survives pod restarts.
-- The deployer (`src/lakebench/deploy/postgres.py`) renders a ServiceAccount, a StatefulSet and a headless Service from Jinja2 templates.
+- Lakebench renders a ServiceAccount, a StatefulSet and a headless Service from Jinja2 templates.
 - Service DNS: `lakebench-postgres.<namespace>.svc.cluster.local:5432`.
 - Databases: `hive` (user `hive`); Polaris and Unity use their own `polaris` and `unity` databases on the same instance.
 
@@ -27,9 +27,7 @@ Defaults from `PostgresConfig` in `config/schema.py`.
 
 ### Choosing a StorageClass
 
-- **Production or bare-metal:** a replicated class such as `px-csi-db` (Portworx `repl=3`). Losing this volume loses every table definition and partition record.
-- **Development or ephemeral clusters:** the cluster default is usually fine. On cloud providers it often maps to a network volume with provider-managed replication.
-- **Never a scratch class.** `px-csi-scratch` (`repl=1`) is for expendable data such as Spark shuffle.
+Recommended: a replicated class such as `px-csi-db` (Portworx `repl=3`). Never use a scratch class -- losing this volume loses every table definition and partition record.
 
 ## Credentials
 

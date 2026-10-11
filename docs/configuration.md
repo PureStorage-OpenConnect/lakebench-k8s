@@ -861,13 +861,7 @@ How 1.6 handled these defaults is in
 
 ## Scale Factors
 
-`datagen.scale` is an abstract multiplier: one scale unit is about 10 GB of
-bronze Parquet. What a unit generates is per workload. For Customer 360 the
-customer id space, file count and row count at each scale are in
-[the Customer 360 spec, section 3](benchmarks/c360/generation.md#3-data-generation).
-[Data Generation](data-generation.md) covers the `generate` command and
-both workloads. Supported, unverified and refused scales:
-[Scale limits](data-generation.md#scale-limits).
+See [Data generation](data-generation.md) for scale factor details.
 
 `spark.lb.gold.strategy` picks how Customer 360 gold-finalize aggregates
 silver:
@@ -890,27 +884,15 @@ Executor counts are covered under [Auto-Sizing](#auto-sizing).
 
 ## Multi-Cycle Batch
 
-`architecture.pipeline.cycles` (1 to 50) runs a batch run as N cycles, each
-over its own slice of the event window, to model a table that receives
-daily loads.
+See [Running pipelines](running-pipelines.md#multi-cycle-batch) for
+multi-cycle batch details.
 
-- It is refused with continuous mode.
-- `run --generate` (except with `--local`), `run --generate-only` and
-  `lakebench generate` are refused with it, because each cycle generates its
-  own slice.
-- Cycles 2 and later set `LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL`.
-  This is the only case in which gold-finalize runs incrementally.
-- Table health is probed after each cycle and recorded in
-  `cycles[].table_health` as `silver_data_file_count`,
-  `gold_data_file_count`, `silver_snapshot_count` and
-  `gold_snapshot_count`. Delta records the file counts only. The record is
-  empty on DuckDB, with no query engine, or where the engine cannot count
-  Delta files. A probe query that fails leaves its key out.
+Config fields:
 
-How a multi-cycle run proceeds and what it records:
-[Running Pipelines](running-pipelines.md#multi-cycle-batch). What it does to
-the corpus:
-[the Customer 360 spec, section 3](benchmarks/c360/generation.md#3-data-generation).
+- `architecture.pipeline.cycles` (1 to 50): number of batch iterations.
+- `architecture.pipeline.pre_benchmark_maintenance` (boolean, default true):
+  run compaction and snapshot expiry before the benchmark after the last
+  cycle.
 
 ## Timestamp Range Impact
 

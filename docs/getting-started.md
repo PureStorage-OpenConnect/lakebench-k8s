@@ -35,24 +35,8 @@ Lakebench does not need `oc`, even on OpenShift.
 
 ### Default StorageClass
 
-The PostgreSQL metadata volume and the `lb-deps-data` volume need a
-**default StorageClass** (annotated
-`storageclass.kubernetes.io/is-default-class: "true"`). Check with
-`kubectl get storageclass -o wide` and look for `(default)`.
-
-| Platform | Usual default |
-|---|---|
-| EKS | `gp2` or `gp3` |
-| GKE | `standard` or `premium-rwo` |
-| AKS | `managed-premium` or `managed-csi` |
-| OpenShift | varies by platform (typically `thin-csi` or Portworx) |
-
-Self-managed clusters (kubeadm, bare metal) may need one created by hand.
-Or set both `platform.compute.postgres.storage_class` and
-`platform.deps.storage_class` in the config.
-
-Trino workers and Spark shuffle use ephemeral storage by default and need no
-StorageClass. Set their `storage_class` fields for PVC-backed storage.
+You need a default StorageClass, or set `postgres.storage_class` and
+`deps.storage_class` in your config. Check with `kubectl get sc`.
 
 ### S3-compatible object storage
 
@@ -234,12 +218,13 @@ Give the two configs different names: a name is one deployment.
 
 Read the two HTML reports side by side (`report` prints each path). The
 Experiment section of each states the corpus, datagen image, components,
-maintenance, the stages and rules that ran, a result fingerprint per
-benchmark query and, for AML batch runs, the alert set.
+maintenance, the stages and rules that ran, the benchmark query set id and,
+for AML batch runs, the alert set.
 
-Compare performance only when the corpus, every result fingerprint and the
-alert set match. A difference means the two stacks returned different
-answers. A number bounded by a Lakebench cap is labelled as such.
+Compare performance only when the corpus, the query set id and the alert set
+match. Lakebench does not compare query answers: check the per-query row
+counts and numbers of both reports by eye. A number bounded by a Lakebench
+cap is labelled as such.
 
 ### 6. Tear down
 
@@ -281,24 +266,8 @@ More in [Troubleshooting](troubleshooting.md).
 
 ## What ran
 
-```
-Raw Parquet (S3)
-  -> Bronze: validate, deduplicate, enforce schema
-  -> Silver: normalize emails and phones, geo-enrich, segment customers,
-             flag quality issues (Iceberg table)
-  -> Gold:   executive dashboard with daily KPIs, channel performance,
-             customer lifetime value (Iceberg table)
-  -> Benchmark: 8 queries on silver and gold (RFM segmentation, revenue
-                moving averages, cohort retention, channel attribution, CLV)
-```
-
-- Bronze is raw Parquet in S3. Silver and gold are Apache Iceberg tables in
-  the catalog (Hive Metastore or Polaris).
-- The query engine (Trino, Spark Thrift or DuckDB) reads silver and gold
-  through its Iceberg connector.
-- Apache Spark does all processing, on Kubernetes through the Spark
-  Operator. Executor count grows with the scale factor. Per-executor sizing
-  stays fixed at tested profiles.
+The pipeline ran bronze-silver-gold stages and a query workload. See
+[Running pipelines](running-pipelines.md) for details.
 
 ## Useful commands
 
@@ -339,16 +308,9 @@ lakebench destroy lakebench.yaml --local
 
 ## Scaling up
 
-Change `scale` in the config:
+Change `scale` in the config. See [Data generation](data-generation.md)
+for scale factors and row counts.
 
-| Scale | Customer 360 bronze | Customers | Rows | AML bronze (batch) | Entities | Transactions |
-|------:|------:|------:|-----:|------:|------:|------:|
-| 1 | 10 GB | 100K | 2.4M | 8.5 GB | 111K | 26.7M |
-| 10 | 100 GB | 1M | 24M | 94 GB | 1.1M | 267M |
-| 100 | 1 TB | 10M | 240M | 936 GB | 11M | 2.7B |
-
-- Supported, unverified and refused scales:
-  [Scale limits](data-generation.md#scale-limits).
 - `lakebench config recommend lakebench.yaml` gives the largest scale your
   cluster holds.
 - The `generate` and `run` timeouts grow with scale. Leave `--timeout`

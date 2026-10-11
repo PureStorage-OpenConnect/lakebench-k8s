@@ -140,31 +140,12 @@ A review tries to break the change rather than approve it.
 - Reviews challenge assumptions nobody has checked, and whether the design is
   the right one at all.
 
-A large change gets one review per dimension it can break: correctness,
-concurrency, config, sizing, cleanup ordering and tests. Large means over
-about 200 lines across modules, or touching destroy and cleanup, shared
-cluster state, table DDL, the Spark job profiles, the compatibility tables
-or the data generator. A fix made for a finding gets its own review: fixes
-have the same blind spots as the code they fix.
-
-Changes to the synthetic data need more than distribution checks. Bands that
-look right do not prove the data still means what it should. Such a change
-also runs a reference detector or scoring function against the output, and a
-leakage check: a planted signal is found by the rule meant to find it and is
-absent otherwise.
+A large change gets one review per dimension it can break. A fix made for a
+finding gets its own review.
 
 ## Performance claims
 
-- Any performance number in a pull request, a doc or a post links to the
-  `metrics.json` of a specific run. It names the commit, the cluster, the
-  scale and the settings that bound it.
-- Not "we saw 4.34 GB/s", but "commit abc123, 8 pods x 8 CPU, scale 0.5,
-  snappy, `lakebench-output/runs/run-<id>/metrics.json`, 4.34 GB/s
-  aggregate".
-- A limit Lakebench itself imposed, such as an executor cap or a trickle
-  rate, is named as such next to the number.
-- A repeatability claim is repeated or labelled `n=1`.
-- Without the `metrics.json`, the claim does not go in.
+Performance claims must link to a specific run's `metrics.json`.
 
 ## Commits and style
 
@@ -236,9 +217,6 @@ lakebench destroy --force my-config.yaml
 - Do not put real customer data anywhere. Every synthetic transaction,
   entity and account name is fabricated. Public sanctions lists may be
   cited; real customer identifiers never.
-- Do not add Prometheus scraping or Grafana panels for short-lived batch
-  jobs whose metrics are terminal. One structured JSON line at completion
-  is enough for the scorecard.
 
 ## Help, security and conduct
 

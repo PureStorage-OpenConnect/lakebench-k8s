@@ -45,37 +45,15 @@ Each stage (datagen, bronze, silver, gold, query) writes a `StageMetrics` record
 By default `lakebench run` measures bronze-verify, silver-build, gold-finalize and the query benchmark; datagen is a separate step.
 
 - Batch: `lakebench run --generate` adds datagen to the same invocation.
-- Continuous: datagen always runs beside the streams as a `datagen` stage (`stage_type="datagen"`, `engine="datagen"`). It adds to `total_elapsed_seconds`, prices bronze's and silver's window rows at its raw bytes per row (fleet bytes written / rows written), and is the denominator of `corpus_ingest_ratio`. Gold's input is what gold reported reading, with no silver-bucket fallback; gold's re-reads and the query stage add none.
-- Continuous runs have no `time_to_value_seconds` or `scale_ratio`.
-- Datagen output size: its pods' bytes written, else a bronze bucket listing (which also holds the table and earlier runs' files). Rows are never estimated from scale.
-- Continuous datagen rows are the sum every pod reports. If any pod did not report, rows are unmeasured (0, with `ingest_ratio` and `pipeline_saturated` null). Batch datagen rows are not measured.
+- Continuous: datagen runs beside the streams as a `datagen` stage. Continuous runs have no `time_to_value_seconds` or `scale_ratio`.
 
-Datagen cost:
+Datagen cost uses requested CPU, not utilization: CPU-seconds = pod CPU request x wall time.
 
-- The scorecard reports CPU-hr/TB and total core-hours from datagen through gold, in the same units for every stage.
-- Datagen wall time is the Job's, from submit to the last pod Succeeded, else the slowest pod's own timer (`wall_elapsed_max_s`).
-- Datagen CPU-seconds are the pod's CPU request x wall time: a pod requesting 8 CPU for 100 s costs 800, whatever its threads did. A pod requesting 16 CPU that runs 8 threads is billed for 16.
 - Example (illustrative, not a measurement): 8 pods at 8 CPU running 200 s = 12,800 CPU-seconds, about 3.6 CPU-hours. Writing 100 GB, that is 36 CPU-hr/TB. With 12 Spark core-hours the pipeline total is 15.6 core-hours.
 - `$/TB` = `total_core_hours` x $/core-hour / TB, covering the whole pipeline.
-- Each pod writes one `LB_METRICS_JSON` line to stderr at completion, with `cores_used` (thread pool) and `cpu_request_millicores` (the request). Cost uses the request.
-- Threads: the pod's CPU rounded up to whole cores (1300m runs 2 threads, held to its share by the CPU quota). An explicit `datagen.generators` overrides it; the count drops when the memory limit cannot hold that many threads.
-- Batch datagen stage: `executor_count` is `pods_reported`; `executor_cores` is effective cores / pods reported; `cpu_seconds_requested` uses the Spark formula; `total_core_hours` includes datagen.
-- A fleet with no reporting pods counts no datagen cores. The stage is added only when the Job's elapsed time is above 0, with 0 executors.
-- Datagen pods are not scraped by Prometheus; the stderr line is the record. With observability on, each pod pushes progress to the deployment's Pushgateway about every 10 s plus a final push at exit, best effort; a failed push changes nothing recorded.
+- `total_core_hours` includes datagen.
 
-The pod lines fold into a sidecar, `lakebench-output/datagen/<namespace>-datagen-metrics.json`. A run never reads another namespace's sidecar.
-
-| Command | Fleet it records |
-|---|---|
-| `lakebench generate` | Writes the sidecar |
-| `run` that generates (batch `--generate`, or continuous without `--skip-generate`) | Its own pods, as `datagen_fleet`; `experiment.corpus.datagen` reads the image digest from it |
-| Batch `run` that does not generate | The namespace's sidecar, from the generate that wrote its corpus |
-| Continuous `--skip-generate` | None |
-| Batch `run` with `pipeline.cycles` above 1 that generates every cycle | None: it does not read those pods. It refuses `--generate`, and removes the sidecar once its bronze check lets it generate (before the check with `--regenerate`) |
-| Multi-cycle `--skip-generate` | The sidecar |
-| `run --local` | Reads the sidecar; writes none |
-
-`lakebench generate` and a generating run remove the sidecar before they empty or regenerate the corpus, so a replaced corpus is never attributed to a later run. This holds even when their own pods cannot be read or the generate fails.
+`lakebench generate` writes a sidecar with the fleet record; a generating `run` writes its own. A replaced corpus's sidecar is removed first, so it is never attributed to a later run.
 
 ## Resource metrics
 

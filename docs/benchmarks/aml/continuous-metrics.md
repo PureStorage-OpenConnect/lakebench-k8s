@@ -81,56 +81,12 @@ carry the keys, null when nothing was measured.
   so a rule that got slower is not hidden in the merged figure.
 
 **Time-travel reads** (`continuous.time_travel`; reported, never gating).
-Each tick records the `silver.transactions` snapshot it read, from snapshot
-metadata only (no scan, so tick timings do not move).
-`continuous.time_travel.ticks[]` holds:
-
-- the driver start, the cycle, whether the tick completed;
-- the snapshot id and its `committed_at` (UTC);
-- from the Iceberg snapshot summary: `total_records` (record count of its
-  live data files), `pos_deletes` and `eq_deletes` (deleted-row totals);
-  with `count_source: "summary"`.
-
-The delete totals are 0 on the copy-on-write tables Lakebench creates, when
-`total_records` is the live row count. With no summary record count,
-`total_records` is null and `count_source` is `"unavailable"`; the current
-table's count never stands in. A tick with no transactions snapshot records
-none.
-
-After the score job of a run that passed its gates, `time-travel-financial`
-(`spark/scripts/time_travel_financial.py`) reads those snapshots back, newest
-first:
-
-- A hash pass fingerprints each recorded snapshot still in the table over its
-  business columns (`common.frame_fingerprint`: every column less `_batch_id`,
-  `_stream_id`, `ingest_ts` and `committed_at`, listed in `hashed_columns`).
-  It writes `scoring/<run_id>/tt_hashes.json` in the gold bucket, listing
-  any snapshot it could not read.
-- A read pass reads that file back, times a full scan `VERSION AS OF` each
-  snapshot with the same fingerprint, and compares it with the tick's
-  `total_records` (when a live-row count) and the hash pass.
-- Each entry gains `state`, `read_s`, `rows`, `fp_match` and `count_match`.
-  `expired_by` comes from `continuous.retention.rounds` (when each maintenance
-  round ended, its applied expiry, its engine, and the tables whose
-  `expire_snapshots` ran).
-- The budget is a deadline on the cluster clock. A wait that ends before the
-  job deletes the job.
-
-Only ticks in the current gold-refresh driver pod's log are read. `verified`
-shows that the snapshot id the tick read still holds the row count its
-summary gave and reads identically twice. Snapshots are immutable, so the hash
-comparison shows read determinism and an unaltered hashes file, not the
-content the tick saw.
-
-| Field | Unit | Definition |
-|---|---|---|
-| `ticks[].state` | text | one of the states in the next table |
-| `ticks[].read_s` | s | the timed read-pass scan plus fingerprint (the snapshot's second read in the job); a snapshot several ticks read is read once per pass |
-| `current_read_s` | s | the same scan of the current snapshot, for comparison only |
-| `policy` | struct | configured retention and the expiry applied while streams ran (floored at 1 h), always stated |
-| `budget` | struct | `budget_s`, the time-travel budget (a Lakebench cap), with its label: the per-job timeout less 120 s; the hash pass gets half |
-| `budget`, scan rule | -- | after a pass's first scan, no scan starts unless the time left exceeds 1.5 times its longest scan. A pass's first scan always starts, so one scan longer than the budget ends the wait and reads `not_run` |
-| `verdict` | text | `pass`, or the first that applies of the verdicts in the table after the states |
+Each tick records the `silver.transactions` snapshot it read. After a passing
+run, `time-travel-financial` reads those snapshots back and verifies that each
+still holds the row count its summary gave and reads identically twice.
+Snapshots are immutable, so the comparison shows read determinism, not the
+content the tick saw. Snapshots expired by a Lakebench maintenance round are
+attributed to the earliest round that could have expired them.
 
 | State | Meaning |
 |---|---|
@@ -139,18 +95,8 @@ content the tick saw.
 | `mismatch` | the read scan's rows, `fp` or column spec differ from the hash pass, or its rows differ from the tick's `total_records`; also when the tick recorded no snapshot id |
 | `error` | a listed snapshot could not be read |
 | `not_read` | the budget ran out |
-| `expired` | expired by a Lakebench maintenance round, named in `expired_by` (below) |
+| `expired` | expired by a Lakebench maintenance round, named in `expired_by` |
 | `missing_unexplained` | expired, and no Lakebench round could have |
-
-`expired_by` is the earliest maintenance round that ran `expire_snapshots` on
-the table and could have expired the snapshot.
-
-- That is a snapshot committed before the round's latest possible cutoff
-  minus its applied retention.
-- The cutoff is the round's end moved to the cluster clock for Trino, and the
-  round's start on this host's clock for Spark Thrift.
-- It records the round, its end time on this host's clock, configured and
-  applied retention, and the reason.
 
 | Verdict | When |
 |---|---|

@@ -31,7 +31,7 @@ engine combination is refused at load with the reason.
 - Each recipe has at most one query engine (`none` for ETL only). The benchmark runs against that engine.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from source. Do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -102,7 +102,7 @@ How the state is recorded:
 The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+<!-- Generated from source. Do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|
@@ -122,7 +122,7 @@ The table below is generated from the code.
 - **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
 - A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
-- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W5, W6, W17 each tick and records W1, W7, W8 as not run (from 1.7.1; earlier records name the rules they ran). W4 raises one alert per entity per week, and W5 screens payments as they arrive, with no rescreen of earlier payments when a list version is published. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
+- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W5, W6, W17 each tick and records W1, W7, W8 as not run (from 1.7.1; earlier records name the rules they ran). W4 raises one alert per entity per week, and W5 screens payments as they arrive, with no rescreen of earlier payments when a list version is published. Its results depend on when detection ran relative to arrival, so two continuous runs cannot show the same results.
 
 <!-- END GENERATED: support-states -->
 

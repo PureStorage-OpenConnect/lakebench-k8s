@@ -3,8 +3,8 @@
 Reference: the code map, test tooling, CI, extension points and why the code is built as it is.
 
 Setup, test tiers, pull requests and review are in
-[CONTRIBUTING.md](../CONTRIBUTING.md). The product model and its extension
-rules are in [DESIGN.md](DESIGN.md).
+[CONTRIBUTING.md](../CONTRIBUTING.md). The product model is in
+[DESIGN.md](DESIGN.md); the [extension rules](#extension-rules) moved here.
 
 ## Architecture map
 
@@ -306,6 +306,104 @@ pull request cancels its older run. A job over its time limit fails.
 - Jobs use a fixed runner image (`ubuntu-24.04`). Every action is pinned by
   commit SHA, with its tag as a trailing comment.
 
+## Extension rules
+
+Rules for extending the product. From [DESIGN.md](DESIGN.md) section 6.
+
+### Adding a workload (design rules)
+
+A new workload brings all five parts of section 2.3. It adds no
+workload-specific logic to component modules; any per-component adapter it
+needs is owned by the workload and passes its correctness contract.
+
+1. A generator schema in `datagen_rs/` and its entry in
+   `datagen_rs/entrypoint.py`, with a seed policy and dimensions in
+   `config/scale.py`.
+2. Stage scripts for each mode it supports, with per-format adapters where a
+   format needs one.
+3. A correctness contract: checks that fail the run on wrong or degenerate
+   output, and a statement of what correct means that a reviewer can check
+(for Customer 360 the owner approves its meaning before it gates, D6).
+4. A query set with its own `query_set_id`, and any workload scores, declared
+   so the collector and report render them without guessing.
+5. A declaration of which formats, engines and modes it is compatible with.
+   Anything not declared is rejected at config load.
+
+### Adding a catalog, table format, pipeline engine or query engine (design rules)
+
+1. Implement the component under `modules/`, alongside the existing ones,
+   and wire it into deployment (`deploy/`) and into where it runs: a query
+   engine through `QueryExecutor`, a pipeline engine through `get_engine`, a
+   table format through its stage scripts (`spark/scripts/`) and its
+   maintenance (`deploy/`).
+   Every resource it creates carries the stamps of `deploy/ownership.py`.
+2. Add the enum value, the structurally valid 4-tuples to
+   `_SUPPORTED_COMBINATIONS`, a reason in `_COMBINATION_NOTES` per known-bad
+   pairing, version entries in the compatibility tables (verify artifacts by
+   direct fetch), and a recipe per tuple.
+3. Declare the access path the component uses (through the catalog, or
+   direct to metadata and storage) so the evidence records it.
+4. A query engine's `adapt_query` changes dialect only, never semantics.
+5. Per workload, show equivalent results to a supported composition.
+
+### Adding a query (design rules)
+
+Queries belong to a workload's set in `benchmark/queries.py`. Changing one
+changes the set's `query_set_id`, and QpH across ids is refused
+(`qph_comparable`). A new query should return a non-empty result whose
+correctness can be checked on a correct corpus; the harness does not yet
+enforce this.
+
+### Adding a metric (design rules)
+
+A metric is defined once, with unit, direction, meaning and the workloads
+and modes it applies to, in the collector's descriptions
+(`metrics/collector.py`). One that depends on a cap or a simulated parameter
+says so. Changing a published metric's meaning is a product decision.
+
+### Support states
+
+Support is judged over workload x mode x architecture, in layers:
+
+1. **Architecture-valid**: the composition is in `_SUPPORTED_COMBINATIONS`.
+2. **Workload-compatible**: the workload declares it can run on that
+   composition.
+3. **Mode-compatible**: the workload declares the mode on that composition.
+4. **Validated**: a live run on the release tree completed it end to end with
+   the correctness contract passing and non-degenerate output, and its
+   results match an existing supported composition or it is the reference
+   for that workload.
+
+A combination passing all four is **supported**. One passing 1 to 3 but not
+validated on the release tree is **unverified**. One failing 1, 2 or 3 is
+**unsupported** and is refused: rejected at config load, or clearly excluded
+and labelled in the evidence; it is never discovered as a failed job and never
+presented as comparable. Upstream limitations that change behaviour are
+recorded in `RECIPE_NOTES` and in the evidence.
+
+- **Supported**: correct and release-validated for this workload x
+  architecture x mode.
+- **Unverified**: structurally valid and ran correctly, but not
+  release-validated as supported.
+- **Unsupported**: known unable to preserve workload semantics, or known
+  broken. Refused.
+
+Unverified experiments may be reported and compared when their correctness
+checks pass. Their support status must be visible in the evidence and in
+comparison output, and they must not be presented as proof that the
+combination is supported. This keeps Lakebench usable for exploring a
+combination before it is supported.
+
+Support is independent of comparability, which has two levels:
+
+- **Comparable**: the workload results are equivalent.
+- **Like-for-like**: comparable, and the relevant execution conditions
+  (for example the effective maintenance policy) also match.
+
+An unverified run can therefore be unverified, comparable and not
+like-for-like at once. That is legitimate evidence when Lakebench states
+exactly which it is.
+
 ## Adding a recipe
 
 A recipe is one valid architecture, `<catalog>-<format>-<engine>-<query_engine>`.
@@ -334,7 +432,7 @@ is listed ([why](#versions-and-artifacts)).
 
 ## Adding a workload
 
-[DESIGN.md](DESIGN.md#61-adding-a-workload) section 6.1 lists the five parts
+The [extension rules](#adding-a-workload-design-rules) list the five parts
 a workload brings: a generator schema with a seed policy and dimensions,
 stage scripts per mode, a correctness contract, a query set with its own
 `query_set_id`, and a compatibility declaration. A change to synthetic data
@@ -370,10 +468,10 @@ with a source pointer for each statement:
 
 - A query belongs to a workload's set in `src/lakebench/benchmark/queries.py`.
   Changing one changes the set's `query_set_id`, and QpH across ids is
-  refused ([DESIGN.md](DESIGN.md#63-adding-a-query) section 6.3).
+  refused ([design rules](#adding-a-query-design-rules)).
 - A metric is defined once, with unit, direction and meaning, in the metric
   registry (`src/lakebench/metrics/metric_registry.py`, which the collector
-  reads; [DESIGN.md](DESIGN.md#64-adding-a-metric) section 6.4).
+  reads; [design rules](#adding-a-metric-design-rules)).
 - Changing what a published metric means is a product decision, not a
   refactor.
 
@@ -415,8 +513,8 @@ LB_METRICS_JSON {"schema":"customer360","node_id":0,"node_count":8,
 ## The AML pre-registration
 
 The AML measurements are pre-registered
-(`src/lakebench/spark/data/aml/aml_preregistration.json`, protocol in
-[docs/internal/aml-protocol.md](internal/aml-protocol.md)).
+(`src/lakebench/spark/data/aml/aml_preregistration.json`; the protocol is
+maintainer-only and not shipped with the package).
 
 - Its gated constants are locked at prereg 3.6.0. Changing one is a
   maintainer decision and needs a fresh evaluation seed.
@@ -439,8 +537,7 @@ The AML measurements are pre-registered
   `lakebench-cluster-lock` lease (`deploy/cluster_lock.py`) and
   read-modify-write under it.
 - Destroying one deployment never touches another's namespace, buckets or
-  shared entries. `deploy/ownership.py` holds the stamps destroy checks. The
-  design record is `docs/internal/namespace-isolation.md`.
+  shared entries. `deploy/ownership.py` holds the stamps destroy checks.
 
 ## Why it is built this way
 

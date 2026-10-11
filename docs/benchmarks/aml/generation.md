@@ -169,18 +169,11 @@ data clock, which sets `silver.entity_profiles.profile_updated_ts`.
 
 **Name pools** (`datagen_rs/src/realism.rs`).
 
-- Given names and company descriptors come from fixed pools.
-- Surnames (synthetic at every scale) and company name heads come from pools
-  that grow with the population. Parties sharing a name, and so screening
-  namesakes per watchlist entry, stay flat across scale.
-- With the fixed pools before `datagen-v2-rs-0.4`, W5 and W6 false matches
-  grew with the square of scale (seed 43). A false match is a party that
-  matches a watchlist entry without being its planted account or a decoy.
-- Synthetic surnames have no romanisation variants, so a listed person's
-  transliterated alias is drawn from the given names only.
-- A relationship account drawn as a transliteration falls back to the exact
-  name more often: about 28% of those draws before, 43% now, computed from
-  the pools (about 3% of person relationship accounts move to an exact name).
+- Given names and company descriptors come from fixed pools. Surnames and
+  company name heads come from pools that grow with the population, so
+  screening namesakes per watchlist entry stay flat across scale.
+- From `datagen-v2-rs-0.4`, the scaled pools replaced fixed ones that caused
+  W5 and W6 false matches to grow with the square of scale.
 
 ## 3.7 Multi-cycle
 

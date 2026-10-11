@@ -31,7 +31,7 @@ Reference: enable and read the optional Prometheus and Grafana stack, per-deploy
 | `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass |
 
 - An installed release keeps the values it was installed with.
-- `observability.reports`, `storage_class`, `prometheus_stack_enabled`, `s3_metrics_enabled` and `spark_metrics_enabled` are removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)). `observability.reports` (including `include.platform_metrics`) had no effect.
+- See [UPGRADING-1.7.md](../UPGRADING-1.7.md) for removed observability keys.
 
 ## Deploy and destroy
 
@@ -97,7 +97,7 @@ After a run, `PlatformCollector` queries the shared Prometheus for the deploymen
 
 ### S3 metrics
 
-`observability/s3_metrics.py` defines `S3MetricsWrapper` with `lakebench_s3_request_duration_seconds` (latency histogram), `lakebench_s3_requests_total` and `lakebench_s3_errors_total` (by operation). No code path instantiates it, so these series are not emitted, and the report and `metrics.json` record S3 request counts and latency as `null` (not collected). They would cover CLI operations (list, head, delete), not Spark or Trino data I/O.
+No S3 I/O metrics are collected; the report and `metrics.json` record S3 request counts and latency as `null` (not collected).
 
 ## Reports
 

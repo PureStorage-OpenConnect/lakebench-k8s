@@ -69,7 +69,7 @@ s3.region=us-east-1
 
 ## Sizing
 
-When `trino.worker.replicas`, `cpu` and `memory` are at their defaults, Lakebench sets them from the scale factor (`full_compute_guidance()` in `config/scale.py`). Explicit values are kept.
+When `trino.worker.replicas`, `cpu` and `memory` are at their defaults, Lakebench sets them from the scale factor. Explicit values are kept.
 
 | Scale factor | Workers | Worker CPU | Worker memory | Coordinator CPU | Coordinator memory |
 |---|---|---|---|---|---|
@@ -83,7 +83,7 @@ When `trino.worker.replicas`, `cpu` and `memory` are at their defaults, Lakebenc
 
 ### Query memory limits
 
-Lakebench sets Trino's memory properties from the deployed heaps and worker count (`trino_memory_properties()` in `deploy/engine.py`). Trino's own `query.max-memory` default is a flat 20GB that does not follow the cluster. With it, four 48Gi workers at AML scale 100 failed FQ3 with `Query exceeded distributed user memory limit of 20GB`. About 107 GB of pool sat unused.
+Lakebench sets Trino's memory properties from the deployed heaps and worker count.
 
 | Property | Value | Scale 1 | Scale 10 | Scale 100 |
 |---|---|---|---|---|
@@ -93,14 +93,7 @@ Lakebench sets Trino's memory properties from the deployed heaps and worker coun
 | `query.max-memory` | workers x worker per-node | 2293MB | 9174MB | 55048MB |
 | `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 4586MB | 18348MB | 110096MB |
 
-- Per-node values are the worker's; the coordinator gets the same fractions of its heap.
-- Per-node plus headroom is 65% of the heap, inside Trino's startup check (the two may not exceed the heap).
-- The node pool is heap minus headroom, 70% of the heap, so two queries at the per-node cap fit a node at once. This serves throughput and composite runs (several streams) with nothing spare: a third stream at the cap, or untracked allocations past the headroom, still block.
-- When a pool fills, Trino blocks queries and kills the largest only after `query.low-memory-killer.delay` (5 minutes, longer than the 300 s client timeout). A blocked stream reads as a timeout.
-- A power run (one query at a time) gets 17% more per node than Trino's 30% default.
-- `query.max-total-memory` stays at Trino's default, about the physical pool across the workers. Pinning it to exactly that pool would let a coordinator reservation plus full revocable use on the workers trip it.
-- The cluster cap is above Trino's stock cap (the smaller of 20GB and workers x 30% of heap) at every autosized scale. Stock to Lakebench: 1.9 to 2.2 GB at scale 1, 7.7 to 9.0 GB at scale 10, 20 to 53.8 GB at scale 100.
-- The values are fixed at deploy. Changing the worker count by hand afterwards does not update them.
+These values are fixed at deploy and scale with the worker count. Stock Trino's 20GB cap is raised at every autosized scale.
 
 ### Spill
 

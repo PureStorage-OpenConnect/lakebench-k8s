@@ -44,11 +44,8 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
 | `end_sample` | The same fields read at run end, and `code_changed_during_run`: true when package files, commit, version or install changed (an edit inside an installed wheel or a modified checkout counts). Then a support state of `supported` drops to `unverified`. |
 | `config_sha256`, `config_path` | Hash of `config_snapshot`; the config file as given, made absolute. |
 | `scripts_sha256`, `scripts_maps`, `scripts_files_sha256` | The Spark scripts ConfigMaps applied and read back. |
-| `deps` | The dependency set, checked before any submission: `pinset_sha256` (its identity), `request_sha256`, repositories and index, files per group with sha256, `resolved_at`, the server pod. `"not_recorded"` for `--local` runs and pre-1.7 records. |
-| `deps` run-end pod check | The Spark Thrift or DuckDB pods: `pods_checked`, `pod_mismatches` (pods on another set; fails the run), `pods_check_error` (pods unreadable; fails the run), or `pods_check_skipped` (why: interrupted, a prerequisite failed, the namespace went, no cluster). |
-| `images_observed` | Digests the run's pods ran (`imageID` from pod status): Spark driver and executors of its own applications, the running Trino coordinator and Spark Thrift server. Pods not listable (RBAC): `{"not_observed": "<reason>"}`. Requested images: `config_snapshot.images`. |
-| `images_observed` reads | Batch: each stage is read while it runs until a driver and an executor digest are seen (at most four reads, 15 s apart, plus one after the stage when no driver digest was seen). Continuous: read when streams are running and again before they stop. |
-| `images_observed_missing`, `images_observed_changed` | Digests a batch stage's reads missed. The first digest per role is kept; a later different one goes in `images_observed_changed`. |
+| `deps` | The dependency set: `pinset_sha256` (its identity), repositories, per-group file hashes, the server pod. A run-end pod check verifies Spark Thrift or DuckDB pods are on the same set. |
+| `images_observed` | Image digests the run's pods ran: Spark driver and executors, Trino coordinator, Spark Thrift server. A later different digest per role goes in `images_observed_changed`. |
 | `scratch_as_ran` | Per Spark job, the executor scratch PVC size and storage class as the cluster held them (null without a scratch PVC). |
 
 ## Benchmark records

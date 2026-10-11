@@ -41,7 +41,7 @@ scale unit:
 | 100 | ~1 TB | 10,000,000 | 240 M | 1--3 hours |
 
 Financial (AML) has 111,111 entities and about 26.7 M transactions per scale
-unit. Its size is measured, not linear (`src/lakebench/config/scale.py`):
+unit. Its size is measured, not linear:
 
 - Measured with the default 64 MB files on the v1.6 generator, the pacs.008
   bronze-verify read was 8.47 GB at scale 1 (n=2) and 93.6 GB at scale 10
@@ -73,44 +73,9 @@ Lakebench cap):
 
 ## Batch and continuous modes
 
-Lakebench runs the same stage graph two ways. They are different workloads
-that answer different questions, and their numbers are not comparable.
-
-- **Batch** (`pipeline.mode: batch`): "how fast can my system process this
-  corpus?" The whole corpus is in bronze before the pipeline starts. Silver
-  and gold run as hard as they can. The headline is wall clock and
-  throughput on the full corpus.
-- **Continuous** (`pipeline.mode: continuous`): "with data arriving at this
-  rate for this long, does my system keep up, and how fresh is the result?"
-  Datagen writes at the scale's offered load for the whole `run_duration`.
-  Bronze, silver and gold run as concurrent streams. The headline is data
-  freshness and whether the pipeline stayed balanced.
-
-**Scale sets pressure, not wall clock.**
-
-- In batch, scale sets the corpus size, and a higher scale takes longer.
-- In continuous, scale sets the offered load: 4 MB/s (AML) or 10 MB/s
-  (Customer 360) of datagen files per scale unit, for the whole
-  `run_duration` (default 30 min). A higher scale raises the load per
-  second, not the length of the run.
-
-**The continuous throughput is usually the offered load, not system
-capacity.** `sustained_throughput_rps` is bronze rows taken in during the
-window over `arrival_seconds`.
-
-- When the pipeline keeps up, it is the rate datagen offered.
-- It is a capacity only when datagen stays ahead with bronze busy
-  (`datagen_ahead`, `intake_limit: bronze_capacity`).
-- Under `--skip-generate` or a set `max_files_per_trigger` (the most files
-  bronze reads per trigger), that limit sets it
-  (`intake_limit: trickle_rate`).
-
-Which to run:
-
-- Batch, to compare raw throughput on a fixed corpus.
-- Continuous at several scales, to find where a system starts falling
-  behind or to measure freshness under a steady load.
-- Never read a batch number against a continuous number.
+Lakebench supports batch and continuous pipeline modes. See
+[Running pipelines](running-pipelines.md) for mode details and
+configuration.
 
 ## How it works
 

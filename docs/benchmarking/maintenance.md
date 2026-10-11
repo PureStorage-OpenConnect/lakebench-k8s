@@ -37,14 +37,10 @@ Each round starts with one unmeasured warm-up pass (first touch of a snapshot). 
 
 ### Storage settle wait
 
-The object store keeps working off deletes and rewrites after maintenance SQL returns. Measured on FlashBlade, Customer 360 scale 10: compacted files read QpH 546 at ~2 min, 569 at +15 min and 841 at +35 min, against 828 before. AML scale 10 read 27% slow straight after.
+The object store keeps working off deletes and rewrites after maintenance SQL returns. Measured on an enterprise object store, Customer 360 scale 10: queries read 27-34% slow straight after compaction and recovered over about 35 minutes.
 
-- Lakebench times one storage-bound probe every `interval_seconds`. Default probe: the workload's first scan-class query (a full scan of the table compaction rewrote).
-- Settled: two consecutive probes agree within `tolerance_pct` and, when the pre round ran, neither is slower than that query's pre-maintenance median by more. Agreement alone is not enough: the +2 and +15 min rounds above agreed within 4% while both were a third slow. The reference is a bound, not a target: when compaction speeds the probe up more than settling slows it, an unsettled probe can still pass.
-- No pre round (scale 50 and above): three consecutive probes must agree, and `maintenance_settle_verified` is false.
-- Stable but slower than before: waits to the cap; the reason says settling and a regression are not separable.
-- At `max_seconds`, or after three failed probes in a row: the post round runs, and `maintenance_value_pct` is null with reason `storage did not settle within N s`.
-- Probe times: `maintenance_settle`. The wait adds to wall clock only.
+- Lakebench probes with a scan-class query every `interval_seconds` until consecutive probes agree within `tolerance_pct`, or `max_seconds` is reached.
+- `maintenance_settle` controls the wait. It adds to wall clock only.
 
 ```yaml
 architecture:
@@ -88,12 +84,7 @@ Ranges: [configuration.md](../configuration.md).
 - `effective_maintenance.detail.operations.compaction`: `{"operation": "trino_optimize", "params": {"file_size_threshold": "128MB"}}`, or `iceberg_rewrite_data_files`, or `mixed` (list in `operations`) when calls fell back to the other engine.
 - In the exp2 id: `compaction=ran(trino_optimize:128MB)` or `compaction=ran(mixed(iceberg_rewrite_data_files+trino_optimize:128MB))`. Older records derive it from query engine and table format.
 
-**Compaction is per table.** A table is compacted only when every statement for it succeeded.
-
-- Trino, Customer 360 silver (partitioned by `interaction_date`) over 90 partitions: chunks of at most 90 partitions, one `optimize ... WHERE interaction_date ...` each, batch and continuous. Trino refuses an `optimize` across more than 100 partitions.
-- AML `silver.transactions` and `silver.account_statements` (monthly): at most one month to merge (two or more files under the threshold) per statement; other months share a neighbour's. Form: `optimize ... WHERE txn_timestamp >= TIMESTAMP '<month> 00:00:00.000000 UTC' AND txn_timestamp < ...` (`book_ts` for statements), first open below, last open above. One statement over all months ran out of Trino per-node query memory.
-- Partly compacted: `compaction=ran` in the id (`failed` only when nothing succeeded), `compaction=partial` in `detail_id`.
-- Failed tables: `reasons` ("compaction failed on <table>: <error>"), `detail.compaction_failures`, `detail.compaction_statements`.
+**Compaction is per table.** Compaction runs per table; large partitioned tables are chunked. A table is compacted only when every statement for it succeeded. Partly compacted: `compaction=ran` in the id (`failed` only when nothing succeeded), `compaction=partial` in `detail_id`.
 
 ## Lakebench caps
 

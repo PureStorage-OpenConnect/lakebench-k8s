@@ -187,24 +187,7 @@ config load with the reason. A listed recipe is a valid composition, not a
 release-validated one: support is judged per workload x recipe x mode (see
 [Compatibility Matrix](compatibility-matrix.md#support-states)).
 
-<!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
-
-| Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
-|---|---|---|---|---|
-| `hive-delta-spark-none` | Hive | Delta | Spark | None |
-| `hive-delta-spark-thrift` | Hive | Delta | Spark | Spark Thrift |
-| `hive-delta-spark-trino` | Hive | Delta | Spark | Trino |
-| `hive-iceberg-spark-duckdb` | Hive | Iceberg | Spark | DuckDB |
-| `hive-iceberg-spark-none` | Hive | Iceberg | Spark | None |
-| `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark | Spark Thrift |
-| `hive-iceberg-spark-trino` | Hive | Iceberg | Spark | Trino |
-| `polaris-iceberg-spark-duckdb` | Polaris | Iceberg | Spark | DuckDB |
-| `polaris-iceberg-spark-none` | Polaris | Iceberg | Spark | None |
-| `polaris-iceberg-spark-thrift` | Polaris | Iceberg | Spark | Spark Thrift |
-| `polaris-iceberg-spark-trino` | Polaris | Iceberg | Spark | Trino |
-
-<!-- END GENERATED: recipe-components -->
+See [Recipes](recipes.md) for the full component matrix.
 
 ## Storage
 

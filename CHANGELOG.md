@@ -18,8 +18,6 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **Continuous datagen runs for the whole window** instead of writing a fixed corpus, at an offered load set by scale: AML 4 MB/s and Customer 360 10 MB/s per scale unit. See [Running Pipelines](docs/running-pipelines.md).
 - **Freshness and time to detect run from file landing** in both workloads. AML bronze stamps `ingest_ts` with the file's landing time on the cluster clock, so time to detect includes the wait before bronze takes a file.
 - **A file written before bronze started** (`--skip-generate`) counts from when bronze took it. Bronze fails when its object-store clock probe fails three times.
-- **Continuous result fingerprints** match only when bronze took the same rows: the result check now drains (bronze stops at the window's end, silver and gold finish, then the queries run).
-- **A new `result_check` gate** fails a continuous run whose result check did not run. A declared reason (no query engine, `--skip-benchmark`, an already failed run, AML continuous, a corpus over the settle limit) passes with a `results_unchecked` qualifier.
 - **Metrics redefined.** Batch `total_elapsed_seconds` is the wall clock (was summed stage seconds). `maintenance_pct_of_pipeline` is maintenance over time to value plus maintenance (it could exceed 100%).
 - **Stage GiB come from what each stage read or wrote**, not bucket listings. Datagen falls back to a bronze listing when no pod reported.
 - **`total_data_processed_gb`, `pipeline_throughput_gb_per_second` and `compute_efficiency_gb_per_core_hour` change.** They had counted retained snapshots, the bronze table and earlier runs' files (about twice the data in a continuous run).
@@ -33,6 +31,8 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **`lakebench reproduce` is gone.** It is now an unknown command (exit 2), with no replacement. Exit code 14 is reserved: no command produces it, and it is never reused. `lakebench financial reproduce` is unchanged. `datagen_aggregate_mbps`, `datagen_mbps_per_pod` and `datagen_cpu_hr_per_tb`, which only `reproduce` derived and no record carries, leave the metric registry.
 - **`deploy --require-new` refusals name the exit path `deploy.existing_namespace`** (was `reproduce.existing_namespace`), still exit 3.
 - **A bare `"0"` trigger interval is refused at load.** The three continuous intervals need a whole number and a unit (`"0 seconds"`, `"5 minutes"`). Before, `"0"` went to Spark unchanged for Customer 360 and became 10 s for AML.
+- **Result fingerprints and the continuous result check are gone.** Batch runs no longer execute each benchmark query a second time, untimed, after the timed samples; timed numbers are unchanged. Continuous runs no longer wait for silver and gold to settle after the window: the streams stop at window end (AML gold-refresh still finishes its tick first). `experiment.results.fingerprints`, `continuous.result_check` and `continuous.settle` are no longer written, and the `result_check` verdict gate is gone; older records keep the fields and load. Lakebench does not compare query answers: compare the query set id, the AML alert set and the reports' row counts. See [Comparing runs](docs/benchmarking/comparing.md).
+- **A continuous Customer 360 run with a benchmark and no in-stream round fails** (`c360 continuous gate: no in-stream benchmark round ran`): the last round's answers are its answer check. Continuous `experiment.results.query_set_id` comes from the aggregated rounds (AML: the fixed 12-query set when the rounds ran it), where AML recorded none.
 - **`lakebench.modules` no longer exports `CatalogModule`, `QueryEngineModule`, `PipelineEngineModule`, `TableFormatModule` or `ModuleRegistry`.** `modules/base.py` and `modules/registry.py` are removed; nothing in Lakebench used them.
 
 ### New
@@ -56,7 +56,6 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **`silver_bronze_wait_seconds` auto** is `run_duration` / 4, at least 600 s (was 10 s). The wait now runs before the window opens.
 - **Batch executor scratch PVCs scale with the data.** Each executor gets its share of the stage's per-scale need, between 50Gi and the old size (300Gi silver and gold, 500Gi AML bronze). Scale 1 batch: 400 Gi, was 2,400 Gi. [Spark](docs/component-spark.md#batch-jobs)
 - **Datagen pods run one generator thread per started core** (`CPU_LIMIT`), so a fractional pod (1300m) is no longer held to one thread.
-- **Settle after the window** allows each silver cycle its median batch time, at least two minutes. At scale 100 a back-to-back silver batch takes several minutes.
 - **AML continuous gold re-detects only around new rows.** Each rule recomputes the days its new rows touch, widened by its windows; the result equals a full recompute. Cost follows the arrival rate, not run length. Passes log `[incremental]`.
 - **AML continuous `detected_ts`** is the first pass that wrote an alert's content, not the last rewrite.
 - **AML continuous silver** keeps `distinct_counterparties_out/in` from a new table, `silver.counterparty_pairs` (`architecture.tables.silver_counterparty_pairs`), so a batch's cost no longer grows with run length. Counts stay exact; batch-stream parity holds.
@@ -78,7 +77,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **Delta + Hive continuous after a failed batch build** no longer fails on a schema mismatch. The reset now clears unregistered silver and gold table directories in the deployment's own buckets.
 - **Long continuous runs keep their driver logs.** Logs are read from a copy kept since pod start, so kubelet rotation no longer cuts ticks gates and scoring read. A gold log missing its first tick fails as "driver log incomplete".
 - **AML continuous scoring is no longer skipped** with "snapshot unknown at the last completed tick" when the gold log rotated during the drain tick: the drained driver repeats the tick's records with each drain line.
-- **The continuous drain settles** when bronze is stopped mid-batch. Iceberg Customer 360 bronze now logs rows after the commit, so uncommitted rows leave the drain count and bronze's window rows and rows/s.
+- **Iceberg Customer 360 bronze logs rows after the commit**, so the rows of a batch stopped mid-write leave bronze's window rows and rows/s.
 - **A batch AML run whose score job failed** or refused the corpus now fails with the reason and records `status: not_scored`. It passed with no recall.
 - **AML continuous gold's busy share and cadence** count the whole tick, including time to detect and the TM pass. The Balance card understated it.
 - **`run --continuous --duration N`** sizes the auto silver wait from N, not the config's `run_duration`.
@@ -102,7 +101,6 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **A steady-state continuous run's ingest ratio** no longer fails on bronze's trigger cadence: `released_rows` counts what datagen had written one bronze cadence before the window's end (a Customer 360 scale-1 run that kept up read 0.94).
 - **AML continuous compaction** skips the tables silver-stream MERGEs into every batch (entities, accounts, entity_profiles, silver_batch_versions). A rewrite under the MERGE ended the stream ("Missing required files to delete").
 - **An ingest-ratio failure with bronze idle** says "bronze took in less than arrived without being at capacity", not "pipeline saturated".
-- **The continuous result check** counts a query it could not fingerprint as failed, and retries once on a transient object-store error (`continuous.result_check.retried`).
 - **Run records no longer store an object-store address** quoted in an error: an IP-literal host is replaced by the snapshot's endpoint hash.
 - **A continuous capacity run** (`datagen_ahead`) warns, not fails, on gold staleness above half the window.
 - **A capacity run with `intake_limit: bronze_capacity`** no longer fails its ingest ratio: the stored record had dropped `datagen_ahead`, `backlog_rows` and both paces, so the recomputed verdict never saw them.
@@ -139,7 +137,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - Customer 360 gold is never silently incremental and a multi-cycle run takes one data clock; records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
 - AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
 - Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
-- A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
+- A continuous record without a stored round count reads it from its rounds; a stored C360 Trino vs Thrift pair is now not like-for-like.
 - The perf gate (`scripts/perf_gate.py`, `benchmarks/perf/`, the baseline store) is removed.
 - A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
 - Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
@@ -173,823 +171,82 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - `metrics.json` `config_snapshot` drops `spark.driver` and `spark.executor` and replaces `scratch.size` with `scratch.size_per_job`.
 - The Hive recipes now default to Spark 4.1.1. A config that does not set `images.spark` runs Spark 4.1.1 (and Delta 4.1.0) where v1.6 ran 4.0.2. Its jars, dependency set and perf fingerprint change, and a deployment made from it must be redeployed before run.
 - A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
-- `report` reads the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+- `report` reads the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair is not comparable.
 - The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
 - Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain `podman build` of `datagen_rs/` now fails.
 - Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
 - A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
 - The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
 
-- **The Hive recipes default to Spark 4.1.1.** Each recipe's default
-  Spark image is now the Spark minor of its release-matrix row:
-  `hive-iceberg-spark-trino` (the default recipe), `hive-iceberg-spark-thrift`,
-  `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none` and
-  `hive-delta-spark-trino` take `apache/spark:4.1.1-python3`; the Polaris
-  recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` stay on
-  `4.0.2-python3`. A config with no recipe and no `images.spark` takes the
-  image of the recipe its components name (so a recipe-less Polaris config
-  stays on 4.0.2). With the format version at `auto`, Delta follows to 4.1.0
-  and Iceberg 1.11.0 uses its native Spark 4.1 runtime. A config that did
-  not set `images.spark` therefore runs a different Spark, jar set and
-  fingerprint than under v1.6: pin `images.spark:
-  apache/spark:4.0.2-python3` to keep the old one. A deployment made from
-  such a config must be redeployed, since `run` refuses a dependency set
-  that no longer matches the config. A config that writes a table format
-  version Spark 4.1 cannot run (Delta 4.0.0) and no image keeps Spark 4.0.2,
-  so it still loads and tears down. The Hive examples now pin 4.1.1. `--local`
-  runs keep their own 4.0.2 image, and their record now names it.
-- **The verdict is decided from the record.** A PASSED verdict now also
-  needs rows in every layer (`layer_rows`), the expected AML rules with no
-  error, an allowed skip only and at least one alert (`aml_rules`; W1
-  `giant-component` or `vertex-cap` and W3 or W17 `path-cap` are allowed,
-  a cap skip labelled in `qualifiers.rule_caps`), a batch scale ratio of at least 0.95,
-  where 0 now fails (`scale_ratio`), and no successful query with 0 rows
-  unless it may return none (`query_answers`; continuous runs: the last
-  in-stream round). The stored verdict is computed from the record as
-  serialised. `run` (batch, continuous and `--local`) exits 1 when that
-  verdict is not PASSED, printing `Verdict: <reason>`; this includes
-  conditions that before only turned the report badge red: a continuous
-  ingest ratio below 0.95 that the trickle does not explain, gold stale for
-  more than half the run, and a batch scale ratio between 0 and 0.95.
-  `report` takes the
-  strictest of a record's stored verdict and the one recomputed from it
-  (`report --json` and its `--list` rows show `verdict_stored`,
-  `verdict_recomputed` and that strictest one as `verdict`), so stored
-  records can read failed: three stored AML batch runs on a
-  corpus without a watchlist (W5 and W6 did not run) do, and the stored
-  Hive-versus-Polaris AML pair they form is now NOT COMPARABLE. The
-  dependency-set gate is named `dependency_set` (was `deps`). `run --stage`
-  records the stage (`stage_only`) and is judged on that stage's layer. A stored scale or ingest ratio just under
-  0.95 is rounded down, never up to 0.95. A `lakebench benchmark`
-  record's `success` follows its verdict (the command's exit code does not change).
-- **Multi-cycle runs and reused corpora check a corpus series marker.**
-  Every generate (`generate`, `run --generate`, each cycle of a multi-cycle
-  run, and a continuous run's datagen) now writes
-  `<datagen prefix>/_corpus/series.json` in the bronze bucket: the cycle
-  count, the cycles whose datagen Job finished, each cycle's event-time
-  window, the generation parameters and the image digest the datagen pods
-  ran. A batch run that reuses bronze (`--skip-generate`, or a single-cycle
-  run without `--generate`) reads it before anything is deployed or
-  submitted and exits 3 (new path `run.series_mismatch`) when the generate
-  did not finish (an interrupted generate or clear, or a continuous run's
-  corpus) or the marker names another cycle count, window or generation
-  (seed, scale, customer id space, file size, target size per cycle, dirty
-  ratio, image, window bounds, AML robustness perturbation) than the
-  config's; it exits 4 (`s3.unreachable`) when bronze cannot be read. A
-  single-cycle run over a corpus with no marker (1.6, or an older
-  `generate`) proceeds as before and records `cycle_series.marker:
-  "absent"`, unless the corpus holds files of later cycles. The clears of
-  the datagen prefix (`--regenerate`, a fresh generate, a continuous reset)
-  first write a marker that says a clear is under way and
-  keep it until the clear is done; a generate whose marker another run
-  replaced exits 3. A multi-cycle `--skip-generate` now reuses a finished
-  multi-cycle corpus with no datagen; 1.6 regenerated every cycle whatever
-  it said. An AML multi-cycle `--skip-generate` is refused (exit
-  2): its stages read the whole bronze prefix every cycle. A multi-cycle run
-  that generates no longer clears an owned non-empty datagen prefix before
-  cycle 0: it exits 3 unless `--regenerate`, which a multi-cycle run now
-  takes without `--generate`. `lakebench generate` (new path
-  `generate.multi_cycle`) and `run --generate-only` refuse a multi-cycle
-  config (exit 2): a corpus generated in one go would be read as cycle 0;
-  `reproduce` of a multi-cycle config lets its run generate each cycle.
-  `metrics.json` gains `cycle_series {marker, reused, cycles_total,
-  windows}` and `cycles[].datagen_skipped`.
-- **Executor overrides are bounded, counted and kept out of evidence.**
-  `platform.compute.spark.*_executors` take 1 to 28 and `driver_cores` 1 to
-  16; a larger value is refused by the commands that change data (a v1.6
-  config with `silver_executors: 40` no longer runs) and dropped with a note
-  by `destroy`, `status` and the read-only commands. The capacity check
-  (`run` and `deploy`), `config show` and `info` now count executor
-  overrides, so a config that was admitted before may be refused. An override below the profile's count is labelled
-  in `limits.bound` and enters the identity's bound limits; every override
-  is recorded in `experiment.architecture` (`spark_executor_overrides`,
-  `spark_driver_overrides`) as an architecture difference. A run whose
-  overrides differ from the profile's counts, or that sets a driver
-  override, is recorded as such. The financial operations
-  jobs (`replay-financial`, `reproduce-financial`,
-  `score-financial-reference`) have their own sizing profiles, equal to
-  silver-build's; a Spark job with no profile is now an error rather than a
-  silent fallback.
-- **`run` needs a 1.7 deploy.** Spark jobs, Spark Thrift and DuckDB now take
-  every jar and wheel from the deployment's dependency server, so `run`,
-  continuous runs and the `financial` commands check the deployment's set
-  before anything is recorded or submitted. A deployment made by 1.6 exits 4
-  ("this deployment has no dependency server; run `lakebench deploy` once");
-  so does one whose last deploy did not finish its dependency step, whose
-  config changed since deploy (the changed request fields are named, which
-  includes a Lakebench upgrade that changed the resolver), or whose server
-  has no Ready pod. A recorded set that does not check, a replaced server on
-  another set, or a Thrift or DuckDB pod on another set exits 3. New exit
-  paths `run.deps_stale` (4) and `run.deps_mismatch` (3); `run.deps_missing`
-  (4) is live. Redeploy once after upgrading.
-- `spark.conf` may also not set `spark.driver.userClassPathFirst` or
-  `spark.executor.userClassPathFirst`: the jobs take their jars, in a fixed
-  order, from the verified set, and these keys would change which copy of a
-  class wins. Refused at load by the commands that change data (exit 2), as
-  for every key Lakebench owns.
-- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are
-  refused** (exit 2, `alias.refused`), without echoing any argument.
-  `bronze` names `lakebench run CONFIG --generate --regenerate`, which
-  clears the run's datagen prefix and generates afresh, and `data` names
-  `clean silver` and `clean gold` before it (on a bucket the deployment did
-  not create, `admin reclaim-bucket` first). `metrics` and `journal` are
-  refused because run records and journals are evidence the CLI does not
-  delete, and so is `clean --metrics-dir`/`-m`. `clean silver` and `clean
-  gold` are unchanged.
-- **Renamed commands print one line and are removed in v1.8.** `results`
-  (now `report --format table`), `admin install-spark-operator` and `admin
-  install-scratch-storage-class` (now `admin install --component ...`) are
-  hidden aliases that print "`lakebench OLD` is now `lakebench NEW`; the old
-  name is removed in v1.8" on stderr, then run the new command. The list of
-  aliased, refused and deprecated commands and flags is
-  `lakebench.cli._aliases`; `init` words its flag refusals from it.
-- **`benchmark` and `query` no longer write into a run's record.**
-  `lakebench benchmark` saves its result as a record of its own under a new
-  run id (`record_kind: "benchmark"`, `parent_run_id` the run it measured,
-  a copy of that run's record with the new benchmark); 1.6 replaced the
-  benchmark inside the run's own `metrics.json`. The copy's QpH, scores and
-  query stage are the new benchmark's, `provenance.benchmark` names the code
-  and time of the benchmark, and a continuous run's in-stream rounds and the
-  run's maintenance QpH pair are not copied. A benchmark record is never a deployment's latest run for `report`:
-  read it by its run id
-  (`benchmark` prints it). `lakebench query` prints and journals its result
-  and no longer appends it to the latest record. `MetricsStorage.save_run`
-  refuses to replace an existing `metrics.json` unless called with
-  `seal_update=True`.
-- **`run` refuses arguments it used to ignore, before any cluster call.**
-  An unknown `--stage` used to be found only after `run` had read the
-  cluster's capacity (and, with `--yes`, could auto-deploy first), and
-  several flags were silently dropped by the mode they did not apply to.
-  Now `run` exits 2 before contacting the cluster for: an unknown
-  `--stage`; `--stage` with a continuous run; `--deploy-only` with
-  `--generate-only`, `--stage`, `--generate` or `--skip-generate`;
-  `--generate-only` with `--skip-generate`; `--local` with `--deploy-only`,
-  `--generate-only`, `--force-rebuild` or `--skip-maintenance`;
-  `--regenerate` on a run that does not generate, or with
-  `--local` or a continuous run other than `--generate-only`; `--skip-generate` with `--generate`;
-  `--generate` or `--generate-only` on a multi-cycle batch run (it generated the corpus twice; the run
-  generates each cycle without it); `--skip-generate` on a multi-cycle AML run;
-  `--force-reset` on a batch run; `--force-rebuild` on a continuous run;
-  `--duration` on a batch run or below 60; `--timeout` below 1. The full
-  list is under `run` in docs/cli-reference.md. `reproduce` refuses a
-  `--timeout` below 1 before its pre-run destroy. Drop the flag the mode
-  does not use.
-- **`reproduce` no longer destroys before its run.** It refuses (exit 3)
-  when the config's namespace or one of its buckets already exists, and
-  refuses `create_namespace: false` or `create_buckets: false` (exit 2),
-  instead of destroying whatever deployment had that name. It deploys with
-  a nonce of its own, refuses a namespace or bucket that appears while it
-  deploys, and its post-run destroy acts only on the namespace incarnation
-  it created: if another deploy replaced it, nothing is deleted and
-  reproduce exits 3 after printing its verdict. Run `lakebench destroy
-  CONFIG` first to reuse a deployment's name.
-- **Continuous runs recorded before the round count was stored compare on
-  their rounds.** A continuous record whose experiment block has no
-  `limits.benchmark_rounds` (records from early 1.6 builds) now has
-  it read from its `pipeline_benchmark` rounds with a positive QpH, so two
-  continuous runs whose composite QpH is a median over different numbers of
-  in-stream rounds read comparable, not like-for-like. The stored C360
-  continuous pair Trino against Spark Thrift (runs 011043-e338c5 and
-  073533-9de9c9, 5 rounds against 4), which 1.6 and earlier 1.7 builds called
-  like-for-like, now reads not like-for-like; no identity digest moves.
-- **`init` writes a first-day config, and the wizard is removed.** The file
-  has 12 lines of settings: a unique name (`lb-<user>-<4 hex>`, new on every
-  `init`, where `my-lakehouse` was shared), `recipe:` once
-  (`polaris-iceberg-spark-trino` unless `--recipe` is given), the workload,
-  scale 1 (was 10), the endpoint, and the two S3 credentials as
-  `${LAKEBENCH_S3_ACCESS_KEY}` and `${LAKEBENCH_S3_SECRET_KEY}`
-  (`--credentials-env PREFIX` renames them). The recipe's components are
-  written as a commented block, so `init --recipe polaris-*` no longer
-  writes `catalog.type: hive` and resolves to Hive. No Polaris client
-  secret is written: deploy generates one for a new Polaris. `init` prints
-  its choices on stderr, with or without a terminal, and refuses (exit 2, nothing written) a combination that would
-  not load. `--access-key` and `--secret-key` are refused with exit 2 and
-  the values are never echoed; `--interactive`, `-i` and `--advanced` print
-  one line and write the default. `--overwrite` is the new spelling of
-  `--force`. Overwriting a config keeps its `name:` unless `--name` is
-  given, and refuses (exit 3) when the new file would keep that name but
-  move the deployment: another namespace, bucket, S3 endpoint (filling in
-  an empty one is fine) or recipe. The replaced file is read as `destroy`
-  reads it; when where it deploys depends on a variable this shell has not
-  set, the overwrite is refused until it is set. The 330-line commented template (`generate_example_config_yaml`)
-  is removed; docs/configuration.md is the key reference.
-- **A component that contradicts its recipe is refused at load.**
-  `architecture.catalog.type`, `table_format.type`, `pipeline_engine` and
-  `query_engine.type` may be left out under a recipe or written with the
-  recipe's value; another value fails `deploy`, `run` and the other
-  commands that change data, naming both keys and the recipe a v1.6
-  deployment from that file actually used. v1.6 let the written value win
-  silently. `destroy`, `status`, `report` and the inspect commands still
-  load such a config as v1.6 did, with a note. Images and engine resources
-  stay overridable.
-- **`${VAR}` is substituted per value, not in the file text.** An unquoted
-  value (`seed: ${LB_SEED}`) is typed as before: the substituted text is
-  trimmed of YAML whitespace and, when untagged, typed by YAML 1.1, so
-  `0042` is still 34, `0x1F` 31, `true` a bool and an empty value null; an
-  explicit tag such as `!!str` still wins. What changed is that the
-  environment value is no longer parsed as YAML: a value holding ` #`,
-  quotes, `[..]`, `{..}` or `a: b` stays that text, where v1.6 cut it at the
-  comment, dropped the quotes or built a list or mapping, and its line
-  breaks and repeated spaces are kept rather than folded. A quoted value
-  (`secret_key: "${S3_SECRET}"`) arrives verbatim as a string (unless it
-  carries a tag such as `!!int`), so a secret
-  with a backslash, quotes or only digits is no longer retyped or echoed in
-  a parse error; `init` writes the credential references quoted. A block
-  scalar (`|`, `>`) keeps the substituted text inside its own line breaks.
-  Two things fail where they loaded before: an unclosed `${VAR:-default`
-  (a default cut short by ` #`), and a reference inside flow syntax
-  (`[${A}, ${B}]`), which must be quoted. A `${VAR}` in a comment is no
-  longer read, and every unset variable is named in one error.
-- **A config with no `recipe:`, or `recipe: default`, is deprecated.** It
-  still resolves as before (to `hive-iceberg-spark-trino` when it sets no
-  component, otherwise to the components it sets) and loads with a note
-  naming the recipe to write. v1.8 requires `recipe:`.
-- **Deploy never installs a shared component; `lakebench admin install
-  --component` does.** The scratch StorageClass, the Spark Operator, the
-  Stackable operators and the kube-prometheus-stack observability release
-  serve every deployment on a cluster, so a cluster admin installs them once
-  with `lakebench admin install --component <c> <config>` (`c` is
-  `scratch-storage-class`, `spark-operator`, `stackable`, `observability`, or
-  `all` for what the config uses; repeatable), under the cluster lease.
-  `deploy` only checks them and fails the step with that command when one is
-  missing: the Hive step no longer installs Stackable, the Spark Operator step
-  no longer installs the operator, and the observability step no longer
-  installs the stack, takes no lease and applies only the deployment's own
-  PodMonitors and Pushgateway (the shared Grafana dashboard is applied by
-  `admin install`); with observability enabled, the deploy preflight stops
-  before creating anything when the stack is missing.
-  `platform.compute.spark.operator.install: true` and
-  `architecture.catalog.hive.operator.install: true` are refused by the
-  commands that change data, with the admin command; `destroy`, `status` and
-  `admin` load them as false. `false` loads as before.
-- **`admin install` never changes an installed component.** It installs what
-  is missing at `--version C=V`, else the config's pin, else the Lakebench
-  default, with `helm install` (never an upgrade). On a cluster that has
-  everything installed and ready it changes nothing, takes no lease and exits
-  0; the one thing it refreshes is the shared Grafana dashboard ConfigMap
-  when it differs. A config pin that differs from the installed version is
-  kept, with a warning. `--version` naming another version is refused (exit
-  2; exit 3 with `--allow-version-change`, which lists the deployments using
-  the Spark Operator and any deleted namespaces in its watch list).
-  Lakebench does not automate a version change: `helm upgrade` leaves the
-  CRDs each chart ships in `crds/` at the installed version. A release that
-  is not `deployed`, a second Spark Operator or kube-prometheus-stack,
-  leftover CRDs with no operator, or a scratch StorageClass whose parameters
-  differ from the config's are refused without a change (the
-  `install-scratch-storage-class` alias exits 3 there, where 1.6 exited 0).
-  An installed component that is not ready exits 1. Chart repos are
-  refreshed before the lease is taken; deploys and destroys wait for the
-  lease up to 37.5 minutes, then fail without changing anything shared. `--dry-run` shows the plan; `-y` skips the
-  confirmation.
-- **`admin install-spark-operator` and `admin install-scratch-storage-class`
-  are aliases** of `admin install --component spark-operator` and
-  `--component scratch-storage-class`, with a notice on stderr.
-  `install-spark-operator --version` no longer upgrades an installed operator
-  (exit 2); resize an installed controller's `/tmp` with `admin
-  repair-operator --controller-tmp-size`.
-- **The watch-list edits never fall back to the config's operator version.**
-  `deploy`, `run` and `destroy` pin the installed chart, read inside the
-  cluster lease; when it cannot be read the edit is refused rather than let
-  Helm move the shared operator to the config's or the repo's latest chart.
-  A refused removal fails `destroy`, which keeps the namespace (as for any
-  failed watch-list removal); re-run it once `helm list` answers.
-- **`admin doctor` runs the prerequisite checks** of `docs/prerequisites.md`
-  for the shared components and exits 1 when one fails or cannot run.
-  Without a config it checks all of them at their default names, and
-  Stackable and the observability stack are reported without failing.
-- **A config needs a `name:` to change data.** `deploy`, `generate`,
-  `run`, `benchmark`, `query`, `clean`, `reproduce`,
-  `financial` and `validate` refuse a nameless config and offer a name to
-  add (`config upgrade` is removed, see Removed). A nameless config no longer gets a
-  name written to `.lakebench/state.json`; that file is only read. Because
-  v1.6 gave every nameless config in a directory the name in that file,
-  nothing ties a v1.6 deployment to any one of them, so `destroy`, `stop`,
-  `admin`, `status`, `logs`, `report` and `results` refuse a nameless
-  config in such a directory, naming the v1.6 name and any other nameless
-  configs there: add `name:` with that name to the config that deployed
-  it. `info` and `config show`, `storage`, `recommend` look at no
-  deployment and still load it under that name. Without that file,
-  `destroy`, `stop` and `admin` refuse a nameless config.
-- **Removed config keys are refused by the commands that change data**
-  (the list above), with what to do instead.
-  `destroy`, `stop`, `status`, `logs`, `report`, `info`, `config show`
-  and `admin` still load such a config and list the
-  dropped keys in one "Upgrade notes" block on stderr. An old
-  `datagen.file_size` is treated the same way.
-- **Counts are bounded at load.** `trino.worker.replicas` 1 to 256,
-  `datagen.generators` 0 to 1024 (0 is auto), the Polaris and Unity ports
-  1 to 65535, and at least 1 for every core count (Spark driver and
-  executor, `driver_cores`, Spark Thrift, DuckDB), the Hive thrift thread
-  counts, `executor.instances`, the per-job executor overrides and
-  `customer360.unique_customers` and `date_range_days`. The two upper
-  bounds sit far above anything lakebench sizes (200 workers at the top
-  scale; generator threads follow the pod CPU). A config with a zero,
-  negative or out-of-range count, which v1.6 accepted, is refused.
-- **Settings that were recorded but not honoured are refused.**
-  `platform.compute.spark.driver`, `platform.compute.spark.executor` and
-  `platform.storage.scratch.size` sized nothing (each Spark job takes its
-  driver, executor and scratch sizing from its job profile), yet were
-  autosized, graded by `validate` and recorded in `metrics.json`. They are
-  removed: the commands that change data refuse a config that sets them,
-  with the fix (`<job>_executors` for counts, `driver_memory` and
-  `driver_cores` for the driver), and `destroy`, `status` and the read-only
-  commands drop them with a note. The autosizer no longer reports executor
-  "caps" on them, so a run whose only cuts were those no longer carries the
-  "auto-sizing cuts" limit in its experiment identity; `validate` no longer
-  grades executor counts and memory.
-- **Config fields nothing read are removed.** `images.hive`,
-  `images.prometheus`, `images.grafana`, `platform.storage.s3.secret_ref`,
-  `architecture.catalog.hive.thrift`, `architecture.catalog.polaris.version`,
-  `architecture.catalog.unity.version`, `architecture.table_format.iceberg.file_format`
-  and `.properties`, `architecture.table_format.delta.properties`,
-  `architecture.pipeline.medallion` (with `bronze.path_template`),
-  `workload.customer360.date_range_days`, `observability.reports`,
-  `observability.storage_class`, `observability.prometheus_stack_enabled`,
-  `observability.s3_metrics_enabled`, `observability.spark_metrics_enabled`
-  and the top-level `version` and `description` (and the flat top-level
-  `secret_ref`). A key still at its v1.6 default is inert and loads under
-  every command with a note (for `description`, any text; for `images.hive`,
-  any value naming 3.1.3; for the two metrics flags, true or null); any
-  other value is refused by the commands that change data, with the fix,
-  and dropped with a note by the others. The
-  same holds for `platform.compute.spark.driver`/`.executor` and
-  `scratch.size` at their v1.6 defaults. The bronze layout is fixed:
-  `customer/interactions/` for Customer 360 and `pacs008/` for financial; a
-  financial config that named another layout with `path_template` (which
-  v1.6 passed to the financial stages) is refused. Corpus and workload ids
-  do not move. A schema walk test fails when a config field has no reader.
-- **`spark.conf` merges over the job defaults; keys Lakebench sets are
-  refused.** `spark.conf` now holds your own keys only (default `{}`). Each
-  job starts from seven proven defaults (S3A multipart size, upload blocks,
-  attempts, retries, retry interval, memory fraction and storage fraction),
-  then your keys, then the keys Lakebench sets for the job. Before, the
-  defaults were the schema default of `spark.conf`, so setting any key
-  dropped all of them: a config with a custom `spark.conf` now gets them back,
-  which changes what such a config runs. A `spark.conf` key Lakebench sets
-  for every job (shuffle partitions, the S3A connection pool and buffers,
-  the catalog, adaptive execution, UI) or a job script sets
-  (`spark.sql.session.timeZone`, `spark.sql.autoBroadcastJoinThreshold` and
-  three adaptive tunables) was silently overwritten and is now refused by
-  the commands that change data, naming what controls it. Also refused, as
-  reserved for Lakebench although v1.6 passed them through:
-  `spark.kubernetes.*` (so node selectors, tolerations and pod annotations
-  can no longer be set here), `spark.jars` and `spark.jars.*`,
-  `spark.submit.pyFiles`, and executor and driver memory, overhead, cores,
-  off-heap and PySpark memory, which would change the pod request outside
-  the capacity check. Teardown and read commands drop such a key with a
-  note, and a key at its v1.6 schema default is dropped with a note
-  everywhere. `spark.driver.maxResultSize` still takes a user value. A
-  non-default `spark.conf` is recorded as
-  `experiment.architecture.spark_conf_user` and enters the experiment
-  identity as `spark conf`; only tuning keys keep their values there.
-  Credential, secret-named, environment-variable and location values are
-  recorded as `<redacted>`, and other values by digest; a per-bucket S3A
-  key names the bucket's layer, not the bucket.
-  `spark.conf` reaches the pipeline's Spark jobs only: not the Spark Thrift
-  server, and not `--local` runs.
-- **`operator.install: true` is refused.** The Spark Operator
-  (`platform.compute.spark.operator.install`) and the Stackable operators
-  (`architecture.catalog.hive.operator.install`) are shared cluster
-  infrastructure that a cluster admin installs once; deploy only checks them.
-  `false` loads as before; teardown and read-only commands load `true` as
-  `false` with a note.
-- **`lakebench run` refuses benchmark settings it does not run.** `run`
-  measures one hot power pass with one stream. A config whose
-  `architecture.benchmark` sets `mode: throughput` or `composite`,
-  `cache: cold`, or `streams` above 1 is refused by `run` (use
-  `lakebench benchmark --mode`, `--cold` or `--streams`), and the run's
-  `config_snapshot.benchmark` records the pass that ran instead of the
-  config's values.
-- **Flat top-level config keys are deprecated.** `endpoint:`, `scale:` and
-  the other flat spellings still load, each with a note naming the nested
-  key to write. Both spellings set: the flat value still wins, with a note.
+- **The Hive recipes default to Spark 4.1.1.** Hive-based recipes take `apache/spark:4.1.1-python3`; Polaris recipes stay on 4.0.2. Pin `images.spark: apache/spark:4.0.2-python3` to keep the old image. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **The verdict is decided from the record.** A PASSED verdict now requires rows in every layer, the expected AML rules, a batch scale ratio of at least 0.95, and no empty query answer. `run` exits 1 when the verdict is not PASSED; `report` takes the stricter of stored and recomputed verdicts. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Multi-cycle runs and reused corpora check a corpus series marker.** Every generate writes `_corpus/series.json`; a run reusing bronze checks the marker and exits 3 on a mismatch or incomplete generate. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Executor overrides are bounded, counted and kept out of evidence.** Executors take 1 to 28 and `driver_cores` 1 to 16; larger values are refused. Overrides enter the capacity check and the experiment identity. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`run` needs a 1.7 deploy.** Jobs take jars from the deployment's dependency server; a 1.6 deployment exits 4. Redeploy once after upgrading. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are refused** (exit 2). Use `lakebench run CONFIG --generate --regenerate` for bronze and `clean silver`/`clean gold` for data. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Renamed commands print one line and are removed in v1.8.** `results`, `admin install-spark-operator` and `admin install-scratch-storage-class` are hidden aliases of their replacements. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`benchmark` and `query` no longer write into a run's record.** `benchmark` saves a record of its own; `query` prints its result and no longer appends it. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`run` refuses arguments it used to ignore, before any cluster call.** Conflicting or mode-inappropriate flags exit 2 before contacting the cluster. The full list is under `run` in docs/cli-reference.md. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`reproduce` no longer destroys before its run.** It refuses an existing namespace or bucket (exit 3). Run `lakebench destroy CONFIG` first. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Continuous runs recorded before the round count was stored compare on their rounds.** A record with no stored `limits.benchmark_rounds` reads it from its rounds, so a pair with different round counts now reads not like-for-like.
+- **`init` writes a first-day config, and the wizard is removed.** A 12-line config with a unique name, `recipe:`, scale 1, and `${VAR}` credentials. The interactive wizard and `--access-key`/`--secret-key` are gone. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **A component that contradicts its recipe is refused at load.** A catalog, format or engine that differs from the recipe fails commands that change data. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`${VAR}` is substituted per value, not in the file text.** Environment values are no longer parsed as YAML, so secrets with special characters work. Two edge cases fail: unclosed defaults and references inside flow syntax. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **A config with no `recipe:`, or `recipe: default`, is deprecated.** It still resolves as before and loads with a note. v1.8 requires `recipe:`.
+- **Deploy never installs a shared component; `lakebench admin install --component` does.** Shared components (scratch StorageClass, Spark Operator, Stackable, observability) are installed once by a cluster admin. `deploy` only checks them. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`admin install` never changes an installed component.** It installs what is missing with `helm install` (never an upgrade). A version change is refused unless `--allow-version-change` is given. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`admin install-spark-operator` and `admin install-scratch-storage-class` are aliases** of `admin install --component`. `install-spark-operator --version` no longer upgrades an installed operator.
+- **The watch-list edits never fall back to the config's operator version.** `deploy`, `run` and `destroy` pin the installed chart, read inside the cluster lease.
+- **`admin doctor` runs the prerequisite checks** of `docs/prerequisites.md` for the shared components and exits 1 when one fails.
+- **A config needs a `name:` to change data.** Commands that change data refuse a nameless config. A v1.6 directory needs `name:` added to the config that deployed it. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Removed config keys are refused by the commands that change data,** with what to do instead. Read-only commands list dropped keys in an "Upgrade notes" block.
+- **Counts are bounded at load.** Zero, negative or out-of-range counts for replicas, cores and generators are refused.
+- **Settings that were recorded but not honoured are refused.** `spark.driver`, `spark.executor` and `scratch.size` sized nothing; they are removed. Use `<job>_executors`, `driver_memory` or `driver_cores` instead. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Config fields nothing read are removed.** Twenty config keys (images, observability flags, properties, and others) that had no consumer are removed; a key at its v1.6 default loads with a note. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`spark.conf` merges over the job defaults; keys Lakebench sets are refused.** `spark.conf` now holds your own keys only; each job starts from proven defaults. Keys Lakebench or its scripts set are refused. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`operator.install: true` is refused.** Shared operators are installed with `admin install`; `deploy` only checks them.
+- **`lakebench run` refuses benchmark settings it does not run.** A config with `mode: throughput|composite`, `cache: cold` or `streams` above 1 is refused by `run`; use `lakebench benchmark` with those flags.
+- **Flat top-level config keys are deprecated.** They still load with a note naming the nested key to write.
 
 ### Added
-- **AML benchmark specification.** `docs/benchmarks/AML.md` publishes the AML
-  (financial) workload's data model, seed policy, pipeline, detection rules
-  and reason codes, correctness contract, query set, metrics, scoring and
-  comparability rules, checked against the code. `tests/test_benchmark_specs.py`
-  fails when a financial metric, query, rule or reason code has no line in it.
-- **`scripts/gen_docs.py`** regenerates every generated docs block in one
-  command (support states, configuration and CLI references, sizing tables,
-  exit codes, prerequisites); `--check` exits 1 when any is stale. Every
-  config schema field, section blocks included, now has a description.
-- **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...`
-  to that file as it exits, so scripts can tell refusals that share exit 3
-  apart without reading message text (docs/exit-codes.md).
-- **AML batch runs record their alert set.**
-  After its last alert write, gold-finalize fingerprints the run's alerts
-  over `(rule_id, entity_id, alert_ts)`, per rule and in total, leaving out
-  generated ids and wall-clock times (`experiment.results.alert_set`, equal
-  on Spark 4.0 and 4.1). Two AML batch runs whose alert sets differ are not
-  comparable; `reproduce` refuses an
-  AML batch record written by 1.7 without one. The fingerprint runs last in
-  the gold-finalize pod; its seconds (`jobs[].alert_set_seconds`) are taken
-  off the stage's time, as the Customer 360 check's are (time to value of a
-  multi-cycle run keeps the earlier cycles'), and the report shows them
-  beside it. The covered continuous score uses the same
-  definition. See
-  [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
-- **W5/W6 non-planted alerts per customer, by scale.** AML scoring records
-  two diagnostic counts, `financial_scoring.nonplanted_alerts_by_rule` and
-  `financial_scoring.customer_count`, which are not results.
-  `scripts/aml_screen_rates.py` reads stored AML batch `metrics.json`
-  records only and writes `docs/benchmarks/data/aml_screening_rates.json`
-  from seed 43's runs at scale 1 and 10, plus the calibration seed's when
-  the pre-registration's calibration seed is not 43.
-  Per seed role (`seed-43` or `calibration`, never a seed value), scale and
-  rule it gives the non-planted alerts, the customer count, the rate, the
-  run id, corpus role, generator digest and workload version, each n=1,
-  and the ratio scale 10 over scale 1 from the raw counts. It refuses, by
-  run id, a protected-corpus record (fail closed), a verdict other than
-  PASSED, a record without the counts or in which W5 or W6 did not run, a
-  record with no observed generator digest, scale and seed, any other
-  seed or a scale other than 1 or 10, a missing one of
-  those runs, a scale pair that differs in generator or workload
-  version, and fewer than 50 non-planted W5 plus W6 alerts at scale 1.
-  Where a Lakebench evidence cap cut a rule's alerts, the row carries
-  `evidence_capped_alerts` and its count is an upper bound; such a ratio is
-  marked `bounded_by_evidence_cap`. The file is not in the tree until the
-  live runs exist. W5 and W6 are unchanged.
-- **Requested and effective values.** Each run records what it asked for
-  against what it did, for the gold strategy (Customer 360), the pipeline
-  mode, each job's executors and the continuous trickle, in
-  `experiment.requested_effective`. A request that was not met (a
-  configured gold strategy the gold job did not run, an executor override
-  that ran with fewer executors, a mode that did not run), or incremental
-  gold chosen automatically outside a multi-cycle cycle, is labelled in
-  the verdict (`qualifiers.requested_effective`) and the report, decided
-  when the record is read (`experiment.requested_effective_mismatches`
-  keeps the run's own list); it never fails the run or enters identity. The config snapshot records the requested gold
-  strategy (`requested.gold_strategy`).
-- **`architecture.benchmark.investigator_sessions` (AML continuous).** A
-  new optional key, 1 to 32, for concurrent investigator sessions on an AML
-  continuous run. It is refused when the config loads unless the workload
-  is `financial`, `tm_operations.enabled` is true and the query engine is
-  `trino` or `spark-thrift` (the message names each condition that fails),
-  and `run` refuses it unless the run is continuous (`run --continuous` on
-  a batch config takes it). The record gains `experiment.investigators =
-  {requested, run}`, and the identity key `investigator sessions` takes the
-  sessions that ran, not the configured number, so a run whose round was
-  lowered or skipped compares as not like-for-like with one that ran at N
-  (an outcome condition: `reproduce` does not refuse on the number). A config without the key records and identifies exactly
-  as before. With the key, the run adds one round after its first
-  in-stream round with a case: N concurrent sessions, one case each in
-  IQ1's queue order, run IQ1 to IQ3 bound to their case and IQ4, once each,
-  with a per-query timeout that keeps the round inside the window, recorded
-  as `continuous.investigators` (sessions run, per-session rows and
-  seconds, p50 and p95 per query, the baseline round's times, status, the
-  timeout and memory bounds when hit, and the overlap of the detection ticks
-  with the session window as `tick_delta` and `load_label`); it never counts
-  as a benchmark round. The verdict shows the check and the load label as
-  its `investigators` qualifier; it never fails the run. See
-  [aml-scoring.md](docs/aml-scoring.md).
-- **AML continuous runs drain the last detection tick and score
-  `recall_covered`.** At window end the CLI asks gold-refresh to finish its
-  tick (a marker under its checkpoint) instead of deleting it mid-tick, then
-  scores recall over the instances that tick could have detected, at the
-  snapshots it logged. The record gains `continuous.ticks[]`,
-  `continuous.drain`, `continuous.ticks_unpinned`,
-  `financial_scoring` with `mode: "covered"` and
-  `experiment.results.alert_set_continuous`. A drain that times out fails
-  the run. `lakebench stop` drains for up to 300 s before deleting. Each
-  tick now filters silver through the versions table at one recorded
-  snapshot. See
-  [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
-- **AML continuous runs re-read the snapshots their ticks read.** After
-  the score job of a run that passed its gates, a `time-travel-financial`
-  Spark job fingerprints each recorded `silver.transactions` snapshot still
-  in the table, newest first (its business columns: every column less the
-  batch-version sentinels; order-independent), writes the
-  hashes, reads them back, then times a full scan of each snapshot (scan
-  plus fingerprint) and compares its rows with the count the tick recorded
-  and its fingerprint with the hash. Each tick in
-  `continuous.time_travel.ticks[]` reads `verified`, `verified_hash_only`
-  (no comparable count), `mismatch`, `error` (a read failed), `not_read`
-  (budget), or `expired` with the earliest maintenance round and retention
-  that could have expired it (`expired_by`), or `missing_unexplained` when
-  no Lakebench round could have. The record gains `current_read_s`,
-  `policy` (configured and applied retention), `budget` (the
-  Lakebench-imposed time-travel budget, from the per-job timeout) and a
-  `verdict` (`pass` needs at least one `verified`; `fail`; `incomplete`;
-  `not_run`); on AML runs `continuous.retention.rounds` records when each maintenance
-  round ran, on which engine and which tables it expired. Only ticks in the
-  current gold-refresh driver pod's log are read. The check is shown beside
-  the run verdict and never fails the run. Nothing is pinned: no tag or
-  branch is created, so destroy is unchanged.
-- **Each AML continuous tick records its transactions snapshot for
-  time travel.** The record gains `continuous.time_travel.ticks[]`: per
-  tick, the `silver.transactions` snapshot detection read, its commit time,
-  and its record count and deleted-row counts from the Iceberg snapshot
-  summary (`count_source: "summary"`, or `"unavailable"` with a null count
-  when the summary has none). It is metadata only, so tick timings, time to
-  detect and freshness are unchanged.
-- **`init --from OLD -o NEW` converts a 1.6 config.** It keeps the
-  deployment's name (OLD's, or the one 1.6 recorded in
-  `.lakebench/state.json` for a nameless config) and writes the bucket names
-  out; moves flat keys, `architecture.workload`, `processing` and
-  `sustained` to the current keys; writes the recipe the config resolves to;
-  drops removed keys and the `operator.install` keys with their fix text;
-  replaces plaintext credentials with `${VAR}` references without printing
-  them; and lists every change and what `run` still refuses. It never
-  expands a `${VAR}`, never writes over OLD, and writes nothing unless the
-  new file loads to the same settings as OLD. `config upgrade` and the
-  nameless-config refusals already pointed here. `scripts/upgrading.py`
-  also requires a breaking-changes entry for each config value 1.7 refuses
-  that 1.6 accepted (`config/refused_keys.py`).
-- **Every AML alert carries reason codes.** `gold.alerts` gains a last
-  column, `reason_codes`: the rule's base code, then the conditions that
-  held (for example `W2_BENEFICIARY_FAN_IN`, `W5_RESCREEN`,
-  `W7_SYNTHETIC_CORRIDOR`). Batch scoring adds per-code recall, false
-  positives and alert counts (`financial_scoring.recall_by_code`,
-  `fp_by_code`, `alerts_by_code`). A gold.alerts table from an earlier
-  release gains the missing trailing columns at the next run; a table whose
-  columns are in another order now stops the gold job instead of taking
-  alerts positionally into the wrong columns. No alert, existing column or
-  score changes. See [aml-scoring.md](docs/aml-scoring.md#reason-codes).
-- **AML batch records attribute gold-finalize time and show stage headroom.**
-  `experiment.attribution` names gold-finalize's slowest rule, its heaviest
-  Spark stage and the TM share; `limits.headroom_pct` gives each stage's
-  headroom against the per-job timeout and the timed benchmark's headroom
-  against its per-query timeout, which the record now keeps as
-  `job_timeout_seconds` and `benchmark_query_timeout_seconds`. Lakebench
-  now reads the whole driver log of a job that fails or times out, as it
-  did for a successful one, so the per-rule lines of a failed gold-finalize
-  reach its record. `scripts/aml_stage_attribution.py`
-  builds the same profile from a Spark event log when the driver could not
-  read its status store. Diagnostics only. See
-  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
-- **AML gold-finalize records where its time goes.** The gold-finalize
-  job in `metrics.json` gains `rule_elapsed_s` (seconds per detection
-  rule), `stage_profile` (each rule's three heaviest Spark stages, read
-  from the driver's status store with every rule in its own job group,
-  flagged when the store may be missing stages), `stage_profile_unavailable`
-  and `stage_profile_cost_s`, and the TM operations summary gains
-  `tm_ops.phases` (seconds per stage of the pass). No alert, gold table or
-  score changes. Reading the profile can add up to 5 seconds per rule to
-  the gold-finalize job when the driver's status listener lags, and none
-  when it keeps up; continuous gold ticks do not profile. See
-  [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
-- **Storage multiple.** Every run measures, at its end, physical bytes over
-  the current snapshot's data files per table, per layer and in total,
-  with physical split into current, retained-snapshot, metadata and other
-  bytes, under the maintenance policy that ran. Checkpoints, datagen
-  markers and manifest, scoring outputs and the ML loop prefix are
-  excluded and listed; raw datagen files are physical only. Recorded as
-  `storage_multiple` and shown on the HTML report; DuckDB and `none`
-  recipes record physical bytes only, and a `run --stage` run records it
-  as not measured. The run end adds a second listing of
-  each bucket and a few metadata queries per table on the maintenance
-  engine, within a 10-minute budget.
-- **Customer 360 results on the HTML report.** The report shows the C360
-  expected-results checks: passed out of total and the gate as the verdict
-  applies it (a gating check that failed, did not run or is absent reads
-  "fails the run"), the checks that did not pass first with observed, expected and
-  tolerance, then the passes by family (pipeline, benchmark shapes,
-  statistical). Before, the
-  34 checks a C360 run records were never shown.
-- **`--json` on the read verbs.** `plan`, `status`, `report`, `config
-  recipes` and `query` write one `lb-cli/1` document to stdout
-  (`schema`, `command`, `exit_code`, `data`, `errors`) and their human
-  output to stderr; the exit code and `exit_code` always agree, and a
-  failed command's document has `data: null` and the error, including an
-  unknown option. `plan --json` prints this document, its plans under
-  `data`.
-- **`docs/cli-reference.md` is generated from the CLI.** Each visible
-  command's usage line, arguments, options (type, default, help) and named
-  exit paths, `run`'s refused arguments and the table of renamed, refused
-  and deprecated names come from `scripts/gen_cli_reference.py`; a unit test
-  fails on drift. A second test parses every `lakebench ...` line in the
-  README, `docs/` and `examples/` with Click and fails on an unknown command
-  or flag, or on an alias or refused name.
-- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a
-  config, reads `./lakebench.yaml` when no argument is given (and says
-  which deployment it shows), and prints the stage matrix with `--format
-  table|json|csv`. `results` is an alias of `report --format table`, with the
-  same argument and `--format` passing through. `report --list` shows each
-  record's kind.
-- **`financial reproduce` reproduces a real batch alert.** AML batch
-  gold-finalize logs the snapshot of `silver.transactions`,
-  `silver.entities` and `silver.silver_batch_versions` it reads, the batch
-  scorer fingerprints every column of each before maintenance, and the run
-  record keeps them as `financial_scoring.read_snapshots`. `lakebench
-  financial reproduce CONFIG --alert-id ID [--run RUN_ID]` reads that
-  record (refusing before any cluster call: exit 2 with no record on this
-  host or a protected corpus, exit 4 when the run recorded no snapshots),
-  reruns the alert's rule on those snapshots (or on content-equal current
-  tables once they expired) with gold's parameters and the batches sealed
-  when gold read, and matches the alert on rule, entity, `alert_ts` and its
-  related transactions: exit 0 reproduced, 1 not reproduced or not found,
-  4 when a snapshot is gone and the content changed. The job runs once (no
-  driver retries) and writes `scoring/reproduce/<alert_id>/result.json`
-  (with `not_pinned`: the watchlist and the W1 cap are read as they are
-  now). `financial replay` builds the rule's arguments with the same
-  function as gold-finalize.
-- **A protected AML corpus is never read or scored outside its registered
-  look.** `run`, `benchmark`, `query`, `reproduce` and every
-  `financial` subcommand refuse a config that declares the evaluation or
-  robustness `corpus_role`, or whose `datagen.seed` hashes to a held-out
-  seed. Each refusal exits 2
-  on the `run.protected_corpus` path before any cluster call and names a
-  role, never a seed. A spent seed, a held-out seed under another role and a
-  role that does not match its seed are refused when the config loads
-  (exit 2, as a config error). The commands that tear down, read about or
-  show a deployment (`destroy`, `stop`, `admin`, `status`, `logs`,
-  `report`, `results`, `plan`, `info` and the `config` read commands) skip that load-time check, so a registered
-  look's deployment can be torn down once its seed is spent; `clean` still
-  refuses it (use `destroy`). A financial config whose bronze prefix is one
-  this host generated a registered corpus into (the corpus ledger below) is
-  refused the same way, so a development config pointed at that bucket does
-  not read the registered corpus. The in-run scorer (`score-financial`) also
-  reads every manifest row and refuses a corpus any of whose rows come from
-  a held-out or spent seed.
-- **`lakebench generate --registered-corpus`** generates the registered
-  evaluation or robustness corpus; it is the only Lakebench command that
-  does (without it a protected config is refused, 2). It needs `--yes`,
-  refuses `--allow-stale-bronze` and a seed that already has a look (the
-  look ledger, or any commit of the look record), and appends the attempt to
-  `~/.lakebench/aml_corpora.jsonl` (`LB_AML_CORPORA_LEDGER`) before the first
-  cluster call, `submitting` before the datagen Job is created, then
-  `generated` (with the observed image digest) or `failed`; a crash leaves
-  `attempted` (and `submitting` once the Job may exist). The ledger, the
-  datagen sidecar and the journal name the seed by its salted hash only.
-  Generating the corpus is not a look and spends nothing.
-- **bronze-verify refuses a corpus from a held-out or spent AML seed** before
-  it reads or writes anything (owner decision, 10-03). It reads every row of
-  every cycle's manifest; a held-out or spent recovered seed, a manifest the
-  corpus seed cannot be recovered from (for example one with no typology row),
-  or a batch corpus with no manifest stops the run with exit 2 on
-  `run.protected_corpus`, so a development config pointed at a bucket that
-  holds a registered corpus never reaches silver. Behaviour changes: an old
-  bucket holding a corpus from a spent seed (42) now stops at bronze-verify
-  instead of running unscored, and a batch run over a corpus without a
-  manifest stops instead of warning. The continuous preflight checks the
-  manifest when it is there, and requires one with `--skip-generate`. A
-  financial `run --stage silver-build` or `gold-finalize` runs bronze-verify's
-  check alone first (a manifest is required unless the run is multi-cycle,
-  whose cycles generate their own corpus). A check that cannot run (a storage or Spark error) stops
-  the job too, but exits 1 as a failure, not 2.
-- **A registered look scores only the corpus `generate --registered-corpus`
-  wrote** (owner decision, 10-03). `scripts/aml_gate.py --registered` refuses
-  unless the corpus ledger holds a `generated` entry for that role and seed
-  whose corpus fingerprint (every data file's path and size, each manifest
-  file's sha256, recorded from S3 when the generation finishes) equals the
-  local corpus's (data files by path and size, manifests by sha256), the
-  generation was pinned to the `--generator-image` digest and every datagen pod
-  of it ran one image, and no other attempt on this host had a datagen Job in
-  that bronze prefix meanwhile (the ledger is per host; an earlier attempt
-  that failed after submitting may have left pods writing, so the corpus is
-  then generated again into a different bucket). `generate --registered-corpus`
-  now needs `images.datagen` pinned by digest, and exits 1 when it generated
-  the corpus but could not fingerprint it or read its pods' image digests.
-- **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role
-  scored run it can find on this host: stored run records, the configs the
-  journals name and the held-out tokens in them, the bronze manifests and
-  gold scoring files of the deployments-ledger rows' own buckets only (a
-  scoped client refuses any other bucket), and the local look and corpus
-  ledgers, with every path searched or skipped. It is read-only and prints
-  no seed or key.
-- **Each deployment gets a dependency server.** `deploy` runs a new
-  `deps` step after the Spark Operator check: a `lb-deps` Deployment, Service
-  and 5Gi PVC `lb-deps-data` in the deployment's namespace, on the stock
-  Spark image. Its init containers resolve the jars (plus the AML reference
-  wheels for the AML workload, and the DuckDB wheel and extensions for
-  DuckDB) once per request; the server re-hashes the set at every start and
-  serves it read-only. Deploy reads the served manifest, recomputes the set
-  hash from its file entries and jar order, checks it (every selected group
-  present, the one table-format runtime the jobs use, no unlisted jar
-  shadowing an image jar), and records it in the `lb-deps-manifest`
-  ConfigMap and the namespace annotation `lakebench.deployment/deps-set`.
-  The step removes the annotation before anything else and writes it last,
-  and removes it again when the step fails, so a failed `deps` step leaves
-  none. A cold resolve adds one to a few
-  minutes to the first deploy; an unchanged redeploy renders the same pod
-  template and does not restart the server. `destroy` removes the server's
-  objects and the annotation, also when `create_namespace: false`.
-- New optional config block `platform.deps`: `maven_repository`,
-  `pypi_index` and `duckdb_extension_repository` point the resolve at
-  mirrors for clusters without public egress, and `storage_class` picks the
-  PVC's StorageClass. Mirror URLs with credentials, a query or another
-  scheme are refused at load.
-- Two new entries on `docs/prerequisites.md`, both checked at deploy and
-  left out of the `run` preflight, so a deployed system never fails a run on
-  them: `deps-storage-class` reports the class of an existing `lb-deps-data`
-  PVC, and before the PVC exists fails when `platform.deps.storage_class`
-  names a missing StorageClass or is empty on a cluster with no default one
-  (the page recommends a replicated class); `egress-hosts` lists the hosts
-  this config's resolve reads (Maven, PyPI, DuckDB extensions, or the
-  configured mirrors) without probing them, and the page describes the
-  mirror keys. `lakebench plan` prints both.
-- **BOUNDED BY trickle.** A continuous run whose trickle
-  (`max_files_per_trigger`) held intake, meaning `ingest_ratio` (ingested
-  over released rows) of at least 0.99 and a lag at window end of at most
-  one trigger, records `experiment.limits.trickle_bound` and a `trickle:`
-  line in `limits.bound`. The report labels the continuous rows/s, GB/s and
-  efficiency figures as the offered load, not capacity; QpH,
-  freshness and time to detect are not labelled. Stored records get the same
-  answer when read. The trickle is not a bound kind, so no experiment
-  identity moves. The `intake_limit` description now says `none` means
-  `ingest_ratio >= 0.95` and points at `trickle_bound`.
-- **Compaction by engine, and blended in-stream QpH.** A run's effective
-  maintenance records the compaction operation and its parameters (Trino
-  `optimize` with its 128 MB threshold, Iceberg `rewrite_data_files`
-  defaults), and an exp2 id names it (`compaction=ran(trino_optimize:128MB)`),
-  so a Trino and a Spark Thrift run that both compacted are not
-  like-for-like. Each in-stream round records the queries it executed and
-  their query set id; `scores.composite_qph_basis` and
-  `scores.composite_qph_by_set` say when the in-stream QpH blends rounds
-  that executed different sets (a round with a failed query). Such a run's
-  in-stream benchmark reads query set `blended`, and the perf gate and
-  `reproduce` leave it out. A record stored before rounds named
-  their set gets each round's set from its queries' success flags, so an
-  older continuous run in which a query failed in some rounds and not
-  others now reads blended too. A run whose rounds all missed the same
-  query is read by `reproduce` as the smaller set it executed. A mix of engines reads
-  `compaction=ran(mixed(<op>+<op>))`. See `docs/benchmarking.md`.
-- **`lakebench plan CONFIG...`**, read-only: the components, recipe and
-  support state, the minimum cluster from the one sizing source (the
-  numbers the `run` preflight and the README tables use), the cluster
-  prerequisites and free capacity (exit 4 when one fails, with the
-  `admin install --component` command for a missing shared component), the
-  Polaris client secret's source (never its value), and the hosts outside
-  the cluster the deployment contacts. `--offline`, `--cores/--memory` and
-  `--json` make no cluster call. A config `deploy` would refuse at load is
-  exit 2. Several configs are compared by experiment identity and
-  execution conditions.
-- **Run provenance is complete.** `metrics.json` `provenance` now says how
-  lakebench was installed (`install`), and a pip-installed run names the
-  commit its wheel was built from (the build writes it into the package;
-  before, a wheel recorded no commit). It also records the config file's
-  sha256 and path, the Spark scripts ConfigMaps applied, the dependency set
-  (`"not_recorded"` until one is recorded), the image digests this run's
-  Spark, Trino and Thrift pods actually ran, and each Spark job's scratch
-  PVC as the cluster held it. The code is read again at run end, including
-  a hash of the package files; a run whose lakebench code changed while it
-  ran is not `supported`. See `docs/benchmarking.md`, "Metrics JSON".
-- **`run --repeat N`: one series of batch runs over one corpus.**
-  Repetition 1 runs as asked; repetitions 2 to N do not generate and
-  rebuild silver and gold from the same bronze. The config is loaded once
-  for the whole series. The datagen prefix is listed around every
-  repetition and must not change; a change, a corpus that differs from
-  repetition 1's, or an interrupt stops the series (exit 3, 3, 130), and a
-  repetition that fails its verdict does not. Records carry
-  `series {id, index, size}`, later repetitions inherit repetition 1's
-  corpus block (`experiment.corpus.inherited_from`) only when their own
-  pre-save listing matches, and `lakebench-output/series/<id>.json`
-  (schema `lb-series/1`) lists the repetitions, the passed members and the
-  corpus. Refused with a continuous run, `cycles` above 1, `--stage`,
-  `--local`, `--deploy-only` and `--generate-only`.
-- `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for running the
-  AML reference detector and the local AML gate. It pins numpy, scipy,
-  pandas, scikit-learn, joblib and threadpoolctl to the versions the cluster
-  job installs, so a local gate fits the same model as the cluster.
-- **A nameless config tears down or reads only a deployment it can prove
-  is its own.** `destroy`, `stop`, `status` and `logs` take `--name` for
-  a config that has no `name:`. With it, or as the only nameless config in
-  its directory, the command goes ahead only when the namespace carries a
-  nonce recorded in `.lakebench/<name>.json` for this directory on this
-  host, or, for a v1.6 directory (only `.lakebench/state.json`), when the
-  namespace's name and created-buckets stamps match `--name`; otherwise it
-  refuses (exit 3) and points at `lakebench init --from`. Without `--name`
-  a v1.6 directory is still refused at load (exit 2). Destroy then touches
-  only the namespace incarnation it checked.
-- **Corpus id v2.** Every `run` (batch, continuous and `--local`)
-  now records its corpus observation (one listing of the datagen prefix
-  and a read of the generator's per-node markers and `series.json`, taken
-  just before the record is saved, in
-  `config_snapshot.experiment_inputs.corpus_observation`; Lakebench's own
-  bucket objects under `.lakebench/` are never counted; a prefix holding no
-  object records no listing digest and the corpus problem "no objects under
-  <prefix>", so such a run is not comparable) and gains in
-  `experiment.corpus`: `id_v2` (null when it cannot be computed, with the
-  reason in `id_v2_unavailable`), `id_version`, `args_sha256`, `declared`
-  (the config's corpus settings, for display), and, when markers exist,
-  `lineage`, `lineage_observed` and `lineage_notes`; `warnings` when the
-  config disagrees with the corpus it read. The id hashes the arguments the
-  generator resolved, the model version and the image lineage (the digest
-  in `series.json`, mapped through `src/lakebench/config/datagen_lineage.yaml`
-  and resolved when the run is observed), so a config edited after
-  generation does not change it. Markers that disagree, miss a node or
-  cycle, or come from different builds are corpus problems, which make
-  the run not comparable. `corpus.id` (v1) is unchanged, and no
-  stored id or identity digest moves.
-- **`docs/prerequisites.md` is generated** from the prerequisite checks in
-  `deploy/prereqs.py` by `scripts/gen_prereq_docs.py`, so the page and the
-  checks cannot drift.
-- **Each datagen pod writes a corpus marker when it finishes.**
-  `<prefix>/_corpus/c<cycle>-node-<node>.json` records the files, rows and
-  bytes the pod wrote, the build commit, the seed (as its salted hash for
-  the financial schema) and `corpus_args`: the corpus arguments as the
-  generator resolved them (defaults applied; the parquet writer settings
-  from `DG_*` included; destination, transport, credentials and thread
-  count left out) with their sha256, so an omitted flag and the same flag at
-  its default hash the same. `generate --print-resolved-args` prints that
-  object and writes nothing; `--version` prints the model version and build
-  commit. The image carries OCI labels for both, refuses to build without
-  `--build-arg LB_BUILD_COMMIT=<commit>`, and no longer installs boto3. A
-  Customer 360 `--cycle n` now needs the matching `--cycles` (Lakebench
-  always passes both), and a non-finite `--scale`, `--dirty-ratio` or
-  `--duplicate-email-pct` (`nan`, `inf`) exits 2.
+- **AML benchmark specification.** `docs/benchmarks/AML.md` publishes the AML workload's data model, seed policy, pipeline, detection rules, correctness contract, query set, metrics and scoring rules.
+- **`scripts/gen_docs.py`** regenerates every generated docs block in one command; `--check` exits 1 when any is stale.
+- **`LB_EXIT_PATH_FILE`.** When set, `lakebench` appends `<code> <path>...` to that file as it exits, so scripts can tell refusals apart without reading message text.
+- **AML batch runs record their alert set.** Gold-finalize fingerprints alerts over `(rule_id, entity_id, alert_ts)`. Two runs whose alert sets differ are not comparable. See [aml-scoring.md](docs/aml-scoring.md#the-alert-set-are-two-runs-alerts-the-same).
+- **W5/W6 non-planted alerts per customer, by scale.** AML scoring records diagnostic counts per rule and scale. `scripts/aml_screen_rates.py` computes screening rates from stored records.
+- **Requested and effective values.** Each run records what it asked for against what it did (gold strategy, pipeline mode, executors, trickle). A mismatch is labelled in the verdict but never fails the run.
+- **`architecture.benchmark.investigator_sessions` (AML continuous).** Optional key (1 to 32) for concurrent investigator sessions on an AML continuous run. The round never counts as a benchmark round and never fails the run. See [aml-scoring.md](docs/aml-scoring.md).
+- **AML continuous runs drain the last detection tick and score `recall_covered`.** At window end gold-refresh finishes its tick, then recall is scored over covered instances. See [aml-scoring.md](docs/aml-scoring.md#continuous-recall-over-covered-instances).
+- **AML continuous runs re-read the snapshots their ticks read.** A post-score time-travel job verifies snapshot integrity and records the result beside the run verdict. The check never fails the run.
+- **Each AML continuous tick records its transactions snapshot for time travel.** Metadata only; tick timings, time to detect and freshness are unchanged.
+- **`init --from OLD -o NEW` converts a 1.6 config.** Keeps the deployment's name, moves keys to current locations, replaces plaintext credentials with `${VAR}` references, and lists what `run` still refuses.
+- **Every AML alert carries reason codes.** `gold.alerts` gains `reason_codes`; batch scoring adds per-code recall, false positives and alert counts. See [aml-scoring.md](docs/aml-scoring.md#reason-codes).
+- **AML batch records attribute gold-finalize time and show stage headroom.** Diagnostics: slowest rule, heaviest Spark stage, and headroom against timeouts. See [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **AML gold-finalize records where its time goes.** Per-rule elapsed seconds, stage profile and TM operations phases. No alert or score changes. See [aml-scoring.md](docs/aml-scoring.md#where-gold-finalize-spends-its-time).
+- **Storage multiple.** Every run measures physical bytes over the current snapshot per table, per layer and in total, under the maintenance policy that ran. Recorded as `storage_multiple` and shown on the HTML report.
+- **Customer 360 results on the HTML report.** The report shows the 34 C360 expected-results checks: passed, failed and gating status.
+- **`--json` on the read verbs.** `plan`, `status`, `report`, `config recipes` and `query` write a structured `lb-cli/1` JSON document to stdout.
+- **`docs/cli-reference.md` is generated from the CLI.** A unit test fails when the reference drifts from the code.
+- **`report` absorbs `results`.** `report [RUN|CONFIG]` takes a run id or a config; `results` is an alias of `report --format table`.
+- **`financial reproduce` reproduces a real batch alert.** Reruns the alert's rule on the snapshots its run read: exit 0 reproduced, 1 not reproduced or not found, 4 when snapshots are gone.
+- **A protected AML corpus is never read or scored outside its registered look.** Commands refuse a config whose seed hashes to a held-out seed (exit 2 before any cluster call). Teardown and read commands skip that check.
+- **`lakebench generate --registered-corpus`** generates the registered evaluation or robustness corpus. It is the only command that takes a protected config. The attempt is ledgered before any cluster call.
+- **bronze-verify refuses a corpus from a held-out or spent AML seed** before it reads or writes anything, so a development config pointed at a registered corpus never reaches silver.
+- **A registered look scores only the corpus `generate --registered-corpus` wrote.** `scripts/aml_gate.py --registered` verifies the corpus fingerprint against the ledger.
+- **`scripts/aml_heldout_audit.py`** (maintainers) lists every protected-role scored run on this host. Read-only; prints no seed or key.
+- **Each deployment gets a dependency server.** `deploy` runs a `deps` step: a `lb-deps` Deployment that resolves jars once and serves them read-only. A cold resolve adds one to a few minutes to the first deploy.
+- New optional config block `platform.deps` for Maven, PyPI and DuckDB mirrors on clusters without public egress.
+- Two new entries on `docs/prerequisites.md`: `deps-storage-class` and `egress-hosts`.
+- **BOUNDED BY trickle.** A continuous run whose trickle held intake is labelled; the report shows rows/s and GB/s as the offered load, not capacity.
+- **Compaction by engine, and blended in-stream QpH.** Each run records its compaction operation and parameters; runs with different engines are not like-for-like. See `docs/benchmarking.md`.
+- **`lakebench plan CONFIG...`**, read-only: shows the components, recipe, support state, minimum cluster, prerequisites and free capacity. `--offline` makes no cluster call.
+- **Run provenance is complete.** `metrics.json` records how lakebench was installed, the config's sha256, image digests, dependency set and scratch PVCs. See `docs/benchmarking.md`.
+- **`run --repeat N`: one series of batch runs over one corpus.** Repetitions 2 to N rebuild silver and gold from the same bronze. Records carry `series {id, index, size}`.
+- `[aml]` install extra (`pip install "lakebench-k8s[aml]"`) for the AML reference detector and local gate.
+- **A nameless config tears down or reads only a deployment it can prove is its own.** `destroy`, `stop`, `status` and `logs` take `--name` and verify a nonce before acting.
+- **Corpus id v2.** Every run records its corpus observation and gains `experiment.corpus.id_v2`, hashed from the generator's resolved arguments and image lineage.
+- **`docs/prerequisites.md` is generated** from the prerequisite checks, so the page and the checks cannot drift.
+- **Each datagen pod writes a corpus marker when it finishes.** The marker records files, rows, bytes, build commit and `corpus_args` with their sha256.
 
 ### Changed
 - The package version is 1.7.0.dev0 until the release commit sets 1.7.0, so development records stamp lakebench 1.7.0.dev0 instead of 1.6.0.
@@ -2273,7 +1530,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   transactions match; detection rules read none of these columns, so alerts
   are unaffected. Not a release blocker because batch and continuous are
   different workload shapes and are not compared; a run under one mode is
-  reproducible under the same mode. Tracked for v1.7.x (LB-276, LB-264).
+  reproducible under the same mode. Fixed in 1.7.1.
 - **The capacity preflight sums free capacity across nodes.** Ten nodes
   with 12 cores free each read as 120 free cores, though each holds one
   8-core pod; only the largest pod is checked against a single node. The
@@ -2292,31 +1549,29 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   in the sizing figures yet; `config show` and `info` say so when a config
   sets one.
 
-- **polaris + AML + continuous is intermittent at scale 1** (LB-279). The
+- **polaris + AML + continuous is intermittent at scale 1.** The
   silver-stream Spark driver exits silently inside the 30-minute window and
   the Spark Operator auto-resubmits a second driver; the continuous gate
   correctly refuses the run on "silver-stream was resubmitted inside the
   window". Observed on polaris-iceberg-spark-trino and
-  polaris-iceberg-spark-thrift. NOT observed on hive-based catalogs, on
+  polaris-iceberg-spark-thrift. Not observed on hive-based catalogs, on
   polaris-iceberg-spark-none (catalog-only), or on polaris + C360 +
-  continuous. In release-matrix testing the shape was seen in 3 of 4
-  attempts of this combination (R.1.16 under 7-way load, R.1.16 solo retry,
-  R.1.20 under 2-wide load, with R.1.16c solo PASS); the solo reproduction
-  rate itself is not characterised precisely. No `StreamingQueryException`,
-  `OOM` or `SIGTERM` found in 31 MB of preserved first-driver logs from the
-  one PASS. Scoped to all three streaming jobs (bronze-ingest, silver-stream,
-  gold-refresh) because the continuous gate refuses a run on any one of
-  them rotating inside the window, so none can usefully auto-rerun there.
-  Workaround: retry the run. Root cause and fix tracked for v1.8.
-- **`report.html` embeds the configured S3 endpoint value verbatim**
-  (LB-280). The field `S3 Endpoint` inside the `config-item` div is rendered
+  continuous. Under heavy parallel load, the failure was seen in 3 of 4
+  attempts; the solo reproduction rate is not characterised precisely.
+  No `StreamingQueryException`, `OOM` or `SIGTERM` found in the preserved
+  first-driver logs. Scoped to all three streaming jobs (bronze-ingest,
+  silver-stream, gold-refresh) because the continuous gate refuses a run on
+  any one of them rotating inside the window, so none can usefully
+  auto-rerun there. Workaround: retry the run. Root cause and fix tracked
+  for v1.8.
+- **`report.html` embeds the configured S3 endpoint value verbatim.**
+  The field `S3 Endpoint` inside the `config-item` div is rendered
   as the live config value, so a shared `report.html` leaks the operator's
-  endpoint. Checked-in `metrics.json` artefacts under `uat/runs/` are
-  sanitised at check-in by the author; `report.html` is not. Access and
-  secret keys were already excluded from `config_snapshot` and never
-  rendered. Fix tracked for v1.7.x: remove the `S3 Endpoint` field from the
-  report config section and redact the raw endpoint value in the
-  `config_snapshot` and the system-identity fingerprint.
+  endpoint. Access and secret keys were already excluded from
+  `config_snapshot` and never rendered. Fix tracked for v1.7.x: remove the
+  `S3 Endpoint` field from the report config section and redact the raw
+  endpoint value in the `config_snapshot` and the system-identity
+  fingerprint.
 
 - **AML silver tables differ between batch and continuous modes on the same
   corpus.** Row counts match, and `transactions`, `entities` and
@@ -2326,17 +1581,16 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   differ because the continuous silver writer picks arrival-order values
   where the batch writer picks a stable key. Each mode is internally
   consistent, and each mode's queries return the expected results against
-  the mode's own silver (R.1.03 AML batch and R.1.04 AML continuous both
-  PASS). A reader must not compare batch AML numbers against continuous AML
-  numbers on these tables; invariant 2 covers that case. Fix tracked for
-  v1.7.1.
+  the mode's own silver. A reader must not compare batch AML numbers
+  against continuous AML numbers on these tables; invariant 2 covers that
+  case. Fixed in 1.7.1.
 
 - **FQ4 answers differ between batch and continuous on the same corpus.**
   FQ4 reads raw rows from `counterparty_edges`; batch silver dedups edges,
   continuous silver appends one edge per micro-batch, so counts differ by
   the number of micro-batches. Each mode is internally consistent and
   passes its own expected-results check; cross-mode comparison of FQ4 is
-  the uncovered case. Fix tracked for v1.7.1.
+  the uncovered case. Fixed in 1.7.1.
 
 - **W5/W6 AML screening alerts grow roughly quadratically with scale.** At
   scale 1 W5 produces 126 alerts; at scale 100, 7.6M (false-positive rate
@@ -2346,9 +1600,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   grow linearly with scale, so namesake collisions grow with the product.
   Each individual scale's run passes; cross-scale totals, the TM funnel and
   gold time are distorted. A reader must not compare W5/W6 alert totals
-  across scales. Rule-side fix (stricter match key or a per-list collision
-  cap) tracked for v1.7.1; a generator-side fix is deferred further because
-  it voids the AML generator freeze.
+  across scales. Fixed in 1.7.1 (name pools grow with population).
 
 ## [1.6.0] - 2026-09-30
 
@@ -2368,35 +1620,35 @@ with 1.6; the first section lists why.
   AML frozen-generator performance and size measurements are deferred to
   v1.7. No pinned config is required by the release gate's
   `perf-baselines` check.
-- **Trino OPTIMIZE hits the open-writer limit (LB-210).** On the Customer
+- **Trino OPTIMIZE hits the open-writer limit.** On the Customer
   360 continuous silver table `silver.customer_interactions_enriched`,
   Trino OPTIMIZE can fail with "Exceeded limit of 100 open writers for
   partitions".
-- **AML continuous recall is not scored (LB-168).** Stopping the streams
+- **AML continuous recall is not scored.** Stopping the streams
   can interrupt a gold-refresh tick; scoring refuses the partial pass.
   Batch recall is unaffected.
-- **AML gold-finalize is slow (LB-201).** At scale 10 it took 4,100 s of its
-  5,400 s auto timeout on 4 executors (run 20260929-214442-825153, n=1); at
+- **AML gold-finalize is slow.** At scale 10 it took 4,100 s of its
+  5,400 s auto timeout on 4 executors (n=1); at
   scale 100 a skewed detection stage takes minutes per task. Under heavy
   parallel load, raise `--timeout` for AML runs at scale 10 and above.
-- **AML expected-size estimate is off (LB-105).** The financial bronze size
+- **AML expected-size estimate is off.** The financial bronze size
   estimate in `config/scale.py` does not match the generator, so the AML
   `scale_ratio` score is not exact.
 
 ### Read this first: comparability with earlier releases
-- **Datagen file size is fixed at 64mb and datagen scale is banded (LB-204).**
+- **Datagen file size is fixed at 64mb and datagen scale is banded.**
   `workload.datagen.file_size` accepts only `64mb` (any case); another size
   is refused by `deploy`, `generate` and `run` (destroy and clean still load
   such a config, with a warning). Batch runs published at another size are
   not like-for-like at the bronze stage. Datagen scale has per-workload
   limits: AML supported to 300, unverified to 800, refused above; Customer
   360 supported to 300, unverified to 600, refused above.
-- **Datagen batch delivery now actually runs batch (LB-196).** Since the Rust
+- **Datagen batch delivery now actually runs batch.** Since the Rust
   default flipped to continuous, `datagen.mode: batch` silently ran
   continuous. Datagen timings recorded as batch before this fix were
   continuous.
 - **Before 1.6.0 no Iceberg `expire_snapshots` or `remove_orphan_files` and
-  no Delta `VACUUM` ever ran (LB-172, LB-173, LB-174), so no earlier
+  no Delta `VACUUM` ever ran, so no earlier
   continuous number is comparable with 1.6.** Trino refused every Iceberg
   expiry and orphan removal below its 7-day system minimum, the Spark Thrift
   form failed a parameter-binding error, Delta VACUUM sent its retention
@@ -2506,7 +1758,7 @@ with 1.6; the first section lists why.
   byte-identical to the frozen generator built from 9382420 source (seed 43,
   141/141 objects, across thread and pod counts). It adds the per-pod memory
   model with a 16Gi cap, fixed 64 MB files and delivery-mode forwarding
-  (LB-204, LB-196). It is the functional default, not the registered-look
+. It is the functional default, not the registered-look
   image: registered-look, D8, A6 and calibration corpora pass an explicit
   frozen digest via `--generator-image` (see `docs/internal/aml-protocol.md`).
   The pinned image is the reproducibility unit; bit-exact output holds within
@@ -2619,7 +1871,7 @@ with 1.6; the first section lists why.
   maintenance and compaction statements get `min(600 s, interval / 2)` each,
   a round is capped at half the interval and at the time left in the run,
   and the next round resumes at the table after the one that timed out.
-- **Destroy never deletes files outside proven ownership (LB-186).** Trino
+- **Destroy never deletes files outside proven ownership.** Trino
   `DROP TABLE` deleted every file an Iceberg (Hive) table referenced,
   including `add_files`-registered datagen files, and a managed Delta
   table's directory, before the bucket step's ownership checks ran; a
@@ -2690,7 +1942,7 @@ with 1.6; the first section lists why.
   setting and the value to use.
 - **A c360 continuous run over existing state refuses without
   `--force-reset`.** It lists the non-empty tables, checkpoints and raw
-  prefixes it would delete (LB-142).
+  prefixes it would delete.
 - **AML rule targets changed.** W3 now searches 2-5 hop cycles and is
   scored against `cycle`; W4 is scored against `rapid_layering`; a new
   chain rule `W17_layering_chain` is scored against `stack`; W2 adds a
@@ -2700,7 +1952,7 @@ with 1.6; the first section lists why.
   W8 drop alerts whose entity is not a customer in `silver.entities`; the
   graph rules (W1, W3, W4, W17) stay unscoped. Alert counts and false
   positives drop.
-- **QpH is the median of 3 samples per query (LB-150).**
+- **QpH is the median of 3 samples per query.**
   `architecture.benchmark.iterations` defaults to 3 and `lakebench run`
   passes it to both benchmark rounds (it was ignored before, and the
   `benchmark --iterations` default of 1 overrode the config). Throughput
@@ -2803,7 +2055,7 @@ with 1.6; the first section lists why.
 - **Batch SUBMISSION_FAILED retries are printed, journaled and recorded**
   (`submission_failures`, `submission_retry_seconds`); the stage line says
   how long it waited on failed operator submissions.
-- **Storage settle wait before the post-maintenance round (LB-150).** In
+- **Storage settle wait before the post-maintenance round.** In
   batch mode a probe query runs every 60 s after maintenance until two
   consecutive probes agree within 10% and neither is slower than the
   pre-maintenance median by more than the tolerance (widened by twice the
@@ -2907,11 +2159,11 @@ with 1.6; the first section lists why.
   whole bronze bucket is emptied via `S3Client.empty_bucket()` (which also
   aborts dangling multipart uploads on FlashBlade) before datagen submits.
   Before, `lakebench generate` and `run --generate` deployed datagen
-  straight onto whatever was in bronze and the deployer's LB-185 clear
+  straight onto whatever was in bronze and the deployer's clear
   covered only buckets this deployment recorded creating.
 
 ### Changed
-- Datagen image `lb-datagen:1.6.0` (LB-204): AML datagen pod memory at scale
+- Datagen image `lb-datagen:1.6.0`: AML datagen pod memory at scale
   100 falls from 18.18 GiB to 5.70 GiB (mimalloc allocator, typology rows kept
   only for each pod's own files, world columns recomputed on demand). Output is
   byte-identical to the v1.6 AML generator freeze (seed-43 byte-compare on the
@@ -2936,10 +2188,10 @@ with 1.6; the first section lists why.
   stages when the capped request fits (AML scale 1-10: 57 cores), and fails
   preflight only when it does not. Stream stages report the executor
   count actually granted, so core-hours are right on capped clusters.
-- **AML bronze-verify sizing (LB-118).** Under `schema: financial`
+- **AML bronze-verify sizing.** Under `schema: financial`
   bronze-verify gets 500Gi scratch per executor, `executors_per_100_scale: 8`
   and `max_executors: 28`; the capacity preflight uses the AML profile.
-- **Continuous runs held to the trickle are not saturation (LB-156).** A run
+- **Continuous runs held to the trickle are not saturation.** A run
   whose bronze ran a micro-batch on at least 90% of the window's triggers,
   inside each trigger, with silver keeping up, reports
   `intake_limit: trickle_rate`, `pipeline_saturated: false` and
@@ -2955,7 +2207,7 @@ with 1.6; the first section lists why.
   watched namespace crash-loops the operator for every tenant); run
   `lakebench admin repair-operator`.
 - **`LB_FINANCIAL_BRONZE_PREFIX` is the datagen root on every AML reader
-  (LB-165).** `bronze_ingest_financial` read it as the inner path; a caller
+.** `bronze_ingest_financial` read it as the inner path; a caller
   that set `bronze/pacs008/` there now reads zero rows. Set it to the
   datagen root, or set `LB_FINANCIAL_PACS_PATH`.
 - **DuckDB probes** get realistic timeouts (startup 15 s, readiness and
@@ -2992,13 +2244,13 @@ with 1.6; the first section lists why.
   behind.
 - **Spark Thrift `s3://` table locations** map to S3A, so Polaris orphan
   removal can open them, and the Thrift server sets `fs.s3a.endpoint.region`
-  like the Spark jobs (LB-052). A failed orphan removal is no longer stamped
+  like the Spark jobs. A failed orphan removal is no longer stamped
   as maintenance that ran.
 - **`validate` failed on every example config before deploy** ("Spark
   Operator does not watch namespace"); the check is advisory before the
   first deploy.
 - **The continuous monitoring loop busy-spun** (0 s sleeps) when an
-  in-stream benchmark round could not fit the time left (LB-180).
+  in-stream benchmark round could not fit the time left.
 - **The destroy table step says what it did** when no engine can drop
   tables, and a re-run after the buckets were emptied no longer fails on a
   Delta table whose directory is gone.
@@ -3008,895 +2260,73 @@ with 1.6; the first section lists why.
 - **`list_runs` ordered runs by timestamp text**, so with mixed local and UTC
   timestamps a UTC+X host picked an older run as the latest; it now orders
   by instant.
-- **LB-146: Trino coordinator OOM-killed under load.** `-Xmx` equalled the
+- **Trino coordinator OOM-killed under load.** `-Xmx` equalled the
   container memory limit, so heap plus native memory exceeded the cgroup
   limit (exit 137). The coordinator and worker heaps are now 80% of the pod
   memory limit; pod limits are unchanged.
-- **LB-148: hive-delta-spark-thrift failed 5 of 8 c360 queries.** The
-  delta-spark `ClassCastException` on MIN/MAX of the date column (LB-034,
-  Q2 and Q6) is worked around with
+- **hive-delta-spark-thrift failed 5 of 8 c360 queries.** The
+  delta-spark `ClassCastException` on MIN/MAX of the date column (Q2 and Q6) is worked around with
   `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta +
   Hive, in the Thrift server and the Spark jobs; Q2 on Delta + Thrift is no
   longer tolerated as a known failure. The Thrift pod limit is now heap +
   max(10% of heap, 1 GiB). Delta + Hive + Thrift defaults to 8 cores / 16g
   heap when unset (fitted down on small nodes); Iceberg keeps 2 / 4g.
-- **LB-147: W3/W17 path search failed at AML scale 10** after executor
+- **W3/W17 path search failed at AML scale 10** after executor
   loss (`CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND`). Path levels are written as
   Parquet under the gold bucket instead of local checkpoints, the step
   frames persist to disk only, and the join is partitioned by edge count.
   Alerts are identical to the previous code on the test graphs.
-- **LB-145: continuous freshness grew with wall clock** once a finite
+- **continuous freshness grew with wall clock** once a finite
   corpus had drained. The trailing idle gold cycles of a drained run are
   left out of freshness; any other idle cycle still counts as a stall.
-- **LB-144: silver overestimated c360 customers** (14.7M at scale 10 where
+- **silver overestimated c360 customers** (14.7M at scale 10 where
   there are 1M). It now uses a Chao1 estimate over the sample.
-- **LB-141: maintenance value reported when compaction changed nothing.**
+- **maintenance value reported when compaction changed nothing.**
   It is reported only when compaction changed the file count, and no
   compaction ratio is recorded when the post file count is unknown.
-- **LB-149: destroy kept the namespace** when FlashBlade listed a finished
+- **destroy kept the namespace** when FlashBlade listed a finished
   multipart upload and the abort raised `NoSuchUpload`; that is now
   treated as done.
 - **c360 continuous writers are exactly-once** across a driver restart,
   bronze-verify fails on columns silver or gold compute on, and Q6 recency
   uses the data clock.
-- **LB-117: AML analytical query QpH was unstable** (an iteration read 0.0
+- **AML analytical query QpH was unstable** (an iteration read 0.0
   when Spark Thrift ran out of memory). The AML Spark Thrift memory target is
   24g, and the benchmark `query_timeout` for `schema: financial` is 900 s
   both before and after compaction (300 s before it for other schemas). On clusters with under 36 GiB
   allocatable the target is `max(4, min(20, allocatable - 8))g`.
-- **LB-118: AML bronze-verify ran out of scratch disk at scale 5 and above**
+- **AML bronze-verify ran out of scratch disk at scale 5 and above**
   on its CTAS fallback. See the AML bronze-verify sizing under Changed.
-- **LB-112: batch AML never ran the detection rules** and wrote an empty
+- **batch AML never ran the detection rules** and wrote an empty
   `gold.alerts`. gold-finalize now runs every scheduled rule after the
   baseline dashboards, cheapest first, with per-rule error isolation and a
   delete-then-insert per rule so a re-run gives reproducible counts. The
   per-job timeout gains 900 s under `schema: financial`.
-- **LB-113: Spark Thrift's 4g default ran out of memory on every AML query
+- **Spark Thrift's 4g default ran out of memory on every AML query
   at scale 1.** The autosizer raises it for `schema: financial` when the
   field is at its default, capped to what the largest node can hold. An
   already-deployed Thrift pod needs destroy and deploy to pick it up.
-- **LB-114: W1 connected components failed with an ambiguous-column error**
+- **W1 connected components failed with an ambiguous-column error**
   on the second label-propagation iteration. The evidence now carries
   `converged=true|false`.
-- **LB-115: W7 crashed in the driver on every run** (no `silver.entities`
+- **W7 crashed in the driver on every run** (no `silver.entities`
   passed, and the AML reference data could not be found inside the Spark
   image). The reference data ships in the scripts ConfigMap, W7 loads
   `silver.entities` itself, and its country choice per entity is
   deterministic.
-- **LB-165: the AML pipeline could not read datagen_rs output.** The bronze
+- **the AML pipeline could not read datagen_rs output.** The bronze
   readers read a flat `pacs008/` layout; datagen_rs writes
   `bronze/pacs008/`, `bronze/party.parquet`, `bronze/account.parquet` and
   `manifest/manifest.parquet`. Both readers now derive the pacs.008 path
   from the datagen root (`LB_FINANCIAL_PACS_PATH` overrides it), and
   bronze-verify registers `bronze.manifest`, which the ad-hoc AML scoring
   query templates read (no QpH query reads bronze).
-- **LB-164: FlashBlade does not implement bucket tagging.** Deploy and
+- **FlashBlade does not implement bucket tagging.** Deploy and
   destroy fall back to name ownership with longest-prefix-wins against the
   other lakebench deployments on the cluster, refuse when those cannot be
   listed, and now also require the namespace's bucket record (see Behaviour
   changes). `lakebench config storage` reports bucket tagging as an advisory
   check.
 
-## [1.5.0] - 2026-09-16
 
-Hardening release built on mandatory adversarial review: 22 bugs fixed
-(LB-072 to LB-093). Reconstructed from the published release notes.
-
-### Changed
-- Polaris `client_secret` is required; no hardcoded default (LB-090).
-- Wait diagnostics fail fast on terminal Waiting reasons, with a
-  3-restart debounce for CrashLoopBackOff (LB-091).
-- Local-mode `ContainerRuntime.apply()` fingerprints the whole container
-  spec, so env, mount or port changes recreate the container (LB-092).
-- Storage conformance passes `ca_cert` / `verify_ssl` through (LB-075).
-
-### Fixed
-- Destroy paths that reported success on failure, an S3 client that
-  returned silently on timeout, metrics computed as 0 when the
-  denominator was unknown, and sustained runs that passed with 0 rows.
-- Shared-cluster races on Stackable SecretClass, the scratch
-  StorageClass and OpenShift SCC bindings (refcounted, read-modify-write).
-- Dead config fields with plausible defaults that nothing read.
-
-## [1.4.0] - 2026-07-29
-
-Local mode, component version refresh, storage conformance.
-Reconstructed from the tag message and repository history.
-
-### Added
-- `lakebench config storage`: graded S3 backend conformance checks
-  (FlashBlade and Garage validated; SeaweedFS refused).
-- Local mode (single-host container runtime).
-
-### Changed
-- Polaris 1.6.0, Spark Operator 2.5.1, kube-prometheus-stack chart pinned
-  (87.19.2).
-- S3A sets `fs.s3a.endpoint.region` on every job (LB-052).
-- Documented cluster minimums come from `compute_peak_requirements()`
-  (LB-050).
-- Iceberg runtime chosen by Spark and Iceberg version; Iceberg 1.11 with a
-  Java 11 Spark image is refused at config time.
-
-## [1.3.1] - 2026-04-05
-
-### Fixed
-- **LB-049: silver-build at scale 100 never completed.** Two compounding root
-  causes. First, the STREAMING strategy wrote with
-  `write.distribution-mode=none`, producing `tasks x partitions` files (2286 x
-  365 = 836K at scale 100). The Hive Metastore commit of 836K files timed out
-  before returning. Second, Spark 4.0.2's `AppStatusListener` does an
-  `O(liveTasks)` flush on every executor heartbeat, which stalled the driver
-  at 5000+ tasks and starved the task scheduler. Fix: changed STREAMING
-  default from `distribution-mode=none` to `hash` (Iceberg now clusters rows
-  by `interaction_date` before writing, producing ~9K files and committing in
-  340ms). Added `spark.lb.silver.distribution_mode` conf override for 5TB+
-  scale testing. Also reduced `target_tasks` from 5000 to 2000, added
-  `spark.ui.liveUpdate.minFlushPeriod=30s` and retained state caps, and
-  disabled the Spark UI (prevents Jetty overhead -- listener still runs but
-  the flush is throttled). Tested A/B/C/D on the live cluster at scale 100:
-  hash distribution passed in 466s; `none` with fanout still produced 800K+
-  files and OOMed; narrowed date range (30 days) passed but is a workaround,
-  not a fix.
-- **Prerequisite tick rendering.** `_run.py` replaced unicode tick/cross
-  (`\u2713`/`\u2717`) with ASCII `+`/`x` to match the `check` command style.
-
-## [1.3.0] - 2026-03-27
-
-### Added
-- **Config Schema v2.** Flat top-level fields (`endpoint`, `access_key`,
-  `secret_key`, `scale`, `namespace`, `mode`, `cycles`, `spark_image`) for
-  minimal 4-line configs. Environment variable substitution with `${VAR}` and
-  `${VAR:-default}` syntax. Auto-generated deployment names persisted to
-  `.lakebench/state.json`.
-- **`compare` command.** Run two configs sequentially and display side-by-side
-  scorecard comparison. Supports `--format` (table/json/csv) and `--output`.
-- **`config` subcommands.** `config show` (resolved config with source
-  annotations), `config validate`, `config recommend`, `config upgrade`
-  (v1.2 nested -> v1.3 flat format).
-- **Maintenance cost metrics.** 11 new scoring fields: pre/post compaction
-  file counts, compaction ratio, maintenance elapsed time, pre/post compaction
-  QpH, and maintenance value percentage. Run flow changed to measure QpH
-  before and after maintenance.
-- **Prerequisite detection.** 8-check engine (kubectl, helm, K8s cluster, S3
-  config, S3 connectivity, Spark Operator, Stackable operators, namespace)
-  with actionable error messages. Runs as Phase 1 of the 7-phase run flow.
-- **7-phase run output.** Progress headers (Phase 1/7 through 7/7) for
-  Prerequisites, Infrastructure, Generate, Pipeline, Maintenance, Benchmark,
-  Results.
-- **Run command flags.** `--skip-preflight` (skip prerequisite checks),
-  `--skip-generate`, `--skip-maintenance`, `--deploy-only`, `--generate-only`,
-  `--yes/-y`. With `--yes`, `run` auto-deploys if infrastructure is missing.
-- **Init quick mode.** Default 2-step wizard (endpoint/keys + review).
-  `--advanced` for full 5-step wizard with recipe and mode selection.
-
-### Changed
-- `cli.py` (6,181 lines) converted to `cli/` package with sustained helpers
-  extracted to `cli/_sustained.py` (1,279 lines).
-- `deploy/engine.py` reduced from 1,682 to 859 lines by extracting
-  `destroy_all()` to `deploy/destroy.py`.
-- All component implementations extracted to `modules/` package:
-  query engines, catalogs, table formats, pipeline engine.
-- Module Protocol interfaces (`CatalogModule`, `QueryEngineModule`,
-  `PipelineEngineModule`, `TableFormatModule`) and `ModuleRegistry`.
-- Old commands (`validate`, `info`, `recommend`) marked deprecated in favor
-  of `config` subcommands.
-- Polaris bootstrap template: pinned `curlimages/curl:latest` to `8.11.1`.
-
-### Fixed
-- `config/scale.py`: `compute_guidance()` mode field changed from
-  `"continuous"` to `"sustained"` (advisory only, not Docker image mode).
-- **Sustained mode (LB-044).** `bronze_ingest.py` created Iceberg tables
-  using Hive Metastore default warehouse (`file:/stackable/warehouse/`)
-  instead of S3, causing crash-loops. Fixed with explicit S3 table location.
-  Sustained streaming now fully functional across all Iceberg recipes.
-- **QpH calculation (LB-042).** Power and throughput QpH counted failed
-  queries as successful. 8 failed queries in 14s reported QpH 1,950.
-  Now only counts `result.success == True`.
-- **Pre-compaction benchmark at scale (LB-041).** Added per-query progress
-  (`[1/8] Query name... 12.3s OK`), file count check (skips pre-compaction
-  at >200K files), and 60s timeout for pre-compaction queries.
-- **Delta+Thrift maintenance (LB-043).** VACUUM OOMs Spark Thrift at 4Gi.
-  Maintenance now skipped for Delta+Spark Thrift combinations.
-- **DuckDB deploy timeout (LB-033).** Increased from 600s to 900s for
-  parallel deployments.
-- **`lakebench results` (LB-039).** Now accepts optional config file argument.
-- **`query --file` duplicate (LB-027).** SQL file input renamed to `--sql-file`.
-- **`config recommend` crash (LB-022).** Passed config Path as int parameter.
-- **Iceberg compat matrix (LB-026).** Removed Iceberg 1.7.1-1.9.1 for Spark
-  4.0/4.1 (Maven artifacts only exist for 1.10.0+).
-- **Deploy timeouts (LB-023).** Hive/Polaris increased from 300s to 600s.
-- **SecretClass race (LB-024).** Parallel deploys race on cluster-scoped
-  resource creation; now catches 409 AlreadyExists.
-- **`--generate-only` (LB-025).** Missing `yes=yes` passthrough.
-- `run --generate` now shows Rich progress bar with pod count (ENH-001).
-- `run` auto-deploys when namespace missing and `--yes` set (ENH-002).
-- `--skip-deploy` renamed to `--skip-preflight` (alias kept) (ENH-003).
-- Deploy tip updated from deprecated `lakebench validate` to
-  `lakebench config validate` (ENH-004).
-- DuckDB no longer shows misleading maintenance value (ENH-005).
-- Empty Phase 5/7 and 6/7 headers now say "Skipped" for `--skip-benchmark`
-  and `--skip-maintenance` (ENH-006).
-- Trino worker memory: performance tier (scale 51-500) bumped from 32Gi to
-  48Gi per worker.
-- Pipeline stage heartbeat: elapsed time printed every 60s during long jobs.
-
-## [1.2.0] - 2026-03-26
-
-### Added
-- **Delta Lake support.** Three new recipes: `hive-delta-spark-trino`,
-  `hive-delta-spark-thrift`, `hive-delta-spark-none`. Delta pipeline scripts
-  (`bronze_ingest_delta.py`, `silver_build_delta.py`, `silver_stream_delta.py`,
-  `gold_refresh_delta.py`, `gold_finalize_delta.py`) mirror the Iceberg variants.
-  Delta maintenance helpers in `deploy/delta_maintenance.py` (VACUUM, OPTIMIZE,
-  DESCRIBE DETAIL, DROP TABLE). Pre-benchmark OPTIMIZE is skipped for Delta+Trino
-  and Delta+Spark Thrift to avoid OOM.
-- **Spark 4.1.x support.** `_SUPPORTED_SPARK_VERSIONS` now includes `(4, 1)`.
-  `_ICEBERG_RUNTIME_SUFFIX` dict maps `(4,1) -> "4.0"` because Iceberg has no
-  `4.1_2.13` runtime artifact on Maven Central. `_delta_spark_artifact()` handles
-  Delta 4.1.0's new Maven coordinate naming (`delta-spark_4.1_2.13`).
-- **Spark 3.5.x support.** `(3, 5)` added to `_SUPPORTED_SPARK_VERSIONS`.
-  Only Iceberg is supported with Spark 3.5 (Delta 4.x requires Spark 4.x).
-- **Config-time format version auto-resolution.** `LakebenchConfig` model_validator
-  calls `resolve_format_version()` at load time. `DeltaConfig.version` defaults to
-  `"auto"` (previously `"4.0.0"`), resolving to the correct version for the Spark
-  image in use. Incompatible combinations (e.g. Delta 4.0.0 + Spark 4.1) are
-  rejected at config load with a clear error message.
-- **`PipelineEngine` protocol.** `src/lakebench/engine/protocol.py` defines a
-  `@runtime_checkable` Protocol with `engine_name`, `submit_job`,
-  `wait_for_completion`, `get_logs`, `cancel_job`. `get_engine(cfg, k8s)` factory
-  returns the appropriate engine (currently only `SparkJobManager`). Wired into
-  `cli.py` so `run` goes through the factory rather than instantiating
-  `SparkJobManager` directly.
-- **Unity Catalog infrastructure.** `deploy/unity.py` and `templates/unity/`
-  deploy OSS Unity Catalog as a K8s Deployment with PostgreSQL backend.
-  Unity + Delta excluded from v1.2 (STS issue on non-AWS S3, planned for v1.3).
-  Unity + Iceberg excluded (v0.4.0 REST API is read-only).
-- **`docs/compatibility-matrix.md`.** Spark + format version matrix for user reference.
-- **`examples/` directory.** Hardened example config YAMLs for all 11 recipes.
-
-### Changed
-- `DeltaConfig.version` default changed from `"4.0.0"` to `"auto"` to prevent
-  cross-version failures when switching Spark images.
-- `_FORMAT_VERSION_COMPAT[(4,1)]["delta"]` changed from `["4.0.0", "4.1.0"]` to
-  `["4.1.0"]` -- Delta 4.0.0 is not compatible with Spark 4.1.
-- PostgreSQL authentication changed from MD5 to SCRAM-SHA-256 (`pg_hba.conf` and
-  `password_encryption = scram-sha-256`).
-- `cli.py` batch and sustained paths use `get_engine()` factory instead of
-  instantiating `SparkJobManager` directly.
-
-### Fixed
-- **Iceberg runtime artifact for Spark 4.1.** `iceberg-spark-runtime-4.1_2.13` does
-  not exist on Maven Central. Spark 4.1.x must use the `4.0` runtime. Fixed with
-  `_ICEBERG_RUNTIME_SUFFIX` dict in `spark/job.py` and `deploy/engine.py`.
-- **Delta 4.0.0 incorrectly allowed with Spark 4.1.** The format version compat
-  matrix previously listed `4.0.0` as compatible with Spark `(4,1)`. Live cluster
-  UAT showed silver-build fails at runtime. Fixed by removing `4.0.0` from the
-  Spark 4.1 delta compat list.
-
-### Known Issues
-- **Delta + Spark Thrift Q2 ClassCastException.** `OptimizeMetadataOnlyDeltaQuery`
-  throws `ClassCastException: java.time.LocalDate cannot be cast to java.sql.Date`
-  on MIN/MAX date partition queries. Q2 is skipped for Delta+Spark Thrift.
-- **Unity + Delta** excluded. `UCSingleCatalog` 0.4.0 calls
-  `generateTemporaryTableCredentials` (STS) for managed tables. Non-AWS S3 has
-  no STS endpoint. Planned for v1.3.
-
-## [1.1.0] - 2026-03-05
-
-### Added
-- **Iterative batch cycles.** New `pipeline.cycles` config field (1-50) runs N
-  batch iterations where cycle 1 is full overwrite and cycles 2-N are incremental
-  append/merge, simulating multi-day lakehouse behavior. Per-cycle datagen splits
-  the timestamp range evenly across cycles.
-- **Iceberg compaction.** New `build_compaction_sql()` in `deploy/iceberg.py`
-  runs `optimize` (Trino) or `rewrite_data_files` (Spark Thrift) to merge small
-  files. Pre-benchmark maintenance (`pipeline.pre_benchmark_maintenance`, default
-  true) runs compaction + expire before QpH measurement. Sustained mode runs
-  compaction on a separate timer (`sustained.compaction_interval`, default 2x
-  retention_interval).
-- **Table health tracking.** `BenchmarkRoundMeta` now captures
-  `silver_data_file_count`, `silver_snapshot_count`, `gold_data_file_count`,
-  `gold_snapshot_count` from Iceberg system tables at each benchmark round.
-- **QpH degradation metric.** `qph_degradation_pct` in sustained scores
-  compares first-half vs second-half median QpH across in-stream benchmark
-  rounds (requires 4+ rounds). Positive = degradation.
-- **`CycleMetrics` dataclass.** Per-cycle metrics including datagen timing,
-  job metrics, benchmark results, and table health snapshot.
-- **`cycle_progression` batch score.** When `cycles > 1`, the scores dict
-  includes per-cycle elapsed time, QpH, and table health.
-- **`query_sql()` in `deploy/iceberg.py`.** Variant of `exec_sql` that returns
-  stdout for table health queries.
-- **`build_table_health_sql()` in `deploy/iceberg.py`.** Generates queries for
-  Iceberg `$files` and `$snapshots` system tables.
-- **Interactive init wizard.** `lakebench init` now launches a 5-step guided
-  wizard by default (identity, recipe, storage, workload, review). Includes
-  Rich-formatted panels, inline S3 connectivity validation, config preview
-  with syntax highlighting, and back-navigation between steps. Use
-  `--no-interactive` for scripted/CI usage. Passing `--endpoint`/`--access-key`/
-  `--secret-key` flags auto-skips the wizard.
-
-### Changed
-- Spark scripts (`silver_build.py`, `gold_finalize.py`) support incremental
-  mode via `LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL` env vars.
-- `submit_job()` in `spark/job.py` accepts optional `cycle_env` dict for
-  per-cycle environment variable injection.
-- `DatagenDeployer` gains `deploy_cycle()` method for per-cycle timestamp
-  window and scaled-down data volume.
-
-### Fixed
-- **Spark Thrift benchmark Q2 and Q6 returning 0 rows.** Benchmark queries use
-  Trino SQL as the canonical dialect.  Q2's `date_add('month', 3, expr)` and
-  Q6's `DATE_DIFF('day', start, end)` are Trino-specific 3-arg forms that
-  Spark SQL silently misinterprets.  `SparkThriftExecutor.adapt_query()` now
-  rewrites these to `add_months()` and `DATEDIFF()` respectively.
-- **DuckDB benchmark returning 0 rows for all queries.** Three issues:
-  (1) `DuckDBExecutor.adapt_query()` never provided the S3 warehouse location
-  to `iceberg_scan()` -- now rewrites `catalog.namespace.table` references to
-  `iceberg_scan('s3://bucket/warehouse/namespace.db/table')` with Hive's `.db`
-  directory convention, `allow_moved_paths`, and `unsafe_enable_version_guessing`.
-  (2) Multi-line SQL from benchmark queries broke the `python -c` one-liner
-  with an unterminated string literal -- now collapsed to a single line via
-  `" ".join(sql.split())` before embedding in the script.
-  (3) Q2's Trino `date_add('month', 3, expr)` unsupported by DuckDB -- added
-  `_rewrite_date_add()` that translates to `(expr + INTERVAL 3 MONTH)`.
-  (4) DuckDB pod startup installed the Python package but not the `iceberg`
-  and `httpfs` extensions -- updated `deployment.yaml.j2` startup command
-  to `INSTALL` both extensions and startup probe to verify they load.
-- **Streaming log parser missing empty batches.** Silver and gold streaming
-  jobs log `"Batch N: empty, skipping"` when a micro-batch has no data, but
-  `parse_streaming_logs()` only matched data-carrying patterns.  Empty silver
-  and gold batches are now counted (bronze empty batches remain excluded).
-- **Table health probe always returning -1.** Two bugs: (1) `build_table_health_sql`
-  wrapped the full qualified name in double quotes (`"catalog.schema.table$files"`),
-  which Trino interprets as a single identifier with literal dots -- fixed by
-  quoting only the table segment (`catalog.schema."table$files"`).
-  (2) `_probe_table_health()` used `isdigit()` to extract counts from output,
-  which fails on padded lines -- switched to regex-based extraction.
-  (3) Trino CLI wraps scalar results in double quotes (`"91"`); the parsing
-  now strips quotes before numeric matching.
-- **CycleMetrics not populated in multi-cycle batch runs.** The CLI cycle
-  loop referenced `collector.cycles` (non-existent) instead of
-  `collector.current_run.cycles`.  Also, `build_pipeline_benchmark()` was
-  not passing cycles from the run to the benchmark object.
-
-## [1.0.12] - 2026-03-04
-
-### Added
-- **Iceberg retention for sustained pipelines.** Periodic `expire_snapshots` +
-  `remove_orphan_files` during the sustained monitoring loop. New config fields
-  `sustained.retention_interval` (default 1800s) and
-  `sustained.retention_threshold` (default `30m`).
-- **Engine-aware Iceberg maintenance.** Maintenance operations (sustained loop
-  and destroy path) now work with Trino or Spark Thrift Server. DuckDB is
-  read-only and skipped. Shared helpers in `deploy/iceberg.py`.
-- **Timestamp range documentation.** Config YAML and user docs now document
-  the impact of `timestamp_start`/`timestamp_end` on Iceberg partition count
-  and sustained-mode small-file proliferation.
-- **`total_s3_objects` sustained score.** Counts total S3 objects across
-  bronze/silver/gold buckets at end of run. Signals whether retention is
-  keeping pace with snapshot growth.
-
-### Fixed
-- **S3 bucket creation during deploy.** `deploy_all()` now creates S3 buckets
-  (bronze, silver, gold) when `create_buckets: true` (the default). Previously
-  the config field existed but was never wired into the deploy engine, causing
-  datagen to fail with a 404 on HeadBucket on fresh deployments.
-- **Datagen Phase 2 race condition in duration mode.** Generator processes
-  exited on empty queue before the main loop could feed Phase 2 file IDs,
-  causing sustained pipelines to receive no new data after the initial burst.
-  Generators now wait for the explicit poison pill in duration mode.
-- **Trino coordinator label selector in Iceberg maintenance.** Both the
-  sustained monitoring loop and the destroy path used a wrong label selector
-  (`app=lakebench-trino-coordinator` instead of
-  `app=lakebench-trino,component=coordinator`), causing maintenance to
-  silently skip every cycle.
-
-### Changed
-- **Datagen image switched to `:latest` tag.** Default image is now
-  `docker.io/sillidata/lb-datagen:latest` (was `:v3`). Default `pull_policy`
-  changed from `IfNotPresent` to `Always` so pods always pull the current image.
-
-## [1.0.11] - 2026-03-02
-
-### Added
-- **HTTPS S3 endpoint support with self-signed CA certificates.** New config
-  fields `platform.storage.s3.ca_cert` (path to PEM certificate) and
-  `platform.storage.s3.verify_ssl` enable HTTPS for all components. At deploy
-  time, the PEM content is embedded into a Kubernetes Secret. JVM components
-  (Spark, Trino, Polaris, Hive) get an init container that imports the CA
-  into a JKS truststore. Python components (datagen, S3 client) pass the PEM
-  path to boto3. Supports both self-signed CAs (FlashBlade) and public CAs
-  (AWS S3). See [Configuration Reference](docs/configuration.md#example-https-endpoint-with-self-signed-ca).
-- 21 new tests for HTTPS support: config field validation (3), Spark
-  truststore manifest (2), DuckDB SSL conditional (2), and template rendering
-  across all component categories (17 -- spark-thrift, trino, polaris, hive,
-  datagen, secrets).
-- Datagen `--duration` mode for sustained pipelines. Generators now run for
-  the configured `run_duration` instead of exiting after a finite file count.
-  Fixes the 5TB scale-test blocker where datagen pods exited in 21 minutes,
-  leaving the streaming pipeline starved. Requires datagen image v3.
-- `lakebench recommend --mode sustained` computes concurrent resource budget
-  (datagen + streaming + trino running simultaneously).
-- `lakebench recommend --slow-datagen` replaces deprecated `--extended`.
-- 8 new tests: Polaris Spark manifest coverage (4) and sustained scoring
-  edge cases (4).
-
-### Changed
-- Default datagen image bumped from `lb-datagen:v2` to `lb-datagen:v3`.
-- `lakebench info` shows streaming executor counts, trigger intervals, and
-  run duration when config uses sustained mode.
-- `lakebench recommend` output includes pipeline mode label and mode-specific
-  resource breakdown.
-- String literal pipeline mode checks replaced with `PipelineMode` enum values.
-- Jinja2 template renderer uses `StrictUndefined` -- undefined variables now
-  raise errors instead of silently producing empty strings.
-- `_MAX_EXECUTORS_SAFE = 28` module constant replaces raw integer in job profiles.
-- Polaris templates use `{{ polaris_image }}` from `ImagesConfig` instead of
-  hardcoded image tags.
-
-### Fixed
-- **Datagen `verify=False` unconditionally disabled SSL.** `datagen/generate.py`
-  hardcoded `verify=False` for all custom endpoints, silently disabling SSL
-  certificate verification even on HTTPS endpoints. Now uses `S3_CA_CERT` and
-  `S3_VERIFY_SSL` environment variables for conditional verification.
-- **Spark Thrift `ssl.enabled=false` hardcoded.** The Spark Thrift Server
-  template hardcoded `spark.hadoop.fs.s3a.connection.ssl.enabled=false`. Now
-  conditional on the endpoint scheme (`{{ s3_use_ssl | lower }}`).
-- **DuckDB `s3_use_ssl=false` hardcoded.** The DuckDB executor always disabled
-  SSL regardless of the endpoint scheme. Now conditional on whether the
-  endpoint starts with `https://`.
-- **Spark Operator v2.4.0 volume injection.** ConfigMap volumes from
-  `.spec.volumes` / `.spec.driver.volumeMounts` are not injected into driver
-  pods by the v2 webhook. Fixed by using `driver.template` /
-  `executor.template` pod templates for ConfigMap volumes and
-  `spark.kubernetes.*.volumes.emptyDir.*` conf properties for emptyDir volumes.
-- `destroy_all()` no longer swallows exceptions as SUCCESS. Missing resources
-  report SKIPPED; real errors report FAILED with full traceback logging.
-- Deployer exception handlers now include `logger.exception()` for traceback
-  visibility.
-- Deprecation warnings for `mode: continuous` now also log via
-  `logger.warning()` (previously only `warnings.warn()`).
-
-### Removed
-- 8 orphaned Jinja2 templates (3 Prometheus, 5 Grafana) that were never
-  referenced by any deployer.
-- `--extended` flag hidden from `lakebench recommend` help (still works
-  with deprecation warning; replaced by `--slow-datagen`).
-
-## [1.0.10] - 2026-03-02
-
-### Changed
-- **Spark 4.0.x support.** Lakebench now supports Spark 4.0.x images alongside
-  Spark 3.5.x. `_spark_compat()` returns Scala 2.13 suffix, Hadoop AWS 3.4.1,
-  and AWS SDK 1.12.367 for Spark 4. Spark Thrift Server template uses
-  `{{ scala_suffix }}` instead of hardcoded `_2.12`.
-- **Spark Operator installed during `deploy`.** `lakebench deploy` now installs
-  the Spark Operator (when `operator.install: true`) instead of deferring to
-  `run`. `run` only verifies the operator is present.
-- **Deploy output shows component versions.** `lakebench deploy` now prints
-  component name, version, and elapsed time in columnar format. Each deployer
-  returns `label` and `detail` on `DeploymentResult`.
-- **Bronze ingest no longer sets explicit table location.** `bronze_ingest.py`
-  relied on the catalog to assign table locations instead of hardcoding
-  `s3a://<bucket>/warehouse/<table>/`. Both Hive and Polaris catalogs assign
-  correct locations from namespace defaults.
-- **Default Spark image bumped to 4.0.2.** Recipes, schema default, and init
-  template now use `apache/spark:4.0.2-python3`. Spark 3.5.x images remain
-  fully supported -- set `images.spark` to `apache/spark:3.5.8-python3` to
-  use Spark 3.
-
-### Fixed
-- **Spark 4 streaming job crash from jar bloat.** Iceberg 1.10.1's
-  `iceberg-aws-bundle` is self-contained (bundles Hadoop AWS + AWS SDK v1 + v2).
-  The packages list also included explicit `hadoop-aws` and
-  `aws-java-sdk-bundle`, doubling the jar payload to ~1.2GB per executor.
-  The driver's netty file server couldn't stream this to 12+ executors --
-  connections timed out with `StacklessClosedChannelException`. Fix: Spark 4
-  uses only 2 packages (iceberg-spark-runtime + iceberg-aws-bundle); Spark 3
-  keeps all 4 packages unchanged.
-- **Polaris allowed-locations scheme mismatch.** Polaris does literal prefix
-  matching on S3 URIs -- `s3a://` (Spark) did not match `s3://` in
-  `allowedLocations`. Bootstrap template now lists both `s3://` and `s3a://`
-  for each bucket. Per-namespace locations and `default-base-location` also
-  corrected to match the bucket-per-layer topology.
-- **Spark Operator RBAC lost after namespace recreate.** After
-  `lakebench destroy` + `deploy`, operator RBAC (Roles/RoleBindings) was lost
-  but `ensure_installed()` reported success because the namespace was still in
-  `spark.jobNamespaces`. Added `recreate_namespace_rbac()` that does a
-  remove-then-re-add Helm cycle to force fresh RBAC creation.
-- **Datagen batch OOM from hardcoded worker count.** The datagen template
-  hardcoded `--workers 4` regardless of mode. Batch mode only allocates 4Gi
-  memory, which is insufficient for 4 concurrent workers with v2 realism
-  features. Worker count now comes from the autosizer (`generators` config),
-  which sets 1 worker for batch and 8 for continuous.
-- **Benchmark executor kubectl stderr noise.** `kubectl exec` without `-c`
-  printed "Defaulted container" to stderr for multi-container pods, filling the
-  200-char error buffer before actual Trino errors. Added explicit `-c trino`
-  and `-c spark-thrift` container flags.
-- **Prometheus status check name mismatch.** `lakebench status` looked for
-  StatefulSet `lakebench-observability-prometheus` but the actual name is
-  `prometheus-lakebench-observability-ku-prometheus`.
-- **NoneType crash in sustained pipeline scorecard.** `data_freshness_seconds`
-  is `float | None` but was used in comparisons and format strings without
-  None guards.
-- **Polaris bootstrap job timeout race.** 180s timeout with 10s polling caused
-  a race condition. Bumped to 300s timeout with 5s polling.
-- **Ivy cache cold start in streaming jobs.** Three concurrent streaming jobs
-  each independently downloading ~200MB of Maven dependencies caused resolution
-  to exceed the run duration. Added `resolve-deps` init container to pre-warm
-  Ivy cache via shared emptyDir volume.
-
-## [1.0.8] - 2026-02-21
-
-### Changed
-- Renamed pipeline mode `continuous` to `sustained`. The old `--continuous` CLI flag
-  and `mode: continuous` YAML value still work with a deprecation warning.
-- Bottleneck chart bar uses flexbox layout (no more line-wrap from subpixel rounding).
-- Bottleneck chart bar always shows CPU share -- the dimension common to all stages
-  including Trino query. Latency stays in the table column for sustained mode.
-- Bottleneck identification picks dominant stage by latency in sustained mode
-  (concurrent stages) and by compute in batch mode (sequential stages).
-- Query stage CPU now derived from Trino config snapshot (coordinator + workers)
-  instead of showing 0% (Trino has no Spark executors).
-- Report title/header: "LakeBench" renamed to "Lakebench".
-
-### Fixed
-- **scale_ratio formula was triple-counting data.** The batch scorecard's
-  `scale_ratio` used `total_data_processed_gb` (sum of bronze + silver + gold
-  inputs) divided by `approx_bronze_gb`. At scale 50 with three stages each
-  reading ~500 GB, this produced a ratio of ~3.0 instead of ~1.0. Now uses
-  only bronze stage input GB in the numerator.
-
-### Added
-- Deploy success panel now shows `lakebench run --generate` as a "Next" option.
-- HTML report layout section in benchmarking docs -- describes every section
-  of the scorecard (verdict cards, bottleneck chart, data validity, stability,
-  freshness, contention, job tables, query performance, config, platform
-  metrics) and which sections appear in batch vs sustained mode.
-
-## [1.0.7] - 2026-02-20
-
-### Added
-- **Stackable operator auto-install.** Set
-  `architecture.catalog.hive.operator.install: true` to auto-install all four
-  Stackable operators (commons, listener, secret, hive) via Helm during
-  `lakebench deploy`. Mirrors the existing Spark Operator auto-install pattern.
-  Requires cluster-admin. Operator namespace and version are configurable.
-- Preflight and validate commands are now install-aware -- they warn instead of
-  failing when Stackable CRDs are missing and auto-install is enabled.
-- Documentation updated across getting-started, component-hive, configuration
-  reference, and operators-and-catalogs guides.
-
-### Fixed
-- README Quick Start now shows `lakebench run --generate` as the single-command
-  option (6 steps instead of 7).
-
-## [1.0.6] - 2026-02-20
-
-### Fixed
-- **Datagen templates missing from PyPI wheel.** The `datagen/` sdist exclude
-  pattern in `pyproject.toml` was unanchored, causing hatchling to also exclude
-  `templates/datagen/*.yaml.j2` from the wheel. `lakebench generate` and
-  `lakebench run --generate` failed with "'datagen/job.yaml.j2' not found in
-  search path" when installed from PyPI. Fixed by anchoring the exclude to the
-  repo root (`/datagen/`).
-- README rewritten for clarity. Value proposition, quick start, and example
-  scorecard output now front and center.
-
-## [1.0.5] - 2026-02-20
-
-### Added
-- In-stream periodic benchmarking for continuous pipelines. The full 8-query
-  Trino benchmark now runs at regular intervals *during* the streaming window,
-  producing per-round QpH and freshness measurements. The final continuous QpH
-  is the median across all in-stream rounds.
-- Query-time freshness: gold-table staleness is probed via SQL at the moment
-  Trino queries run, reported as `query_time_freshness_seconds` in the scorecard.
-- Q9 contention handling: gold `createOrReplace()` contention is detected,
-  retried up to twice with 30s/60s backoff, and reported per round
-  (`q9_contention_observed`, `q9_retry_used`). Benchmark rounds are offset
-  by half the gold refresh interval to land between rewrite cycles.
-- `benchmark_interval` and `benchmark_warmup` config fields on
-  `architecture.pipeline.continuous` control in-stream benchmark scheduling.
-- HTML report "In-Stream Benchmark Rounds" section with per-round QpH,
-  per-query times, freshness, and Q9 contention status.
-- Terminal rounds summary table after streaming completes, with median QpH
-  and freshness.
-- New continuous scores: `query_time_freshness_seconds`, `in_stream_composite_qph`,
-  `benchmark_rounds_count`.
-- Removed `--include-datagen` flag (redundant with `--generate`). Continuous mode
-  always runs datagen automatically.
-- `run` command preflight check: verifies namespace, Postgres, catalog, and query
-  engine are deployed and ready before starting the pipeline. Blocks with
-  actionable guidance if infrastructure is missing or misconfigured.
-- **Scorecard v2.0 report overhaul.** HTML report restructured into three
-  layers: Verdict (5 summary cards), Diagnosis (bottleneck, data validity,
-  query behavior), and Evidence (detail tables).
-- Bottleneck Identification section: stacked CPU bar chart and per-stage
-  breakdown table identifying the dominant pipeline stage.
-- Data Validity panel: green/red indicators for scale ratio (batch) or
-  ingest ratio (continuous), job success rate, and failed query count.
-- Query Behavior section: per-class QpH breakdown table showing relative
-  performance of scan, join, analytics, and aggregate query categories.
-- Stability Over Time section (continuous only): dual-axis inline SVG chart
-  plotting QpH and freshness per benchmark round, with trend analysis.
-- Contention Map section (continuous only): summary and detail table of Q9
-  gold-table contention events across benchmark rounds.
-- Query-Time Freshness diagnostic section (continuous only): shows median
-  query-time freshness vs worst-case data freshness with gap analysis and
-  variability interpretation.
-- `total_core_hours` field added to pipeline benchmark JSON output (both
-  batch and continuous modes).
-- `advanced_metrics` stub key in JSON output (null when Prometheus Tier 2
-  is not deployed).
-- **Tier 2 engine-level metrics.** Spark PrometheusServlet sink and Trino
-  JMX exporter are now enabled when `observability.enabled` is true.
-  - Spark: PrometheusServlet sink exposes GC, shuffle, and task metrics at
-    `:4040/metrics/prometheus`.
-  - Trino: JMX exporter JAR injected via init container from configurable
-    `images.jmx_exporter` image, exposes metrics at port 9090.
-  - PlatformCollector queries engine-level metrics (Spark GC, shuffle bytes,
-    Trino query counts) from Prometheus when available.
-  - Engine metrics rendered in the Platform section of the HTML report.
-- `images.jmx_exporter` config field for specifying the JMX exporter
-  container image (default: `bitnami/jmx-exporter:latest`).
-- Platform metrics are now collected from Prometheus at the end of each
-  pipeline run (both batch and continuous) when `observability.enabled` is
-  true. Pod CPU/memory, S3 metrics, and engine-level Tier 2 metrics (Spark GC,
-  shuffle, Trino query counts) are saved in `metrics.json` and rendered in the
-  HTML report's Platform Metrics section.
-- **Default StorageClass prerequisite documented.** Getting Started guide now
-  lists a default StorageClass as a cluster prerequisite (needed for PostgreSQL
-  metadata PVC).
-- **PostgreSQL PVC troubleshooting entry.** New section in troubleshooting guide
-  for diagnosing "PVC stuck in Pending" when no default StorageClass exists.
-
-### Removed
-- **Delta Lake recipes and support.** Removed `hive-delta-trino` and
-  `hive-delta-none` recipes, the `DELTA` enum value from `TableFormatType`,
-  `DeltaConfig` class, and both Delta entries from `_SUPPORTED_COMBINATIONS`.
-  Delta Lake was never tested or supported in the pipeline -- keeping it in the
-  codebase misled users. Recipe count drops from 10 to 8.
-
-### Changed
-- **4-slot recipe naming convention.** Recipe names now encode all four
-  architecture axes: `<catalog>-<format>-<engine>-<query_engine>`. Old 3-slot
-  names (`hive-iceberg-trino`) are replaced by 4-slot names
-  (`hive-iceberg-spark-trino`). The Spark Thrift query engine slot uses
-  `thrift` (not `spark`) to avoid `spark-spark` ambiguity. No backward
-  compatibility aliases -- clean break.
-- **`_SUPPORTED_COMBINATIONS` expanded to 4-tuples.** Validation now checks
-  `(catalog, table_format, engine, query_engine)` instead of 3-tuples. Added
-  `PipelineEngineType` enum with single value `SPARK`.
-- **Config snapshot includes `pipeline_engine`.** `build_config_snapshot()` and
-  the HTML report banner now render the full 4-slot recipe name.
-- **Trino workers default to ephemeral storage.** When `storage_class` is empty
-  (the default), Trino workers now use `emptyDir` instead of requiring a PVC.
-  This removes the need for a provisioned StorageClass on new clusters. Set
-  `storage_class` to a class name to opt back into PVC-backed storage.
-- Documentation restructured with **quick-recipe** terminology. The `recipe:`
-  field is now called a "quick-recipe" (one-line shorthand), with a new
-  "Advanced Configuration" section in the Recipes guide showing how to
-  override individual settings while keeping the recipe base.
-- Updated all documentation to remove Delta Lake references (README, recipes,
-  configuration, supported-components, getting-started, architecture,
-  component-hive, component-trino, operators-and-catalogs, docs index).
-- Streaming-log freshness metric changed from average to worst-case (max).
-  The worst staleness spike is what matters for streaming SLAs, not the average
-  that hides it.
-- Continuous pipeline no longer runs a post-stream benchmark. The in-stream
-  rounds are the benchmark -- measuring QpH against a different (larger) table
-  state after streaming stops is not a meaningful comparison.
-- Primary continuous `composite_qph` is the in-stream median QpH.
-- **HTML report overhaul for continuous mode.** Summary cards now show
-  streaming KPIs (duration, data processed, data throughput GB/s, sustained
-  throughput rows/s, in-stream QpH, data freshness) instead of batch-derived
-  zeros. Duplicate QpH card eliminated. Empty "Job Performance" section
-  hidden. Section renamed to "Pipeline Stages" with column tooltips.
-  Detail cards (ingest ratio, compute efficiency, total CPU-hours) placed
-  below stage table. Run context banner added (mode, dataset, stack,
-  duration). All cards have hint text explaining what each number means.
-- Batch summary: 5 primary cards (Time to Value, Pipeline Throughput,
-  Compute Efficiency, QpH, Scale Ratio) plus metadata row (Total Time,
-  Jobs). Replaces the previous variable-count card layout.
-- Continuous summary: 5 primary cards (Data Freshness, Sustained Throughput,
-  Compute Efficiency, In-Stream QpH, Total CPU-hours) plus metadata row
-  (Duration, Data Processed).
-- Data Freshness card always shows worst-case `data_freshness_seconds` from
-  streaming logs. Previously swapped to query-time freshness when available.
-- Trend analysis requires minimum 5 benchmark rounds (was 3). Rounds 2-4
-  show "Insufficient data" message instead of potentially misleading trends.
-- Pipeline Stages table: CPU-hours column added per stage. Latency column
-  auto-converts to seconds when values exceed 1000ms. Cores and memory
-  merged into "Cores x Mem" column.
-- Streaming table enriched with compute columns (Executors, Cores x Mem,
-  CPU-sec) and a total compute summary line.
-- Batch pipeline score cards updated with hint text (Time to Value, Pipeline
-  Throughput, Compute Efficiency, Scale Ratio).
-- `total_data_processed_gb` and `pipeline_throughput_gb_per_second` now
-  computed for continuous mode (previously batch-only). Both appear in
-  continuous JSON scorecard output.
-- `stage_latency_profile` JSON format changed from array to named object
-  (`{"bronze_ms": ..., "silver_ms": ..., "gold_ms": ...}`). Old array
-  format still loads via backward-compatible deserialization.
-- Run context banner includes `storage_backend` when available in config.
-- Renamed metric field `ingestion_completeness_ratio` to `ingest_ratio` and
-  `scale_verified_ratio` to `scale_ratio` in pipeline benchmark data model
-  and JSON output. Old JSON keys still load via backward-compatible
-  deserialization. Report labels updated: "Completeness" -> "Ingest Ratio",
-  "Scale Verified" -> "Scale Ratio".
-- Added `score_descriptions` dict to pipeline benchmark JSON output. Each
-  score key gets a human-readable explanation for downstream tools and
-  manual inspection.
-- `score_descriptions` updated with `total_core_hours` and reorganized into
-  batch, continuous, and shared sections. `data_freshness_seconds` marked
-  as "Primary freshness score", `query_time_freshness_seconds` marked as
-  "Diagnostic" with gap explanation.
-
-### Fixed
-- **DuckDB deploy fails on OpenShift.** The `python:3.11-slim` container runs
-  as non-root on OpenShift, causing `pip install duckdb` to fail with
-  `Permission denied: /.local`. Fixed by setting `HOME=/tmp` and using
-  `--no-cache-dir` in the DuckDB deployment template.
-- **DuckDB readiness probe too aggressive.** Added a `startupProbe` with
-  `failureThreshold: 30` (300s window) to allow time for `pip install`.
-  Reduced readiness/liveness `initialDelaySeconds` to 5 since the startup
-  probe handles the init window.
-- **DuckDB deployer timeout too short.** Increased from 180s to 300s.
-- **Prometheus service discovery for platform metrics.** The
-  kube-prometheus-stack Helm chart truncates service names based on release
-  name length, making the hardcoded URL
-  `lakebench-observability-prometheus` incorrect (actual name:
-  `lakebench-observability-ku-prometheus`). Platform metric collection now
-  discovers the Prometheus service dynamically via Helm release labels.
-- `benchmark_rounds` was serialized to JSON but never deserialized back
-  when loading saved runs. The Stability chart, Contention Map, and
-  Benchmark Rounds table were empty on `lakebench report` from saved data.
-  Now fully round-tripped including `BenchmarkRoundMeta` (Q9 contention
-  flags, freshness, timestamps).
-- Trino PodMonitor label selectors matched `app.kubernetes.io/name: trino`
-  and `app.kubernetes.io/component: coordinator`, but actual pod labels use
-  `app.kubernetes.io/name: lakebench` and
-  `app.kubernetes.io/component: trino-coordinator`. Fixed both coordinator
-  and worker PodMonitors.
-- Prometheus ConfigMap scrape configs for Trino had the same label mismatch.
-  Fixed to match actual pod labels.
-- PodMonitor templates were never rendered or applied. Wired
-  `_apply_podmonitor_templates()` into the observability deployer to apply
-  them after the kube-prometheus-stack Helm install.
-- PodMonitor `release` label was `prometheus` but the Helm release is
-  `lakebench-observability`. Fixed to match the actual Prometheus Operator
-  selector.
-- JMX exporter config with empty `rules: []` only exported JVM metrics.
-  Added catch-all rule to emit whitelisted Trino MBeans.
-- Default `images.jmx_exporter` was `bitnami/jmx-exporter:1.0.1` (does not
-  exist). Changed to `bitnami/jmx-exporter:latest`.
-
-## [1.0.3] - 2026-02-17
-
-### Added
-- `architecture.pipeline.mode` config field (`batch` | `continuous`) sets the
-  pipeline execution mode in YAML. The `--continuous` CLI flag still works as
-  an override for one-off runs.
-- `report --summary` / `-s` flag prints key pipeline scores (per-stage table,
-  time-to-value, throughput, efficiency, QpH) to the terminal without opening
-  the HTML report.
-- `lakebench init` template includes `pipeline.mode: batch` in generated configs.
-- `info` command shows the active pipeline mode.
-
-### Changed
-- Scorecard stage label changed from "datagen" to "data-generation" for clarity.
-- `lakebench.yaml` example: flattened double-commented sections (`#   #` patterns)
-  to single-level comments for readability.
-
-### Fixed
-- Documentation: observability annotated example in `configuration.md` used the
-  old nested YAML structure (`metrics.prometheus.enabled`, `dashboards.grafana`).
-  Updated to match the flat schema (`observability.enabled`, etc.).
-- Documentation: `query_engine.type` reference table and supported combinations
-  table were missing `duckdb` as a valid option.
-- Documentation: `running-pipelines.md` and `configuration.md` now document
-  `pipeline.mode` config field alongside the `--continuous` CLI flag.
-- Documentation: `benchmarking.md` now documents `report --summary` in the
-  "Viewing Results on the Command Line" section.
-
-## [1.0.2] - 2026-02-14
-
-### Changed
-- Spark Operator `install` default changed from `true` to `false`. The operator
-  requires cluster-admin and platform-specific patches -- explicit opt-in is safer.
-- `run --timeout` now auto-scales from the data scale factor (`max(3600, scale * 60)`)
-  when not explicitly set.
-- `status` command is config-aware: only shows components matching the configured
-  catalog, query engine, and observability settings. Includes Trino workers and
-  datagen job progress.
-- Spark job monitor fires progress callback on every poll while RUNNING (not just
-  on state transitions). CLI only prints executor count when it changes.
-- `validate` summary distinguishes warnings from passes/failures and shows a
-  warning count.
-
-### Added
-- Spark Operator namespace watching detection: `validate` and `run` now check
-  whether `spark.jobNamespaces` includes the target namespace. When `install: true`,
-  the namespace is added automatically via `helm upgrade --reuse-values` and the
-  operator controller is restarted to pick up the change. When `install: false`,
-  the exact fix command is shown.
-- Prerequisite detection in `validate`: checks kubectl and helm on PATH, checks
-  Stackable CRDs for Hive recipes (with install commands), checks Spark Operator
-  with full manual `helm install` command when `install: false`.
-- `deploy` now blocks with exit 1 when Stackable operators are missing for Hive
-  recipes (was a non-blocking warning). Suggests Polaris as an alternative.
-- `generate --yes/-y` flag to skip confirmation prompt.
-- Confirmation prompt before `generate` submits the datagen job.
-- OOM and crash-loop detection in datagen progress: `generate --wait` exits
-  immediately with actionable guidance when pods are OOMKilled.
-- Pending pod count shown during `generate --wait`.
-- Bucket name overlap warning in `validate` (bronze/silver/gold sharing names).
-- Active datagen guard in `clean`: warns and prompts before deleting S3 data
-  while generation is running.
-- S3 `empty_bucket()` progress callback; `clean` command shows deletion progress.
-- `S3Client._check_client()` raises `S3AuthError` early when boto init failed.
-- ANSI escape code stripping for `logs` command output.
-- Helm failure recovery commands in observability deployer error messages.
-- Workflow hint in CLI help epilog: `init -> validate -> deploy -> generate -> run -> report -> destroy`.
-- Minimum viable config block in generated YAML (3 required fields).
-- "Next step" hints in `deploy`, `generate`, and `destroy` success panels.
-- `deploy` preflight prints a validate reminder tip.
-- Scale 100 (~1 TB) configuration example in docs.
-
-### Fixed
-- `generate` showed "Target: 0.00 GB" (wrong dict key `target_size_bytes`
-  instead of `target_tb`).
-- `validate` Stackable error listed all 4 operators even when only 1 CRD was
-  missing. Now lists only missing operators plus prerequisites.
-- JSON query output (`--format json`) now produces proper `{"key": "value"}`
-  dicts instead of raw tab-delimited arrays.
-- CSV query output strips surrounding quotes from fields.
-- ConfigMap deploy failure in `spark/job.py` now returns `False` (hard failure)
-  instead of raising an unhandled exception.
-- 11 bare `except: pass` patterns replaced with `logger.debug()` or
-  `logger.warning()` across cli.py, engine.py, k8s/client.py, s3/client.py,
-  hive.py, and metrics/collector.py.
-- 6 e2e test bugs: continuous pipeline used `--timeout` instead of `--duration`,
-  destroy assertion failed on Completed pods, `--mode` flag doesn't exist (use
-  `--continuous`), gold row count regex matched run ID hex digits, scale matrix
-  namespace not registered with Spark Operator, integration test rejected
-  Succeeded postgres phase.
-
-## [1.0.1] - 2026-02-13
-
-### Fixed
-- Rename "Recipe" label to "Workload" in `lakebench info` output to avoid
-  collision with the architecture recipe concept (`<catalog>-<format>-<engine>`).
-
-## [1.0.0] - 2026-02-12
-
-Initial public release.
-
-### Features
-- Deploy and benchmark lakehouse stacks on Kubernetes from a single YAML config.
-- Recipe system -- 10 validated (catalog, table format, query engine) combinations.
-  Single `recipe:` field sets the full stack.
-- Catalogs: Hive Metastore (Stackable operator) and Apache Polaris (REST, OAuth2).
-- Table formats: Apache Iceberg, Delta Lake.
-- Query engines: Trino, Spark Thrift Server (HiveServer2 JDBC), DuckDB (single-pod).
-- Synthetic Customer360 data generation at configurable scale (1 GB to 10+ TB).
-- Batch medallion pipeline: bronze-verify, silver-build, gold-finalize (Spark).
-- Streaming/continuous pipeline: Structured Streaming bronze-ingest, silver-stream,
-  gold-refresh.
-- 8-query benchmark suite across 5 query categories.
-- `QueryExecutor` protocol with pluggable engine backends and `adapt_query()` for
-  engine-specific SQL rewriting.
-- HTML report generation with job performance, query latencies, and platform metrics.
-- Platform observability via `kube-prometheus-stack` Helm chart. `ObservabilityDeployer`
-  handles deploy/destroy lifecycle.
-- S3 metrics wrapper (`S3MetricsWrapper`) instruments CLI-side boto3 operations with
-  Prometheus counters and histograms.
-- Platform metrics collection (`PlatformCollector`) snapshots CPU, memory, and S3 I/O
-  per pod after benchmark runs.
-- Auto-sizing engine for Spark executor counts based on scale factor.
-- `lakebench recommend` command with binary search for max feasible scale.
-- Interactive init mode, deploy confirmation, progress bars for `generate --wait`.
-- S3 client with FlashBlade multipart upload handling.
-- OpenShift SCC integration for Spark pods.
-- Pre-built binaries for Linux (amd64) and macOS (amd64, arm64).
+For releases before 1.6.0, see [CHANGELOG-archive.md](CHANGELOG-archive.md).
