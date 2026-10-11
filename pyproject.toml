@@ -74,7 +74,7 @@ aml = [
 dev = [
     "lakebench-k8s[aml]",
     "pytest>=8.0.0",
-    "pytest-cov==7.0.0",
+    "pytest-cov==7.1.0",
     "coverage==7.13.2",
     "pytest-asyncio>=0.23.0",
     # Parallel unit tier (make check-fast, the CI unit legs). Pinned like
