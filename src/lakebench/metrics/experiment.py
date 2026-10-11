@@ -8,11 +8,10 @@ the stages and detection rules that ran or were skipped, the limits
 Lakebench imposed on the run, and a result fingerprint per benchmark query
 (benchmark.fingerprint).
 
-``reproduce`` reads it (``stored_identity_refusals``): two
-runs whose workload, corpus, seed, scale or mode differ, or whose benchmark
-queries returned different results, are not compared on performance
-(invariant 2). A record without the block (written before it existed) is
-"not comparable: no provenance".
+Two runs whose workload, corpus, seed, scale or mode differ, or whose
+benchmark queries returned different results, are not compared on
+performance (invariant 2). A record without the block (written before it
+existed) has no provenance.
 
 The block is assembled in two halves. ``experiment_inputs(cfg)`` runs when
 the run starts and is stored in ``config_snapshot["experiment_inputs"]``
@@ -113,8 +112,6 @@ DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
     "customer360": None,
     "custom": None,
 }
-
-NO_PROVENANCE = "not comparable: no provenance"
 
 # Batch and continuous Spark job types -> snapshot executor-override key.
 
@@ -1315,49 +1312,6 @@ def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: Identity keys that are execution conditions (the Conditions group of
-#: metrics/comparability.py, its one definition): a difference makes a pair
-#: comparable but not like-for-like. ``system`` and ``query access path``
-#: moved out in 1.7 (System and Architecture groups); ``compaction
-#: operation`` is a read-time key, not an identity() key.
-CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
-
-#: Conditions that are also outcomes of the run: the in-stream round count
-#: depends on how long each round took, so a slower build fits fewer rounds,
-#: and the investigator sessions that ran depend on the cases open.
-#: A difference is not like-for-like; reproduce does not
-#: refuse on it, or a regression that costs a round would
-#: read as "not comparable" instead of a regression.
-OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
-
-
-def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
-    """Why a run's corpus is not one known corpus (see _observed_corpus)."""
-    return list(((exp or {}).get("corpus") or {}).get("problems") or [])
-
-
-def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True) -> bool | str:
-    """True when the run recorded benchmark results that can be checked for
-    equivalence, else the reason they cannot (DESIGN 6.5: comparable means
-    the results are equivalent, which needs results). An AML batch record
-    written by 1.7 also needs its alert set; *alert_set* False
-    asks about the benchmark results alone (ladder step 0's query set id)."""
-    res = (exp or {}).get("results") or {}
-    if res.get("not_checked"):
-        return str(res["not_checked"])
-    if not res.get("fingerprints"):
-        return "no benchmark query results were recorded"
-    if not alert_set:
-        return True
-    from lakebench.metrics.alert_set import alert_set_missing
-
-    missing = alert_set_missing(exp)
-    if missing:
-        # An exp2 AML batch record must carry its alert set.
-        return missing
-    return True
-
-
 def identity_hash(exp: Mapping[str, Any]) -> str:
     """The identity digest of a block as stored (``identity`` minus the
     generator digest). For exp1 blocks it is the v1.6 digest unchanged."""
@@ -1376,26 +1330,6 @@ def experiment_of(record: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     if not isinstance(exp, Mapping) or _cmp.generation(record) == _cmp.LEGACY:
         return None
     return exp
-
-
-def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = None) -> list[str]:
-    """Differences between two ``identity`` dicts, one line per field
-    (only *keys*, when given)."""
-    out = []
-    for key in dict.fromkeys([*ia, *ib]):
-        if keys is not None and key not in keys:
-            continue
-        va, vb = ia.get(key), ib.get(key)
-        if key == "generator digest" and (va is None or vb is None):
-            continue
-        if va != vb:
-            if key == "seed":
-                # Never a seed in a refusal: either side may be a held-out
-                # seed the caller has not checked.
-                out.append(f"{key} differs (values withheld)")
-            else:
-                out.append(f"{key} differs ({va!r} vs {vb!r})")
-    return out
 
 
 def identity_differences(
@@ -1433,193 +1367,3 @@ def condition_differences(
 
 def result_fingerprints(exp: Mapping[str, Any]) -> dict[str, Any]:
     return dict((exp.get("results") or {}).get("fingerprints") or {})
-
-
-def diff_fingerprints(
-    ra: Mapping[str, Any],
-    rb: Mapping[str, Any],
-    label_a: str = "A",
-    label_b: str = "B",
-) -> list[str]:
-    """One line per benchmark query whose results are not shown equal,
-    naming both fingerprints. Empty when every query matches."""
-    from lakebench.benchmark.fingerprint import describe, mismatch
-
-    out = []
-    for name in sorted(set(ra) | set(rb)):
-        fa, fb = ra.get(name), rb.get(name)
-        if name not in ra or name not in rb:
-            out.append(
-                f"{name} ran in only one run ({label_a}: {describe(fa) if name in ra else 'absent'}; "
-                f"{label_b}: {describe(fb) if name in rb else 'absent'})"
-            )
-            continue
-        why = mismatch(fa, fb)
-        if why:
-            out.append(
-                f"{name} results not shown equal, {why} "
-                f"({label_a}: {describe(fa)}; {label_b}: {describe(fb)})"
-            )
-    return out
-
-
-def stored_identity_refusals(
-    expected_identity: Mapping[str, Any] | None,
-    expected_fingerprints: Mapping[str, Any] | None,
-    actual: Mapping[str, Any] | None,
-    what: str,
-    failed: Any = (),
-) -> list[str]:
-    """Refusals for a run (*actual*: its experiment block) checked against a
-    stored reference, a reproduction package, which
-    keeps only the identity and the result fingerprints. *what* names the
-    reference in messages ("baseline", "package"). Every identity field
-    counts here, execution conditions included: a reference is only matched
-    like-for-like. The exception is OUTCOME_CONDITION_KEYS (the in-stream
-    round count), which the run's own speed decides.
-
-    *failed* names queries that failed in the run. The caller already fails
-    the run for them (a regression, not a different experiment), so they are
-    left out of the result check rather than reported twice. A query that
-    succeeded but could not be fingerprinted still refuses."""
-    if actual is None:
-        return [f"{NO_PROVENANCE} (the run has no experiment block)"]
-    if not expected_identity:
-        return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
-    full_actual = identity(actual)
-    version_refusal = _identity_version_refusal(expected_identity, full_actual, actual, what)
-    if version_refusal:
-        return [version_refusal]
-    unobserved = (
-        _unobserved_system(expected_identity.get("system fingerprint"), actual)
-        if full_actual.get("identity version") == IDENTITY_VERSION
-        else None
-    )
-    if unobserved:
-        return [f"not comparable: {unobserved}; the {what} cannot be matched to a system"]
-    actual_identity = {k: v for k, v in full_actual.items() if k not in OUTCOME_CONDITION_KEYS}
-    # An optional key (set only when non-default) absent from the reference
-    # is a difference in that key, not an older identity.
-    missing = [
-        k
-        for k in actual_identity
-        if k not in expected_identity and k not in _cmp.OPTIONAL_IDENTITY_KEYS
-    ]
-    if missing:
-        return [
-            f"not comparable: the {what} was recorded with an older experiment identity "
-            f"(no {', '.join(missing)}); record it again from a current run"
-        ]
-    expected = {k: v for k, v in expected_identity.items() if k not in OUTCOME_CONDITION_KEYS}
-    reasons = [f"{r} from the {what}" for r in diff_identities(expected, actual_identity)]
-    # The count itself may differ, but not the estimator: with no in-stream
-    # round composite_qph is the post-stream benchmark (streams stopped),
-    # which must not stand against an in-stream median, or a regression that
-    # empties every round would read as a pass.
-    r_ref, r_run = (
-        expected_identity.get("benchmark rounds"),
-        identity(actual).get("benchmark rounds"),
-    )
-    if r_ref is not None and r_run is not None and (r_ref > 0) != (r_run > 0):
-        reasons.append(
-            f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
-            f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
-        )
-    # The number of investigator sessions that ran may differ (an outcome),
-    # but not whether the run put investigator load on the pipeline at all
-    # (none configured, or none ran): load is never matched to no load, as
-    # an in-stream QpH median is never matched to the post-stream estimator.
-    s_ref = expected_identity.get("investigator sessions")
-    s_run = full_actual.get("investigator sessions")
-
-    def _loaded(v: Any) -> bool:
-        # 0: configured, but no session ran (skipped round): no load either.
-        return isinstance(v, int) and not isinstance(v, bool) and v > 0
-
-    if _loaded(s_ref) != _loaded(s_run):
-        reasons.append(
-            f"investigator load differs: the {what} "
-            + ("ran no investigator sessions" if not s_ref else f"ran {s_ref} session(s)")
-            + ", the run "
-            + ("none" if not s_run else f"{s_run}")
-            + " (architecture.benchmark.investigator_sessions)"
-        )
-    reasons.extend(f"run: {p}" for p in corpus_problems(actual))
-    established = results_established(actual)
-    if established is not True:
-        # Nothing shows the run returned the reference's results.
-        reasons.append(f"comparability not established (run: {established})")
-        return reasons
-    if not expected_fingerprints:
-        reasons.append(f"comparability not established (the {what} has no result fingerprints)")
-        return reasons
-    # Queries that failed in the run, and queries the reference recorded as
-    # failed (no fingerprint), have no pair of results to compare.
-    skip = set(failed or ()) | {n for n, f in (expected_fingerprints or {}).items() if f is None}
-    got = {n: f for n, f in result_fingerprints(actual).items() if n not in skip}
-    want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
-    reasons.extend(diff_fingerprints(want, got, what, "run"))
-    return reasons
-
-
-def _unobserved_system(expected_fingerprint: Any, actual: Mapping[str, Any]) -> str | None:
-    """Why a v2 reference or run names no observed system, or None. The
-    fingerprint of an identity with no observed part is one constant per
-    system type, so two such runs on different clusters would match."""
-    from lakebench.metrics.system_identity import PARTS, fingerprint_of, observed_parts
-
-    sysid = actual.get("system_identity")
-    if isinstance(sysid, Mapping) and not observed_parts(sysid.get("parts") or {}):
-        return "the run observed no part of its system"
-    blank = {
-        fingerprint_of({p: {"not_observed": ""} for p in PARTS}, system_type=t)
-        for t in ("cluster", "local")
-    }
-    if expected_fingerprint in blank:
-        return "the reference observed no part of its system"
-    return None
-
-
-def _identity_version_refusal(
-    expected: Mapping[str, Any], actual_identity: Mapping[str, Any], actual: Any, what: str
-) -> str | None:
-    """One refusal naming both identity versions when a stored reference
-    and a run were recorded under different ones (L8), else None. A v1
-    reference against a v2 run is refused, and so is the reverse: the
-    workload version bumps of 1.7 make them different experiments anyway."""
-    want = expected.get("identity version", 1)
-    got = actual_identity.get("identity version", 1)
-    if want == got:
-        return None
-    if want < got:
-        return (
-            f"not comparable: the {what} was recorded with experiment identity v{want} and "
-            f"this run is v{got}; record the {what} again from a current run"
-        )
-    missing = list((actual or {}).get("v2_unavailable") or [])
-    why = (
-        "its corpus has no generator marker; re-run it on the current datagen image"
-        if "corpus id v2" in missing
-        else (
-            f"it recorded no {', '.join(missing)}; re-run it with the current Lakebench"
-            if missing
-            else "re-run it with the current Lakebench"
-        )
-    )
-    return (
-        f"not comparable: the {what} was recorded with experiment identity v{want} and "
-        f"this run is v{got} ({why})"
-    )
-
-
-def failed_queries(record: Mapping[str, Any] | None) -> set[str]:
-    """Names of the benchmark queries a metrics.json dict records as failed."""
-    rec = record or {}
-    bench = rec.get("benchmark") or (rec.get("pipeline_benchmark") or {}).get("query_benchmark")
-    out = set()
-    for q in (bench or {}).get("queries") or []:
-        if isinstance(q, Mapping) and not q.get("success", True):
-            name = q.get("name") or q.get("query_name")
-            if name:
-                out.add(str(name))
-    return out

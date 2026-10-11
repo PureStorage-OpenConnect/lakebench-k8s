@@ -229,8 +229,7 @@ recall scorer outside a run. With no run id it scores the run
 
 **`lakebench financial reproduce CONFIG --alert-id <id>`** (`--run RUN_ID`)
 reruns one batch alert's rule on exactly what that run's gold-finalize read
-(`spark/scripts/reproduce_financial.py`). It differs from `lakebench
-reproduce`.
+(`spark/scripts/reproduce_financial.py`).
 
 - Gold-finalize logs the snapshot of `silver.transactions`,
   `silver.entities` and `silver.silver_batch_versions` it reads.

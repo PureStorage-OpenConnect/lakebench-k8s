@@ -3,8 +3,8 @@
 A benchmark round times each query ``iterations`` times and scores it by the
 median. The recorded query dict carries every sample. Records
 written before that carry only ``elapsed_seconds`` and read as one sample.
-These helpers work on the dicts, so the scorecard and
-reproduce read new and old metrics.json the same way.
+These helpers work on the dicts, so the scorecard reads new and old
+metrics.json the same way.
 """
 
 from __future__ import annotations

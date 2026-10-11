@@ -741,41 +741,6 @@ def test_seed_is_protected_by_hash_and_fails_closed(held, monkeypatch):
     assert ds.seed_is_protected(43), "an unreadable record must hide every seed"
 
 
-def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch):
-    from lakebench.cli import _reproduce as rep
-
-    text = f"seed {EV} is refused; seed 43 is fine; 12 rows"
-    out = rep._redact_seed_text(text)
-    assert _no_seed_in(out) and "43" in out and "12 rows" in out
-
-    # reproduce refuses a config through the look guard's one rule.
-    from lakebench.aml import look_guard
-
-    assert look_guard.corpus_fields_reason("financial", EV, None) is not None
-    assert look_guard.corpus_fields_reason("financial", 43, None) is None
-    monkeypatch.setattr(ds, "load_looks", lambda path=None: [])
-    meta = {"experiment_identity": {"workload": "financial", "seed": EV}}
-    kind, why = rep._spent_look(meta)
-    assert kind == "refuse" and _no_seed_in(why)
-
-
-def test_reproduce_fails_closed_without_the_hash_record(monkeypatch):
-    from lakebench.cli import _reproduce as rep
-
-    monkeypatch.setattr(ds, "_heldout", _gone)
-    assert rep._redact_seed_text("seed 1234 of 12") == "seed <seed> of 12"
-    meta = {"experiment_identity": {"workload": "financial", "seed": 43}}
-    assert rep._spent_look(meta)[0] == "refuse"
-
-    def role_broken(seed, h=None):
-        raise ValueError("record conflict")
-
-    monkeypatch.setattr(ds, "heldout_role", role_broken)
-    from lakebench.aml import look_guard
-
-    assert look_guard.corpus_fields_reason("financial", 43, None) is not None
-
-
 def test_shipped_hash_file_history_is_clean():
     # The shipped file meets the creation rules and the recorded looks (a
     # spent append of an unlooked held-out seed fails).

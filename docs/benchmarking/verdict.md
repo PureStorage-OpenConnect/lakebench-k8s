@@ -45,7 +45,7 @@ In-stream results are not compared. After the gates pass, the CLI drains the pip
 
 - Bronze stops at window end. Silver and gold finish bronze's rows (all committed by silver, plus a gold refresh after silver's last commit), for at most 1800 s. The streams stop and the query set runs once over the settled tables. With `--skip-generate` it waits for the whole corpus.
 - Fingerprints match only when bronze took the same rows. A failing query fails the run.
-- Fingerprints are the run's results (`continuous.result_check`, experiment `results`); the perf gate and `reproduce` need equivalent results to compare.
+- Fingerprints are the run's results (`continuous.result_check`, experiment `results`); two runs compare only with equivalent results.
 - A run whose check did not run records why in `results.not_checked` and is never shown as comparable.
 - The `result_check` gate fails it (drain did not settle, check could not run). Declared reasons pass with a `results_unchecked` qualifier: no query engine, `--skip-benchmark`, an already failed run, AML continuous, a corpus needing more than the 1800 s settle limit.
 - AML continuous is not result-checked: its timed detection and TM passes make tables timing-dependent.

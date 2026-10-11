@@ -29,7 +29,6 @@ from lakebench.exit_codes import (
     SafetyRefusal,
     UsageError,
 )
-from tests.fixtures.exit_codes_helpers import _reproduce_package as _reproduce_package
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -256,7 +255,9 @@ _READ_SNAPSHOTS = [
 ]
 
 
-def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, outcome=None):
+def _financial_reproduce_scenario(
+    monkeypatch, tmp_path, *, record=True, snapshots=True, outcome=None
+):
     """financial reproduce with a stubbed config, record, job and S3: the
     record (or none) decides the refusals before any cluster call, the
     job's result.json the outcome."""
@@ -318,20 +319,20 @@ def _reproduce_scenario(monkeypatch, tmp_path, *, record=True, snapshots=True, o
     )
 
 
-def _scenario_reproduce_no_record(monkeypatch, tmp_path):
-    return _reproduce_scenario(monkeypatch, tmp_path, record=False)
+def _scenario_financial_reproduce_no_record(monkeypatch, tmp_path):
+    return _financial_reproduce_scenario(monkeypatch, tmp_path, record=False)
 
 
-def _scenario_reproduce_snapshot_gone(monkeypatch, tmp_path):
-    return _reproduce_scenario(monkeypatch, tmp_path, snapshots=False)
+def _scenario_financial_reproduce_snapshot_gone(monkeypatch, tmp_path):
+    return _financial_reproduce_scenario(monkeypatch, tmp_path, snapshots=False)
 
 
-def _scenario_reproduce_not_found(monkeypatch, tmp_path):
-    return _reproduce_scenario(monkeypatch, tmp_path, outcome="not_found")
+def _scenario_financial_reproduce_not_found(monkeypatch, tmp_path):
+    return _financial_reproduce_scenario(monkeypatch, tmp_path, outcome="not_found")
 
 
-def _scenario_reproduce_mismatch(monkeypatch, tmp_path):
-    return _reproduce_scenario(monkeypatch, tmp_path, outcome="mismatch")
+def _scenario_financial_reproduce_mismatch(monkeypatch, tmp_path):
+    return _financial_reproduce_scenario(monkeypatch, tmp_path, outcome="mismatch")
 
 
 def _scenario_sigint(monkeypatch, tmp_path):
@@ -794,85 +795,6 @@ def _scenario_alias_refused(monkeypatch, tmp_path):
     return _runner().invoke(app, ["clean", "bronze", str(tmp_path / "secret-name.yaml")])
 
 
-def _scenario_reproduce_commit_drift(monkeypatch, tmp_path):
-    import lakebench.cli._reproduce as rep
-
-    pkg = _reproduce_package(tmp_path, "AAA1111")
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "BBB2222")
-    return _runner().invoke(app, ["reproduce", str(pkg), "--dry-run"])
-
-
-def _scenario_reproduce_drift(monkeypatch, tmp_path):
-    import lakebench.cli._reproduce as rep
-
-    pkg = _reproduce_package(tmp_path, "abc")
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
-    monkeypatch.setattr(rep, "_run_pipeline", lambda *a, **k: object())
-    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
-        monkeypatch.setattr(rep, check, lambda *a, **k: None)
-    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
-    monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
-    monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
-    # The run reproduced nothing: every expected number measured as zero.
-    monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.0})
-    return _runner().invoke(app, ["reproduce", str(pkg)])
-
-
-def _look_package(tmp_path, role: str = "evaluation", seed: int = 987654) -> Path:
-    import yaml
-
-    pkg = {
-        "schema_version": 1,
-        "reproduction_metadata": {
-            "commit_sha": "unknown",
-            "pipeline_mode": "batch",
-            "corpus_role": role,
-            "expected_numbers": {"scale_ratio": 1.0},
-            "experiment_identity": {"workload": "financial", "seed": seed},
-        },
-    }
-    path = tmp_path / "look.yaml"
-    path.write_text(yaml.safe_dump(pkg))
-    return path
-
-
-def _stub_look(monkeypatch, report_sha256=None, spent=True, seed=987654):
-    from lakebench.config import datagen_seed
-
-    looks = (
-        [{"role": "evaluation", "seed": seed, "state": "complete", "report_sha256": report_sha256}]
-        if spent
-        else []
-    )
-    monkeypatch.setattr(datagen_seed, "load_looks", lambda path=None: looks)
-    monkeypatch.setattr(datagen_seed, "spent_seeds", lambda: frozenset({seed} if spent else ()))
-    monkeypatch.setattr(
-        datagen_seed, "_heldout", lambda: __import__("types").SimpleNamespace(spent=frozenset())
-    )
-    monkeypatch.setattr(
-        datagen_seed, "heldout_role", lambda s, h=None: "evaluation" if s == seed else None
-    )
-
-
-def _scenario_reproduce_verify_out_of_band(monkeypatch, tmp_path):
-    _stub_look(monkeypatch, report_sha256="0" * 64)
-    report = tmp_path / "report.json"
-    report.write_text("{}")
-    return _runner().invoke(
-        app, ["reproduce", str(_look_package(tmp_path)), "--report", str(report)]
-    )
-
-
-def _scenario_reproduce_report_required(monkeypatch, tmp_path):
-    _stub_look(monkeypatch, report_sha256="0" * 64)
-    return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
-
-
-def _scenario_reproduce_held_out(monkeypatch, tmp_path):
-    _stub_look(monkeypatch, spent=False)
-    return _runner().invoke(app, ["reproduce", str(_look_package(tmp_path))])
-
-
 def _scenario_run_protected_corpus(monkeypatch, tmp_path):
     """A config naming the (test) evaluation seed and role, with looks open
     so it loads: run refuses it before any cluster call."""
@@ -883,35 +805,31 @@ def _scenario_run_protected_corpus(monkeypatch, tmp_path):
     return _runner().invoke(app, ["run", str(cfg), "--yes"])
 
 
-def _scenario_reproduce_existing_namespace(monkeypatch, tmp_path):
-    import lakebench.cli._reproduce as rep
+def _scenario_deploy_existing_namespace(monkeypatch, tmp_path):
+    """`deploy --require-new` reports the engine's refusal of an existing
+    namespace as exit 3, naming the path."""
+    import lakebench.cli._deploy as deploy_mod
+    from tests.fixtures import saf2_deploy_state_helpers as t
 
-    pkg = _reproduce_package(tmp_path, "abc")
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
-    monkeypatch.setattr("lakebench.k8s.client.K8sClient.namespace_exists", lambda self, n: True)
-    return _runner().invoke(app, ["reproduce", str(pkg)])
+    cfg = _init_config(tmp_path)
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: t.FakeCore())
+    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
+    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
 
+    class Engine:
+        def __init__(self, cfg, require_new=False, **kw):
+            self.require_new = require_new
+            self.deploy_nonce = None
 
-def _scenario_reproduce_nonce_changed(monkeypatch, tmp_path):
-    import lakebench.cli._reproduce as rep
-    from lakebench.exit_codes import SafetyRefusal
+        def deploy_all(self, **kw):
+            assert self.require_new
+            # The real refusal the namespace step returns under require_new.
+            from lakebench.deploy.engine import DeploymentEngine
 
-    pkg = _reproduce_package(tmp_path, "abc")
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: "abc")
+            return [DeploymentEngine._existing_refusal(self, "namespace", "namespace x", 0.0)]
 
-    def pipeline(config_file, timeout, keep, refusals=None):
-        # Its post-run destroy found another incarnation and deleted nothing.
-        refusals.append(SafetyRefusal("Destroy NOT started", path="destroy.incarnation_mismatch"))
-        return object()
-
-    monkeypatch.setattr(rep, "_run_pipeline", pipeline)
-    for check in ("_sample_mismatch", "_policy_refusal", "_experiment_refusal"):
-        monkeypatch.setattr(rep, check, lambda *a, **k: None)
-    monkeypatch.setattr(rep, "_benchmark_samples", lambda m: 1)
-    monkeypatch.setattr(rep, "_run_maintenance_policy", lambda m: None)
-    monkeypatch.setattr(rep, "_run_query_set", lambda m: None)
-    monkeypatch.setattr(rep, "_measure_actual_numbers", lambda m: {"scale_ratio": 0.992})
-    return _runner().invoke(app, ["reproduce", str(pkg)])
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
+    return _runner().invoke(app, ["deploy", str(cfg), "--yes", "--require-new"])
 
 
 def _ops_cluster(monkeypatch, tmp_path):
@@ -1257,10 +1175,10 @@ SCENARIOS = {
     "confirm.non_tty": _scenario_confirm_non_tty,
     "sigint": _scenario_sigint,
     "financial.k8s_unreachable": _scenario_financial_k8s_unreachable,
-    "financial.reproduce.no_record": _scenario_reproduce_no_record,
-    "financial.reproduce.snapshot_gone": _scenario_reproduce_snapshot_gone,
-    "financial.reproduce.not_found": _scenario_reproduce_not_found,
-    "financial.reproduce.mismatch": _scenario_reproduce_mismatch,
+    "financial.reproduce.no_record": _scenario_financial_reproduce_no_record,
+    "financial.reproduce.snapshot_gone": _scenario_financial_reproduce_snapshot_gone,
+    "financial.reproduce.not_found": _scenario_financial_reproduce_not_found,
+    "financial.reproduce.mismatch": _scenario_financial_reproduce_mismatch,
     "config.validation": _scenario_config_validation,
     "config.unsupported": _scenario_config_unsupported,
     "config.name_required": _scenario_config_name_required,
@@ -1299,14 +1217,8 @@ SCENARIOS = {
     "run.args": _scenario_run_args,
     "run.namespace_gone": _scenario_run_namespace_gone,
     "confirm.declined": _scenario_confirm_declined,
-    "reproduce.commit_drift": _scenario_reproduce_commit_drift,
-    "reproduce.verify_out_of_band": _scenario_reproduce_verify_out_of_band,
-    "reproduce.report_required": _scenario_reproduce_report_required,
-    "reproduce.held_out": _scenario_reproduce_held_out,
     "run.protected_corpus": _scenario_run_protected_corpus,
-    "reproduce.drift": _scenario_reproduce_drift,
-    "reproduce.existing_namespace": _scenario_reproduce_existing_namespace,
-    "reproduce.nonce_changed": _scenario_reproduce_nonce_changed,
+    "deploy.existing_namespace": _scenario_deploy_existing_namespace,
     "status.ok": _scenario_status_ok,
     "status.drift": _scenario_status_drift,
     "status.namespace_missing": _scenario_status_namespace_missing,
@@ -1360,8 +1272,6 @@ EXPECTED_OUTPUT = {
     "run.namespace_gone": "was deleted mid-run; stopping",
     "config.name_required": "config has no name, so it cannot change data",
     "config.validation": "Config error",
-    "reproduce.commit_drift": "Commit drift",
-    "reproduce.drift": "scale_ratio",
 }
 # Text that must not appear: a declined prompt is not an unanswered one.
 UNEXPECTED_OUTPUT = {"confirm.declined": "Not confirmed", "run.verdict_failed": "ERROR"}

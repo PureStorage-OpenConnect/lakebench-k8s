@@ -4,20 +4,16 @@ Maintenance changes what a run measures: post-maintenance QpH, continuous
 freshness and throughput (maintenance statements compete with the streams),
 and total_s3_objects. Two runs under different policies are not comparable,
 in the same way two QpH numbers over different query sets are not
-(benchmark.queries.query_set_id). Every metrics.json records the policy id;
-``lakebench reproduce`` refuses a package recorded under
-another policy.
+(benchmark.queries.query_set_id). Every metrics.json records the policy id.
 
-A metrics.json or package without the field was recorded under the legacy
-policy.
+A metrics.json without the field was recorded under the legacy policy.
 
 Policy history:
 
 - ``m1-legacy``: everything recorded before the id was stamped. That lumps
   two real policies: before f63cb38 Iceberg expire_snapshots and
   remove_orphan_files never succeeded on either engine, so only compaction
-  ran; from f63cb38 they did. Because the two cannot be told apart,
-  reproduce accepts only runs under the current id.
+  ran; from f63cb38 they did. The two cannot be told apart.
 - ``m2-2026-09-26``: fixed statement forms (Trino SET SESSION
   min-retention in the same submission, Spark TIMESTAMP literal); continuous
   expiry floored at 1 h and orphan removal at 24 h 10 min on every path;
@@ -65,33 +61,10 @@ def skipped_policy_id() -> str:
     return MAINTENANCE_POLICY_ID + SKIPPED_SUFFIX
 
 
-def not_current(actual: str | None) -> str | None:
-    """Why a run under *actual* cannot be gated by this version, or None."""
-    got = actual or LEGACY_MAINTENANCE_POLICY_ID
-    if got == MAINTENANCE_POLICY_ID:
-        return None
-    return (
-        f"run was measured under maintenance policy {got}, not the current "
-        f"{MAINTENANCE_POLICY_ID}; only runs under the current policy are gated"
-    )
-
-
 def recorded_policy(record: Mapping[str, Any] | None) -> str:
-    """The policy id a metrics.json dict or package metadata was recorded under."""
+    """The policy id a metrics.json dict was recorded under."""
     value = (record or {}).get("maintenance_policy_id")
     return str(value) if value else LEGACY_MAINTENANCE_POLICY_ID
-
-
-def policy_mismatch(expected: str | None, actual: str | None) -> str | None:
-    """Why numbers under *actual* cannot stand against *expected*, or None."""
-    a = expected or LEGACY_MAINTENANCE_POLICY_ID
-    b = actual or LEGACY_MAINTENANCE_POLICY_ID
-    if a == b:
-        return None
-    return (
-        f"maintenance policy differs ({a} vs {b}); numbers measured under different "
-        "table-maintenance policies are not comparable"
-    )
 
 
 #: The per-statement query id in a Trino error ("Query 20260929_..._abcde

@@ -20,7 +20,7 @@ All keys live under `platform.storage.s3`. Defaults from `S3Config` in `config/s
 | `access_key` | `""` | S3 access key |
 | `secret_key` | `""` | S3 secret key |
 | `buckets.bronze`, `.silver`, `.gold` | `<name>-bronze`, `-silver`, `-gold` | Layer bucket names. Unset, derived from the deployment `name`. |
-| `create_buckets` | `true` | Create buckets that do not exist. Set `false` when buckets are pre-provisioned or credentials lack `CreateBucket`. `lakebench reproduce` refuses `false` (exit 2): it measures only against buckets it creates. |
+| `create_buckets` | `true` | Create buckets that do not exist. Set `false` when buckets are pre-provisioned or credentials lack `CreateBucket`. |
 | `ca_cert` | `""` | Path to a PEM CA bundle for HTTPS with a self-signed or private CA. Deploy reads it and puts it in a Kubernetes Secret for all components. Empty: system CAs. |
 | `verify_ssl` | `true` | Verify HTTPS certificates. Set `false` only in development without the CA file. |
 

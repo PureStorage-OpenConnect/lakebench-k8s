@@ -125,7 +125,6 @@ from lakebench.cli._generate import generate as _generate_fn  # noqa: E402
 from lakebench.cli._plan import plan as _plan_fn  # noqa: E402
 from lakebench.cli._query import benchmark as _benchmark_fn  # noqa: E402
 from lakebench.cli._query import query as _query_fn  # noqa: E402
-from lakebench.cli._reproduce import reproduce as _reproduce_fn  # noqa: E402
 from lakebench.cli._run import run as _run_fn  # noqa: E402
 
 app.command(name="deploy")(_deploy_fn)
@@ -135,7 +134,6 @@ app.command(name="generate")(_generate_fn)
 app.command(name="run")(_run_fn)
 app.command(name="query")(_query_fn)
 app.command(name="benchmark")(_benchmark_fn)
-app.command(name="reproduce")(_reproduce_fn)
 app.command(name="plan")(_plan_fn)
 
 from lakebench.cli import _aliases  # noqa: E402

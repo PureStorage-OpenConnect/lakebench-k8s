@@ -1,6 +1,6 @@
 """One source of metric metadata (EVD-2, DESIGN ch03 section 2).
 
-compare, reproduce, the perf gate, the report and the collector's
+The report and the collector's
 score_descriptions read unit, direction and band from
 ``metrics/metric_registry.py``. A score emitted with no entry fails here.
 """
@@ -325,46 +325,10 @@ def test_the_trickle_caps_intake_only():
         assert reg.capped_by(key, [], "sustained", extra=["trickle"]) == [], key
 
 
-# --- reproduce and the perf gate keep their classification ------------------
-
-#: What cli/_reproduce._classify_direction answers for every metric reproduce
-#: or the perf gate reads: a wrong direction passes a regression.
-EXPECTED = {
-    "scale_ratio": ("correctness", "exact"),
-    "ingest_ratio": ("correctness", "exact"),
-    "time_to_value_seconds": ("performance", "lower"),
-    "data_freshness_seconds": ("performance", "lower"),
-    "datagen_cpu_hr_per_tb": ("performance", "lower"),
-    "pipeline_throughput_gb_per_second": ("performance", "higher"),
-    "compute_efficiency_gb_per_core_hour": ("performance", "higher"),
-    "composite_qph": ("performance", "higher"),
-    "sustained_throughput_rps": ("performance", "higher"),
-    "datagen_aggregate_mbps": ("performance", "higher"),
-    "datagen_mbps_per_pod": ("performance", "higher"),
-    "pre_compaction_qph": ("performance", "higher"),
-    "query_qph_Q1_full_aggregation_scan": ("performance", "higher"),
-    "bronze_seconds": ("performance", "lower"),
-    "silver_seconds": ("performance", "lower"),
-    "gold_seconds": ("performance", "lower"),
-    "datagen_seconds": ("performance", "lower"),
-    "query_seconds": ("performance", "lower"),
-    "some_future_stage_seconds": ("performance", "lower"),
-    "some_future_metric": ("performance", "exact"),
-}
-
-
-@pytest.mark.parametrize(("key", "want"), sorted(EXPECTED.items()))
-def test_reproduce_classification(key, want):
-    from lakebench.cli._reproduce import _classify_direction
-
-    assert _classify_direction(key) == want
-
-
 def test_every_emitted_key_registered():
-    """Every key _scores_dict can emit, every score key in the pinned records
-    and their rebuilt pipeline_benchmark, and every number reproduce takes
-    from those records resolves in the registry, in its mode."""
-    from lakebench.cli._reproduce import _extract_expected_numbers
+    """Every key _scores_dict can emit, and every score key in the pinned
+    records and their rebuilt pipeline_benchmark, resolves in the registry,
+    in its mode."""
     from lakebench.metrics.collector import build_pipeline_benchmark
 
     missing: list[str] = []
@@ -384,8 +348,5 @@ def test_every_emitted_key_registered():
             for key in rebuilt:
                 if reg.lookup(key, mode) is None:
                     missing.append(f"{key} ({run_id} rebuilt)")
-        for key in set(_extract_expected_numbers(metrics)):
-            if reg.lookup(key, mode) is None:
-                missing.append(f"{key} ({run_id} reproduce)")
     assert stored_keys
     assert missing == []

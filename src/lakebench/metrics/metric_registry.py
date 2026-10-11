@@ -1,7 +1,7 @@
 """One source of metric metadata: unit, direction, band, modes, workloads
 and Lakebench caps a metric depends on.
 
-Readers: ``lakebench reproduce`` (``reproduce_class``), the HTML
+Readers: the HTML
 report's "higher is better" hints (``direction_hint``), and the collector's
 ``score_descriptions``. Still outside it: the QpH query-set check and
 its "capped" rendering. A score emitted
@@ -9,8 +9,8 @@ with no entry fails ``tests/test_metric_registry.py``.
 
 ``band`` decides who uses a metric:
 
-- ``performance``: a rate or a time; feeds deltas and reproduce tolerance.
-- ``correctness``: exact in reproduce (``scale_ratio``, best at 1.0).
+- ``performance``: a rate or a time; feeds deltas.
+- ``correctness``: exact (``scale_ratio``, best at 1.0).
 - ``guard``: a range the run must sit in (``ingest_ratio``).
 - ``diagnostic``, ``config_bound``, ``label`` and ``result``: shown, never
   directional. ``config_bound`` follows a configured value (a continuous
@@ -34,8 +34,7 @@ seconds are the window length; continuous core-hours scale with it): they
 have one entry per mode, and ``lookup`` takes the run's mode. ``lookup``
 refuses ``mode=None`` for a key whose unit, direction or band differs by
 mode (``ModeRequired``), and answers it with every mode's caps when only the
-caps differ; reproduce, which reads numbers without a
-mode, uses ``reproduce_class``.
+caps differ.
 
 History of band and direction changes to published metrics (to be named in
 UPGRADING-1.7.md):
@@ -53,8 +52,7 @@ UPGRADING-1.7.md):
   ``storage_reclaimed_mb``, and in a continuous run ``total_core_hours`` and
   ``total_elapsed_seconds``. ``compaction_ratio`` is higher (was lower) and
   diagnostic; ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was
-  higher). The reproduce classification of every metric it
-  extracts is unchanged.
+  higher).
 """
 
 from __future__ import annotations
@@ -155,8 +153,8 @@ class MetricMeta:
     #: ``ml_loop`` metrics are assessed only between equal loop groups.
     group: Literal["pipeline", "ml_loop"] = "pipeline"
     #: ``scores``: emitted under ``pipeline_benchmark.scores`` (and listed in
-    #: ``score_descriptions``); ``derived``: computed by reproduce or the perf
-    #: gate from elsewhere in the record; ``ml_loop``: in the record's
+    #: ``score_descriptions``); ``derived``: computed from elsewhere in the
+    #: record; ``ml_loop``: in the record's
     #: ``ml_loop`` block.
     source: Literal["scores", "derived", "ml_loop"] = "scores"
     #: A median over in-stream rounds: when the rounds executed different
@@ -922,39 +920,6 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         source="derived",
         description="Physical over logical table bytes at run end (storage_multiple.total.multiple): a condition of the maintenance policy, not a system score",
     ),
-    MetricMeta(
-        "datagen_cpu_hr_per_tb",
-        "cpu-h/TB",
-        "lower",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen CPU-hours per TB written (fleet aggregate)",
-    ),
-    MetricMeta(
-        "datagen_aggregate_mbps",
-        "MB/s",
-        "higher",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen fleet write throughput in MB/s",
-    ),
-    MetricMeta(
-        "datagen_mbps_per_pod",
-        "MB/s",
-        "higher",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen write throughput per pod in MB/s",
-    ),
 )
 
 #: Renamed keys a stored record may carry, to the key they became.
@@ -1070,7 +1035,7 @@ _BY_ID = _by_id(_ENTRIES)
 def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
     """The first (batch) entry of a mode-split key with every entry's modes,
     caps and ``blended_by_rounds``: ``lookup(key, None)`` when the entries agree on unit,
-    direction and band, and ``reproduce_class`` always."""
+    direction and band, and ``capped_by`` without a mode always."""
     first = entries[0]
     if len(entries) == 1:
         return first
@@ -1202,8 +1167,8 @@ def descriptions() -> dict[str, str]:
 
 
 def _mode_free(key: str) -> MetricMeta | None:
-    """The batch entry with every mode's caps (``_merged``); reproduce
-    reads stored numbers without a mode."""
+    """The batch entry with every mode's caps (``_merged``), for a reader
+    of stored numbers without a mode."""
     key = ALIASES.get(key, key)
     if key in _BY_ID:
         return _merged(_BY_ID[key])
@@ -1211,24 +1176,6 @@ def _mode_free(key: str) -> MetricMeta | None:
         if pattern.match(key):
             return replace(_merged(metas), id=key)
     return None
-
-
-def reproduce_class(key: str) -> tuple[str, str]:
-    """``(band, direction)`` in the vocabulary reproduce
-    uses: band ``correctness`` (the registry's correctness and guard bands)
-    or ``performance`` (every other band); direction ``higher`` or
-    ``lower`` for a directional metric, else ``exact`` (either way of
-    drift counts). Mode-free, as those callers are. A key the registry does
-    not know keeps the rule those callers had: a ``*_seconds`` key is lower
-    is better, anything else exact."""
-    meta = _mode_free(key)
-    if meta is None:
-        if key.endswith("_seconds"):
-            return ("performance", "lower")
-        return ("performance", "exact")
-    if meta.band in ("correctness", "guard"):
-        return ("correctness", "exact")
-    return ("performance", meta.direction if meta.directional else "exact")
 
 
 def _check(entries: Iterable[MetricMeta]) -> None:

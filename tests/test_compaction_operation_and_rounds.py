@@ -9,7 +9,6 @@ blended and not assessed in compare.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest import mock
 
 import pytest
 
@@ -267,20 +266,6 @@ def test_one_set_keeps_the_declared_query_set():
     )
 
 
-def test_blended_qph_is_not_gated_or_reproduced():
-    """The perf gate and reproduce leave out a median over blended rounds
-    and keep one over a single query set."""
-    from lakebench.cli._reproduce import _extract_expected_numbers
-
-    m = sr.load_metrics("231711-6dd3bc")
-    pb = m.pipeline_benchmark
-    pb.benchmark_rounds = [_round(EIGHT, index=i) for i in range(3)]
-    pb.post_compaction_qph = 260.0
-    assert _extract_expected_numbers(m)["composite_qph"] == 260.0
-    pb.benchmark_rounds = [_round(EIGHT, index=0), _round(EIGHT, failed=("Q1",), index=1)]
-    assert "composite_qph" not in _extract_expected_numbers(m)
-
-
 def test_mixed_compaction_operations_are_named_mixed():
     trino, thrift = _compaction_outcome("trino"), _compaction_outcome("spark-thrift")
     em = _effective("trino", [trino, thrift])
@@ -370,30 +355,6 @@ def test_the_experiment_block_records_and_names_the_compaction_operation():
     named = with_compaction_operation(em)
     assert label in named["id"]
     assert named["detail"] == em["detail"]
-
-
-def test_recorded_rounds_that_all_missed_a_query_read_the_smaller_set():
-    """Rounds written through record_round that all missed Q8 executed the
-    7-query set: compare and reproduce both read that set, not the declared
-    8-query one, and a full set reads as the aggregate's id."""
-    from lakebench.benchmark.queries import query_set_id
-    from lakebench.cli._reproduce import _run_query_set
-    from lakebench.metrics.collector import executed_subset_query_set
-
-    c = _collector()
-    for i in range(3):
-        c.record_round(_round(EIGHT, failed=("Q8",), index=i))
-    rounds = c.current_run.benchmark_rounds
-    assert executed_subset_query_set(rounds) == query_set_id(EIGHT[:7])
-    run = mock.Mock()
-    run.pipeline_benchmark.benchmark_rounds = rounds
-    run.pipeline_benchmark.query_benchmark.query_set_id = query_set_id(EIGHT)
-    assert _run_query_set(run) == query_set_id(EIGHT[:7])
-
-    c = _collector()
-    for i in range(3):
-        c.record_round(_round(EIGHT, index=i))
-    assert executed_subset_query_set(c.current_run.benchmark_rounds) is None
 
 
 # --- QpH degradation over rounds of different query sets (owner, 10-03) -------

@@ -103,23 +103,6 @@ class TestIdentityVersions:
         v1 = _fresh(markers=False).to_dict()["experiment"]
         assert ex.identity_hash(v2) != ex.identity_hash(v1)
 
-    @pytest.mark.parametrize(
-        ("baseline_markers", "run_markers", "role"),
-        [(True, False, "baseline"), (False, True, "package")],
-        ids=["v2-baseline-v1-run", "v1-baseline-v2-run"],
-    )
-    def test_baseline_and_run_of_different_versions_are_one_refusal(
-        self, baseline_markers, run_markers, role
-    ):
-        """L8: one refusal naming both versions, not per-key lines."""
-        base = _fresh(markers=baseline_markers).to_dict()["experiment"]
-        run = _fresh(markers=run_markers).to_dict()["experiment"]
-        refs = ex.stored_identity_refusals(
-            ex.identity(base), ex.result_fingerprints(base), run, role
-        )
-        assert len(refs) == 1, refs
-        assert "v1" in refs[0] and "v2" in refs[0]
-
 
 # ---------------------------------------------------------------------------
 # A stored block is never rebuilt (d3, review d2 item 2)
@@ -180,12 +163,6 @@ def _caller_support(m):
     return support_state_of(m), "planted-state"
 
 
-def _caller_reproduce(m):
-    from lakebench.cli._reproduce import _run_experiment
-
-    return (_run_experiment(m) or {}).get("corpus", {}).get("id_v2"), "plantedidv2plant"
-
-
 @pytest.mark.parametrize(
     "caller",
     [
@@ -195,12 +172,11 @@ def _caller_reproduce(m):
         _caller_caps,
         _caller_n_runs,
         _caller_support,
-        _caller_reproduce,
     ],
     ids=lambda f: f.__name__.removeprefix("_caller_"),
 )
 def test_stored_block_never_rebuilt(caller):
-    """Each of the seven readers of experiment_block() sees the stored
+    """Each of the six readers of experiment_block() sees the stored
     block. With the d2 rule (rebuild a current-schema block) every one of
     them sees the rebuilt value."""
     got, want = caller(_load(_planted()))
@@ -368,8 +344,8 @@ class TestDifferences:
 
     def test_system_and_access_path_are_not_conditions(self):
         """OD-2: they moved to the System and Architecture groups."""
-        assert "system" not in ex.CONDITION_KEYS
-        assert "query access path" not in ex.CONDITION_KEYS
+        assert "system" not in cmp.CONDITION_KEYS
+        assert "query access path" not in cmp.CONDITION_KEYS
         a = sr.load_record("5105a0")["experiment"]
         b = copy.deepcopy(a)
         b["system"] = "local"
@@ -468,7 +444,7 @@ def _rec(run_id="5105a0", new_id=None, **edits):
 
 def _condition_keys(a, b):
     """The Conditions keys that differ between two stored records, as the
-    perf gate and reproduce read them (comparability.diff_group)."""
+    comparison ladder reads them (comparability.diff_group)."""
     ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
     return [d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
 
@@ -505,24 +481,6 @@ def test_optional_key_absent_from_the_baseline_is_a_difference():
     run["architecture"]["spark_executor_overrides"] = {"silver": 12}
     added = set(ex.identity(run)) - set(baseline)
     assert added == {"spark executor overrides"}
-    refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
-    assert len(refs) == len(added), refs
-    assert all(any(key in r for r in refs) for key in added), refs
-
-
-def test_reference_with_no_observed_system_is_refused():
-    """A v2 reference whose system fingerprint is the no-part constant
-    would match any unsampled run on any cluster: refused."""
-    from lakebench.metrics import system_identity as si
-
-    run = _fresh().to_dict()["experiment"]
-    baseline = ex.identity(run)
-    baseline["system fingerprint"] = si._unobserved_identity("cluster", "x")["fingerprint"]
-    refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
-    assert refs == [
-        "not comparable: the reference observed no part of its system; "
-        "the baseline cannot be matched to a system"
-    ]
 
 
 def test_config_only_identity_is_not_v2():

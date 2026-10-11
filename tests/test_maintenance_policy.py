@@ -1,4 +1,4 @@
-"""maintenance_policy_id: stamped in metrics.json, gated like query_set_id."""
+"""maintenance_policy_id: stamped in metrics.json, read back as legacy when absent."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import json
 from datetime import datetime
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 
 from lakebench.metrics.collector import PipelineBenchmark, PipelineMetrics
@@ -14,7 +13,6 @@ from lakebench.metrics.maintenance_policy import (
     LEGACY_MAINTENANCE_POLICY_ID,
     MAINTENANCE_POLICY_ID,
     effective_maintenance,
-    policy_mismatch,
     recorded_policy,
     skipped_policy_id,
 )
@@ -26,9 +24,6 @@ def test_ids_and_helpers():
     assert recorded_policy({}) == LEGACY_MAINTENANCE_POLICY_ID
     assert recorded_policy(None) == LEGACY_MAINTENANCE_POLICY_ID
     assert recorded_policy({"maintenance_policy_id": "x"}) == "x"
-    assert policy_mismatch(None, LEGACY_MAINTENANCE_POLICY_ID) is None
-    assert policy_mismatch(MAINTENANCE_POLICY_ID, MAINTENANCE_POLICY_ID) is None
-    assert policy_mismatch(None, MAINTENANCE_POLICY_ID) is not None
 
 
 def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):
@@ -88,47 +83,6 @@ def test_skip_maintenance_stamps_a_distinct_id(monkeypatch, tmp_path, mode, skip
     want = skipped_policy_id() if skip else MAINTENANCE_POLICY_ID
     assert seen[0].maintenance_policy_id == want
     assert skipped_policy_id() != MAINTENANCE_POLICY_ID
-
-
-def test_reproduce_package_carries_the_policy():
-    from lakebench.cli._reproduce import _build_package
-    from tests.fixtures.reproduce_helpers import _metrics
-
-    pkg = _build_package(_metrics(), config_reference=None, commit_sha="abc1234")
-    assert pkg["reproduction_metadata"]["maintenance_policy_id"] == MAINTENANCE_POLICY_ID
-
-
-@pytest.mark.parametrize(
-    ("meta", "actual", "refused"),
-    [
-        ({}, MAINTENANCE_POLICY_ID, True),  # legacy package, current code
-        ({"maintenance_policy_id": MAINTENANCE_POLICY_ID}, MAINTENANCE_POLICY_ID, False),
-        ({"maintenance_policy_id": "m9-future"}, MAINTENANCE_POLICY_ID, True),
-        ({}, LEGACY_MAINTENANCE_POLICY_ID, False),
-    ],
-)
-def test_reproduce_policy_refusal(meta, actual, refused):
-    from lakebench.cli._reproduce import _policy_refusal
-
-    assert (_policy_refusal(meta, actual) is not None) is refused
-
-
-def test_reproduce_verify_refuses_a_legacy_package_before_running(tmp_path):
-    """Exit 2 before the multi-hour run, even on --dry-run."""
-    import typer
-
-    from lakebench.cli._reproduce import _build_package, reproduce
-    from tests.fixtures.reproduce_helpers import _ONE_SAMPLE_CFG, _metrics
-
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(_ONE_SAMPLE_CFG)
-    pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="unknown")
-    del pkg["reproduction_metadata"]["maintenance_policy_id"]
-    pkg_path = tmp_path / "pkg.yaml"
-    pkg_path.write_text(yaml.safe_dump(pkg))
-    with pytest.raises(typer.Exit) as exc:
-        reproduce(package=pkg_path, dry_run=True)
-    assert exc.value.exit_code == 2
 
 
 def _report_html(tmp_path, *, mode: str, fmt: str, policy: str = MAINTENANCE_POLICY_ID) -> str:

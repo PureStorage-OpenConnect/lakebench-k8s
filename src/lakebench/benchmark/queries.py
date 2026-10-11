@@ -762,8 +762,7 @@ def query_set_id(names) -> str:
 
     QpH is queries per hour over a set; two runs over different sets (the
     Financial set grew from 8 to 12 queries with the investigator class, or a
-    query's SQL changed) do not have comparable QpH, and reproduce refuses
-    to put them side by side.
+    query's SQL changed) do not have comparable QpH.
     """
     import hashlib
 
@@ -843,22 +842,6 @@ def legacy_query_set_id(queries, recorded_at=None) -> str:
     return (
         pinned[0] if when.astimezone(timezone.utc) >= since.astimezone(timezone.utc) else "unknown"
     )
-
-
-def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
-    """Whether QpH over query sets ``a`` and ``b`` may be compared, and why not."""
-    if not a or not b or a == "unknown" or b == "unknown":
-        return False, (
-            f"query set not recorded ({a or 'none'} vs {b or 'none'}); "
-            "the run predates query-set ids"
-        )
-    if a == "blended" or b == "blended":
-        return False, (
-            f"rounds ran different query sets ({a} vs {b}); a median over them is not one QpH"
-        )
-    if a != b:
-        return False, f"different query sets ({a} vs {b})"
-    return True, ""
 
 
 # Backward-compatible alias. New code should call

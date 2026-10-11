@@ -381,10 +381,10 @@ class DeploymentEngine:
             deploy_nonce: The nonce ``deploy`` recorded in the directory's
                 state before deploying; stamped on the namespace.
             require_new: Refuse, instead of adopting, a namespace or bucket
-                that already exists (``reproduce``, which may destroy only
-                what it created). The namespace is created with a plain
-                create, so a competing create between a caller's check and
-                this step is refused (409), not adopted.
+                that already exists (``deploy --require-new``, for a caller
+                that may destroy only what it created). The namespace is
+                created with a plain create, so a competing create between a
+                caller's check and this step is refused (409), not adopted.
         """
         self.deploy_nonce = deploy_nonce
         self.require_new = require_new
@@ -827,7 +827,7 @@ class DeploymentEngine:
                 "resources (require_new). Nothing that existed was changed."
             ),
             elapsed_seconds=time.time() - start,
-            details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+            details={REFUSAL_DETAIL: "deploy.existing_namespace"},
         )
 
     def _namespace_already_using_name(self, namespace: str) -> str | None:

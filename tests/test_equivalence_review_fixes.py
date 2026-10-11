@@ -25,7 +25,7 @@ from lakebench.metrics.collector import (
     StreamingJobMetrics,
     build_config_snapshot,
 )
-from tests.conftest import make_config, stub_experiment
+from tests.conftest import make_config
 
 
 def _cfg(**arch):
@@ -246,55 +246,6 @@ class TestFreshnessProbe:
 # ---------------------------------------------------------------------------
 
 
-class TestFailedQueries:
-    def test_reference_side_failed_query_is_not_a_mismatch(self):
-        exp = stub_experiment(["Q1", "Q2"])
-        refs = ex.stored_identity_refusals(
-            ex.identity(exp),
-            {"Q1": exp["results"]["fingerprints"]["Q1"], "Q2": None},
-            exp,
-            "baseline",
-        )
-        assert refs == []
-
-    def test_reproduce_skips_a_failed_query(self):
-        from lakebench.cli._reproduce import _experiment_refusal
-
-        exp = stub_experiment(["Q1", "Q2"])
-        meta = {
-            "experiment_identity": ex.identity(exp),
-            "result_fingerprints": ex.result_fingerprints(exp),
-        }
-        run_exp = stub_experiment(["Q1", "Q2"], failed=("Q2",))
-        bench = SimpleNamespace(
-            queries=[{"name": "Q1", "success": True}, {"name": "Q2", "success": False}]
-        )
-        metrics = SimpleNamespace(experiment=run_exp, benchmark=bench, pipeline_benchmark=None)
-        assert _experiment_refusal(meta, metrics) is None
-
-
-# ---------------------------------------------------------------------------
-# Comparability not established
-# ---------------------------------------------------------------------------
-
-
-class TestNotEstablished:
-    def test_stored_references_refuse_a_batch_run_without_results(self):
-        exp = stub_experiment(["Q1"])
-        empty = stub_experiment([])
-        identity, fps = ex.identity(exp), ex.result_fingerprints(exp)
-        # Same call, same reference; only the missing results differ.
-        assert ex.stored_identity_refusals(identity, fps, exp, "baseline") == []
-        assert ex.stored_identity_refusals(identity, fps, empty, "baseline")
-        assert ex.stored_identity_refusals(identity, fps, exp, "package") == []
-        assert ex.stored_identity_refusals(identity, {}, exp, "package")
-
-
-# ---------------------------------------------------------------------------
-# Corpus as generated
-# ---------------------------------------------------------------------------
-
-
 class TestObservedCorpus:
     def test_mixed_fleet_is_a_problem(self):
         e = _run(fleet={"data_quality": "mixed", "mixed_params": ["scale"]}).to_dict()["experiment"]
@@ -396,17 +347,6 @@ class TestBlockFollowsTheRecord:
         run = _run()
         run.maintenance_outcomes = []
         assert "not_run" in run.to_dict()["experiment"]["effective_maintenance"]["id"]
-
-
-class TestPackageUsability:
-    def test_package_refuses_an_unusable_fingerprint(self):
-        from lakebench.cli._reproduce import ReproduceError, _build_package
-        from tests.fixtures.reproduce_helpers import _metrics
-
-        exp = stub_experiment(["Q1"])
-        exp["results"]["fingerprints"]["Q1"] = {"spec": "rf2", "error": "timed out"}
-        with pytest.raises(ReproduceError, match="usable result fingerprint"):
-            _build_package(_metrics(experiment=exp), config_reference="c.yaml", commit_sha="abc")
 
 
 class TestRunLocalIds:

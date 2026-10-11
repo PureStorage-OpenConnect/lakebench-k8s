@@ -15,7 +15,7 @@ Gate and result check: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](
 
 **Changed definitions.** Do not compare across these:
 
-- Before 1.6 (2026-09-26), throughput, freshness, `corpus_drained` and `total_rows_processed` counted outside the window. `sustained_throughput_rps` was bronze rows / `run_duration`, pre-window rows included; `corpus_drained` also needed two idle gold cycles. `reproduce` refuses those records.
+- Before 1.6 (2026-09-26), throughput, freshness, `corpus_drained` and `total_rows_processed` counted outside the window. `sustained_throughput_rps` was bronze rows / `run_duration`, pre-window rows included; `corpus_drained` also needed two idle gold cycles.
 - 1.7.1: gold freshness counts from file landing (bronze `ingest_ts`), adding the datagen-to-bronze and bronze-to-silver lag; stages run back to back by default; `arrival_seconds`, `ingest_ratio` and silver's kept-pace check use the stage's cadence (trigger interval, or its median batch time). AML identity catches this (`aml-3`); Customer 360 (`c360-2.dev1`) does not.
 
 ## Scores

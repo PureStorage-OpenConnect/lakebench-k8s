@@ -7,7 +7,7 @@ Reference: the AML benchmark specification: purpose, supported compositions, and
 - Query sets `qs12-910d16a91962` (batch with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8).
 - Maintenance policy `m2-2026-09-26`.
 
-For engineers who run, reproduce or compare this benchmark, and contributors
+For engineers who run or compare this benchmark, and contributors
 who implement it on a new component. Every statement describes the code of
 this release and names the module. Python paths are relative to
 `src/lakebench/`; generator paths to `datagen_rs/`. A reader's guide to the

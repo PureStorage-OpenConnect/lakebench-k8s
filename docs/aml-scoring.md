@@ -106,7 +106,7 @@ What protects the held-out corpora:
   and when each look may be taken.
 - Config load refuses a held-out seed unless `workload.datagen.corpus_role`
   declares the matching role.
-- With the role declared, `run`, `benchmark`, `query`, `reproduce` and the
+- With the role declared, `run`, `benchmark`, `query` and the
   `financial` subcommands still refuse the corpus with exit 2 before any
   cluster call. Only `lakebench generate --registered-corpus --yes` writes
   it, and only `scripts/aml_gate.py --registered` scores it.

@@ -9,26 +9,26 @@ import).
 
 "Produced by" lists the named paths the test suite drives to each code.
 Commands reach the same codes on other paths too; a code with no named
-path yet says so.
+path yet says so, and a reserved code says it is reserved.
 
 Several paths share a code (3 covers every safety refusal). With
 `LB_EXIT_PATH_FILE` set to a file name, `lakebench` appends one line
 `<code> <path>...` to that file as it exits (`<code> -` when no path is
 named), so a script can tell `destroy.incarnation_mismatch` from
-`lease.held` without reading message text. `deploy`, `destroy`, `generate`,
-the bronze and datagen gates of `run` and `reproduce` name every refusal and
+`lease.held` without reading message text. `deploy`, `destroy`, `generate`
+and the bronze and datagen gates of `run` name every refusal and
 `destroy.namespace_terminating`; other commands may write `<code> -`.
 
 | Code | Name | Meaning | Produced by |
 |---|---|---|---|
 | 0 | `OK` | Success: the run passed or the read succeeded. | `version.ok`, `run.pass`, `status.ok`, `plan.ok` |
 | 1 | `FAILED` | Negative verdict of the command's own object: the run failed, a record was modified, status found drift. Also any error Lakebench did not classify. | `unhandled_exception`, `run.verdict_failed`, `run.datagen_timeout`, `run.namespace_gone`, `repeat.no_verified_corpus`, `status.drift`, `status.namespace_missing`, `stop.api_error`, `logs.no_pod`, `financial.reproduce.mismatch`, `financial.reproduce.not_found` |
-| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `financial.reproduce.no_record`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `run.protected_corpus`, `alias.refused`, `reproduce.report_required` |
-| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `run.series_mismatch`, `reproduce.existing_namespace`, `reproduce.nonce_changed`, `reproduce.held_out`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
+| 2 | `USAGE` | Usage or config error, nothing ran: a bad flag or flag combination, a config that fails to load, an unsupported combination. | `click.usage`, `config.validation`, `financial.reproduce.no_record`, `config.unsupported`, `cli.bad_argument`, `config.name_required`, `run.args`, `config.upgrade_refused`, `generate.multi_cycle`, `run.protected_corpus`, `alias.refused` |
+| 3 | `REFUSED` | Refused by the safety or protocol model: identity, ownership, context or fingerprint mismatch, corpus state, live jobs, a held lease, a spent seed. | `run.series_mismatch`, `deploy.existing_namespace`, `destroy.incarnation_mismatch`, `destroy.redeployed`, `nameless.ambiguous`, `nameless.nonce_mismatch`, `nameless.copied_dir`, `nameless.moved`, `nameless.name_required`, `nameless.stamp_mismatch`, `nameless.v17_state_elsewhere`, `deploy.state_copied`, `nameless.namespace_missing`, `deploy.identity_foreign`, `run.deps_mismatch`, `run.bronze_nonempty`, `datagen.pods_live`, `series.corpus_changed`, `lease.held`, `context.changed`, `destroy.unverified_cluster` |
 | 4 | `PREREQUISITE` | Prerequisites not met, nothing ran: an operator or StorageClass missing, a permission gap, capacity below the peak, the cluster or S3 unreachable. | `deploy.state_unrecordable`, `nameless.namespace_unreadable`, `run.prereq_failed`, `capacity.shortfall`, `capacity.unknown`, `plan.missing_storage_class`, `k8s.unreachable`, `k8s.api_error`, `run.no_corpus`, `s3.unreachable`, `financial.k8s_unreachable`, `financial.reproduce.snapshot_gone`, `run.deps_missing`, `run.deps_stale` |
 | 5 | `NOT_CONFIRMED` | Not confirmed: a prompt was declined, or there was no terminal to answer it and the command was not given --yes. | `confirm.non_tty`, `confirm.declined`, `run.namespace_missing_no_yes` |
 | 6 | `INCOMPLETE` | Incomplete and safe to re-run: for example the namespace is still terminating. | `destroy.namespace_terminating` |
-| 14 | `REQUIREMENT_UNMET` | Requirement unmet: a reproduction drifted outside its tolerance, was asked to verify at another commit, or could only be verified out of band. | `reproduce.drift`, `reproduce.commit_drift`, `reproduce.verify_out_of_band` |
+| 14 | `REQUIREMENT_UNMET` | Reserved, never reused: no command exits 14 since `reproduce` was removed in 1.7.1. | none (reserved) |
 | 130 | `INTERRUPTED` | Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM). | `sigint`, `run.interrupted` |
 
 ## Named paths
@@ -62,11 +62,11 @@ the CLI down every path listed here and checks the code.
 | `config.validation` | 2 | the config fails to load or validate |
 | `financial.reproduce.no_record` | 2 | `financial reproduce` found no AML batch run record of the deployment on this host (or none for `--run`) |
 | `generate.multi_cycle` | 2 | `generate` with a multi-cycle config (`cycles` above 1): `run` generates each cycle |
-| `reproduce.report_required` | 2 | `reproduce` of a registered look's package without --report (a look is never rerun) |
 | `run.args` | 2 | a `run` argument or combination is refused before any cluster call |
 | `run.protected_corpus` | 2 | a protected AML corpus (evaluation or robustness role or seed, or a run record from one) reached a command that reads or scores data; `generate --registered-corpus` got a config naming none; or bronze-verify, or its check before `run --stage`, refused the manifest (held-out or spent seed, no corpus seed, missing, unreadable) |
 | `context.changed` | 3 | the kubeconfig changed under the command: a second context, or the pinned context's server or CA moved |
 | `datagen.pods_live` | 3 | `generate`, `run --generate`, a multi-cycle or a continuous run: an earlier datagen Job's pods were still running five minutes after the Job was deleted, and would write into the new corpus |
+| `deploy.existing_namespace` | 3 | `deploy --require-new` found the namespace or a bucket already exists; nothing that existed was changed |
 | `deploy.identity_foreign` | 3 | the namespace or a bucket is owned by another deployment, or has no lakebench ownership proof (`deploy`, `destroy`, `clean`) |
 | `deploy.state_copied` | 3 | `deploy` found a state written for another directory or host (a copied directory) |
 | `destroy.incarnation_mismatch` | 3 | `destroy` found the namespace is not the deployment incarnation it checked or was told to expect |
@@ -81,9 +81,6 @@ the CLI down every path listed here and checks the code.
 | `nameless.nonce_mismatch` | 3 | a nameless config's recorded nonces do not include the namespace's |
 | `nameless.stamp_mismatch` | 3 | a nameless v1.6 config's --name or buckets do not match the namespace's stamps |
 | `nameless.v17_state_elsewhere` | 3 | the namespace carries v1.7 state that lives with another config |
-| `reproduce.existing_namespace` | 3 | `reproduce` would reuse a namespace or bucket that already exists |
-| `reproduce.held_out` | 3 | `reproduce` was given a package from a held-out corpus whose look has not run, or whose seed or look record cannot be read |
-| `reproduce.nonce_changed` | 3 | the deployment `reproduce` created was replaced before its run or its destroy |
 | `run.bronze_nonempty` | 3 | datagen would write over a non-empty bronze prefix: without --regenerate, or with it on a bucket this deployment cannot prove it owns (a continuous run too, when objects land in the prefix after its reset) |
 | `run.deps_mismatch` | 3 | the recorded dependency set does not check, or the server or a query engine pod runs another set than the deployment recorded |
 | `run.series_mismatch` | 3 | a `run` that reuses the corpus (`--skip-generate`, or one cycle without `--generate`) finds its series marker unfinished, unreadable, or written for another cycle count, window or generation than the config's |
@@ -106,9 +103,6 @@ the CLI down every path listed here and checks the code.
 | `confirm.non_tty` | 5 | a confirmation prompt got no answer (no terminal, end of input) or was declined |
 | `run.namespace_missing_no_yes` | 5 | `run` would create a missing namespace and was not given --yes |
 | `destroy.namespace_terminating` | 6 | `destroy` finished its steps but the namespace is still terminating |
-| `reproduce.commit_drift` | 14 | `reproduce` was asked to verify a package recorded at another commit, without --allow-commit-drift |
-| `reproduce.drift` | 14 | `reproduce` ran and a metric drifted outside its tolerance band (correctness, or performance), or the run did not follow the package's protocol |
-| `reproduce.verify_out_of_band` | 14 | `reproduce --report` of a registered look: the report does not match the look record, or the record holds no report sha256 |
 | `run.interrupted` | 130 | `run` interrupted by SIGINT or SIGTERM; the record is sealed as interrupted and the run's unfinished jobs are stopped |
 | `sigint` | 130 | a command interrupted with Ctrl-C outside a prompt (Ctrl-C at a prompt is 5) |
 

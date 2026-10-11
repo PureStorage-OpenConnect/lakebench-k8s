@@ -15,7 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 from typer.testing import CliRunner
 
 from lakebench.aml import look_guard as lg
@@ -140,44 +139,6 @@ def test_verb_refuses_a_protected_config(tmp_path, monkeypatch, held, no_cluster
     _assert_refused(_invoke(_verb_argv(verb, cfg)), no_cluster, verb.removesuffix(" --interactive"))
 
 
-def test_reproduce_refuses_a_config_naming_a_protected_corpus(
-    tmp_path, monkeypatch, held, no_cluster
-):
-    """An ordinary package with --config naming the evaluation corpus: exit 2
-    before the run (the package-level held-out refusal stays exit 3)."""
-    import lakebench.cli._reproduce as rep
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(rep, "_current_commit_sha", lambda: None)
-    pkg = tmp_path / "pkg.yaml"
-    pkg.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "reproduction_metadata": {
-                    "commit_sha": "unknown",
-                    "pipeline_mode": "batch",
-                    "corpus_role": "calibration",
-                    "expected_numbers": {"scale_ratio": 1.0},
-                    "experiment_identity": {"workload": "financial", "seed": pc.CALIBRATION},
-                },
-            }
-        )
-    )
-    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
-    _assert_refused(_invoke(["reproduce", str(pkg), "--config", str(cfg)]), no_cluster, "reproduce")
-
-
-def test_reproduce_pipeline_refuses_before_it_deploys(tmp_path, monkeypatch, held, no_cluster):
-    from lakebench.cli._reproduce import _run_pipeline
-    from lakebench.exit_codes import UsageError
-
-    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
-    with pytest.raises(UsageError) as info:
-        _run_pipeline(cfg, 600, keep=True)
-    assert info.value.path == lg.PATH and no_cluster == []
-
-
 # -- refused at load ---------------------------------------------------------
 
 
@@ -263,6 +224,59 @@ def test_protected_corpus_reason_fails_closed_for_aml(monkeypatch):
     assert "cannot be read" in lg.protected_corpus_reason(_cfg(seed=pc.CALIBRATION))
     # Customer 360 corpora are not AML data: no refusal when the record is gone.
     assert lg.protected_corpus_reason(_cfg(seed=42, schema="customer360")) is None
+
+
+def _role_broken(seed, h=None):
+    raise ValueError("record conflict")
+
+
+def _record_gone():
+    raise FileNotFoundError("heldout_hashes.json not found")
+
+
+@pytest.mark.parametrize(
+    ("schema", "seed", "role", "break_fn", "refused"),
+    [
+        pytest.param("financial", pc.EV, None, None, True, id="evaluation-seed"),
+        pytest.param("financial", pc.RB, "calibration", None, True, id="robustness-seed-any-role"),
+        pytest.param("financial", None, "evaluation", None, True, id="evaluation-role"),
+        pytest.param("financial", pc.CALIBRATION, None, None, False, id="calibration-seed"),
+        pytest.param(
+            "financial",
+            pc.CALIBRATION,
+            None,
+            ("heldout_role", _role_broken),
+            True,
+            id="role-lookup-raises-fails-closed",
+        ),
+        pytest.param(
+            "financial",
+            pc.CALIBRATION,
+            None,
+            ("_heldout", _record_gone),
+            True,
+            id="record-gone-fails-closed",
+        ),
+        pytest.param(
+            "customer360",
+            42,
+            None,
+            ("_heldout", _record_gone),
+            False,
+            id="c360-not-aml-data",
+        ),
+    ],
+)
+def test_corpus_fields_reason(held, monkeypatch, schema, seed, role, break_fn, refused):
+    """The one rule the look guard applies to raw corpus fields (configs, raw
+    config files in the held-out audit, generate): a protected role or
+    held-out seed refuses, and an unreadable held-out record refuses an AML
+    corpus (fail closed). No reason names a seed."""
+    if break_fn is not None:
+        monkeypatch.setattr(ds, *break_fn)
+    reason = lg.corpus_fields_reason(schema, seed, role)
+    assert (reason is not None) is refused, reason
+    assert pc.seed_tokens(reason or "") == []
 
 
 def _rec(**corpus):

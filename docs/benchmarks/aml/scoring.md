@@ -138,8 +138,6 @@ or hash differs are not comparable.
   `results.alert_set_unavailable`) or gold-finalize did not run. It cannot
   show its results match another run's; do not compare it on query results
   alone.
-  `reproduce` refuses such a run; it does not yet compare alert sets with its
-  package.
 - Records from 1.6 have no alert set.
 - A rule that ran and raised no alert is absent from `by_rule`, like a rule
   that did not run; `experiment.rules` records which rules ran.

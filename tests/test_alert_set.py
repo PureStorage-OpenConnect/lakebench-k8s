@@ -141,7 +141,7 @@ class TestRecord:
         e = _fresh(aset=None, unavailable="boom").to_dict()["experiment"]
         assert "alert_set" not in e["results"]
         assert e["results"]["alert_set_unavailable"] == "boom"
-        assert ex.results_established(e) == "the alert-set fingerprint was not recorded (boom)"
+        assert als.alert_set_missing(e) == "the alert-set fingerprint was not recorded (boom)"
 
     def test_last_gold_job_wins(self):
         """Multi-cycle: gold.alerts holds the last cycle's alerts, so an
@@ -158,7 +158,7 @@ class TestRecord:
     def test_c360_needs_none(self):
         e = _fresh(schema="customer360", aset=None).to_dict()["experiment"]
         assert e["schema"] == "exp2"
-        assert ex.results_established(e) is True
+        assert als.alert_set_missing(e) is None
 
     def test_benchmark_refresh_keeps_it(self):
         run = _fresh()

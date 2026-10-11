@@ -3,7 +3,7 @@
 ## 8. Metrics
 
 Units, directions and bands come from the metric registry
-(`metrics/metric_registry.py`), which `reproduce` and the report read.
+(`metrics/metric_registry.py`), which the report reads.
 Direction `none`: a delta has no better side.
 
 ### 8.1 Batch
@@ -19,7 +19,7 @@ Primary: `time_to_value_seconds`, lower is better.
 | `pipeline_throughput_gb_per_second` | GiB/s | higher | `total_data_processed_gb / time_to_value_seconds` |
 | `total_core_hours` | core-h | lower | sum over batch stages of executors x executor cores x elapsed / 3600 (requested, not used; drivers excluded) |
 | `compute_efficiency_gb_per_core_hour` | GiB/core-h | higher | `total_data_processed_gb / total_core_hours` |
-| `scale_ratio` | ratio | target 1.0 | bronze input GB / `approx_bronze_gb` (10 x scale); a correctness figure, exact in `reproduce` |
+| `scale_ratio` | ratio | target 1.0 | bronze input GB / `approx_bronze_gb` (10 x scale); a correctness figure |
 | `composite_qph` | QpH | higher | QpH of the scored round: successful queries / sum of their median elapsed seconds x 3600; absent when no benchmark ran |
 | `benchmark_samples_per_query`, `qph_spread` | count, struct | none | samples behind the medians; QpH of the slowest and fastest sample combination |
 | `pre_compaction_qph`, `post_compaction_qph` | QpH | higher | the pre- and post-maintenance rounds |
@@ -117,11 +117,8 @@ continuous `composite_qph` must carry `composite_qph_basis`.
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
 | `snapshots_expired`, `orphan_files_removed`, `storage_reclaimed_mb` | count, count, MB | none | reserved for what table maintenance removed; no code path fills them in this release, so they never appear in a record |
-| `datagen_aggregate_mbps`, `datagen_mbps_per_pod` | MB/s | higher | datagen fleet and per-pod write throughput |
-| `datagen_cpu_hr_per_tb` | cpu-h/TB | lower | datagen CPU-hours per TB written |
 | `storage_multiple_total` | ratio | lower, diagnostic (never a directional delta) | physical over logical table bytes at run end under the maintenance policy that ran (`storage_multiple.total.multiple`); a condition of the policy, not a system score |
 
-`reproduce` derives the three datagen figures from the datagen record.
 `storage_multiple_total` is shown by the report and read by nothing that
 gates. None of these is under `scores`. Per-stage and per-query figures
 (`<stage>_seconds`, `query_qph_<query>`) are recorded beside these and follow the stage and query definitions above.

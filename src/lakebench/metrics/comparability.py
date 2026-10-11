@@ -79,10 +79,6 @@ CONDITION_KEYS = (
     "benchmark rounds",
 )
 
-#: Conditions that are also outcomes of the run: a difference is not
-#: like-for-like, and reproduce does not refuse on it.
-OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds", "investigator sessions"})
-
 
 # ---------------------------------------------------------------------------
 # Optional identity keys: present only when non-default

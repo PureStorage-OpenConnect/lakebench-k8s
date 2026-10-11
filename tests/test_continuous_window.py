@@ -468,25 +468,6 @@ def test_continuous_results_are_established_only_by_a_result_check():
     assert res["fingerprints"] == {"Q1": {"a": 1}} and "not_checked" not in res
 
 
-def test_stored_reference_refuses_a_continuous_run_without_checked_results():
-    from lakebench.metrics.experiment import identity, stored_identity_refusals
-    from tests.conftest import stub_experiment
-
-    ref = stub_experiment(["Q1"], mode="sustained")
-    run = stub_experiment(["Q1"], mode="sustained")
-    assert (
-        stored_identity_refusals(
-            identity(ref), {"Q1": ref["results"]["fingerprints"]["Q1"]}, run, "baseline"
-        )
-        == []
-    )
-    run["results"] = {"fingerprints": {}, "not_checked": "continuous: the corpus did not settle"}
-    reasons = stored_identity_refusals(
-        identity(ref), ref["results"]["fingerprints"], run, "baseline"
-    )
-    assert any("comparability not established" in r for r in reasons)
-
-
 # ------------------------------------------------ end to end (mocked cluster)
 
 
@@ -739,15 +720,6 @@ def test_stage_rate_is_windowed_after_compute_derived():
     st = _stage("bronze", input_rows=1_000_000, window_input_rows=600_000)
     st.compute_derived()
     assert st.throughput_rows_per_second == pytest.approx(1000.0)
-
-
-def test_drained_rps_is_gated_when_arrival_lasted_the_window():
-    from lakebench.metrics.continuous_window import drained_rps_excluded
-
-    assert drained_rps_excluded(True, 0.95) is None
-    assert "short arrival" in drained_rps_excluded(True, 0.5)
-    assert "lower bound" in drained_rps_excluded(True, None)  # pre-window record
-    assert drained_rps_excluded(False, 0.1) is None
 
 
 def test_a_stream_restarted_inside_the_window_fails():

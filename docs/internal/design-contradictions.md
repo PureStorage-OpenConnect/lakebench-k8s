@@ -27,8 +27,8 @@ remains open only as implementation work.
    **Superseded 2026-10-03 (owner):** `compare` is removed; humans compare
    two reports. Each report shows the evidence (per-query result
    fingerprints, the query set, the AML batch alert set and the identity
-   digest), and the perf gate and `reproduce` still refuse a run whose query
-   results differ from their reference. They do not compare alert sets.
+   digest). Since `reproduce` was removed (2026-10-10, owner), no command
+   refuses a run whose query results differ from a reference.
 
 2. **Queries are never checked for non-empty or correct results.**
    `rows_returned` (`benchmark/runner.py:37`) is only displayed

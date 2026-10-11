@@ -64,7 +64,6 @@ Supporting directories:
 | Queries | `src/lakebench/benchmark/queries.py` (the QpH sets), `benchmark/aml_queries.py` and the SQL under `benchmark/queries/aml/` (the AML score queries) |
 | Metric definitions | `src/lakebench/metrics/metric_registry.py`, which the collector's score descriptions read |
 | Kubernetes manifests | the Jinja2 templates in `src/lakebench/templates/`; Spark jobs are built in code in `job.py` |
-| Reproduction packages | `src/lakebench/cli/_reproduce.py` (`_build_package`); it shares the deploy, generate, run and destroy code with the main CLI |
 | Datagen metrics | `datagen_rs/src/metrics.rs` (struct and JSON line), `src/lakebench/metrics/datagen_aggregator.py` (aggregator), `src/lakebench/templates/datagen/job.yaml.j2` (`LB_POD_CPU_REQUEST_MILLI`) |
 
 ### Key conventions
@@ -377,22 +376,6 @@ with a source pointer for each statement:
   reads; [DESIGN.md](DESIGN.md#64-adding-a-metric) section 6.4).
 - Changing what a published metric means is a product decision, not a
   refactor.
-
-## Reproduction packages
-
-- Record each package from a real run
-  (`lakebench reproduce --record <run-id> --write <path>`), so its expected
-  numbers cannot drift from a real `metrics.json`.
-- Default bands are `DEFAULT_TOLERANCES` in `_reproduce.py` (performance 20%,
-  correctness 0%).
-- Each metric's band and direction come from `metrics/metric_registry.py`, not
-  from the package. A malformed package cannot downgrade a correctness metric.
-- A PR that changes a performance-affecting code path runs one reproduce
-  against a package the change should not regress. It posts expected vs
-  actual per metric, the drift percentage and pass / warn / fail.
-- A PR that changes a performance number on purpose records a new package from
-  the post-change `metrics.json`. The commit message names the old package as
-  "supersedes"; do not just delete it.
 
 ## The datagen metrics line
 

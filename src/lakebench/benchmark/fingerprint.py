@@ -3,8 +3,7 @@
 Two compositions may only be compared on performance when they return the
 same results (mission invariant 2). After a benchmark query's timed samples,
 the runner executes it once more, untimed, and records a fingerprint of the
-rows. ``lakebench reproduce`` refuses when fingerprints do
-not match, and the report shows them so a reader can compare two runs.
+rows. The report shows them so a reader can compare two runs.
 
 Spec ``rf2`` (rf1 rounded every number to 15 significant digits, summed
 approximate columns without row association, and let NaN match anything). Bump SPEC whenever any rule here changes, so a fingerprint is

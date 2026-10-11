@@ -147,7 +147,7 @@ protected seed as its salted reference and role, never the value
 (`metrics/seed_record.py`). Do not check in the run
 output of a registered generate before its look is recorded. In practice
 only `lakebench generate --registered-corpus` reaches the cluster with such
-a config: `run`, `benchmark`, `query`, `reproduce` and the
+a config: `run`, `benchmark`, `query` and the
 `financial` commands refuse it before any cluster call, so the in-cluster
 reference scorer never scores a registered corpus; the look scores the local
 copy with `scripts/aml_gate.py --registered`.

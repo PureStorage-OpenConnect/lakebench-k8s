@@ -57,6 +57,5 @@ comparable only when (`metrics/comparability.py`):
 - Batch and continuous runs are never comparable (mode is a Workload key).
 - A batch run whose TM layer did not run (8 queries) is not comparable with
   one where it ran (12), because the query sets differ.
-- `reproduce` refuses a different maintenance policy id.
 - Records written by Lakebench 1.6 (exp1, workload `aml-1`), including the
   three cited runs, are not comparable with this release's records: they are reference figures, not baselines.

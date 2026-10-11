@@ -187,5 +187,5 @@ Every command writes under `lakebench-output/` in the working directory.
 
 - `runs/run-<id>/` holds each run's `metrics.json` and `report.html`.
 - `journal/` holds the session provenance logs.
-- Keep that directory: `report` and `reproduce` read the records in it.
+- Keep that directory: `report` reads the records in it.
 - Layout: [Run records](benchmarking/records.md).

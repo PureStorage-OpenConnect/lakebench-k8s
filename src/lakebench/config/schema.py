@@ -633,7 +633,7 @@ class S3Config(ConfigModel):
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     """Bronze, silver and gold bucket names."""
     create_buckets: bool = True
-    """Create buckets if they do not exist. `reproduce` refuses `false`."""
+    """Create buckets if they do not exist."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "secret_ref": (
@@ -1946,7 +1946,7 @@ class DatagenConfig(ConfigModel):
             return "64mb"
         raise ValueError(
             f"datagen.file_size is fixed at 64mb; got {v!r}. Remove the key or set 64mb. "
-            "(Configs and reproduce packages from before v1.6 that used another size "
+            "(Configs from before v1.6 that used another size "
             "cannot be regenerated with this version.)"
         )
 

@@ -1667,7 +1667,7 @@ def destroy_all(
         delete_buckets: After emptying, delete the buckets this deployment
             provably owns. False empties them and keeps them.
         expected_incarnation: The ``uid#nonce`` the caller verified (a
-            nameless config's state check, or ``reproduce``'s own deploy).
+            nameless config's state check, or ``--expect-incarnation``).
             When set and the namespace is not that incarnation at
             start (another, or absent), destroy returns one FAILED result
             with ``details["incarnation_mismatch"]`` before any delete.

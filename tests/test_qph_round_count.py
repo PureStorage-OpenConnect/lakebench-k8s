@@ -72,14 +72,3 @@ def test_different_round_counts_are_not_like_for_like():
     assert ex.identity_differences(a, b) == []
     assert ex.condition_differences(a, b) == ["benchmark rounds differs (4 vs 5)"]
     assert ex.condition_differences(a, _exp("sustained", 4)) == []
-
-
-def test_zero_rounds_never_gates_against_an_in_stream_median():
-    """With 0 rounds composite_qph is the post-stream benchmark, a different
-    estimator from the reference's in-stream median."""
-    for ref, run in ((5, 0), (0, 3)):
-        baseline, current = _exp("sustained", ref), _exp("sustained", run)
-        reasons = ex.stored_identity_refusals(
-            ex.identity(baseline), ex.result_fingerprints(baseline), current, "baseline"
-        )
-        assert any("continuous QpH estimator differs" in r for r in reasons), reasons

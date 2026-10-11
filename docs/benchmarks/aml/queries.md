@@ -35,8 +35,8 @@ SQL of the queries actually recorded, failed ones included.
 - A `--class` subset gets its own id.
 - Each continuous round records the set it executed. Rounds over different
   sets are not combined into one assessed QpH ([8.2](continuous-metrics.md#82-continuous)).
-- `reproduce` refuses to compare QpH across query sets, so an 8-query AML run
-  is never set against a 12-query one.
+- The query set id is a workload identity key, so an 8-query AML run is
+  never set against a 12-query one as like for like.
 - A run recorded before the id existed can get a pinned historical id. That
   needs its query names to be the c360 set or the 8-query AML set, recorded
   after that set's last SQL change. It then stays comparable with runs over
@@ -59,7 +59,7 @@ SQL of the queries actually recorded, failed ones included.
   first TM pass), so no record from before it compares with one after. It is
   part of workload version `aml-2`.
 - A batch record is still never compared with a continuous one: mode is a
-  workload identity key, and `reproduce` refuses the pair.
+  workload identity key.
 
 | ID | Class | Business question | Reads | Ordering and checks |
 |---|---|---|---|---|

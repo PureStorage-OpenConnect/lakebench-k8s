@@ -47,11 +47,8 @@ comparable only when (`metrics/comparability.py`):
 - Query access path and system are Architecture and System keys, not
   conditions; when architecture and system both differ, no difference can be
   put down to either.
-- `reproduce` requires every identity key, conditions included (except the
-  in-stream round count), to match its stored reference, and refuses a
-  different maintenance policy id.
 - Compare QpH only between runs with the same non-unknown `query_set_id`; a
   continuous median over rounds of different sets reads `blended`
   ([8.2](metrics.md#82-continuous)).
-- The perf gate and `reproduce` leave out continuous rows per second when the
-  corpus drained with less than 90% arrival.
+- Continuous rows per second from a run whose corpus drained with less than
+  90% arrival is over a short arrival; do not compare it.

@@ -11,7 +11,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 ### Breaking
 
 - **AML corpora change.** `datagen-v2-rs-0.4` name pools grow with population, so W5/W6 false matches per watchlist entry stay flat (seed 43, scale 1/10/100: 0.39, 0.35, 0.34; were 0.14, 1.86, 17.2). Every AML corpus changes; registered v1.7 looks keep `datagen-v2-rs-0.3`. [Detail](docs/benchmarks/AML.md)
-- **W3 and W17 treat an account as a hub only in weeks** it sends over 200 transfers, not for the whole corpus. Alerts, recall and false positives change in both modes. Workload `aml-3`, rule 1.1.0; `reproduce` refuses 1.7.0 alerts.
+- **W3 and W17 treat an account as a hub only in weeks** it sends over 200 transfers, not for the whole corpus. Alerts, recall and false positives change in both modes. Workload `aml-3`, rule 1.1.0; `financial reproduce` refuses 1.7.0 alerts.
 - **AML continuous runs W5 and W6 every tick**, screening each payment once as it arrives. W5's rescreen stays batch-only; covered scoring leaves the sanctions instances only a rescreen finds out of recall and counts them.
 - **Continuous W4 raises one alert per entity per week**, not one per entity over its history. Its counts, recall and false positives differ from batch W4 (unchanged) and from 1.7.0 continuous runs.
 - **Continuous stages run back to back by default.** `bronze_trigger_interval`, `silver_trigger_interval` and `gold_refresh_interval` default to `0 seconds` (were 30 s, 60 s, 5 minutes). The `run_duration` floor of 3 x `gold_refresh_interval` applies only with gold on an interval.
@@ -30,6 +30,8 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **New default datagen image** `lb-datagen:5d7ce61a`, pinned by digest (`sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc`). `lb-datagen:2a36ae21` and `1.6.0` are gone from the registry. Its corpora get a corpus id of their own.
 - **A `datagen.parallelism` set in the config is used exactly**, with a warning where the autosizer would have changed it. A continuous run whose datagen pods do not all fit is refused at preflight, naming `datagen.parallelism`.
 - **`lakebench compare` is gone.** It is now an unknown command. Compare runs from their reports.
+- **`lakebench reproduce` is gone.** It is now an unknown command (exit 2), with no replacement. Exit code 14 is reserved: no command produces it, and it is never reused. `lakebench financial reproduce` is unchanged. `datagen_aggregate_mbps`, `datagen_mbps_per_pod` and `datagen_cpu_hr_per_tb`, which only `reproduce` derived and no record carries, leave the metric registry.
+- **`deploy --require-new` refusals name the exit path `deploy.existing_namespace`** (was `reproduce.existing_namespace`), still exit 3.
 - **A bare `"0"` trigger interval is refused at load.** The three continuous intervals need a whole number and a unit (`"0 seconds"`, `"5 minutes"`). Before, `"0"` went to Spark unchanged for Customer 360 and became 10 s for AML.
 - **`lakebench.modules` no longer exports `CatalogModule`, `QueryEngineModule`, `PipelineEngineModule`, `TableFormatModule` or `ModuleRegistry`.** `modules/base.py` and `modules/registry.py` are removed; nothing in Lakebench used them.
 
@@ -64,7 +66,6 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 
 - **Stage times no longer include Lakebench's own bookkeeping.** AML gold ran a count per rule inside each rule's time and its continuous time to detect; C360 gold recomputed the gold aggregate to count it; AML bronze verify read the data seven times and C360 bronze verify twice more for output nobody read. Each is gone or one pass.
 - **Digest-pinned Spark images** (`apache/spark:4.1.1-python3@sha256:...`) are accepted; the version came from the digest and the config was refused.
-- **`reproduce` reads the running Lakebench's commit**, not the current directory's git repository, which reported false commit drift.
 - **A finished command no longer hangs at exit.** After a continuous run wrote its record, Python could wait forever on a logging lock, so a script's next step (`destroy`) never ran.
 - **Observability numbers** ([Observability](docs/component-observability.md)). Trino counts the run's queries. S3 requests and latency, platform CPU and memory, bucket sizes and the continuous S3 object count read `not collected` (`null`), not 0. An interrupted run with observability on says metrics were skipped.
 - **Observability report and dashboards.** Platform Metrics always appears, with the reason when empty. No Spark engine metrics are claimed (the Spark UI is off). Grafana Trino panels use lowercase metric names; CPU counts containers once. JMX exporter pinned by digest.

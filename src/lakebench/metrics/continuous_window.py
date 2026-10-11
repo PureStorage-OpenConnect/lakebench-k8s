@@ -339,31 +339,6 @@ def window_stats(
     return out
 
 
-#: Arrival share at or above which a drained run's rows/s is still gated: it
-#: is window rows over arrival_seconds, so only a corpus that ran out early
-#: leaves a rate set by a partial last trigger over a short arrival.
-GATED_ARRIVAL_FRACTION = 0.9
-
-
-def drained_rps_excluded(corpus_drained: Any, window_arrival_fraction: Any) -> str | None:
-    """Why a continuous run's rows/s is left out of a comparison, or None.
-
-    Left out when the corpus drained and data arrived for less than
-    GATED_ARRIVAL_FRACTION of the window (or the record predates the
-    window and carries no arrival share: then rows/s was corpus rows over
-    the window, a lower bound)."""
-    if corpus_drained is not True:
-        return None
-    if isinstance(window_arrival_fraction, (int, float)):
-        if window_arrival_fraction >= GATED_ARRIVAL_FRACTION:
-            return None
-        return (
-            f"corpus drained with data arriving for {window_arrival_fraction:.0%} of the "
-            f"window (under {GATED_ARRIVAL_FRACTION:.0%}); rows/s is over a short arrival"
-        )
-    return "corpus drained before the window ended; rows/s is a lower bound"
-
-
 #: Share of the window data must keep arriving for: a corpus that runs out
 #: earlier leaves a window that mostly measures an idle pipeline.
 MIN_ARRIVAL_FRACTION = 0.5

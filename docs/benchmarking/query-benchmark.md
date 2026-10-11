@@ -88,6 +88,6 @@ Each round records `index`, `started_at`, `ended_at`, `executed_queries` (those 
 - A round with a failed query has QpH over a smaller set.
 - `scores.composite_qph_basis`: whether the rounds with a QpH ran more than one set (`blended`), and rounds per set. `scores.composite_qph_by_set`: median per set.
 - AML continuous: composite QpH uses only the rounds that ran the full 12-query set (`composite_qph_basis.composite_set`). Earlier 8-query rounds stay in `composite_qph_by_set`; `qph_degradation_pct` uses full-set rounds.
-- Blended: the aggregate `query_set_id` reads `blended`, `composite_qph` and `in_stream_composite_qph` are not comparable with another run's, `qph_degradation_pct` is withheld (`scores.qph_degradation_withheld`), and `reproduce` leaves the in-stream QpH out. Otherwise `query_set_id` is every query name the rounds ran, even one that failed in every round.
-- Every round missed the same query: medians cover the smaller set, and `reproduce` reads the executed set (pre-1.7: its pinned legacy id or `unknown`).
+- Blended: the aggregate `query_set_id` reads `blended`, `composite_qph` and `in_stream_composite_qph` are not comparable with another run's and `qph_degradation_pct` is withheld (`scores.qph_degradation_withheld`). Otherwise `query_set_id` is every query name the rounds ran, even one that failed in every round.
+- Every round missed the same query: medians cover the smaller set.
 - Pre-1.7 rounds get their set from success flags; one with a query failing in some rounds reads blended.

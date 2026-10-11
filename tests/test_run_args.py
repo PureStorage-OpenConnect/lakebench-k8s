@@ -21,7 +21,7 @@ from lakebench.cli._run_args import (
     RunContext,
     run_args_problems,
 )
-from lakebench.exit_codes import ExitCode, UsageError
+from lakebench.exit_codes import ExitCode
 from tests.fixtures import run_args_helpers as _run_args_helpers
 from tests.fixtures.run_args_helpers import CONFIG as CONFIG
 
@@ -92,45 +92,6 @@ def test_run_validation_zero_cluster_calls(argv, message, tmp_path, monkeypatch,
         assert message in result.output, result.output
     assert no_cluster == []
     assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
-
-
-def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatch, no_cluster):
-    """reproduce destroys, deploys and generates before it calls run; a
-    timeout run would refuse is refused first, with nothing destroyed."""
-    import lakebench.cli._destroy as destroy_mod
-    from lakebench.cli._reproduce import _run_pipeline
-
-    monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "runargs.yaml"
-    cfg.write_text(CONFIG)
-    called: list[str] = []
-    monkeypatch.setattr(destroy_mod, "destroy", lambda **k: called.append("destroy"))
-    with pytest.raises(UsageError, match="--timeout must be at least 1 s"):
-        _run_pipeline(cfg, 0, keep=True)
-    assert called == [] and no_cluster == []
-
-
-def test_reproduce_refuses_batch_investigator_sessions_before_it_deploys(
-    tmp_path, monkeypatch, no_cluster
-):
-    """A batch AML config with investigator sessions loads, and run would
-    refuse it only after reproduce had deployed and generated: reproduce
-    checks run's rules first."""
-    import lakebench.cli._deploy as deploy_mod
-    from lakebench.cli._reproduce import _run_pipeline
-
-    monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "runargs.yaml"
-    cfg.write_text(
-        CONFIG.replace("schema: customer360", "schema: financial").replace(
-            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
-        )
-    )
-    called: list[str] = []
-    monkeypatch.setattr(deploy_mod, "_deploy_impl", lambda *a, **k: called.append("deploy"))
-    with pytest.raises(UsageError, match="investigator_sessions runs only on an AML continuous"):
-        _run_pipeline(cfg, None, keep=True)
-    assert called == [] and no_cluster == []
 
 
 @pytest.mark.parametrize(

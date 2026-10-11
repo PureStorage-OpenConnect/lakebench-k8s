@@ -522,16 +522,14 @@ def _deploy_impl(
     local: bool = False,
     workdir: Path | None = None,
     force_legacy: bool = False,
-    nonce: str | None = None,
     require_new: bool = False,
     next_steps: bool = True,
 ) -> str | None:
-    """The body of ``deploy``, callable with a nonce the caller chose.
+    """The body of ``deploy``.
 
-    ``reproduce`` passes its own ``nonce``, so it destroys only what it made,
-    and ``require_new`` so an existing namespace or bucket is refused (exit
-    3), not adopted. Returns the nonce this deploy recorded and stamped, or
-    None for a dry run or local mode.
+    ``require_new`` refuses an existing namespace or bucket (exit 3,
+    ``deploy.existing_namespace``) instead of adopting it. Returns the nonce
+    this deploy recorded and stamped, or None for a dry run or local mode.
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
@@ -627,7 +625,7 @@ def _deploy_impl(
         # Record the nonce in the directory's state before the
         # namespace gets it, so a crash between the two cannot orphan the
         # deployment. A dry run only reads.
-        recorded = _record_deploy_nonce(cfg, config_file, dry_run=dry_run, nonce=nonce)
+        recorded = _record_deploy_nonce(cfg, config_file, dry_run=dry_run, nonce=None)
         engine.deploy_nonce = recorded
 
         # Progress callback -- columnar output with version info

@@ -213,9 +213,8 @@ def _deserialize_benchmark_rounds(
 def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
     """The ``composite_qph_basis`` of a stored metrics.json record, read from
     its in-stream rounds (collector.composite_qph_basis) so a record written
-    before the basis was stored gets the same answer in
-    reproduce. A record that keeps no rounds gives its stored basis,
-    or None."""
+    before the basis was stored gets the same answer. A record that keeps
+    no rounds gives its stored basis, or None."""
     from .collector import composite_qph_basis
 
     rounds = _recorded_rounds(record)

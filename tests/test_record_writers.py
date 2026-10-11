@@ -280,16 +280,3 @@ def test_benchmark_record_drops_the_parents_post_maintenance_qph(tmp_path):
     # replace the parent's.
     want = parent_elapsed - parent_query_s + _bench_result().total_seconds
     assert scores["total_elapsed_seconds"] == pytest.approx(want, abs=0.01)
-
-
-def test_reproduce_refuses_a_benchmark_record(tmp_path, monkeypatch):
-    from lakebench.cli._query import _save_benchmark_record
-
-    runs = _runs(tmp_path, PARENT)
-    storage = MetricsStorage(runs)
-    path = _save_benchmark_record(storage, storage.load_run(PARENT), _bench_result())
-    bench_id = path.parent.name.removeprefix("run-")
-    res = _invoke(tmp_path, monkeypatch, "reproduce", "--record", bench_id, "--write", "pkg.yaml")
-    assert res.exit_code == 2, res.output
-    assert f"lakebench reproduce --record {PARENT} --write pkg.yaml" in _stderr(res)
-    assert not (tmp_path / "pkg.yaml").exists()

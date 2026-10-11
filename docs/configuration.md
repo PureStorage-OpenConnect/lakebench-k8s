@@ -37,7 +37,7 @@ workload:
   loads with a deprecation note (see
   [Recipes and components](#recipes-and-components)).
 - `name` is required by every command that changes data: `deploy`,
-  `generate`, `run`, `benchmark`, `query`, `clean`, `reproduce`, `financial`
+  `generate`, `run`, `benchmark`, `query`, `clean`, `financial`
   and `validate` refuse a config without one, and the error offers a name to
   add.
 - There is no `config upgrade` command (removed in 1.7; see the CHANGELOG).
@@ -534,7 +534,7 @@ Container images for every deployed component. Override for air-gapped registrie
 | `platform.storage.s3.buckets.bronze` | string | `<name>-bronze` | advanced | Bronze layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.silver` | string | `<name>-silver` | advanced | Silver layer S3 bucket name. Unset, it is derived from the deployment `name`. |
 | `platform.storage.s3.buckets.gold` | string | `<name>-gold` | advanced | Gold layer S3 bucket name. Unset, it is derived from the deployment `name`. |
-| `platform.storage.s3.create_buckets` | boolean | `true` | advanced | Create buckets if they do not exist. `reproduce` refuses `false`. |
+| `platform.storage.s3.create_buckets` | boolean | `true` | advanced | Create buckets if they do not exist. |
 
 ### Platform -- Scratch Storage
 

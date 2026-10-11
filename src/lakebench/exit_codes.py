@@ -36,6 +36,12 @@ class ExitCode(IntEnum):
     INTERRUPTED = 130
 
 
+#: Codes no command produces any more. They keep their number and are never
+#: given another meaning, so a script written against an older release never
+#: misreads one.
+RESERVED: frozenset[ExitCode] = frozenset({ExitCode.REQUIREMENT_UNMET})
+
+
 MEANINGS: dict[ExitCode, str] = {
     ExitCode.OK: "Success: the run passed or the read succeeded.",
     ExitCode.FAILED: (
@@ -60,8 +66,7 @@ MEANINGS: dict[ExitCode, str] = {
     ),
     ExitCode.INCOMPLETE: "Incomplete and safe to re-run: for example the namespace is still terminating.",
     ExitCode.REQUIREMENT_UNMET: (
-        "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
-        "to verify at another commit, or could only be verified out of band."
+        "Reserved, never reused: no command exits 14 since `reproduce` was removed in 1.7.1."
     ),
     ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM).",
 }
@@ -300,11 +305,6 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=0,
     ),
     ExitPath(
-        "reproduce.report_required",
-        _C.USAGE,
-        "`reproduce` of a registered look's package without --report (a look is never rerun)",
-    ),
-    ExitPath(
         "admin.version_change_needs_flag",
         _C.USAGE,
         "`admin install` would change a component version without --allow-version-change",
@@ -312,21 +312,10 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     # 3
     ExitPath(
-        "reproduce.existing_namespace",
+        "deploy.existing_namespace",
         _C.REFUSED,
-        "`reproduce` would reuse a namespace or bucket that already exists",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.nonce_changed",
-        _C.REFUSED,
-        "the deployment `reproduce` created was replaced before its run or its destroy",
-    ),
-    ExitPath(
-        "reproduce.held_out",
-        _C.REFUSED,
-        "`reproduce` was given a package from a held-out corpus whose look has not run, "
-        "or whose seed or look record cannot be read",
+        "`deploy --require-new` found the namespace or a bucket already exists; nothing "
+        "that existed was changed",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
@@ -537,27 +526,7 @@ PATHS: tuple[ExitPath, ...] = (
         "`destroy` finished its steps but the namespace is still terminating",
         v16_code=4,
     ),
-    # 14
-    ExitPath(
-        "reproduce.drift",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce` ran and a metric drifted outside its tolerance band (correctness, "
-        "or performance), or the run did not follow the package's protocol",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.commit_drift",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce` was asked to verify a package recorded at another commit, "
-        "without --allow-commit-drift",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.verify_out_of_band",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce --report` of a registered look: the report does not match the look "
-        "record, or the record holds no report sha256",
-    ),
+    # 14: reserved, no producer
     # 130
     ExitPath(
         "sigint",
@@ -625,14 +594,14 @@ def render_markdown() -> str:
         "",
         '"Produced by" lists the named paths the test suite drives to each code.',
         "Commands reach the same codes on other paths too; a code with no named",
-        "path yet says so.",
+        "path yet says so, and a reserved code says it is reserved.",
         "",
         "Several paths share a code (3 covers every safety refusal). With",
         "`LB_EXIT_PATH_FILE` set to a file name, `lakebench` appends one line",
         "`<code> <path>...` to that file as it exits (`<code> -` when no path is",
         "named), so a script can tell `destroy.incarnation_mismatch` from",
-        "`lease.held` without reading message text. `deploy`, `destroy`, `generate`,",
-        "the bronze and datagen gates of `run` and `reproduce` name every refusal and",
+        "`lease.held` without reading message text. `deploy`, `destroy`, `generate`",
+        "and the bronze and datagen gates of `run` name every refusal and",
         "`destroy.namespace_terminating`; other commands may write `<code> -`.",
         "",
         "| Code | Name | Meaning | Produced by |",
@@ -640,8 +609,9 @@ def render_markdown() -> str:
     ]
     for code in ExitCode:
         names = ", ".join(f"`{p.name}`" for p in live if p.code == code)
+        empty = "none (reserved)" if code in RESERVED else "no command yet"
         lines.append(
-            f"| {int(code)} | `{code.name}` | {_cell(MEANINGS[code])} | {names or 'no command yet'} |"
+            f"| {int(code)} | `{code.name}` | {_cell(MEANINGS[code])} | {names or empty} |"
         )
     lines += [
         "",

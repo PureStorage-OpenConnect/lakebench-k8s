@@ -55,8 +55,8 @@ evaluation` or `robustness`, or names a seed hashing to a held-out role:
   report's sha256 before printing a verdict. No `lakebench` command records a
   look.
 
-**The look guard** (`aml/look_guard.py`). `run`, `benchmark`, `query`,
-`reproduce` and the `financial` commands refuse a protected corpus right after
+**The look guard** (`aml/look_guard.py`). `run`, `benchmark`, `query`
+and the `financial` commands refuse a protected corpus right after
 config load, before any cluster call, with exit 2 (`run.protected_corpus`).
 Protected: the config declares `corpus_role: evaluation` or `robustness`,
 names a seed hashing to a held-out role, or (AML) points its bronze datagen

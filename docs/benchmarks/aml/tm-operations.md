@@ -229,7 +229,4 @@ days.
   throughput keep their values and include those ticks.
 - `experiment.investigators` holds `{requested, run}`. The identity key
   `investigator sessions` is the number that ran, an outcome condition: runs
-  that ran different numbers are not like-for-like. `reproduce` does not
-  refuse on the number (8 against 3), but refuses load against no load
-  (sessions that ran against a baseline with none configured or none run,
-  and the reverse).
+  that ran different numbers are not like-for-like.

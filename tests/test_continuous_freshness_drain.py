@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from lakebench.cli._reproduce import _extract_expected_numbers
 from lakebench.metrics.collector import (
     MetricsCollector,
     PipelineBenchmark,
@@ -158,11 +157,3 @@ def test_drained_flag_and_stage_fields_survive_save_and_load(tmp_path):
     assert gold.freshness_active_seconds == pytest.approx(55.0)
     silver = next(s for s in loaded.stages if s.stage_name == "silver")
     assert silver.committed_rows == 1_000_000
-
-
-def test_reproduce_leaves_out_bounded_rps_when_drained():
-    run = PipelineMetrics(run_id="r", deployment_name="t", start_time=_T0, success=True)
-    run.pipeline_benchmark = _pb(1_000_000, 1_000_000, 1_000_000)
-    numbers = _extract_expected_numbers(run)
-    assert "sustained_throughput_rps" not in numbers
-    assert numbers["data_freshness_seconds"] == pytest.approx(55.0)

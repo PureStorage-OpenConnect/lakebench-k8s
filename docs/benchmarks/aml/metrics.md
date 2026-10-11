@@ -5,7 +5,7 @@ See also: continuous metrics in [8.2](continuous-metrics.md#82-continuous); scor
 ## 8. Metrics
 
 Units, directions and bands come from the metric registry
-(`metrics/metric_registry.py`), which `reproduce` and the report read.
+(`metrics/metric_registry.py`), which the report reads.
 `pipeline_benchmark.score_descriptions` describes each score a run recorded
 in one line. Direction `none`: a delta has no better side. In `metrics.json`:
 
@@ -55,11 +55,8 @@ releases on one config, not to compare stacks sized differently.
 | `pre_compaction_file_count`, `post_compaction_file_count` | count | none | data files before and after compaction |
 | `compaction_ratio` | ratio | higher | pre over post file count; diagnostic |
 | `total_s3_objects` | count | none | objects across the three buckets at run end (continuous: window end); unbounded growth means maintenance is not keeping up |
-| `datagen_aggregate_mbps`, `datagen_mbps_per_pod` | MB/s | higher | datagen fleet and per-pod write throughput |
-| `datagen_cpu_hr_per_tb` | cpu-h/TB | lower | datagen CPU-hours per TB written |
 | `storage_multiple_total` | ratio | lower, diagnostic (never a directional delta) | physical over logical table bytes at run end, measured once after maintenance and only when the run passed (`storage_multiple.total.multiple`); a condition of the maintenance policy, not a system score |
 
-`reproduce` derives the three datagen figures from the datagen record and
-`storage_multiple_total` from the `storage_multiple` block; none is under
+`storage_multiple_total` comes from the `storage_multiple` block, not
 `scores`. Per-stage and per-query figures (`<stage>_seconds`,
 `query_qph_<query>`) are recorded beside these and follow the stage and query definitions above.

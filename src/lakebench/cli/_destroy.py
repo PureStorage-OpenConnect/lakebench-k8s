@@ -290,7 +290,7 @@ def _destroy_impl(
     ``expected_incarnation`` (``uid#nonce``) only adds a refusal: when the
     namespace is not that incarnation, nothing is deleted and
     ``SafetyRefusal`` (``destroy.incarnation_mismatch``, exit 3) is raised,
-    whatever ``force`` says. ``reproduce`` passes the incarnation it created.
+    whatever ``force`` says.
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 

@@ -57,10 +57,6 @@ class EventType(str, Enum):
     # Metrics bridge
     METRICS_SAVED = "metrics.saved"
 
-    # Reproduce: the namespace incarnation (uid#nonce) it deployed, the only
-    # one its post-run destroy may touch
-    REPRODUCE_CREATED_INCARNATION = "reproduce.created_incarnation"
-
 
 class CommandName(str, Enum):
     """CLI command names for journal tracking."""

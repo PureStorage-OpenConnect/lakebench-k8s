@@ -2620,38 +2620,6 @@ def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[Benchm
     return groups
 
 
-def executed_subset_query_set(
-    rounds: list[BenchmarkMetrics], recorded_at: Any = None
-) -> str | None:
-    """The query set id in-stream rounds executed when they all executed the
-    same set and it is smaller than the set they listed (a query that failed
-    in every round); None otherwise, and the aggregate's id stands. Such a
-    QpH is over the smaller set. Rounds from before the round record map
-    their executed names through the legacy table (``"unknown"`` when it has
-    no entry), never through today's SQL."""
-    from lakebench.benchmark.queries import legacy_query_set_id
-
-    groups = rounds_by_query_set(rounds)
-    if len(groups) != 1:
-        return None
-    ((key, members),) = groups.items()
-    if key == QUERY_SET_NOT_RECORDED:
-        return None
-    listed = {
-        str(q.get("name") or q.get("query_name"))
-        for r in members
-        for q in r.queries or []
-        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
-    }
-    rec = members[0].round_record
-    executed = (rec or {}).get("executed_queries")
-    if not isinstance(executed, list):
-        executed = executed_query_set(members[0])[0]
-    if not listed or set(executed) == listed:
-        return None
-    return key if rec is not None else legacy_query_set_id(executed, recorded_at)
-
-
 def aml_fixed_query_set() -> str:
     """The AML continuous composite's query set id: the full Financial set
     (12 queries with the investigator class)."""
@@ -2730,7 +2698,7 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
         timed, set_id = groups[fixed], fixed
     elif len(groups) > 1:
         # Different sets and none is the fixed one: never comparable, not
-        # even with another blend (benchmark.queries.qph_comparable).
+        # even with another blend.
         set_id = BLENDED_QUERY_SET
     basis = timed or rounds
 

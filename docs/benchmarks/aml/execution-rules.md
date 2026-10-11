@@ -46,7 +46,6 @@ only here stay comparable. What a difference means (`metrics/comparability.py`):
   the compaction operation that ran (Trino `optimize` or Spark
   `rewrite_data_files`), maintenance settings, benchmark iterations and mode,
   the Lakebench caps that bound, and (continuous) the in-stream round count.
-  Round count is an outcome, so `reproduce` does not refuse on it.
 
 Datagen parallelism is not permitted tuning: it is a corpus input
 ([3.2](generation.md#32-scale-factor)). `datagen.file_size` is fixed at

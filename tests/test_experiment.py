@@ -274,38 +274,20 @@ class TestLegacy:
         assert "experiment" not in loaded.to_dict()
 
 
-class TestRefusals:
-    def test_stored_references_refuse_on_conditions(self):
-        """The perf gate and reproduce need the same experiment under the same
-        conditions: a condition difference refuses there."""
-        a = ex.experiment_of(_metrics(_cfg(engine="trino")).to_dict())
-        same = ex.experiment_of(_metrics(_cfg(engine="trino")).to_dict())
-        other = ex.experiment_of(_metrics(_cfg(engine="duckdb")).to_dict())
-
-        def refusals(b):
-            return ex.stored_identity_refusals(
-                ex.identity(a), ex.result_fingerprints(a), b, "baseline"
-            )
-
-        assert refusals(same) == []
-        assert refusals(other)
-
-    def test_query_set_change_is_refused(self):
+class TestQuerySetId:
+    def test_query_set_change_moves_the_id(self):
         """Tiebreakers moved the query-set id: the old id never matches the new."""
         from lakebench.benchmark.queries import (
             LEGACY_QUERY_SET_IDS,
             get_benchmark_queries,
-            qph_comparable,
             query_set_id,
         )
         from lakebench.config.schema import WorkloadSchema
 
         for schema in (WorkloadSchema.CUSTOMER360, WorkloadSchema.FINANCIAL):
-            names = [q.name for q in get_benchmark_queries(schema)]
-            current = query_set_id(names)
+            current = query_set_id([q.name for q in get_benchmark_queries(schema)])
             for old, _ in LEGACY_QUERY_SET_IDS.values():
-                ok, _why = qph_comparable(old, current)
-                assert not ok
+                assert old != current
 
 
 class TestEffectiveMaintenance:
