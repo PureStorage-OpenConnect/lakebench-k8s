@@ -793,34 +793,7 @@ def benchmark_checks(
             out.append(_check(cid, "shape", None, got, None, 0, why))
         else:
             out.append(_check(cid, "shape", int(got) == int(exp), got, exp, 0, why))
-        if ok and name.startswith("Q1_"):
-            out.append(_q1_revenue_check(q, g))
     return out
-
-
-def _q1_revenue_check(q: Any, gold: dict[str, Any]) -> dict[str, Any]:
-    """Q1's total_revenue (silver) against gold's summed daily revenue: the
-    benchmark's answer and the pipeline's own figure for the same quantity.
-    Reporting only (not in GATING_CHECKS)."""
-    fp = (
-        q.get("result_fingerprint")
-        if isinstance(q, dict)
-        else getattr(q, "result_fingerprint", None)
-    )
-    got = ((fp or {}).get("approx") or {}).get("3")
-    want = ((gold or {}).get("sums") or {}).get("total_daily_revenue")
-    if got is None or want is None:
-        return _check("benchmark_answer_Q1_revenue", "answer", None, got, want)
-    tol = 0.005 * int(gold.get("rows") or 0) + 1e-9 * abs(want) + 0.01
-    return _check(
-        "benchmark_answer_Q1_revenue",
-        "answer",
-        abs(float(got) - float(want)) <= tol,
-        round(float(got), 2),
-        round(float(want), 2),
-        round(tol, 2),
-        "Q1 total_revenue == sum of gold total_daily_revenue",
-    )
 
 
 # ---------------------------------------------------------------------------

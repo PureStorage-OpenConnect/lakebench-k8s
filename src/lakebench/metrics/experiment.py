@@ -5,13 +5,11 @@ invariant 5): the workload and its version, the corpus that was generated
 (generator image and digest, seed, corpus role, scale), the architecture
 composition and component versions, the mode, the table-maintenance policy,
 the stages and detection rules that ran or were skipped, the limits
-Lakebench imposed on the run, and a result fingerprint per benchmark query
-(benchmark.fingerprint).
+Lakebench imposed on the run, and the benchmark query set id.
 
-Two runs whose workload, corpus, seed, scale or mode differ, or whose
-benchmark queries returned different results, are not compared on
-performance (invariant 2). A record without the block (written before it
-existed) has no provenance.
+Two runs whose workload, corpus, seed, scale or mode differ are not
+compared on performance (invariant 2). A record without the block (written
+before it existed) has no provenance.
 
 The block is assembled in two halves. ``experiment_inputs(cfg)`` runs when
 the run starts and is stored in ``config_snapshot["experiment_inputs"]``
@@ -626,36 +624,27 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
 
 
 def _continuous_results(metrics: Any) -> dict[str, Any]:
-    """A continuous run's results: the fingerprints of the result check the
-    CLI runs once the whole corpus has passed through the pipeline and the
-    streams have stopped (cli/_sustained.py). The tables are then a function
-    of the corpus, except the layout of AML's counterparty_edges rows (one
-    per pair per micro-batch) and account_statements running balances
-    (arrival order), which no benchmark query reads raw: FQ3 and IQ3 sum the
-    edges per pair and FQ4 recomputes the balance in ledger order. The
-    in-stream rounds read tables still being written and are never
-    fingerprinted.
+    """A continuous run's results: the query set id of every query its
+    in-stream rounds ran, failed ones included, so a tolerated Q9 failure
+    in one round does not move the run's identity (for AML the 12-query
+    set once a round ran the investigator queries), None when no round ran.
+    The QpH basis is ``benchmark.query_set_id``, which may read
+    ``blended``.
 
     An AML run also carries ``alert_set_continuous``: the alert-set
     fingerprint of gold.alerts at the scored tick's commit, computed once
     after the drain by
     the covered score (cli/_aml_post.py), never per tick. Diagnostic only:
     continuous alerts depend on when ticks ran."""
-    check = (getattr(metrics, "continuous", None) or {}).get("result_check") or {}
-    fps = dict(check.get("fingerprints") or {})
-    if fps and not check.get("not_checked"):
-        out: dict[str, Any] = {
-            "query_set_id": check.get("query_set_id"),
-            "fingerprints": fps,
-            "basis": "continuous result check after the corpus settled",
-        }
-    else:
-        out = {
-            "query_set_id": check.get("query_set_id"),
-            "fingerprints": {},
-            "not_checked": "continuous: "
-            + str(check.get("not_checked") or "no end-of-run result check was recorded"),
-        }
+    from lakebench.benchmark.queries import query_set_id
+
+    names = {
+        str(q.get("name") or q.get("query_name"))
+        for r in getattr(metrics, "benchmark_rounds", None) or []
+        for q in getattr(r, "queries", None) or []
+        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
+    }
+    out: dict[str, Any] = {"query_set_id": query_set_id(names) if names else None}
     scoring = getattr(metrics, "financial_scoring", None) or {}
     if (
         scoring.get("mode") == "covered"
@@ -688,21 +677,8 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
-    if bench is None:
-        return {
-            "query_set_id": None,
-            "fingerprints": {},
-            "not_checked": "no benchmark ran",
-            **_alert_set_results(metrics),
-        }
-    fps: dict[str, Any] = {}
-    for q in _benchmark_queries(metrics):
-        name = q.get("name") or q.get("query_name")
-        if name:
-            fps[str(name)] = q.get("result_fingerprint")
     return {
         "query_set_id": getattr(bench, "query_set_id", None),
-        "fingerprints": fps,
         **_alert_set_results(metrics),
     }
 
@@ -1128,17 +1104,16 @@ def refresh_benchmark(metrics: Any) -> None:
     """Bring a stored block's benchmark half up to date after ``lakebench
     benchmark`` replaced the record's benchmark (``cli/_query.py``).
 
-    A stored block is never rebuilt, so without this its result
-    fingerprints, benchmark iterations and mode would still describe the
-    benchmark that was replaced. Only those keys, the sample count, the
+    A stored block is never rebuilt, so without this its query set id,
+    benchmark iterations and mode would still describe the benchmark that
+    was replaced. Only those keys, the sample count, the
     "benchmark (not run)" entry of the skipped stages and a
     ``benchmark_source`` note change; schema, corpus, architecture and every
     other key stay as stored. The identity digest moves with the benchmark
     iterations and mode (and on exp2 the query set id), as the record now
     describes a different benchmark. A record with no stored block is left alone
-    (its block is built from the record when it is saved). For a continuous
-    record the results stay its end-of-run result check, which a later
-    benchmark does not change."""
+    (its block is built from the record when it is saved). A continuous
+    record's results stay those of its in-stream rounds."""
     exp = getattr(metrics, "experiment", None)
     if not isinstance(exp, dict) or not exp.get("schema"):
         return
@@ -1149,8 +1124,9 @@ def refresh_benchmark(metrics: Any) -> None:
     if mode != "sustained":
         old = exp.get("results") or {}
         new = _results(metrics, mode)
-        # Keys another writer put in results stay; the benchmark's own
-        # three are replaced.
+        # Keys another writer put in results stay; the benchmark's own are
+        # replaced, and an older block's fingerprints and not_checked go
+        # with the benchmark they described.
         exp["results"] = {
             **{
                 k: v
@@ -1363,7 +1339,3 @@ def condition_differences(
 
     ca, cb = cmp.classify(a, record_a), cmp.classify(b, record_b)
     return [str(d) for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
-
-
-def result_fingerprints(exp: Mapping[str, Any]) -> dict[str, Any]:
-    return dict((exp.get("results") or {}).get("fingerprints") or {})

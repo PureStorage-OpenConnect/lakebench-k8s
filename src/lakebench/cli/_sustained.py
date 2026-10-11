@@ -45,7 +45,7 @@ from lakebench.k8s import (
     pinned_kubectl,
     pinned_kubectl_popen,
 )
-from lakebench.metrics.continuous_window import committed_writes, parse_events, utc_naive
+from lakebench.metrics.continuous_window import parse_events, utc_naive
 from lakebench.metrics.verdict import apply_save_gate
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,36 @@ def tolerated_q9_results(queries: list[dict], *, final: bool) -> list[dict]:
         if str(q.get("name", "")).startswith("Q9")
         and (not q.get("success") or (not final and not q.get("rows_returned")))
     ]
+
+
+def no_rounds_problem(cfg, run) -> str | None:
+    """Why a continuous C360 run with a benchmark must not pass (invariant
+    2): no in-stream round ran, so no query answer was checked, or Q9 (the
+    one query on gold, whose failures the rounds tolerate as contention)
+    failed in every round, so gold never answered. The last round's other
+    answers are gated where the rounds are aggregated. AML is judged on its
+    alerts instead."""
+    if cfg.architecture.workload.schema_type.value == "financial":
+        return None
+    rounds = (getattr(run, "benchmark_rounds", None) or []) if run is not None else []
+    if not rounds:
+        return (
+            "c360 continuous gate: no in-stream benchmark round ran, so no query answer was "
+            "checked. Lengthen run_duration past benchmark_warmup + benchmark_interval. "
+            "Marking FAILURE."
+        )
+    q9 = [
+        q
+        for r in rounds
+        for q in (getattr(r, "queries", None) or [])
+        if isinstance(q, dict) and str(q.get("name", "")).startswith("Q9")
+    ]
+    if q9 and not any(q.get("success") for q in q9):
+        return (
+            "c360 continuous gate: Q9 failed in every in-stream round, so gold never "
+            "answered a query. Marking FAILURE."
+        )
+    return None
 
 
 def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[str]:
@@ -1112,7 +1142,7 @@ def scalar_from_output(engine: str, output: str) -> float | None:
     if not text:
         return None
     if engine == "duckdb":
-        from lakebench.benchmark.fingerprint import last_json_line
+        from lakebench.benchmark.result import last_json_line
 
         payload = last_json_line(text)
         data = (payload or {}).get("data") or []
@@ -2002,7 +2032,6 @@ def _run_benchmark_round(
     # One sample per query: gold refreshes under the round, so repeats would
     # time different snapshots. The rounds themselves are the repeats, and
     # the scores take their median (qph_degradation_pct, composite_qph).
-    # No result fingerprints: each round reads tables still being written.
     tm_run = (
         bench_runner.tm_run_id
         if isinstance(getattr(bench_runner, "tm_run_id", None), str)
@@ -2013,7 +2042,7 @@ def _run_benchmark_round(
         bench_runner.tm_run_id = None  # this round runs without IQ1 to IQ4
     round_started = utc_now()
     try:
-        bench_result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=False)
+        bench_result = bench_runner.run_power(cache="hot", iterations=1)
     finally:
         if tm_run:
             bench_runner.tm_run_id = tm_run
@@ -3197,74 +3226,6 @@ def short_window_problem(cfg, run_duration: int) -> str | None:
     )
 
 
-#: Longest the CLI keeps the streams running after the window so the corpus
-#: can finish passing through for the result check. Longer corpora are not
-#: settled and the run records why its results were not checked.
-SETTLE_MAX_SECONDS = 1800
-
-
-def settle_budget_seconds(
-    cfg, datagen_rows: int, bronze_rows: int, rows_per_s: float, silver_batch_s: float = 0.0
-) -> float:
-    """Seconds the remaining corpus needs to reach gold: the rows the stage
-    still has to take in (*datagen_rows* less *bronze_rows*; a drain passes
-    bronze's rows and silver's committed ones) at the rate it held, plus two
-    silver cycles (its trigger, or back to back its median batch time
-    *silver_batch_s*, at least two minutes) and two gold refreshes, plus a
-    minute."""
-    sustained = cfg.architecture.pipeline.sustained
-    remaining = max(0, datagen_rows - bronze_rows)
-    intake = remaining / rows_per_s if rows_per_s > 0 else (0.0 if remaining == 0 else float("inf"))
-    return (
-        intake
-        + 2 * max(_parse_spark_interval(sustained.silver_trigger_interval), silver_batch_s, 120)
-        + 2 * _parse_spark_interval(sustained.gold_refresh_interval)
-        + 60
-    )
-
-
-def _silver_batch_s(silver) -> float:
-    """Silver's median micro-batch seconds from its parsed stage, 0 unknown."""
-    ms = silver.median_batch_duration_ms if silver is not None else None
-    return float(ms) / 1000.0 if ms else 0.0
-
-
-def wait_for_settle(
-    monitor,
-    job_names: list[str],
-    datagen_rows: int,
-    budget_s: float,
-    poll_s: float = 30.0,
-    probe=None,
-    bronze_rows: int | None = None,
-) -> dict:
-    """Keep polling the stream logs until the whole corpus has reached gold
-    (continuous_window.settle_state; *bronze_rows* for a drain) or *budget_s*
-    runs out. *probe* runs after every sleep (the namespace read, which
-    raises when it is gone). Returns {"settled", "seconds", "reason"}."""
-    from lakebench.metrics.continuous_window import settle_state
-
-    start = time.time()
-    reason = "not polled"
-    while True:
-        events = {}
-        for name in job_names:
-            try:
-                logs = monitor._get_driver_logs(f"lakebench-{name}", tail_lines=None)
-            except Exception:  # noqa: BLE001
-                logs = None
-            events[name] = parse_events(logs, name)
-        settled, reason = settle_state(events, datagen_rows, bronze_rows=bronze_rows)
-        waited = time.time() - start
-        if settled:
-            return {"settled": True, "seconds": round(waited, 1), "reason": reason}
-        if waited + poll_s > budget_s:
-            return {"settled": False, "seconds": round(waited, 1), "reason": reason}
-        time.sleep(poll_s)
-        if probe is not None:
-            probe()
-
-
 def _stage_intervals(cfg) -> dict[str, float | None]:
     """Each stream's trigger interval in seconds (None or 0: back to back)."""
     from lakebench.metrics.collector import _interval_seconds
@@ -3298,68 +3259,6 @@ def _live_lag_line(monitor, submitted: list) -> str:
         return lag_line(handoff_lags(events, utc_naive(datetime.now(timezone.utc))))
     except Exception as e:  # noqa: BLE001
         return f"not measured ({e})"
-
-
-def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
-    """Run the query set once over the settled tables (streams stopped) and
-    fingerprint every result, as a batch run does after its benchmark.
-    Failed queries are recorded with no fingerprint. Returns the record and
-    the query results (for the benchmark gate)."""
-    try:
-        result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=True)
-    except Exception as e:  # noqa: BLE001
-        return {"not_checked": f"the result check could not run: {e}"}, []
-    retried = _retry_transient_results(bench_runner, result.queries)
-    queries = [qr.to_dict() for qr in result.queries]
-    fps = {qr.query.name: (qr.result_fingerprint if qr.success else None) for qr in result.queries}
-    if not fps:
-        return {"not_checked": "the result check ran no queries"}, []
-    from lakebench.benchmark.queries import query_set_id
-
-    return {
-        "query_set_id": query_set_id(fps),
-        "fingerprints": fps,
-        # A query that ran but whose result could not be fingerprinted
-        # ({spec, error}) has no answer to compare, so it failed too.
-        "failed": sorted(
-            n for n, f in fps.items() if f is None or (isinstance(f, dict) and "error" in f)
-        ),
-        **({"retried": retried} if retried else {}),
-    }, queries
-
-
-#: An object-store connection that dropped for a moment (the query engine's
-#: S3 client), not a wrong answer or a dead engine: worth one retry.
-_TRANSIENT_QUERY_ERROR = re.compile(
-    r"Could not connect to server|Connection (?:reset|refused)|SlowDown|"
-    r"Service Unavailable|\b503\b|Temporary failure in name resolution"
-)
-
-
-def _retry_transient_results(bench_runner, results: list) -> list[str]:
-    """Re-run, once, each result-check query that failed, or whose result
-    could not be fingerprinted, on a transient object-store connection
-    error, and keep the new result. Returns the queries retried (recorded,
-    so a retried answer is never silent). A dead engine pod is not retried:
-    its error is not transient."""
-    repeat = getattr(bench_runner, "_repeat_query", None)
-    if repeat is None:
-        return []
-    fingerprint = getattr(bench_runner, "fingerprint_results", None)
-    if fingerprint is None:
-        return []
-    retried: list[str] = []
-    for i, r in enumerate(results):
-        fp = r.result_fingerprint if r.success else None
-        text = str(r.error_message or "") if not r.success else str((fp or {}).get("error") or "")
-        if not _TRANSIENT_QUERY_ERROR.search(text):
-            continue
-        again = repeat(r.query, "hot", 1, 300)
-        if again.success:
-            fingerprint([again], 300)
-        results[i] = again
-        retried.append(r.query.name)
-    return retried
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
@@ -3562,16 +3461,14 @@ def _run_sustained(
     # any early exit, so an error or Ctrl-C never leaves them running.
     submitted: list = []
     streams_stopped = False
-    # Streams stopped before the others: bronze, at a drain's start.
-    _stopped_early: set[str] = set()
     # This run's continuous datagen, until its stop marker is written: the
     # window's end writes it, and the finally block on any early exit.
     _datagen_live = False
     k8s = None
     _total_s3_objects: int | None = None
     # Whether the window-end listing ran: a listing that ran and could not
-    # count every bucket is not repeated after settle, whose micro-batches
-    # would then be counted as the window's.
+    # count every bucket is not repeated after the streams stop, whose last
+    # micro-batches would then be counted as the window's.
     _sizes_listed = False
     # The gold-refresh drain at window end (financial only); None
     # until it has run.
@@ -3646,11 +3543,11 @@ def _run_sustained(
             pipeline_success = False
             raise typer.Exit(ExitCode.USAGE)
         if not skip_benchmark and cfg.architecture.query_engine.type.value == "none":
-            print_info("No query engine in this recipe: no in-stream rounds and no result check")
+            print_info("No query engine in this recipe: no in-stream rounds")
             skip_benchmark = True
 
-        # The benchmark runner serves the in-stream rounds and the end-of-run
-        # result check. A run that cannot create it cannot produce the query
+        # The benchmark runner serves the in-stream rounds. A run that
+        # cannot create it cannot produce the query
         # evidence continuous mode claims, so it fails here, before any
         # stream starts (it used to warn and pass with no rounds).
         bench_runner = None
@@ -4605,146 +4502,9 @@ def _run_sustained(
             },
         )
 
-        # Result check (DESIGN 4.1 for continuous): keep the streams running
-        # until the whole corpus has reached gold, stop them, and fingerprint
-        # the query set over tables that are then a function of the corpus
-        # alone. Not part of the window: nothing here is scored.
-        settle: dict = {"settled": False}
-        _stage = "settle"
-        result_check: dict = {}
-        # Bucket sizes and object counts as of the window, before any settle
-        # micro-batches add files.
+        # Bucket sizes and object counts as of the window close.
         _total_s3_objects = _measure_bucket_sizes(cfg, collector)
         _sizes_listed = True
-        if bench_runner is None:
-            result_check = {
-                "not_checked": (
-                    "no query engine in this recipe"
-                    if cfg.architecture.query_engine.type.value == "none"
-                    else "no benchmark (--skip-benchmark)"
-                ),
-                "cause": "declared",
-            }
-        elif not pipeline_success:
-            result_check = {"not_checked": "the run failed its gates", "cause": "declared"}
-        elif cfg.architecture.workload.schema_type.value == "financial":
-            result_check = {
-                "not_checked": (
-                    "AML continuous results depend on when detection and TM passes ran "
-                    "relative to arrival, so they are not a function of the corpus alone"
-                ),
-                "cause": "declared",
-            }
-        elif not skip_generate:
-            # Drain at shutdown: this run's datagen generated for the whole
-            # window and was stopped with it, so the corpus is what bronze
-            # took by then. Bronze stops; silver and gold finish those rows.
-            _bronze = parsed.get("bronze-ingest")
-            _silver = parsed.get("silver-stream")
-            _b_rows = _bronze.total_rows_processed if _bronze is not None else 0
-            _s_done = (_silver.committed_rows or 0) if _silver is not None else 0
-            _s_rps = (
-                (_silver.window_input_rows or 0) / window_seconds
-                if _silver is not None and window_seconds > 0
-                else 0.0
-            )
-            _need = settle_budget_seconds(
-                cfg, _b_rows, _s_done, _s_rps, _silver_batch_s(parsed.get("silver-stream"))
-            )
-            if _b_rows <= 0:
-                result_check = {"not_checked": "bronze took no rows, so there is nothing to drain"}
-            elif _need > SETTLE_MAX_SECONDS:
-                result_check = {
-                    "not_checked": (
-                        f"silver needs about {_need:,.0f}s to finish the rows bronze took, over "
-                        f"the {SETTLE_MAX_SECONDS}s settle limit"
-                    ),
-                    "cause": "declared",
-                }
-                settle = {"settled": False, "reason": result_check["not_checked"]}
-            else:
-                _drain_stop = [s for s in submitted if s[1] == "bronze-ingest"]
-                # Bronze kept writing after the window: its rows as it stops.
-                try:
-                    _b_log = monitor._get_driver_logs("lakebench-bronze-ingest", tail_lines=None)
-                except Exception:  # noqa: BLE001 -- the window's count stands
-                    _b_log = None
-                _b_now = sum(
-                    e.rows or 0 for e in committed_writes(parse_events(_b_log, "bronze-ingest"))
-                )
-                if _b_now > _b_rows:
-                    _need += (_b_now - _b_rows) / _s_rps if _s_rps > 0 else 0.0
-                    _b_rows = _b_now
-                # By name: first make sure the namespace is still this run's.
-                _ns_watch.check(time.time() - start)
-                for _job_type, job_name in _stop_streams(k8s, namespace, _drain_stop):
-                    _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
-                    _stopped_early.add(job_name)
-                print_info(
-                    f"Draining: bronze stopped at {_b_rows:,} rows; silver and gold finish "
-                    f"them for the result check (up to {_need:.0f}s, not scored)..."
-                )
-                settle = wait_for_settle(
-                    monitor,
-                    [n for _, n in submitted if n not in _stopped_early],
-                    0,
-                    _need,
-                    probe=lambda: _ns_watch.check(time.time() - start),
-                    bronze_rows=_b_rows,
-                )
-                if settle["settled"]:
-                    print_success(f"Bronze's rows settled in gold after {settle['seconds']:.0f}s")
-                else:
-                    result_check = {"not_checked": f"the drain did not settle: {settle['reason']}"}
-                    print_warning(
-                        f"Result check skipped: {result_check['not_checked']}. The run's "
-                        "results are not established, so it cannot be compared."
-                    )
-        elif _datagen_output_rows <= 0:
-            result_check = {"not_checked": "datagen row count not measured, so settling is unknown"}
-        else:
-            _bronze = parsed.get("bronze-ingest")
-            _rps = (
-                (_bronze.window_input_rows or 0) / window_seconds
-                if _bronze is not None and window_seconds > 0
-                else 0.0
-            )
-            _need = settle_budget_seconds(
-                cfg,
-                _datagen_output_rows,
-                _bronze.total_rows_processed if _bronze is not None else 0,
-                _rps,
-                _silver_batch_s(parsed.get("silver-stream")),
-            )
-            if _need > SETTLE_MAX_SECONDS:
-                result_check = {
-                    "not_checked": (
-                        f"the rest of the corpus needs about {_need:,.0f}s to reach gold, over "
-                        f"the {SETTLE_MAX_SECONDS}s settle limit"
-                    ),
-                    "cause": "declared",
-                }
-                settle = {"settled": False, "reason": result_check["not_checked"]}
-            else:
-                print_info(
-                    f"Letting the pipeline take in the rest of the corpus for the result "
-                    f"check (up to {_need:.0f}s, not scored)..."
-                )
-                settle = wait_for_settle(
-                    monitor,
-                    [n for _, n in submitted],
-                    _datagen_output_rows,
-                    _need,
-                    probe=lambda: _ns_watch.check(time.time() - start),
-                )
-                if settle["settled"]:
-                    print_success(f"Corpus settled in gold after {settle['seconds']:.0f}s")
-                else:
-                    result_check = {"not_checked": f"the corpus did not settle: {settle['reason']}"}
-                    print_warning(
-                        f"Result check skipped: {result_check['not_checked']}. The run's "
-                        "results are not established, so it cannot be compared."
-                    )
 
         # Ask gold-refresh to finish its tick before the streams stop,
         # so gold.alerts is whole and the last tick's record names what it
@@ -4782,9 +4542,7 @@ def _run_sustained(
         collector.observe_images(
             namespace, at="before stop", apps={f"lakebench-{n}" for _, n in submitted}
         )
-        _stopped_now = _stop_streams(
-            k8s, namespace, [s for s in submitted if s[1] not in _stopped_early]
-        )
+        _stopped_now = _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         if (
             cfg.architecture.workload.schema_type.value == "financial"
@@ -4799,7 +4557,7 @@ def _run_sustained(
             _driver_log_capturer = None
         for _job_type, job_name in submitted:
             _interrupt.finished("SparkApplication", f"lakebench-{job_name}")
-        _stage = "result-check"
+        _stage = "gates"
 
         _journal_safe(
             j.record,
@@ -4807,36 +4565,6 @@ def _run_sustained(
             message="Streaming pipeline stopped",
             details={"duration_seconds": run_duration},
         )
-
-        if settle.get("settled") and bench_runner is not None:
-            print_info("Result check: fingerprinting the query set over the settled tables...")
-            result_check, _check_queries = continuous_result_check(bench_runner)
-            if _check_queries:
-                # The settled tables answer every query; a failure here is a
-                # failed query, as in batch.
-                from lakebench.cli._run import _benchmark_gate_problems
-
-                for problem in _benchmark_gate_problems(cfg, _check_queries, check_empty=True):
-                    print_error(f"Result check: {problem}")
-                    _record_failure(collector, f"Result check: {problem}")
-                    pipeline_success = False
-            if result_check.get("fingerprints"):
-                _n = len(result_check["fingerprints"])
-                _bad = result_check.get("failed") or []
-                print_success(
-                    f"Result check: {_n - len(_bad)} of {_n} query results fingerprinted"
-                    + (f" (failed: {', '.join(_bad)})" if _bad else "")
-                )
-            else:
-                print_warning(f"Result check: {result_check.get('not_checked')}")
-        if collector.current_run is not None:
-            if collector.current_run.continuous is None:
-                collector.current_run.continuous = {}
-            collector.current_run.continuous["settle"] = settle
-            if result_check.get("not_checked") and "cause" not in result_check:
-                # Not a declared skip: the answers are not established.
-                result_check["cause"] = "failed"
-            collector.current_run.continuous["result_check"] = result_check
 
         # Honest continuous runner. A continuous AML run whose gold stage
         # produced ZERO alerts is a FAILURE, not a PASS: it means detection
@@ -4971,6 +4699,11 @@ def _run_sustained(
 
         # Aggregate in-stream benchmark rounds
         if not skip_benchmark:
+            problem = no_rounds_problem(cfg, collector.current_run)
+            if problem:
+                print_error(problem)
+                _record_failure(collector, problem)
+                pipeline_success = False
             try:
                 from lakebench.metrics import aggregate_benchmark_rounds
 
@@ -5012,7 +4745,16 @@ def _run_sustained(
                             _record_failure(collector, f"Round {idx}: {problem}")
                             pipeline_success = False
             except Exception as e:
-                print_warning(f"Benchmark aggregation failed: {e}")
+                if cfg.architecture.workload.schema_type.value == "financial":
+                    print_warning(f"Benchmark aggregation failed: {e}")
+                else:
+                    # The rounds' gates are the run's only answer check.
+                    problem = (
+                        f"c360 continuous gate: the in-stream rounds could not be judged ({e})"
+                    )
+                    print_error(problem)
+                    _record_failure(collector, problem)
+                    pipeline_success = False
 
         # Recall over what the drained run's last tick saw, with the
         # streams stopped and every gate decided, so a run that failed one
@@ -5104,7 +4846,7 @@ def _run_sustained(
             _exception_in_flight = True
         raise
     except KeyboardInterrupt as e:
-        # SIGINT or SIGTERM anywhere (the settle phase can last 30 min). Sealed
+        # SIGINT or SIGTERM anywhere. Sealed
         # first; then the streams, the datagen Job and an unfinished preflight
         # this run created are deleted by uid. The finally must not then stop
         # the streams by name: one left with 409 is not ours, and one skipped
@@ -5179,9 +4921,7 @@ def _run_sustained(
             pipeline_success,
         )
         if submitted and not streams_stopped and k8s is not None:
-            _stop_streams(
-                k8s, cfg.get_namespace(), [s for s in submitted if s[1] not in _stopped_early]
-            )
+            _stop_streams(k8s, cfg.get_namespace(), submitted)
         if _datagen_live:
             from lakebench.deploy.datagen import stop_continuous_datagen
 
@@ -5209,7 +4949,7 @@ def _run_sustained(
             and k8s is not None
             and collector.current_run is not None
         ):
-            # Physical over logical bytes after settle, as the batch run
+            # Physical over logical bytes after the streams stop, as the batch run
             # measures it after maintenance (metrics/storage_multiple.py).
             # Never raises. Not after an interrupt or a lost namespace.
             from lakebench.metrics.storage_multiple import measure_run

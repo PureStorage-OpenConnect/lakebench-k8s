@@ -520,10 +520,8 @@ class PipelineMetrics:
     # {"start", "end", "seconds"} in UTC, each stream's start
     # {"streams": {job: {"running_at", "submission_failures",
     # "submission_retry_seconds"}}}, the gate's
-    # problems, and the result check {"settle": {...}, "result_check":
-    # {"query_set_id", "fingerprints"} or {"not_checked": reason}}: gold and
-    # the query set read once the whole corpus has passed through, so two
-    # runs of the same experiment can be shown to return the same results.
+    # problems. Older records also carry "settle" and "result_check" (the
+    # end-of-run result check, since removed); nothing reads them.
     # None on batch runs and on records from before it.
     continuous: dict[str, Any] | None = None
 
@@ -2727,12 +2725,6 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
             qd["max_seconds"] = round(max(times), 3)
             mid = statistics.median(times)
             qd["relative_range"] = round((max(times) - min(times)) / mid, 4) if mid > 0 else 0.0
-        if "result_fingerprint" in qd:
-            # Each in-stream round read a different state of tables still
-            # being written; the first round's fingerprint is not the
-            # aggregate's.
-            qd["result_fingerprint"] = None
-            qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
         aggregated_queries.append(qd)
 
     return BenchmarkMetrics(
@@ -2749,10 +2741,10 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     )
 
 
-#: The benchmark every continuous in-stream round (and the end-of-run result
-#: check) runs: one hot power pass with one sample per query. Gold changes
-#: under a round, so repeats would time different snapshots; the rounds
-#: themselves are the repeats (cli/_sustained.py _run_benchmark_round).
+#: The benchmark every continuous in-stream round runs: one hot power pass
+#: with one sample per query. Gold changes under a round, so repeats would
+#: time different snapshots; the rounds themselves are the repeats
+#: (cli/_sustained.py _run_benchmark_round).
 CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
     "mode": "power",
     "streams": 1,

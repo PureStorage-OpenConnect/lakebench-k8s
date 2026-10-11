@@ -10,12 +10,6 @@ import re
 import subprocess
 import time
 
-from lakebench.benchmark.fingerprint import (
-    Unsupported,
-    fingerprint_rows,
-    rows_from_beeline_tsv2,
-    unusable,
-)
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
 from lakebench.k8s import pinned_kubectl
 
@@ -167,52 +161,6 @@ class SparkThriftExecutor:
             duration_seconds=elapsed,
             rows_returned=len(data_rows),
             raw_output=output,
-        )
-
-    def fingerprint_query(
-        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
-    ) -> QueryExecutorResult:
-        """Run *sql* once, untimed, and fingerprint the tsv2 rows
-        (benchmark.fingerprint)."""
-        pod = self._discover_pod()
-        start = time.monotonic()
-        try:
-            result = subprocess.run(
-                self._beeline_cmd(pod, sql), capture_output=True, text=True, timeout=timeout
-            )
-        except subprocess.TimeoutExpired:
-            timed_out = f"fingerprint query timed out ({timeout}s)"
-            return QueryExecutorResult(
-                sql=sql,
-                engine="spark-thrift",
-                duration_seconds=time.monotonic() - start,
-                rows_returned=0,
-                raw_output="",
-                error=timed_out,
-                fingerprint=unusable("error", timed_out, "spark-thrift"),
-            )
-        error: str | None = None
-        if result.returncode != 0:
-            error = summarise_engine_error(result.stderr or "")
-            fp = unusable("error", error, "spark-thrift")
-        else:
-            try:
-                fp = fingerprint_rows(
-                    rows_from_beeline_tsv2(result.stdout or ""),
-                    approx_columns,
-                    engine="spark-thrift",
-                    adapted_sql=sql,
-                )
-            except Unsupported as e:
-                fp = unusable("unsupported", str(e), "spark-thrift")
-        return QueryExecutorResult(
-            sql=sql,
-            engine="spark-thrift",
-            duration_seconds=time.monotonic() - start,
-            rows_returned=int(fp.get("rows") or 0),
-            raw_output="",
-            error=error,
-            fingerprint=fp,
         )
 
     def health_check(self) -> bool:

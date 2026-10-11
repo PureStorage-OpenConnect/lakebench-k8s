@@ -36,8 +36,8 @@
 - **Continuous recall is `recall_covered`**
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)),
   not batch `recall`; no published record carries one yet.
-- **Continuous results are never checked**: no result fingerprints, so any
-  comparison including one is NOT ESTABLISHED at best. The published
+- **Continuous results are never checked across runs**: alerts depend on
+  when ticks ran, so any comparison including one is NOT ESTABLISHED at best. The published
   continuous record (1.6, scale 1, n=1) ingested 43.7% of the corpus in the
   default 1,800 s window.
 - **Continuous throughput follows the offered load** (4 MB/s per scale unit by
@@ -49,7 +49,8 @@
   ran under a trickle, predates that label and shows `bound: []`.
 - **No expected results and no row relations checked**
   ([5](correctness.md#5-correctness-contract)). Correctness across
-  architectures rests on fingerprint equality between batch runs.
+  architectures rests on equal alert sets between batch runs; query answers
+  are compared by eye.
 - **Repeatability.** Each record is one run (`runs: 1`). `run --repeat` (up to
   20 runs) runs a series on one corpus; Lakebench does not summarise it, so
   read the members' records for the spread. Every published AML record is

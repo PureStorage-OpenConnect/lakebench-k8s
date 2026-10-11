@@ -29,7 +29,6 @@ from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effectiv
 from lakebench.metrics.seed_record import recorded_seed
 from tests.conftest import make_config
 from tests.fixtures.experiment_helpers import _cfg as _cfg
-from tests.fixtures.experiment_helpers import _fp as _fp
 from tests.fixtures.experiment_helpers import _metrics as _metrics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +48,8 @@ class TestStamping:
     @pytest.mark.parametrize("mode", ["batch", "sustained"])
     def test_every_record_carries_the_block(self, schema, mode):
         cfg = _cfg(schema, mode)
-        d = _metrics(cfg).to_dict()
+        run = _metrics(cfg)
+        d = run.to_dict()
         e = d["experiment"]
         # No corpus observation and no system identity in this synthetic
         # run: identity v1, naming what v2 lacked (ER-10a stamping rule).
@@ -82,7 +82,7 @@ class TestStamping:
                 == cfg.architecture.pipeline.sustained.max_files_per_trigger
             )
         else:
-            assert e["results"]["fingerprints"]["Q1_full_aggregation_scan"]["rows"] == 1
+            assert e["results"]["query_set_id"] == run.benchmark.query_set_id
 
     def test_block_survives_a_save_and_load(self, tmp_path):
         from lakebench.metrics.storage import MetricsStorage

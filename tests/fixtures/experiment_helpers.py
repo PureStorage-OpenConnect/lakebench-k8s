@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from lakebench.benchmark.fingerprint import fingerprint_rows
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
     JobMetrics,
@@ -23,15 +22,10 @@ def _cfg(schema="customer360", mode="batch", engine="trino", fmt="iceberg", **da
     )
 
 
-def _fp(value: int = 1) -> dict:
-    return fingerprint_rows([(value, "x")], engine="trino", adapted_sql="SELECT 1")
-
-
-def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
+def _metrics(cfg, fleet: dict | None = None):
     run = MetricsCollector().start_run(
         "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
     )
-    fps = fingerprints if fingerprints is not None else {"Q1_full_aggregation_scan": _fp()}
     run.benchmark = BenchmarkMetrics(
         mode="power",
         cache="hot",
@@ -39,8 +33,12 @@ def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
         qph=100.0,
         total_seconds=10.0,
         queries=[
-            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
-            for n, f in fps.items()
+            {
+                "name": "Q1_full_aggregation_scan",
+                "elapsed_seconds": 1.0,
+                "success": True,
+                "rows_returned": 1,
+            }
         ],
     )
     run.datagen_fleet = fleet

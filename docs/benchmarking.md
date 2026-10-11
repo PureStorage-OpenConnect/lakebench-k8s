@@ -17,7 +17,7 @@ Reference: what Lakebench measures and where each score, verdict rule and record
 - [Continuous scores](benchmarking/continuous.md): window, scores, regimes, intake limits, [trickle](glossary.md#trickle)
 - [Query benchmark](benchmarking/query-benchmark.md): QpH modes, samples, in-stream rounds
 - [Maintenance and Lakebench caps](benchmarking/maintenance.md): maintenance scoring, settle wait, compaction, caps
-- [Verdict](benchmarking/verdict.md): PASSED, continuous gate, result check, requested vs effective
+- [Verdict](benchmarking/verdict.md): PASSED, continuous gate, after the window, requested vs effective
 - [Tuning a continuous pipeline](benchmarking/continuous-tuning.md): levers and checklist
 - [Run records](benchmarking/records.md): `metrics.json`, provenance, benchmark records
 - [HTML report layout](benchmarking/html-report.md): header, cards, sections, AML results

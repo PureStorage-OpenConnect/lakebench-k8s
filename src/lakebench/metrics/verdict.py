@@ -1020,51 +1020,10 @@ def _query_answers_gate(metrics: PipelineMetrics) -> _GateResult:
     return res
 
 
-#: Reasons a continuous run may leave its result check undone and still pass,
-#: for records written before ``result_check.cause`` existed: no query
-#: engine or benchmark, a run that already failed, AML by design, and a
-#: corpus over the settle limit. Every other unchecked result is a failure.
-_DECLARED_UNCHECKED = (
-    "no query engine",
-    "no benchmark",
-    "the run failed its gates",
-    "AML continuous results depend",
-    "s settle limit",
-)
-
-
-def _result_check_gate(metrics: PipelineMetrics) -> _GateResult:
-    """A continuous run's end-of-run result check (invariant 2): PASS when it
-    fingerprinted the query set, or skipped it for a declared reason (named
-    in the ``results_unchecked`` qualifier); FAIL when it was skipped for any
-    other reason (the drain did not settle, the check could not run), because
-    the run's answers are then not established. Not applied to batch runs or
-    to records with no result check."""
-    res = _GateResult()
-    check = (getattr(metrics, "continuous", None) or {}).get("result_check")
-    if not _is_sustained(metrics) or not isinstance(check, Mapping) or not check:
-        return res
-    why = check.get("not_checked")
-    if why:
-        cause = check.get("cause")
-        declared = cause == "declared" or (
-            "cause" not in check and any(d in str(why) for d in _DECLARED_UNCHECKED)
-        )
-        if declared:
-            res.qualifiers["results_unchecked"] = str(why)
-        else:
-            res.reasons.append(
-                f"Result check not done: {why}; the run's answers are not established"
-            )
-    res.outcome = "FAIL" if res.reasons else "PASS"
-    return res
-
-
 def record_gates(metrics: PipelineMetrics) -> dict[str, _GateResult]:
     """The record gates that apply to *metrics*, by gate id:
     ``layer_rows``, ``aml_rules`` (financial runs), ``scale_ratio`` (batch),
-    ``query_answers`` (runs with benchmark queries) and ``result_check``
-    (continuous runs). A gate that does
+    and ``query_answers`` (runs with benchmark queries). A gate that does
     not apply is left out. Empty for an interrupted run, and for a run whose
     ``pipeline`` gate failed: a failed stage already fails the verdict, and
     the empty layers after it are its consequence, not another finding."""
@@ -1075,7 +1034,6 @@ def record_gates(metrics: PipelineMetrics) -> dict[str, _GateResult]:
         gates["aml_rules"] = _aml_rules_gate(metrics)
     gates["scale_ratio"] = _scale_ratio_gate(metrics)
     gates["query_answers"] = _query_answers_gate(metrics)
-    gates["result_check"] = _result_check_gate(metrics)
     return {k: g for k, g in gates.items() if g.outcome is not None}
 
 

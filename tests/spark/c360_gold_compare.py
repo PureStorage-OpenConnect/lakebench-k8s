@@ -21,11 +21,7 @@ Spark rounds a DOUBLE HALF_UP through BigDecimal, which is monotone, so a
 pre-ROUND difference below one quantum moves the result by at most one: at
 these test sizes the pre-ROUND difference is a few ulps. Every other KPI,
 including every count and every sum, is compared exactly, so a one-cent
-change to one purchase still shows in that day's revenue. The rows must also
-match under the product's result fingerprint (``benchmark/fingerprint.py``,
-the two averages approximate at their quanta), the rule ``compare`` and the
-perf gate apply to query results; beyond the cell check it catches a bias
-of one quantum in the same direction on many days.
+change to one purchase still shows in that day's revenue.
 
 The rows come from ``table_fingerprint.table_rows`` in the Spark child.
 Imported by the parity test modules in the parent; stdlib and ``lakebench`` only.
@@ -91,21 +87,6 @@ def gold_differences(
             elif not _same(x, y):
                 problems.append(f"{day} {c}: {x!r} vs {y!r}")
     return problems
-
-
-def product_mismatch(
-    a: dict[str, Any], b: dict[str, Any], quanta: dict[str, float] = ORDER_SENSITIVE
-) -> str | None:
-    """``benchmark.fingerprint.mismatch`` of the two tables' rows, with the
-    ``quanta`` columns approximate: None when the product's result
-    fingerprint takes them for the same result."""
-    from lakebench.benchmark.fingerprint import fingerprint_rows, mismatch
-
-    def fp(t: dict[str, Any]) -> dict:
-        approx = {i: quanta[c] for i, c in enumerate(t["columns"]) if c in quanta}
-        return fingerprint_rows(t["rows"], approx_columns=approx)
-
-    return mismatch(fp(a), fp(b))
 
 
 def _by_key(rows: list[list[Any]], k: int) -> dict[Any, list[Any]] | str:

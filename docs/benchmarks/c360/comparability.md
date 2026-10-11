@@ -16,7 +16,7 @@ published result carries all of it:
 | Mode and maintenance | mode; maintenance policy id, configured settings and effective maintenance per operation (compaction operation included), with known limitations |
 | Stages | executed and skipped (a skipped benchmark or maintenance is listed) |
 | Limits | benchmark iterations and mode, continuous rounds and [trickle](../../glossary.md#trickle), trigger intervals set in the config (`limits.trigger_bound`), executor caps with `cap_hit` and budget caps, sizing cuts, maintenance stop, the bound kinds |
-| Results | `query_set_id` and one fingerprint per query, or `not_checked` with the reason; for continuous `composite_qph`, its `composite_qph_basis` |
+| Results | `query_set_id` (continuous: every query the in-stream rounds ran; null with no benchmark); for continuous `composite_qph`, its `composite_qph_basis` |
 | Correctness | the `c360_correctness` record: its 16 gating checks drive the verdict and exit code; other failures are reported only ([5.2](correctness.md#52-expected-result-checks-batch-only)) |
 | Repetitions | runs = 1 and samples per query; a repeatability claim needs repeated runs or an `n=1` label |
 | Provenance | Lakebench commit, dirty tree flag |
@@ -33,11 +33,12 @@ comparable only when (`metrics/comparability.py`):
 - every Workload and Corpus identity key
   ([7.4](execution-rules.md#74-prohibited-changes-invalidate-a-result-or-are-refused))
   is equal and neither run has a corpus problem;
-- they ran the same query set with every result fingerprint matching.
+- they ran the same query set.
 
-- A run with no checked results (`--skip-benchmark`, a `*-none` recipe, a
-  continuous run that did not settle or skipped the result check) cannot
-  show matching answers.
+- Lakebench does not compare query answers: a reader compares the
+  per-query row counts and numbers of the two reports by eye.
+- A run with no benchmark (`--skip-benchmark`, a `*-none` recipe) has no
+  query set to compare.
 - Execution conditions: effective maintenance, compaction operation,
   maintenance settings, benchmark iterations and mode, the Lakebench caps
   that bound, and (continuous) the in-stream round count. When they differ,

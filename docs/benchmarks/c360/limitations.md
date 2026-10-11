@@ -23,7 +23,7 @@
   - A statistical check at 6 standard errors can fail a correct run by
     chance (the module puts that probability well under 1e-6 per check).
   - Continuous runs have no expected-result checks. Their correctness rests
-    on the window gate and fingerprint equality with a reference run.
+    on the window gate and the last in-stream round's row counts.
 - **Continuous QpH can be over a smaller query set**: a failed Q9 is tolerated
   in rounds, and rounds over different sets give `query_set_id: blended`, are
   not assessed, and `composite_qph_basis` records the rounds per set.
@@ -48,10 +48,6 @@
   (`datagen_ahead`, `intake_limit: bronze_capacity`). Under `--skip-generate`
   or an explicit `max_files_per_trigger` the [trickle](../../glossary.md#trickle) bounds it
   (`intake_limit: trickle_rate`).
-- **Large continuous corpora may not settle**: when the estimate exceeds
-  1,800 s ([4.2](pipeline.md#42-continuous-mode-pipelinemode-continuous-or-run---continuous))
-  the result check is skipped without waiting, the run records
-  `results.not_checked`, and it cannot show matching answers.
 - **Executor ceiling**: counts do not grow up to scale 10 and stop at the
   per-job cap above it ([7.5](execution-rules.md#75-lakebench-imposed-caps-and-how-a-bound-cap-is-reported)).
   Time to value there is bounded by the profile; the record marks the job

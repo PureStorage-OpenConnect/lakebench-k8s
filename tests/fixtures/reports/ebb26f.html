@@ -206,24 +206,24 @@
             <div class="subtitle">
                 Deployment: <strong>pipe-aml-c1</strong> |
                 Run ID: <code class="mono">20260929-205000-ebb26f</code> |
-                <span class="status status-success" title="Pipeline completed, data complete (ingest/scale ratio 0.95-1.05), all jobs succeeded, no failed queries">
-                    PASSED
+                <span class="status status-warning" title="rule status at the scored tick not recorded: rules taken from time-to-detect lines">
+                    WARNING
                 </span>
                 <span class="confidence-chip" title="run-count qualifier" style="display: inline-block; margin-left: 0.5em; padding: 0.1em 0.5em; border-radius: 9999px; background: rgba(148,163,184,0.15); color: var(--warning); font-size: 0.65em; font-weight: 600; text-transform: none;">single_run</span>
             </div>
-            
+            <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--warning);">rule status at the scored tick not recorded: rules taken from time-to-detect lines</div>
         </header>
 
         
-        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
+        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--warning);">
             <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
                 Read this first
             </div>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
-                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--success);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> AML continuous, scale 1.0, 4 of 4 rules ran, n=1</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id 4862ac7677e9, scale 1.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> trickle: max_files_per_trigger 1 (auto), the pipeline kept pace</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 1 sample per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">83096ae7e667c1b8</code></div>
+                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--warning);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> rule status at the scored tick not recorded: rules taken from time-to-detect lines</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id 4862ac7677e9, scale 1.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> trickle: max_files_per_trigger 1 (auto), the pipeline kept pace</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 1 sample per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">83096ae7e667c1b8</code></div>
             </div>
             
-            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li>5 detection rules not run in continuous mode (W5, W6, W1, W7, W8): their typologies have no result in this run</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
+            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li><li>5 detection rules not run in continuous mode (W1, W5, W6, W7, W8): their typologies have no result in this run</li><li>AML recall is uncalibrated and in-sample: no registered look names this run</li></ul></div>
         </section>
         
 
@@ -240,8 +240,8 @@
         <div class="cards">
             <div class="card">
                 <div class="card-label">Data Freshness</div>
-                <div class="card-value">202.0s</div>
-                <div class="card-hint">worst-case gold staleness during the continuous window</div>
+                <div class="card-value">202.0s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-hint">gold freshness at each refresh in the window (readers see up to one refresh interval more)</div>
                 <div class="card-hint2">&#8595; lower is better | 3.4 min lag</div>
             </div>
             <div class="card">
@@ -252,27 +252,27 @@
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">0.46 GB/core-hr<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></div>
-                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-value">0.46 GiB/core-hr<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></div>
+                <div class="card-hint">stage-input GiB per core-hour requested</div>
                 <div class="card-hint2">&#8593; higher is better</div>
             </div>
             <div class="card">
                 <div class="card-label">In-Stream QpH</div>
-                <div class="card-value">409.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
-                <div class="card-hint">median of <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</div>
+                <div class="card-value">409.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.composite_qph_rounds" data-lb-fmt=",d">4</span> rounds</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-hint">median of <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.composite_qph_rounds" data-lb-fmt=",d">4</span> rounds</div>
                 <div class="card-hint2">&#8593; higher is better | ~7 queries/min</div>
             </div>
             <div class="card">
                 <div class="card-label">Total CPU-hours</div>
                 <div class="card-value">54.0</div>
                 <div class="card-hint">total compute across all stages</div>
-                <div class="card-hint2">extrapolates to ~2,438/day</div>
+                <div class="card-hint2">extrapolates to ~2,592/day</div>
             </div>
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: 31m 54s</span>
-            <span>Stage inputs processed: 24.81 GB (bronze + silver + gold + query reads; bronze bucket 11.7 GB at run end: landing files plus the bronze table)</span>
-            <span>Avg stage-input throughput: 0.01 GB/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></span>
+            <span>Stage inputs processed: 24.81 GiB (bronze and silver window rows at datagen's bytes per row; bronze bucket 11.7 GiB at run end: landing files plus the bronze table)</span>
+            <span>Avg stage-input throughput: 0.01 GiB/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></span>
         </div>
         
 
@@ -338,7 +338,7 @@
         <section>
             <h2>Pipeline Stages</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Mode: continuous | Freshness: <strong>202.0s</strong> | Throughput: <strong>6,481 rows/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></strong> | Data: <strong>24.8 GB</strong> | Rows: 51,506,579
+                Mode: continuous | Freshness: <strong>202.0s</strong> | Throughput: <strong>6,481 rows/s<span class="qual qual-bounded" title="trickle 1 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></strong> | Data: <strong>24.8 GiB</strong> | Rows in the window: <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.total_rows_processed" data-lb-fmt=",d">51,506,579</span> across stages (includes gold's re-reads of silver each cycle)
             </div>
             <table>
                 <thead>
@@ -347,10 +347,10 @@
                         <th>Stage</th>
                         <th>Engine</th>
                         <th>Time</th>
-                        <th>In Rows</th>
-                        <th title="Rows processed per second">Rows/s</th>
+                        <th title="Rows taken in inside the measurement window">In Rows (window)</th>
+                        <th title="Rows taken in inside the window per second">Rows/s (window)</th>
                         <th title="Average micro-batch processing time">Latency</th>
-                        <th title="Worst-case staleness of stage output">Freshness (s)</th>
+                        <th title="Freshness of the stage output at each commit (readers see up to one cadence more)">Freshness (s)</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
                         <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
@@ -379,7 +379,7 @@
                     <td><strong>silver</strong></td>
                     <td>spark</td>
                     <td>1800.0s</td>
-                    <td>11,474,373</td>
+                    <td>11,086,355</td>
                     <td>6,159<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
                     <td>57.0s</td>
                     <td>-</td>
@@ -395,7 +395,7 @@
                     <td>spark</td>
                     <td>1800.0s</td>
                     <td>28,754,133</td>
-                    <td>15,974<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                    <td>15,974<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span> <small>(re-reads of silver)</small></td>
                     <td>68.2s</td>
                     <td>202.0</td>
                     <td>12</td>
@@ -425,12 +425,12 @@
             
         <div class="cards" style="margin-top: 1.5rem;">
             <div class="card">
-                <div class="card-label">Ingest Ratio</div>
+                <div class="card-label">Ingest Ratio (estimate)</div>
                 <div class="card-value">1.05</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     <span style="color: var(--success);">Healthy</span>
                 </div>
-                <div class="card-hint">bronze rows / rows the trickle released</div>
+                <div class="card-hint">estimate: bronze rows / rows released by the window's end, estimated at the mean release rate</div>
             </div>
             <div class="card">
                 <div class="card-label">Corpus coverage</div>
@@ -443,12 +443,20 @@
                 <div class="card-hint">measured continuous window</div>
             </div>
             <div class="card">
-                <div class="card-label">Offered load (trickle)</div>
-                <div class="card-value" style="font-size: 1rem;">1 file per 30 seconds bronze trigger</div>
-                <div class="card-hint">Lakebench-imposed intake rate, not a capacity</div>
+                <div class="card-label">Offered load</div>
+                <div class="card-value" style="font-size: 1rem;">trickle 1 file per 30 seconds bronze trigger</div>
+                <div class="card-hint">the load Lakebench offered the pipeline, not a capacity</div>
+            </div>
+            
+            
+            <div class="card">
+                <div class="card-label">Time to detect</div>
+                <div class="card-value">p50 220s</div>
+                <div class="card-hint">p95 370s, max 1,455s over 217099 newly raised alerts</div>
+                <div class="card-hint2">newest related transaction landing to the end of the detection pass that raised the alert</div>
             </div>
         </div>
-        <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.5rem;">Excluded in continuous mode: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.</p>
+        <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 0.5rem;">Excluded in continuous mode: AML continuous runs detection rules W2, W3, W4, W5, W6, W17 each tick and records W1, W7, W8 as not run (from 1.7.1; earlier records name the rules they ran). W4 raises one alert per entity per week, and W5 screens payments as they arrive, with no rescreen of earlier payments when a list version is published. Its results depend on when detection ran relative to arrival, so two continuous runs cannot show the same results.</p>
         
             <section><h3>AML results funnel</h3><table><thead><tr><th>Step</th><th>Count</th><th>Source</th></tr></thead><tbody><tr><td>Rule alerts in gold.alerts (TM)</td><td>39,075</td><td><code class='mono'>tm_operations.ops.alerts_total</code></td></tr><tr><td>dispositioned on customers (monitored)</td><td>19,761</td><td><code class='mono'>tm_operations.ops.funnel.alerts</code></td></tr><tr><td>&nbsp;&nbsp;of which over the per-customer cap (held back, not worked)</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_over_capacity</code></td></tr><tr><td>&nbsp;&nbsp;of which withdrawn, carried from an earlier cycle</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_withdrawn_carried</code></td></tr><tr><td>dispositioned on non-customers (outside the monitored population)</td><td>19,314</td><td><code class='mono'>tm_operations.ops.alerts_out_of_scope</code></td></tr><tr><td>&nbsp;&nbsp;of which not declared as counterparties</td><td>0</td><td><code class='mono'>tm_operations.ops.alerts_noncustomer_undeclared</code></td></tr><tr><td>customer alerts per customer</td><td><span data-lb-derived="ratio" data-lb-inputs="tm_operations.ops.funnel.alerts;tm_operations.ops.reconciliation[&quot;completeness.customers&quot;]" data-lb-fmt=".2f">0.36</span></td><td><code class='mono'>tm_operations.ops.funnel.alerts / tm_operations.ops.reconciliation[&quot;completeness.customers&quot;]</code></td></tr><tr><td>disposition: attached</td><td>58</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.attached</code></td></tr><tr><td>disposition: closed_nfa</td><td>16,717</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.closed_nfa</code></td></tr><tr><td>disposition: escalated</td><td>2,134</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.escalated</code></td></tr><tr><td>disposition: out_of_scope</td><td>19,314</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.out_of_scope</code></td></tr><tr><td>disposition: pending_l1</td><td>852</td><td><code class='mono'>tm_operations.ops.alerts_by_disposition.pending_l1</code></td></tr><tr><td>escalated</td><td>2,134</td><td><code class='mono'>tm_operations.ops.funnel.escalated</code></td></tr><tr><td>alert cases</td><td>2,134</td><td><code class='mono'>tm_operations.ops.funnel.cases</code></td></tr><tr><td>continuing-activity review cases</td><td>272</td><td><code class='mono'>tm_operations.ops.reconciliation[&quot;funnel.continuing_review_cases&quot;]</code></td></tr><tr><td>SARs filed</td><td>272</td><td><code class='mono'>tm_operations.ops.sars_filed</code></td></tr></tbody></table><h4>Reconciliation</h4><ul><li>TM rule alerts = customer + non-customer dispositions - withdrawn carried alerts</li><li>dispositions sum to customer + non-customer dispositions</li><li>SARs filed = 258 on alert cases + 14 continuing-activity SARs</li></ul></section><section><h3>Transaction Monitoring Operations</h3>
 <p>P10 gate (continuous, per operations pass): <strong style="color: var(--success);">pass</strong></p>
@@ -493,7 +501,7 @@
         <section>
             <h2>Continuous Pipeline</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                <span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> continuous jobs | <span data-lb-derived="total" data-lb-inputs="streaming[*].total_rows_processed" data-lb-fmt=",d">51,894,597</span> total rows processed
+                <span data-lb-derived="count" data-lb-inputs="count(streaming)" data-lb-fmt=",d">3</span> continuous jobs | rows in the window: <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.total_rows_processed" data-lb-fmt=",d">51,506,579</span> across stages (includes gold's re-reads of silver each cycle)
             </div>
             <table>
                 <thead>
@@ -502,10 +510,10 @@
                         <th>Status</th>
                         <th>Duration</th>
                         <th>Batches</th>
-                        <th>Rows Processed</th>
-                        <th>Throughput</th>
+                        <th title="Rows the stage took in by the window's end, before it opened included">Rows to window end</th>
+                        <th title="Rows taken in inside the window per second; gold's are re-reads of silver">Throughput</th>
                         <th title="Average micro-batch processing time">Avg Batch</th>
-                        <th title="Worst-case staleness of stage output">Freshness</th>
+                        <th title="Freshness of the stage output at each commit (readers see up to one cadence more)">Freshness</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
                         <th title="executor_count x cores x elapsed_seconds">CPU-sec</th>
@@ -547,7 +555,7 @@
                 <td>1800s</td>
                 <td>6</td>
                 <td>28,754,133</td>
-                <td>15,974 rows/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span></td>
+                <td>15,974 rows/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span> <small>(re-reads of silver)</small></td>
                 <td>68.2s</td>
                 <td>202s</td>
                 <td>12</td>
@@ -651,7 +659,7 @@
             
             <tr>
                 <td><code class="mono">FQ8_alert_to_entity_join</code></td>
-                <td>Case investigation: alert -> entity -> recent txns</td>
+                <td>Case investigation: alert -&gt; entity -&gt; recent txns</td>
                 <td>operational</td>
                 <td>4.59s</td>
                 <td>100</td>
@@ -668,7 +676,7 @@
         <section>
             <h2>In-Stream Benchmark Rounds</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                <span data-lb-derived="count" data-lb-inputs="count(benchmark_rounds)" data-lb-fmt=",d">4</span> in-stream rounds in the window | Median QpH: <strong>409.3</strong> | Median gold event age: 693.4 d (corpus event time, not freshness)
+                <span data-lb-derived="count" data-lb-inputs="count(benchmark_rounds)" data-lb-fmt=",d">4</span> in-stream rounds in the window | Median QpH: <strong>409.3</strong> over <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.composite_qph_rounds" data-lb-fmt=",d">4</span> composite rounds | Median gold event age: 693.4 d (corpus event time, not freshness)
             </div>
             <table>
                 <thead>
@@ -704,6 +712,14 @@
 
         
 
+        
+        <section>
+            <h2>Platform Metrics</h2>
+            <p style="color: var(--text-muted); font-size: 0.875rem;">
+                Not collected: observability was off for this run, so no per-pod
+                CPU or memory was read from Prometheus. Stage figures above come
+                from the run's own record.</p>
+        </section>
         
 
         
@@ -776,7 +792,7 @@
                 
             </div>
         </section>
-        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus and mode match and every result fingerprint below (and, for an AML batch run, the alert set) is equal. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>83096ae7e667c1b8</code></td></tr><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>4862ac7677e9e1d4</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>continuous</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;30m&#x27;, &#x27;retention_interval&#x27;: 600, &#x27;compaction_interval&#x27;: 1200}</code></td></tr><tr><td>In-stream QpH rounds</td><td><code class='mono'>4</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 1, in-stream rounds 4</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>trickle: max_files_per_trigger 1 (auto), the pipeline kept pace [trickle (offered load, not capacity)]</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W17_layering_chain, W2_structuring, W3_round_tripping, W4_risk_propagation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>none</code></td></tr><tr><td>Trickle rate (files per trigger)</td><td><code class='mono'>1</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>continuous: AML continuous results depend on when detection and TM passes ran relative to arrival, so they are not a function of the corpus alone</p></section>
+        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus, mode and query set match (and, for an AML batch run, their alert sets are equal). Lakebench does not compare query answers: read the row counts and numbers of both reports. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>83096ae7e667c1b8</code></td></tr><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>4862ac7677e9e1d4</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>continuous</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;30m&#x27;, &#x27;retention_interval&#x27;: 600, &#x27;compaction_interval&#x27;: 1200}</code></td></tr><tr><td>In-stream QpH rounds</td><td><code class='mono'>4</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 1, in-stream rounds 4</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>trickle: max_files_per_trigger 1 (auto), the pipeline kept pace [trickle (offered load, not capacity)]</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Query set</td><td><code class='mono'>not recorded</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W17_layering_chain, W2_structuring, W3_round_tripping, W4_risk_propagation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>none</code></td></tr><tr><td>Trickle rate (files per trigger)</td><td><code class='mono'>1</code></td></tr></tbody></table></section>
 
         <footer>
             Generated by Lakebench | (timestamp removed)

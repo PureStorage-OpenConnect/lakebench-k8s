@@ -24,13 +24,11 @@ from lakebench.metrics.collector import (
     build_config_snapshot,
 )
 from lakebench.metrics.continuous_window import (
-    StreamEvent,
     arrival_seconds,
     balance,
     classify_submission_failure,
     freshness_summary,
     parse_events,
-    settle_state,
     window_gate_problems,
     window_stats,
 )
@@ -415,59 +413,6 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     jm.deploy_scripts_configmap.assert_not_called()
 
 
-# ---------------------------------------------------- result check (deviation)
-
-
-def test_settled_needs_every_row_through_silver_and_a_gold_read_after():
-    ev = {job: parse_events(log, job) for job, log in HEALTHY.items()}
-    bronze_rows = 20 * 26_000
-    ok, why = settle_state(ev, bronze_rows + 1)
-    assert not ok and "bronze has" in why
-    ok, why = settle_state(ev, bronze_rows)
-    assert not ok and "no gold refresh has read silver" in why  # last gold read at 401 s
-    short = silver_log([(t, 52_000, 51_000) for t in range(10, 540, 60)])
-    ok, why = settle_state(
-        {**ev, "silver-stream": parse_events(short, "silver-stream")}, bronze_rows
-    )
-    assert not ok and "silver has committed" in why
-    ev["gold-refresh"] = parse_events(gold_log([(599, 510_000, 40, False)]), "gold-refresh")
-    ok, why = settle_state(ev, bronze_rows)
-    assert ok, why
-    # Bronze stopped mid-write inside the window: its last batch logged
-    # "writing" and never committed, so those rows never reached the table.
-    # Settled all the same, and the stage's rows exclude them.
-    cut = HEALTHY["bronze-ingest"] + _line(595, "Batch 20: writing 700,000 rows to ice.bronze.raw")
-    stopped = {**ev, "bronze-ingest": parse_events(cut, "bronze-ingest")}
-    ok, why = settle_state(stopped, bronze_rows)
-    assert ok, why
-    stats = window_stats(stopped["bronze-ingest"], "bronze-ingest", W0, W1)
-    assert stats["output_rows"] == stats["window_input_rows"] == bronze_rows
-    # A drain: bronze stopped (its log gone) after taking its rows. Silver
-    # must still have committed every one of them.
-    drained = {k: v for k, v in ev.items() if k != "bronze-ingest"}
-    assert settle_state(drained, 0, bronze_rows=bronze_rows)[0]
-    ok, why = settle_state(drained, 0, bronze_rows=bronze_rows + 1)
-    assert not ok and "silver has committed" in why
-    # A last bronze batch written while it stopped: silver is transforming it.
-    last = drained["silver-stream"][-1]
-    in_flight = StreamEvent(last.at, "transform", 999, rows=1_000)
-    drained["silver-stream"] = [*drained["silver-stream"], in_flight]
-    ok, why = settle_state(drained, 0, bronze_rows=bronze_rows)
-    assert not ok and "not committed yet" in why
-
-
-def test_continuous_results_are_established_only_by_a_result_check():
-    from lakebench.metrics.experiment import _continuous_results
-
-    run = MagicMock(continuous=None)
-    assert "no end-of-run result check" in _continuous_results(run)["not_checked"]
-    run.continuous = {"result_check": {"not_checked": "the corpus did not settle: x"}}
-    assert "did not settle" in _continuous_results(run)["not_checked"]
-    run.continuous = {"result_check": {"query_set_id": "qs8-x", "fingerprints": {"Q1": {"a": 1}}}}
-    res = _continuous_results(run)
-    assert res["fingerprints"] == {"Q1": {"a": 1}} and "not_checked" not in res
-
-
 # ------------------------------------------------ end to end (mocked cluster)
 
 
@@ -650,7 +595,6 @@ def test_healthy_run_passes_with_window_scores(monkeypatch, tmp_path):
     assert code is None, saved.continuous.get("gate_problems")
     assert saved.success is True
     assert saved.continuous["gate_problems"] == []
-    assert saved.continuous["result_check"]["cause"] == "declared"
     gold = next(s for s in saved.streaming if s.job_type == "gold-refresh")
     assert gold.window_new_data_cycles == 3 and gold.freshness_seconds == 25
 
@@ -746,14 +690,6 @@ def test_a_window_too_short_for_two_gold_refreshes_is_refused():
     assert short_window_problem(cfg, 900) is None
 
 
-def test_aml_continuous_results_are_not_established(monkeypatch, tmp_path):
-    # Settling is not attempted for AML: detection and TM passes are timed.
-    from lakebench.cli import _sustained
-
-    src = __import__("inspect").getsource(_sustained._run_sustained)
-    assert "not a function of the corpus alone" in src
-
-
 def test_an_error_after_the_window_fails_the_run_and_stops_streams(monkeypatch, tmp_path):
     from lakebench.cli import _sustained
 
@@ -823,48 +759,18 @@ def _settling_logs(job, end):
     )
 
 
-def _runner(fail=()):
-    from lakebench.benchmark.fingerprint import fingerprint_rows
-
-    queries = []
-    for name in ("Q1_a", "Q9_b"):
-        ok = name not in fail
-        q = MagicMock(success=ok, result_fingerprint=fingerprint_rows([(name, 1)]) if ok else None)
-        q.query.name = name
-        q.to_dict.return_value = {"name": name, "success": ok, "rows_returned": 1 if ok else 0}
-        queries.append(q)
-    r = MagicMock()
-    r.run_power.return_value = MagicMock(queries=queries)
-    return r
-
-
-def test_settled_run_records_fingerprinted_results(monkeypatch, tmp_path):
-    code, saved = _drive(
-        monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=12 * 10_000
-    )
-    assert code is None, saved.continuous
-    assert saved.continuous["settle"]["settled"] is True
-    fps = saved.continuous["result_check"]["fingerprints"]
-    assert set(fps) == {"Q1_a", "Q9_b"}
-    results = saved.experiment_block()["results"]
-    assert results["fingerprints"] == fps and "not_checked" not in results
-
-
-def test_a_failed_result_check_query_fails_the_run(monkeypatch, tmp_path):
-    code, saved = _drive(
-        monkeypatch, tmp_path, _settling_logs, runner=_runner(fail=("Q1_a",)), dg_rows=120_000
-    )
+def test_a_c360_run_with_no_in_stream_round_fails(monkeypatch, tmp_path):
+    """A 120 s window is shorter than benchmark_warmup + benchmark_interval,
+    so no round runs and no query answer is checked (invariant 2): the run
+    fails and says why, whatever the window gate found."""
+    runner = MagicMock()
+    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=runner)
+    runner.run_power.assert_not_called()
+    assert saved.benchmark_rounds == []
     assert code == 1 and saved.success is False
-
-
-def test_an_unsettled_corpus_leaves_results_not_established(monkeypatch, tmp_path):
-    monkeypatch.setattr("lakebench.cli._sustained.SETTLE_MAX_SECONDS", 1)
-    # Bronze took in 96% of the corpus (ingest is not what is judged); the
-    # rest cannot settle within the limit.
-    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=125_000)
-    assert code is None
-    assert "settle limit" in saved.continuous["result_check"]["not_checked"]
-    assert "not_checked" in saved.experiment_block()["results"]
+    # The only reason: the window itself passed.
+    assert len(saved.failure_reasons) == 1
+    assert "no in-stream benchmark round ran" in saved.failure_reasons[0]
 
 
 def test_a_rerun_with_the_same_pod_name_is_caught_by_submission_time():
@@ -1246,79 +1152,6 @@ def test_iceberg_run_header_is_unchanged():
     assert "not run" in _header("iceberg", "duckdb")[0][1]
 
 
-def test_result_check_counts_an_unfingerprinted_result_as_failed():
-    """A query that ran but whose result could not be fingerprinted
-    ({spec, error}: DuckDB lost its S3 connection re-reading silver,
-    2026-10-07) has no answer to compare: it is failed, not fingerprinted."""
-    from types import SimpleNamespace
-
-    from lakebench.cli._sustained import continuous_result_check
-
-    def qr(name, success, fp):
-        return SimpleNamespace(
-            query=SimpleNamespace(name=name),
-            success=success,
-            result_fingerprint=fp,
-            to_dict=lambda: {"name": name},
-        )
-
-    ok = {"spec": "rf2", "rows": 1, "cols": 1, "exact": "ab"}
-    result = SimpleNamespace(
-        queries=[
-            qr("Q1", True, ok),
-            qr("Q2", True, {"spec": "rf2", "error": "IOException: IO Error"}),
-            qr("Q6", False, None),
-        ]
-    )
-    runner = SimpleNamespace(run_power=lambda **kw: result)
-    record, _ = continuous_result_check(runner)
-    assert record["failed"] == ["Q2", "Q6"]
-
-
-def test_result_check_retries_a_transient_store_error_once_and_records_it():
-    from types import SimpleNamespace
-
-    from lakebench.cli._sustained import continuous_result_check
-
-    ok = {"spec": "rf2", "rows": 1, "cols": 1, "exact": "ab"}
-
-    def qr(name, success, fp=None, err=""):
-        return SimpleNamespace(
-            query=SimpleNamespace(name=name),
-            success=success,
-            result_fingerprint=fp,
-            error_message=err,
-            to_dict=lambda: {"name": name},
-        )
-
-    result = SimpleNamespace(
-        queries=[
-            qr("Q1", True, ok),
-            # Ran, then the fingerprint run lost the S3 connection.
-            qr("Q2", True, {"spec": "rf2", "error": "IO Error: Could not connect to server"}),
-            # The engine pod died (OOM): not transient, not retried.
-            qr("Q6", False, err='unable to upgrade connection: container not found ("duckdb")'),
-        ]
-    )
-    calls = []
-
-    def repeat(query, cache, iterations, timeout):
-        calls.append(query.name)
-        return qr(query.name, True)
-
-    def fingerprint(results, timeout):
-        for r in results:
-            r.result_fingerprint = ok
-
-    runner = SimpleNamespace(
-        run_power=lambda **kw: result, _repeat_query=repeat, fingerprint_results=fingerprint
-    )
-    record, _ = continuous_result_check(runner)
-    assert calls == ["Q2"]
-    assert record["retried"] == ["Q2"]
-    assert record["failed"] == ["Q6"]
-
-
 def test_stream_marker_is_cleared_only_once_the_driver_pod_is_gone(monkeypatch):
     """A clean stop clears the AML stream's _STARTED marker so a later batch
     may rebuild silver; while the driver pod still exists it may write, so
@@ -1623,6 +1456,65 @@ def test_aml_continuous_composite_qph_is_the_fixed_set_median():
     assert scores["composite_qph_rounds"] == 3
     assert scores["composite_qph_basis"]["blended"] is False
     assert aggregate_benchmark_rounds(rounds).qph == 620.0
+
+
+def _round_with(names: list[str], failed=()):
+    r = _round(names, 500.0)
+    for q in r.queries:
+        q["success"] = q["name"] not in failed
+    return r
+
+
+def test_continuous_results_carry_the_rounds_query_set_id():
+    """A continuous record's experiment results name every query its
+    in-stream rounds ran: AML the full set once a round ran the
+    investigator queries, C360 its set even when a tolerated Q9 failed in
+    one round (the QpH basis may read blended; the identity does not
+    move), and none with no round."""
+    from lakebench.benchmark.queries import (
+        INVESTIGATOR_QUERIES,
+        get_benchmark_queries,
+        query_set_id,
+    )
+    from lakebench.config.schema import WorkloadSchema
+    from lakebench.metrics.collector import aml_fixed_query_set
+    from lakebench.metrics.experiment import _continuous_results
+
+    full = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
+    base = [n for n in full if n not in {q.name for q in INVESTIGATOR_QUERIES}]
+    c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    q9 = next(n for n in c360 if n.startswith("Q9"))
+    run = MagicMock(benchmark_rounds=[], financial_scoring=None)
+    assert _continuous_results(run)["query_set_id"] is None
+    run.benchmark_rounds = [_round_with(base), _round_with(full)]
+    assert _continuous_results(run)["query_set_id"] == aml_fixed_query_set()
+    run.benchmark_rounds = [_round_with(c360), _round_with(c360, failed=(q9,))]
+    assert _continuous_results(run)["query_set_id"] == query_set_id(c360)
+
+
+@pytest.mark.parametrize(
+    ("schema", "rounds", "fails"),
+    [
+        ("customer360", [], True),  # no round: no answer checked
+        ("customer360", [(), ("Q9",)], False),  # Q9 contention in one round
+        ("customer360", [("Q9",), ("Q9",)], True),  # gold never answered
+        ("financial", [], False),  # AML is judged on its alerts
+    ],
+)
+def test_a_c360_run_needs_a_round_and_one_q9_answer(schema, rounds, fails):
+    from lakebench.benchmark.queries import get_benchmark_queries
+    from lakebench.cli._sustained import no_rounds_problem
+    from lakebench.config.schema import WorkloadSchema
+    from tests.conftest import make_config
+
+    names = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    cfg = make_config(architecture={"workload": {"schema": schema}})
+    run = MagicMock(
+        benchmark_rounds=[
+            _round_with(names, failed=[n for n in names if n.split("_")[0] in f]) for f in rounds
+        ]
+    )
+    assert (no_rounds_problem(cfg, run) is not None) is fails
 
 
 @pytest.mark.parametrize("bucket_gib", [0.0, 500.0])

@@ -220,7 +220,6 @@ def run_sessions(
     result = runner.run_throughput(
         cache="hot",
         iterations=1,
-        fingerprint=False,
         query_timeout=timeout,
         stream_queries=[session_queries(c) for c in cases],
         shuffle=False,

@@ -1,22 +1,12 @@
-"""Result equivalence and evidence: fingerprint rules, comparability, stamps
-and maintenance records."""
+"""Evidence: comparability, stamps and maintenance records."""
 
 from __future__ import annotations
 
 import copy
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
-from lakebench.benchmark.fingerprint import (
-    Unsupported,
-    canonical_cell,
-    fingerprint_rows,
-    mismatch,
-    rows_from_beeline_tsv2,
-    rows_from_trino_json,
-)
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
@@ -34,22 +24,18 @@ def _cfg(**arch):
     return make_config(architecture=base)
 
 
-def _run(cfg=None, fps=None, fleet=None):
+def _run(cfg=None, fleet=None):
     cfg = cfg or _cfg()
     run = MetricsCollector().start_run(
         "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
     )
-    fps = fps if fps is not None else {"Q1": fingerprint_rows([(1, "x")])}
     run.benchmark = BenchmarkMetrics(
         mode="power",
         cache="hot",
         scale=1,
         qph=100.0,
         total_seconds=10.0,
-        queries=[
-            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
-            for n, f in fps.items()
-        ],
+        queries=[{"name": "Q1", "elapsed_seconds": 1.0, "success": True}],
     )
     run.datagen_fleet = fleet
     # Compare and perf_gate refuse a FAILED run. Mark the synthetic run
@@ -60,143 +46,6 @@ def _run(cfg=None, fps=None, fleet=None):
         for s in ("bronze-verify", "silver-build", "gold-finalize")
     ]
     return run
-
-
-# ---------------------------------------------------------------------------
-# Fingerprint rules
-# ---------------------------------------------------------------------------
-
-
-class TestApproxRowAssociation:
-    def test_swapped_values_between_groups_differ(self):
-        a = fingerprint_rows([("web", 1000.00), ("mobile", 5.00)], {1: 0.01})
-        b = fingerprint_rows([("web", 5.00), ("mobile", 1000.00)], {1: 0.01})
-        assert a["approx"] == b["approx"]  # the plain sum cannot see it
-        assert mismatch(a, b) and "row-weighted" in mismatch(a, b)
-
-    @pytest.mark.parametrize(
-        ("rows_a", "rows_b", "quantum", "mismatches"),
-        [
-            (
-                [(f"d{i}", 100.0) for i in range(90)],
-                [*[(f"d{i}", 100.0) for i in range(89)], ("d89", 189.0)],
-                1.0,
-                True,
-            ),
-            (
-                [(f"d{i}", 100.25) for i in range(455)],
-                [(f"d{i}", 100.25 + (0.01 if i % 50 == 0 else 0.0)) for i in range(455)],
-                0.01,
-                False,
-            ),
-            ([("x", 10.0)], [("x", 21.0)], 1.0, True),
-            ([("x", 10.0)], [("x", 12.0)], 1.0, False),
-        ],
-        ids=["one-far-off-row", "summation-noise", "single-row-beyond-quanta", "single-row-within"],
-    )
-    def test_approx_tolerance(self, rows_a, rows_b, quantum, mismatches):
-        a = fingerprint_rows(rows_a, {1: quantum})
-        b = fingerprint_rows(rows_b, {1: quantum})
-        assert bool(mismatch(a, b)) is mismatches
-
-
-class TestApproxSpecials:
-    def test_nan_matches_only_nan(self):
-        nan = fingerprint_rows([("a", float("nan"))], {1: 0.01})
-        num = fingerprint_rows([("a", 1.0)], {1: 0.01})
-        assert mismatch(nan, num)
-        assert mismatch(nan, fingerprint_rows([("a", "NaN")], {1: 0.01})) is None
-        assert mismatch(
-            fingerprint_rows([("a", float("inf"))], {1: 0.01}),
-            fingerprint_rows([("a", float("-inf"))], {1: 0.01}),
-        )
-
-
-class TestExactDigits:
-    def test_bigint_ids_as_text_keep_every_digit(self):
-        """Beeline sends a 19-digit xxhash64 id as text; Trino and DuckDB as an int."""
-        assert canonical_cell("-1234567890123456789") == canonical_cell(-1234567890123456789)
-        assert canonical_cell("1234567890123456789") != canonical_cell("1234567890123456788")
-
-    def test_decimal_sums_keep_their_cents(self):
-        assert canonical_cell("12345678901234.57") != canonical_cell("12345678901234.56")
-        assert canonical_cell("12345678901234.570") == canonical_cell("12345678901234.57")
-
-    def test_trino_json_numbers_are_read_as_text(self):
-        rows = rows_from_trino_json('{"id":1234567890123456789,"v":12345678901234.57}\n')
-        tsv = rows_from_beeline_tsv2("id\tv\n1234567890123456789\t12345678901234.57\n")
-        assert fingerprint_rows(rows)["exact"] == fingerprint_rows(tsv)["exact"]
-
-
-# ---------------------------------------------------------------------------
-# Empty output and empty rows
-# ---------------------------------------------------------------------------
-
-
-class TestEmptyOutput:
-    def test_no_tsv2_header_is_unsupported_not_zero_rows(self):
-        with pytest.raises(Unsupported):
-            rows_from_beeline_tsv2("")
-
-    def test_empty_trino_output_is_unsupported(self):
-        with pytest.raises(Unsupported):
-            rows_from_trino_json("")
-
-    def test_a_row_of_empty_cells_is_kept(self):
-        assert rows_from_beeline_tsv2("name\n\n") == [[""]]
-
-    def test_thrift_count_keeps_a_row_of_empty_cells(self):
-        from lakebench.benchmark.executor import SparkThriftExecutor
-
-        ex_ = SparkThriftExecutor(namespace="t", catalog_name="c")
-        ex_._pod = "p"
-        with mock.patch("subprocess.run") as run:
-            run.return_value = mock.MagicMock(returncode=0, stdout="name\n\n", stderr="")
-            assert ex_.execute_query("SELECT ''").rows_returned == 1
-
-
-class TestRunnerCrossCheck:
-    def _runner(self, timed_rows, fp):
-        from lakebench.benchmark.result import QueryExecutorResult
-        from lakebench.benchmark.runner import BenchmarkRunner
-
-        class Ex:
-            catalog_name = "lakehouse"
-
-            def engine_name(self):
-                return "trino"
-
-            def adapt_query(self, sql):
-                return sql
-
-            def flush_cache(self):
-                pass
-
-            def execute_query(self, sql, timeout=300):
-                return QueryExecutorResult(sql, "trino", 1.0, timed_rows, "x")
-
-            def fingerprint_query(self, sql, timeout=300, approx_columns=None):
-                self.timeout = timeout
-                return QueryExecutorResult(sql, "trino", 1.0, 0, "", fingerprint=fp)
-
-        executor = Ex()
-        with mock.patch("lakebench.benchmark.executor.get_executor", return_value=executor):
-            return BenchmarkRunner(make_config()), executor
-
-    def test_row_count_disagreeing_with_the_timed_run_is_unusable(self):
-        runner, _ = self._runner(5, fingerprint_rows([(1,)]))
-        result = runner.run_power(iterations=1)
-        fp = result.queries[0].result_fingerprint
-        assert "error" in fp
-
-    def test_empty_trino_result_agreeing_with_the_timed_run_is_zero_rows(self):
-        from lakebench.benchmark.fingerprint import unusable
-
-        fp = unusable("unsupported", "Trino printed no rows (an empty result ...)", "trino")
-        runner, _ = self._runner(0, fp)
-        result = runner.run_power(iterations=1)
-        got = result.queries[0].result_fingerprint
-        assert got["rows"] == 0 and "exact" in got
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +91,7 @@ class TestFreshnessProbe:
 
 
 # ---------------------------------------------------------------------------
-# Failed queries are one failure, not also a result mismatch
+# Observed corpus
 # ---------------------------------------------------------------------------
 
 
@@ -325,16 +174,16 @@ class TestBlockFollowsTheRecord:
         storage = MetricsStorage(tmp_path)
         storage.save_run(run)
         loaded = storage.load_run(run.run_id)
-        assert loaded.to_dict()["experiment"]["results"]["not_checked"]
+        assert loaded.to_dict()["experiment"]["results"]["query_set_id"] is None
         loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
         stored = copy.deepcopy(loaded.to_dict()["experiment"])
-        assert stored["results"]["not_checked"], "a stored block is never rebuilt"
+        assert stored["results"]["query_set_id"] is None, "a stored block is never rebuilt"
         ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
         # ... under its own run id: the run's record is written once.
         loaded.run_id = "bench-1"
         storage.save_run(loaded)
         e = storage.load_run("bench-1").to_dict()["experiment"]
-        assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+        assert e["results"]["query_set_id"] == loaded.benchmark.query_set_id
         assert e["benchmark_source"].startswith("lakebench benchmark")
         moved = ("results", "limits", "repetitions", "stages", "benchmark_source")
         assert {k: v for k, v in e.items() if k not in moved} == {
@@ -347,25 +196,6 @@ class TestBlockFollowsTheRecord:
         run = _run()
         run.maintenance_outcomes = []
         assert "not_run" in run.to_dict()["experiment"]["effective_maintenance"]["id"]
-
-
-class TestRunLocalIds:
-    def test_fq8_alert_id_is_volatile(self):
-        """alert_id is uuid() per pipeline run: two runs on one corpus must
-        still match."""
-        from lakebench.benchmark.queries import get_benchmark_queries
-        from lakebench.config.schema import WorkloadSchema
-
-        fq8 = next(
-            q for q in get_benchmark_queries(WorkloadSchema.FINANCIAL) if q.name.startswith("FQ8")
-        )
-        cols = fq8.fingerprint_columns()
-        run1 = fingerprint_rows([("uuid-a", "2026-01-01 00:00:00", "acme")], cols)
-        run2 = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "acme")], cols)
-        assert mismatch(run1, run2) is None
-        other = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "other")], cols)
-        assert mismatch(run1, other)
-        assert mismatch(run1, fingerprint_rows([(None, "2026-01-01 00:00:00", "acme")], cols))
 
 
 # ---------------------------------------------------------------------------

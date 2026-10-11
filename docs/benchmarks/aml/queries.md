@@ -63,14 +63,14 @@ SQL of the queries actually recorded, failed ones included.
 
 | ID | Class | Business question | Reads | Ordering and checks |
 |---|---|---|---|---|
-| `FQ1_txn_full_scan` | scan | Payment count, distinct originators and beneficiaries, total and average USD | silver.transactions | one row; `avg_txn_usd` (fifth column) at a quantum of 0.01 |
+| `FQ1_txn_full_scan` | scan | Payment count, distinct originators and beneficiaries, total and average USD | silver.transactions | one row |
 | `FQ2_top_corridors_window` | filter_prune | Top 100 bank-to-bank corridors by USD in the last 30 days of data | silver.transactions | window anchored on MAX(txn_timestamp), not the wall clock; total order by volume, then BICs and currency |
 | `FQ6_structuring_scan` | filter_prune | Originators with 3 or more payments just under a currency's reporting threshold (the W2 shape) | silver.transactions | top 500, total order by count, originator, currency |
 | `FQ3_entity_edge_risk` | aggregation | Per-entity out-degree and outbound USD | counterparty_edges, entities | top 200 by outbound USD, entity id |
-| `FQ7_cross_border_concentration` | aggregation | Cross-border share of USD per corridor | silver.transactions | top 100, total order; `xborder_share` (fifth column) at a quantum of 0.001 |
+| `FQ7_cross_border_concentration` | aggregation | Cross-border share of USD per corridor | silver.transactions | top 100, total order |
 | `FQ4_running_balance_window` | analytics | Ordered statement entries for the 50 most active accounts, running balance recomputed in ledger order | account_statements | see below |
-| `FQ5_alert_triage` | operational | Alerts by rule, priority and status with entity count and mean score | gold.alerts | ORDER BY alerts DESC only, no LIMIT; fingerprint order-independent; `avg_score` (sixth column) at a quantum of 0.001 |
-| `FQ8_alert_to_entity_join` | operational | 100 most recent alerts with entity and payment count | gold.alerts, entities | total order by alert_ts, entity, rule, alert_id; `alert_id` volatile (NULL-ness only); `txns_in_alert` is Lakebench-capped, see below |
+| `FQ5_alert_triage` | operational | Alerts by rule, priority and status with entity count and mean score | gold.alerts | ORDER BY alerts DESC only, no LIMIT |
+| `FQ8_alert_to_entity_join` | operational | 100 most recent alerts with entity and payment count | gold.alerts, entities | total order by alert_ts, entity, rule, alert_id; `alert_id` is a per-run uuid; `txns_in_alert` is Lakebench-capped, see below |
 | `IQ1_customer_360` | investigator | 360 view of the top open case | cases, alert_dispositions, accounts, entities | case picked by status, priority, opened date, case id; TM reads scoped to the TM run id |
 | `IQ2_case_activity_12m` | investigator | Monthly activity in the 365 days before the newest escalation case | cases, silver.transactions | `allow_empty` |
 | `IQ3_counterparty_two_hop` | investigator | Counterparties and two-hop network of the oldest open case | cases, edges, entities, alert_dispositions | both hops sum edge rows per pair; top 50 hop-1, top 500 overall, total order |
@@ -93,8 +93,7 @@ Rules for every query:
 - Every ORDER BY feeding a LIMIT or ROW_NUMBER ends in keys that make the
   order total.
 - Engine sessions are pinned to UTC (Trino `--timezone UTC`, DuckDB
-  `SET TimeZone='UTC'`, Spark Thrift session time zone UTC). The fingerprint
-  reads zone-less timestamps as UTC.
+  `SET TimeZone='UTC'`, Spark Thrift session time zone UTC).
 - Queries are in Trino dialect. Engine adapters change dialect (`date_add`,
   `DATE_DIFF`, and on DuckDB `cardinality` to `len`), with at most one
   `DATE_DIFF` per investigator query.
@@ -102,17 +101,8 @@ Rules for every query:
   `iceberg_scan` of the table's storage path. So DuckDB reads table metadata
   from object storage, not the catalog; the run records
   `query_access_path: direct_storage`.
-- Result check (batch): after the scored round's timed samples, one untimed
-  execution per successful query records an `rf2` fingerprint.
-  - It is an order-independent sum of per-row hashes over exact
-    Decimal-normalised cells.
-  - Approximate columns are summed per column, once plainly and once
-    weighted by a per-row factor. They match when both sums are within
-    tolerance.
-  - Volatile columns count as NULL-ness.
-  - A row-count mismatch between the timed and fingerprint executions marks
-    the fingerprint unusable.
-  - The pre-compaction round and continuous rounds are never fingerprinted.
+- Each query's answer is recorded as its row count from the timed run; no
+  answer hash is recorded.
 
 Ad-hoc SQL against the deployment uses `lakebench query`
 ([Customer 360 queries](../c360/queries.md#running-ad-hoc-queries)).

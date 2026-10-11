@@ -20,8 +20,8 @@
 
 A publishable AML result is a full batch `lakebench run` without `--stage`,
 with the benchmark and a query engine, on an unverified or supported
-composition, with verdict PASSED. An AML continuous run records no result
-fingerprints, so it cannot show it returned another run's answers.
+composition, with verdict PASSED. An AML continuous run's alerts depend on
+when ticks ran, so it cannot show it returned another run's answers.
 
 ## 7.2 Permitted tuning (still publishable)
 
@@ -61,7 +61,7 @@ These change the identity, so the runs are not comparable:
 - workload parameters (`parameters_id` hashes every TM operations setting,
   `w1_max_vertices`, `retention_workload` and `retention_months`);
 - mode;
-- a different query set or any differing result fingerprint;
+- a different query set;
 - the corpus group: corpus id, seed, corpus role, scale, cycle count above 1,
   and the generator digest when both runs observed one;
 - different identity versions (exp1 against exp2);

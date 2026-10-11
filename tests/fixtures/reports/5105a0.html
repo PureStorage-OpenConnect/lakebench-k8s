@@ -246,17 +246,17 @@
             </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">0.809 GB/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-value">0.809 GiB/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-delta" style="color: var(--text-muted);">
-                    295.7 GB of stage inputs; corpus 99.1 GB in bronze
+                    295.7 GiB of stage inputs; corpus 99.1 GiB in bronze
                 </div>
-                <div class="card-hint">stage inputs processed per second (bronze + silver + gold + query reads)</div>
+                <div class="card-hint">stage inputs processed per second (bronze, silver and gold reads)</div>
                 <div class="card-hint2">&#8593; higher is better</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">132.44 GB/core-hr</div>
-                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-value">132.44 GiB/core-hr</div>
+                <div class="card-hint">stage-input GiB per core-hour requested</div>
                 <div class="card-hint2">&#8593; higher is better</div>
             </div>
             <div class="card">
@@ -264,6 +264,7 @@
                 <div class="card-value">855.6<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, 3 samples/query</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">&#8593; higher is better | ~14 queries/min</div>
+                <div class="card-hint2">within-run spread over 3 samples/query: QpH <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.qph_spread.low" data-lb-fmt=",.1f">820.5</span> to <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.qph_spread.high" data-lb-fmt=",.1f">891.1</span> (fastest and slowest samples; samples in one run, not runs)</div>
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
@@ -347,7 +348,7 @@
         <section>
             <h2>Pipeline Benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Mode: batch | Time-to-Value: <strong>365.4s</strong> | Stage-input throughput: <strong>0.809 GB/s</strong> | Stage inputs: 295.7 GB (corpus 99.1 GB in bronze)
+                Mode: batch | Time-to-Value: <strong>365.4s</strong> | Stage-input throughput: <strong>0.809 GiB/s</strong> | Stage inputs: 295.7 GiB (corpus 99.1 GiB in bronze)
             </div>
             <table>
                 <thead>
@@ -356,11 +357,11 @@
                         <th>Stage</th>
                         <th>Engine</th>
                         <th>Time</th>
-                        <th>In (GB)</th>
-                        <th>Out (GB)</th>
+                        <th>In (GiB)</th>
+                        <th>Out (GiB)</th>
                         <th>In Rows</th>
                         <th>Out Rows</th>
-                        <th>GB/s</th>
+                        <th>GiB/s</th>
                         <th>Rows/s</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
@@ -492,9 +493,9 @@
                 <td><code class="mono">lakebench-bronze-verify</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>85.5s</td>
-                <td>99.12 GB</td>
+                <td>99.12 GiB</td>
                 <td>24,770,109</td>
-                <td>2.78 GB/s</td>
+                <td>2.78 GiB/s</td>
                 <td>4</td>
                 <td>2</td>
                 <td>684</td>
@@ -504,9 +505,9 @@
                 <td><code class="mono">lakebench-silver-build</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>190.7s</td>
-                <td>99.12 GB</td>
+                <td>99.12 GiB</td>
                 <td>24,274,519</td>
-                <td>0.66 GB/s</td>
+                <td>0.66 GiB/s</td>
                 <td>8</td>
                 <td>4</td>
                 <td>6,102</td>
@@ -516,9 +517,9 @@
                 <td><code class="mono">lakebench-gold-finalize</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>78.2s</td>
-                <td>97.46 GB</td>
+                <td>97.46 GiB</td>
                 <td>366</td>
-                <td>1.25 GB/s</td>
+                <td>1.25 GiB/s</td>
                 <td>4</td>
                 <td>4</td>
                 <td>1,252</td>
@@ -642,6 +643,14 @@
         
 
         
+        <section>
+            <h2>Platform Metrics</h2>
+            <p style="color: var(--text-muted); font-size: 0.875rem;">
+                Not collected: observability was off for this run, so no per-pod
+                CPU or memory was read from Prometheus. Stage figures above come
+                from the run's own record.</p>
+        </section>
+        
 
         
         <section>
@@ -713,7 +722,7 @@
                 
             </div>
         </section>
-        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus and mode match and every result fingerprint below (and, for an AML batch run, the alert set) is equal. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>9be64a9a08289b8e</code></td></tr><tr><td>Workload</td><td><code class='mono'>customer360 c360-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>none</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>194912d5ba8ce6db</code></td></tr><tr><td>Seed</td><td><code class='mono'>42</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>10.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;0s&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 3</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>none</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>Query set <code class='mono'>qs8-32043638dbc4</code></p><table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead><tbody><tr><td>Q1_full_aggregation_scan</td><td><code class='mono'>rf2 rows=1 cols=5 exact=c58b144823c5f99d approx{3:6.6089e+08, 4:151.26}</code></td></tr><tr><td>Q2_filtered_aggregation</td><td><code class='mono'>rf2 rows=455 cols=5 exact=5d134890fca9b0ae approx{4:1.64372e+08}</code></td></tr><tr><td>Q3_customer_segmentation</td><td><code class='mono'>rf2 rows=12 cols=6 exact=1f96978736f3537e approx{3:6.6089e+08, 4:37.8, 5:39547.5}</code></td></tr><tr><td>Q4_churn_risk_analysis</td><td><code class='mono'>rf2 rows=6 cols=7 exact=ea91f4e977c84f78 approx{5:0, 6:13.5}</code></td></tr><tr><td>Q5_revenue_trend_ma7</td><td><code class='mono'>rf2 rows=90 cols=6 exact=9e5bd19027fdb4ba approx{2:1.63289e+08, 4:1.63224e+08, 5:323571}</code></td></tr><tr><td>Q6_customer_rfm</td><td><code class='mono'>rf2 rows=5 cols=5 exact=478a92b75a422295 approx{2:531554, 3:221.4, 4:429}</code></td></tr><tr><td>Q7_channel_conversion_funnel</td><td><code class='mono'>rf2 rows=5 cols=9 exact=5f8c68cd90dba94a approx{6:257.19, 7:6.6089e+08, 8:8.35}</code></td></tr><tr><td>Q9_executive_dashboard</td><td><code class='mono'>rf2 rows=30 cols=8 exact=c11e0934eb31f283 approx{6:-9693.44, 7:-3.5}</code></td></tr></tbody></table></section>
+        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus, mode and query set match (and, for an AML batch run, their alert sets are equal). Lakebench does not compare query answers: read the row counts and numbers of both reports. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>9be64a9a08289b8e</code></td></tr><tr><td>Workload</td><td><code class='mono'>customer360 c360-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>none</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>194912d5ba8ce6db</code></td></tr><tr><td>Seed</td><td><code class='mono'>42</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>10.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;0s&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 3</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>none</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Query set</td><td><code class='mono'>qs8-32043638dbc4</code></td></tr></tbody></table></section>
 
         <footer>
             Generated by Lakebench | (timestamp removed)

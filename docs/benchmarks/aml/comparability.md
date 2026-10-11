@@ -20,7 +20,7 @@ published AML result must show:
 | Stages executed and skipped; rules executed, skipped (with reason) and errored | `experiment.stages`, `experiment.rules`. Continuous: disclose the mode-excluded W1, W7 and W8 from `experiment.support.mode_note` (they are not in `experiment.rules.skipped`) |
 | Caps configured and caps that bound | `experiment.limits` (`bound`, `bound_kinds`; continuous `trickle_bound`) |
 | Repetitions | `experiment.repetitions` (each record is one run, `runs: 1`; `run --repeat` records a series whose members are listed in its manifest; label a one-run figure n=1) |
-| Query set id and per-query fingerprints, or `not_checked` with the reason | `experiment.results.query_set_id`, `.fingerprints`, `.not_checked` |
+| Query set id (continuous: every query the in-stream rounds ran; null with no round) | `experiment.results.query_set_id` |
 | AML scoring and its mode | `financial_scoring` (`mode`, `status`, `reason`) |
 | Code provenance | `provenance`, `experiment.lakebench` (`lakebench_version`, `git_sha`, `git_dirty`, `install`, `tree_sha256`, the dependency set and observed image digests) |
 
@@ -41,13 +41,14 @@ comparable only when (`metrics/comparability.py`):
   ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused))
   is equal, and neither has a corpus problem (config and datagen pods
   disagree);
-- they ran the same query set with every result fingerprint matching, and
-  for batch the alert set matches rule by rule (a different alert set is a
-  different result; [8.7](scoring.md#87-alert-set)).
+- they ran the same query set, and for batch the alert set matches rule by
+  rule (a different alert set is a different result;
+  [8.7](scoring.md#87-alert-set)).
 
-- Results are not checked for AML continuous runs
-  (`experiment.results.not_checked`) or a `*-none` recipe, so such runs cannot
-  show matching answers.
+- Lakebench does not compare query answers: a reader compares the per-query
+  row counts and numbers of the two reports by eye.
+- An AML continuous run has no comparable alert set, and a `*-none` recipe no
+  query set, so such runs cannot show matching results.
 - Differing execution conditions
   ([7.2](execution-rules.md#72-permitted-tuning-still-publishable)), or only
   the dependency pinset, leave the pair comparable but not like-for-like: a

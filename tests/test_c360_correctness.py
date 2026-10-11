@@ -325,18 +325,14 @@ def _facts(days, rows_per_day=2_000, tx_per_day=360, support_per_day=240):
     }
 
 
-def _q(name, rows, ok=True, revenue=None):
-    q = {"name": name, "rows_returned": rows, "success": ok}
-    if revenue is not None:
-        q["result_fingerprint"] = {"approx": {"3": revenue}}
-    return q
+def _q(name, rows, ok=True):
+    return {"name": name, "rows_returned": rows, "success": ok}
 
 
 def test_benchmark_row_counts_on_a_dense_year():
     facts = _facts(366)
-    facts["gold"]["sums"] = {"total_daily_revenue": 54_900.0}
     queries = [
-        _q("Q1_full_aggregation_scan", 1, revenue=54_900.0),
+        _q("Q1_full_aggregation_scan", 1),
         _q("Q2_filtered_aggregation", 91 * 5),  # 2024-01-01 .. 2024-03-31
         _q("Q4_churn_risk_analysis", 6),
         _q("Q3_customer_segmentation", 12),
@@ -347,26 +343,6 @@ def test_benchmark_row_counts_on_a_dense_year():
     ]
     checks = c3.benchmark_checks(queries, facts, {})
     assert {c["status"] for c in checks} == {"pass"}, checks
-
-
-@pytest.mark.parametrize(
-    ("revenue", "status"),
-    [(54_900.004, "pass"), (55_900.0, "fail"), (None, "unchecked")],
-)
-def test_q1_revenue_answer_matches_gold(revenue, status):
-    """Q1's total_revenue is the benchmark's answer for the quantity gold
-    sums as total_daily_revenue: they agree within rounding, or the check
-    fails (reporting only); without Q1's fingerprint it is unchecked."""
-    facts = _facts(366)
-    facts["gold"]["sums"] = {"total_daily_revenue": 54_900.0}
-    checks = {
-        c["id"]: c
-        for c in c3.benchmark_checks(
-            [_q("Q1_full_aggregation_scan", 1, revenue=revenue)], facts, {}
-        )
-    }
-    assert checks["benchmark_answer_Q1_revenue"]["status"] == status
-    assert "benchmark_answer_Q1_revenue" not in c3.GATING_CHECKS
 
 
 def test_benchmark_row_counts_catch_a_wrong_shape_and_skip_failed_queries():

@@ -452,8 +452,6 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
                     "elapsed_seconds": r[2],
                     "success": r[1],
                     "rows_returned": r[3],
-                    # (name, ok, elapsed, rows[, fingerprint]): see benchmark_local.
-                    "result_fingerprint": r[4] if len(r) > 4 else None,
                 }
                 for r in bench_results
             ],
@@ -958,7 +956,7 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
     """
     try:
         # One sample: the pass exists to touch every table, not to be timed.
-        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1, fingerprint=False)
+        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("benchmark warm-up pass failed: %s", e)
 
@@ -1904,8 +1902,7 @@ def run(
     With --continuous, runs the continuous pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
     and gold-refresh as concurrent Spark jobs. Runs in-stream benchmark
-    rounds during the configured duration, then lets the corpus settle,
-    stops the jobs and fingerprints the query set over the settled tables.
+    rounds during the configured duration, then stops the jobs.
     """
 
     config_file = resolve_config_path(config_file, file_option)
@@ -3369,8 +3366,6 @@ def _run_once(
                         iterations=cfg.architecture.benchmark.iterations,
                         progress_callback=_bench_progress,
                         query_timeout=_pre_timeout,
-                        # Results are checked on the post-maintenance benchmark.
-                        fingerprint=False,
                     )
                     pre_compaction_qph = _pre_result.qph
                     _pre_record = _pre_result.to_dict()

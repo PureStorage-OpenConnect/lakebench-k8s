@@ -63,8 +63,7 @@ refused before any cluster call (exit 2, `cli/_run_args.py:RUN_RULES`).
 4. **Pre-benchmark maintenance and benchmark**
    ([7.2](execution-rules.md#72-maintenance-policy-handling),
    [6](queries.md#6-query-set)): an optional pre-maintenance round, table
-   maintenance, a storage settle wait, and the scored round with result
-   fingerprints.
+   maintenance, a storage settle wait, and the scored round.
 
 ### 4.2 Continuous mode (`pipeline.mode: continuous` or `run --continuous`)
 
@@ -113,15 +112,8 @@ refused before any cluster call (exit 2, `cli/_run_args.py:RUN_RULES`).
    (default 1,800). Inside it: in-stream benchmark rounds
    ([6](queries.md#6-query-set)) and table maintenance rounds
    ([7.2](execution-rules.md#72-maintenance-policy-handling)).
-6. **Gates** ([5.3](correctness.md#53-continuous-window-gate)), then **settle
-   and result check**, none of it scored.
-   - The CLI estimates how long the rest of the corpus needs to reach gold.
-     The estimate is remaining rows at the rate bronze held, plus two silver
-     cycles, two gold refreshes and 60 s. A silver cycle is its trigger, or
-     back to back its median batch time, at least 120 s.
-   - Above 1,800 s the result check is skipped with no wait, and the run
-     records `results.not_checked`.
-   - Otherwise the streams run until every datagen row is in bronze, silver
-     has committed all of them and a gold refresh has read silver after its
-     last commit. Then the streams stop, the query set runs once and every
-     result is fingerprinted.
+6. **Gates** ([5.3](correctness.md#53-continuous-window-gate)). The streams
+   stop at window end; the run does not wait for silver and gold to finish
+   the rows bronze took. The in-stream rounds are the only query checks; a
+   run with a benchmark fails with no in-stream round, or with Q9 failed in
+   every round.

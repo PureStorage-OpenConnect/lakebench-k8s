@@ -7,14 +7,12 @@
 - **Batch**: all three stages in order, then the benchmark unless the recipe
   has no query engine. `--stage` runs one stage and skips the correctness
   evaluation, so it is not a benchmark run.
-- **Continuous**: all three streams for the full window, the gates and the
-  result check. A run without the result check (`--skip-benchmark`, no query
-  engine, a corpus that did not settle or was too large to settle within
-  1,800 s) cannot be shown comparable.
+- **Continuous**: all three streams for the full window, at least one
+  in-stream round when a benchmark runs, and the gates. The streams stop at
+  window end.
 - **Iterations**: batch timed samples per query = `benchmark.iterations`
   (default 3, range 1 to 100), scored by the per-query median. In-stream
-  rounds take 1 sample per query whatever the config says; the result check
-  takes 1.
+  rounds take 1 sample per query whatever the config says.
 - **Timeouts**: per stage `--timeout`, else `max(3600, scale x 120)` s.
   Benchmark query 300 s. The phase-3 datagen wait uses the stage timeout
   (per cycle in a multi-cycle run); exceeding it deletes the datagen Job and
@@ -41,7 +39,7 @@ recorded in `experiment.effective_maintenance` with classes `ran`,
 | Delta + Trino | VACUUM at the resolved retention; OPTIMIZE never runs (`not_supported`) | VACUUM at Delta's 7-day default while streams are live (`ran_no_effect`); no OPTIMIZE. No effective maintenance; the record says so in `known_limitations` |
 | Delta + Spark Thrift | VACUUM and OPTIMIZE skipped (`not_supported`) | same |
 | DuckDB (Iceberg) | none (`not_supported`); the settle wait is skipped because no statement ran | none (`not_supported`) |
-| No query engine | no benchmark, no maintenance | no rounds, result check or maintenance |
+| No query engine | no benchmark, no maintenance | no rounds or maintenance |
 
 Both Iceberg compaction statements aim at the table's 128 MB
 `write.target-file-size-bytes` but select files differently. The record names
@@ -55,7 +53,7 @@ like-for-like (`metrics/maintenance_policy.py`,
 `--skip-maintenance` or `pre_benchmark_maintenance: false`):
 
 1. file count probe;
-2. a pre-maintenance round (warm-up pass, then timed, not fingerprinted), at
+2. a pre-maintenance round (warm-up pass, then timed), at
    scale below 50 only;
 3. maintenance and compaction under one 1,800 s budget; the first statement
    timeout or the deadline stops the rest and records `maintenance_stopped`;
@@ -158,8 +156,7 @@ What may be tuned:
   corpus id, seed, scale, corpus role or cycle count above 1;
 - a different generator image (exp1) or generator digest (when both runs
   recorded one);
-- a mixed or disagreeing datagen fleet;
-- any differing result fingerprint.
+- a mixed or disagreeing datagen fleet.
 
 **Corpus id** (`metrics/experiment.py`, `metrics/corpus_identity.py`):
 
@@ -194,7 +191,7 @@ What may be tuned:
 | Trickle, examples | at the trickle's 30 s trigger and a 1,800 s window: scale 1 gives 2 (about 2,400 s of arrival), scale 10 gives 22 (about 2,190 s) | as above |
 | Trickle, explicit | an explicit `max_files_per_trigger` is used as given, bounded only below (>= 1) and by the arrival rule | as above |
 | Pre-benchmark maintenance budget | 1,800 s | `maintenance_stopped`, `limits.bound` |
-| Settle waits | batch 2,700 s default; continuous 1,800 s, the result check skipped without waiting when the estimate exceeds it | `maintenance_settle_capped`; `results.not_checked` |
+| Settle wait (batch) | 2,700 s default | `maintenance_settle_capped` |
 | Sizing cuts to fit the cluster | as printed | `limits.autosize_cuts`, `limits.bound` |
 
 - A bound cap enters `limits.bound_kinds`, part of the like-for-like

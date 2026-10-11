@@ -255,8 +255,8 @@ _ROUND_RECORD_KEYS = (
 def recorded_engine(bench: dict[str, Any]) -> str | None:
     """The query engine a recorded benchmark ran on. Records from before the
     ``engine`` field stamped ``benchmark_type`` "trino_query" on every
-    engine, so it is not trusted; the per-query result fingerprints carried
-    the real engine and are used instead."""
+    engine, so it is not trusted; the per-query result fingerprints those
+    records carry name the real engine and are used instead."""
     if bench.get("engine"):
         return str(bench["engine"])
     for q in bench.get("queries") or []:

@@ -693,12 +693,7 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
     ``build_experiment`` makes from the record's ``experiment_inputs`` (what
     a record without a stored block gets on load; a stored block is never
     rebuilt, so this is the stricter of the two)."""
-    from lakebench.metrics.experiment import (
-        build_experiment,
-        experiment_of,
-        identity,
-        result_fingerprints,
-    )
+    from lakebench.metrics.experiment import build_experiment, experiment_of, identity
     from lakebench.metrics.storage import MetricsStorage
 
     def view(exp: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -708,7 +703,9 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "identity": identity(exp),
             "corpus_id": (exp.get("corpus") or {}).get("id"),
-            "fingerprints": result_fingerprints(exp),
+            # Older stored blocks carry per-query result
+            # fingerprints; the scrubber must leave them as they are.
+            "fingerprints": (exp.get("results") or {}).get("fingerprints"),
             "query_set_id": (exp.get("results") or {}).get("query_set_id"),
             "stages": exp.get("stages"),
             "bound_kinds": limits.get("bound_kinds"),

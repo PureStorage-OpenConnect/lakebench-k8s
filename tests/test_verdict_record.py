@@ -70,12 +70,11 @@ def _no_alerts(rec: dict) -> None:
     rec["financial_scoring"]["total_alerts"] = 0
 
 
-def _drain_unsettled(rec: dict) -> None:
-    # The drain stopped bronze mid-batch and silver never caught up, so the
-    # end-of-run result check did not run: the answers are not established.
-    rec.setdefault("continuous", {})["result_check"] = {
-        "not_checked": "the drain did not settle: silver has committed 1 of 2 bronze rows"
-    }
+def _last_round_empty(rec: dict) -> None:
+    # Continuous: the last in-stream round is judged (earlier rounds can
+    # run before gold holds rows).
+    for q in rec["benchmark_rounds"][-1]["queries"]:
+        q["rows_returned"] = 0
 
 
 MUTATIONS = {
@@ -85,7 +84,7 @@ MUTATIONS = {
     "scale_ratio_0": (C360_BATCH, _ratio_zero, "scale_ratio"),
     "every_rule_errored": (AML_BATCH, _rules_errored, "aml_rules"),
     "zero_alerts": (AML_BATCH, _no_alerts, "aml_rules"),
-    "continuous_result_check_not_done": (C360_CONT, _drain_unsettled, "result_check"),
+    "continuous_last_round_empty": (C360_CONT, _last_round_empty, "query_answers"),
 }
 
 

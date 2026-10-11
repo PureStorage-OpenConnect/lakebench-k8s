@@ -155,7 +155,7 @@ def _metrics_with_experiment(
         "maintenance_settings": {},
         "system": "cluster",
         "support": {"state": "unverified", "basis": "test-fixture"},
-        "results": {"fingerprints": {"q1": "aa" * 16}},
+        "results": {"query_set_id": "qs1-aaaaaaaaaaaa"},
         # repetitions.runs counts INDEPENDENT runs behind the record; the
         # confidence chip must never claim replication from in-stream
         # rounds (benchmark_iterations), which are within one run.

@@ -55,11 +55,12 @@ engine x query engine, on a known system):
 
 - These figures are valid only when the verdict passes
   ([5](aml/correctness.md#5-correctness-contract)).
-- A batch comparison also needs both runs to return the same query results
-  ([10](aml/comparability.md#10-comparability)).
-- An AML continuous run records no result fingerprints. Its alerts depend on
-  when detection and TM passes ran relative to arrival. A continuous
-  comparison can never establish its results.
+- A batch comparison also needs both runs to have the same query set and
+  alert set ([10](aml/comparability.md#10-comparability)). Lakebench does not
+  compare query answers.
+- An AML continuous run's alerts depend on when detection and TM passes ran
+  relative to arrival. A continuous comparison can never establish its
+  results.
 
 What it does not claim:
 
@@ -102,7 +103,7 @@ only on the cells it lists; every other valid combination is unverified.
 | hive-iceberg-spark-trino (`default`) | catalog | 4.1.1 | |
 | hive-iceberg-spark-thrift | catalog | 4.1.1 | query and pipeline share Spark |
 | hive-iceberg-spark-duckdb | direct storage | 4.1.1 | DuckDB runs no Iceberg maintenance |
-| hive-iceberg-spark-none | none | 4.1.1 | no query benchmark, QpH or result fingerprints |
+| hive-iceberg-spark-none | none | 4.1.1 | no query benchmark or QpH |
 | polaris-iceberg-spark-trino | catalog | 4.0.2 | |
 | polaris-iceberg-spark-thrift | catalog | 4.0.2 | |
 | polaris-iceberg-spark-duckdb | direct storage | 4.0.2 | as DuckDB above |

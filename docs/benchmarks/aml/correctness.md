@@ -37,11 +37,10 @@ at a fixed seed but not checked; check them from `metrics.json`
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |
 | Continuous: ingest ratio at least 0.95, unless the [trickle](../../glossary.md#trickle) bounded intake and the pipeline kept pace, or a capacity run with bronze at capacity (then a warning) | record gates | yes |
 | Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance gate | yes; peak gold freshness is reported beside it, never gated |
-| Continuous end-of-run result check | not performed; `experiment.results.not_checked` | n/a |
 
-No AML query has fixed expected results. Query correctness across runs rests
-only on result fingerprints compared between two batch runs
-([10](comparability.md#10-comparability)); an answer wrong the same way on
-both sides is not detected. The detection gate reads the last gold-finalize
+No AML query has fixed expected results, and Lakebench does not compare
+query answers between runs: a reader compares row counts by eye
+([10](comparability.md#10-comparability)), and an answer wrong the same way
+on both sides is not detected. The detection gate reads the last gold-finalize
 job. The TM verdict reads every cycle and is `unknown` when any cycle's log
 was not parsed.

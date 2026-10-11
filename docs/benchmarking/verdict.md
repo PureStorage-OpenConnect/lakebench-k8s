@@ -1,6 +1,6 @@
 # Verdict
 
-Reference: what a PASSED verdict asserts, the continuous gate and result check, and requested versus effective values.
+Reference: what a PASSED verdict asserts, the continuous gate, what happens after the window, and requested versus effective values.
 
 ## What a PASSED verdict asserts
 
@@ -39,17 +39,12 @@ Corpus out after half the window: the run passes (`window_arrival_fraction` show
 - Submission failures (such as a truncated Maven download): printed, journaled, `streaming[].submission_failures`. RUNNING time: `running_at`.
 - `continuous.balance`: `balanced`, `measured`, `bottleneck`, `lever`, and per handoff (`datagen->bronze`, `bronze->silver`, `silver->gold`): `samples`, `first_half_max_s`, `end_s`, `cadence_s`, `second_half_growth_s`, `allowance_s`, `keeps_up`, `busy_share`, and `not_judged` with a reason. `trend_samples` keeps the per-batch lag samples.
 
-## Result check
+## After the window
 
-In-stream results are not compared. After the gates pass, the CLI drains the pipeline:
-
-- Bronze stops at window end. Silver and gold finish bronze's rows (all committed by silver, plus a gold refresh after silver's last commit), for at most 1800 s. The streams stop and the query set runs once over the settled tables. With `--skip-generate` it waits for the whole corpus.
-- Fingerprints match only when bronze took the same rows. A failing query fails the run.
-- Fingerprints are the run's results (`continuous.result_check`, experiment `results`); two runs compare only with equivalent results.
-- A run whose check did not run records why in `results.not_checked` and is never shown as comparable.
-- The `result_check` gate fails it (drain did not settle, check could not run). Declared reasons pass with a `results_unchecked` qualifier: no query engine, `--skip-benchmark`, an already failed run, AML continuous, a corpus needing more than the 1800 s settle limit.
-- AML continuous is not result-checked: its timed detection and TM passes make tables timing-dependent.
-- None of this time is in the window.
+- The streams stop at window end; the run does not wait for silver and gold to finish the rows bronze took. AML gold-refresh first finishes its tick ([drain](../glossary.md#drain)).
+- The in-stream rounds are the only query checks: a failed query fails the run (a Q9 failure is tolerated, as contention with gold refresh), and empty answers count in the last round only (`query_answers`, above). Lakebench does not check answer values.
+- A Customer 360 run with a benchmark fails when no in-stream round ran, or Q9 failed in every round (`c360 continuous gate: ...`).
+- `experiment.results.query_set_id` names every query the rounds ran, failed ones included; AML gets the 12-query set once a round ran the investigator queries.
 
 ## Requested and effective values
 

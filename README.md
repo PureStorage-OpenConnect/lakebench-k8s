@@ -6,9 +6,9 @@
 Lakebench deploys a lakehouse stack on Kubernetes from one YAML file, runs a
 data workload through it, and reports how it behaved.
 
-Each run records what produced it, including a fingerprint of every query
-result. A reader can check that two runs returned the same answers before
-comparing their numbers.
+Each run records what produced it: corpus, components, query set and the
+Lakebench caps that applied. A reader can check that two runs did the same
+work before comparing their numbers.
 
 ## What it is for
 
@@ -173,7 +173,7 @@ the run:
 - workload and generator version, seed, recipe and component versions
 - scale, mode and the maintenance that ran
 - which Lakebench caps applied and whether they bound
-- the support state, and each query's result fingerprint
+- the support state, and the benchmark query set id
 
 ## Comparing two stacks
 
@@ -191,12 +191,13 @@ The Experiment section of each HTML report lists:
 - the corpus and datagen image
 - the components and the maintenance that ran
 - the stages and rules that ran
-- one result fingerprint per benchmark query
+- the benchmark query set id
 - for AML batch runs, the alert set
 
-Compare performance only when the corpus, the fingerprints and the alert set
-match. A difference means the two stacks returned different answers. A
-number bounded by a Lakebench cap is labelled as such.
+Compare performance only when the corpus, the query set id and (AML batch)
+the alert set match. Lakebench does not compare query answers: check the
+per-query row counts and numbers in both reports by eye. A number bounded by
+a Lakebench cap is labelled as such.
 
 ## Upgrading
 

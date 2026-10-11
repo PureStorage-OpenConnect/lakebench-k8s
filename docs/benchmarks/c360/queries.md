@@ -13,8 +13,8 @@ sorted by name (a name not in the registry hashes by name only).
 - The hash covers the registry SQL, not engine-rewritten SQL. Changing any
   query's SQL changes the id, and QpH across ids is refused.
 - A batch run's id covers every query name in the result, successful or not.
-- A continuous round records the set of queries that succeeded in it. The
-  post-settle result check hashes every query it ran ([8.2](metrics.md#82-continuous)).
+- A continuous round records the set of queries that succeeded in it; the
+  run's id is that of its aggregated rounds ([8.2](metrics.md#82-continuous)).
 - Power-run order: Q1, Q2, Q4, Q3, Q7, Q5, Q6, Q9 (by class: scan,
   filter/prune, aggregation, analytics, operational). There is no Q8.
 - Throughput mode: each stream shuffles the order independently.
@@ -58,10 +58,10 @@ Rules for every query:
 - **Tie-breaking.** Every `ORDER BY` feeding a `LIMIT` or window ends in a
   unique key: Q5 and Q9 order by `interaction_date`, unique per row of their
   input. Queries without a `LIMIT` (Q2, Q3, Q4, Q6, Q7) may return ties in
-  engine-dependent order; the fingerprint is order-independent.
+  engine-dependent order.
 - **Time zone.** Stage and query sessions are pinned to UTC on every engine
   (Trino `--timezone`, Spark Thrift `spark.sql.session.timeZone=UTC`, DuckDB
-  `SET TimeZone='UTC'`); a zone-less timestamp is fingerprinted as UTC.
+  `SET TimeZone='UTC'`).
 - **Dialect.** Queries are in Trino dialect. Engine adapters rewrite dialect
   and, on DuckDB, table references, nothing else. For example, on Spark
   Thrift `date_add('month', 3, x)` becomes `add_months(x, 3)` and

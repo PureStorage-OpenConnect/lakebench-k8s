@@ -1,4 +1,5 @@
-"""Executor internals: DuckDB payload parsing and Spark Thrift row counting."""
+"""Executor internals: DuckDB payload parsing, Spark Thrift row counting and
+the Trino session zone."""
 
 from __future__ import annotations
 
@@ -43,6 +44,8 @@ class TestSparkThriftExecuteQuery:
         [
             ("col1\tcol2\nval1\tval2\nval3\tval4", 2),  # tsv2 header excluded
             ("col1\tcol2", 0),  # header alone is an empty result
+            # a one-column empty-string row is an empty line and still a row
+            ("name\n\n", 1),
         ],
     )
     def test_thrift_rows_exclude_the_header(self, stdout, rows):
@@ -73,3 +76,18 @@ class TestSparkThriftExecuteQuery:
         for opt in ("--silent=true", "--outputformat=tsv2", "--nullemptystring=false"):
             assert argv.index(opt) < e
         assert result.rows_returned == 250
+
+
+class TestTrinoSession:
+    def test_every_trino_call_pins_utc(self):
+        """timestamptz rendering, date_trunc and timestamp arithmetic follow
+        the session zone; unpinned they follow the coordinator's default."""
+        from lakebench.modules.query_engines.trino.executor import TrinoExecutor
+
+        ex = TrinoExecutor("ns", "lakehouse")
+        ex._pod = "coord-0"
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout='"1"\n', stderr="")
+            ex.execute_query("SELECT 1")
+        cmd = mock_run.call_args[0][0]
+        assert cmd[cmd.index("--timezone") + 1] == "UTC"

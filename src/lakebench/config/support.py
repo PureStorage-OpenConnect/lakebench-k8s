@@ -114,8 +114,8 @@ MODE_NOTES: dict[tuple[str, str], str] = {
         "earlier records name the rules they ran). W4 raises one alert per entity per "
         "week, and W5 screens payments as they arrive, with no rescreen of earlier "
         "payments when a list version is published. Its results "
-        "depend on when detection ran relative to arrival, so no end-of-run result "
-        "check is recorded."
+        "depend on when detection ran relative to arrival, so two continuous runs "
+        "cannot show the same results."
     ),
 }
 

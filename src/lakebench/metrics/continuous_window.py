@@ -526,57 +526,6 @@ def classify_submission_failure(message: str | None) -> str:
     return first[:300]
 
 
-def settle_state(
-    events_by_job: dict[str, list[StreamEvent]],
-    datagen_rows: int,
-    *,
-    bronze_rows: int | None = None,
-) -> tuple[bool, str]:
-    """Whether the pipeline has taken in and published the whole corpus.
-
-    Settled when every datagen row reached bronze, silver committed every
-    one of them, and a gold cycle read silver after silver's last commit and
-    finished its refresh. With ``bronze_rows`` (a drain: bronze stopped
-    after taking that many rows) the corpus is what bronze took, bronze's own
-    log is not read, and every silver batch with rows must be committed. Pod log timestamps only, so no
-    CLI clock enters.
-    """
-    silver = events_by_job.get("silver-stream") or []
-    gold = events_by_job.get("gold-refresh") or []
-    if bronze_rows is not None:
-        b_rows = bronze_rows
-    else:
-        if datagen_rows <= 0:
-            return False, "datagen row count not measured"
-        bronze = events_by_job.get("bronze-ingest") or []
-        b_rows = sum(e.rows or 0 for e in committed_writes(bronze))
-        if b_rows < datagen_rows:
-            return False, f"bronze has {b_rows:,} of {datagen_rows:,} rows"
-    rows_in: dict[int, int] = {}
-    committed: dict[int, datetime] = {}
-    for e in silver:
-        if e.kind == "transform":
-            rows_in[e.ident] = e.rows or 0
-        elif e.kind == "commit":
-            committed[e.ident] = e.at
-    s_rows = sum(rows_in.get(b, 0) for b in committed)
-    if s_rows < b_rows:
-        return False, f"silver has committed {s_rows:,} of {b_rows:,} bronze rows"
-    if bronze_rows is not None:
-        # A drain: bronze may have written a last batch while it was being
-        # stopped, so silver may still be transforming rows past the count.
-        pending = sorted(b for b, n in rows_in.items() if n and b not in committed)
-        if pending:
-            return False, f"silver batch {pending[0]} is not committed yet"
-    last_commit = max(committed.values()) if committed else None
-    read_after = {
-        e.ident for e in gold if e.kind == "aggregate" and last_commit and e.at > last_commit
-    }
-    if not any(e.kind == "refreshed" and e.ident in read_after for e in gold):
-        return False, "no gold refresh has read silver since its last commit"
-    return True, "settled"
-
-
 #: SPEC section 8: BOUNDED BY trickle needs ingested / offered rows at or
 #: above this, and lag at window end within one trigger interval.
 TRICKLE_KEPT_PACE_RATIO = 0.99

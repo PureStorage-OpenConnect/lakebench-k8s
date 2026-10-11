@@ -246,17 +246,17 @@
             </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
-                <div class="card-value">0.024 GB/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
+                <div class="card-value">0.024 GiB/s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-delta" style="color: var(--text-muted);">
-                    20.9 GB of stage inputs; corpus 8.5 GB in bronze
+                    20.9 GiB of stage inputs; corpus 8.5 GiB in bronze
                 </div>
-                <div class="card-hint">stage inputs processed per second (bronze + silver + gold + query reads)</div>
+                <div class="card-hint">stage inputs processed per second (bronze, silver and gold reads)</div>
                 <div class="card-hint2">&#8593; higher is better</div>
             </div>
             <div class="card">
                 <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">4.75 GB/core-hr</div>
-                <div class="card-hint">stage-input GB per core-hour requested</div>
+                <div class="card-value">4.75 GiB/core-hr</div>
+                <div class="card-hint">stage-input GiB per core-hour requested</div>
                 <div class="card-hint2">&#8593; higher is better</div>
             </div>
             <div class="card">
@@ -264,6 +264,7 @@
                 <div class="card-value">421.3<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, 3 samples/query</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">&#8593; higher is better | ~7 queries/min</div>
+                <div class="card-hint2">within-run spread over 3 samples/query: QpH <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.qph_spread.low" data-lb-fmt=",.1f">408.8</span> to <span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.qph_spread.high" data-lb-fmt=",.1f">429.3</span> (fastest and slowest samples; samples in one run, not runs)</div>
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
@@ -348,7 +349,7 @@
         <section>
             <h2>Pipeline Benchmark</h2>
             <div style="margin-bottom: 1rem; color: var(--text-muted); font-size: 0.875rem;">
-                Mode: batch | Time-to-Value: <strong>865.5s</strong> | Stage-input throughput: <strong>0.024 GB/s</strong> | Stage inputs: 20.9 GB (corpus 8.5 GB in bronze)
+                Mode: batch | Time-to-Value: <strong>865.5s</strong> | Stage-input throughput: <strong>0.024 GiB/s</strong> | Stage inputs: 20.9 GiB (corpus 8.5 GiB in bronze)
             </div>
             <table>
                 <thead>
@@ -357,11 +358,11 @@
                         <th>Stage</th>
                         <th>Engine</th>
                         <th>Time</th>
-                        <th>In (GB)</th>
-                        <th>Out (GB)</th>
+                        <th>In (GiB)</th>
+                        <th>Out (GiB)</th>
                         <th>In Rows</th>
                         <th>Out Rows</th>
-                        <th>GB/s</th>
+                        <th>GiB/s</th>
                         <th>Rows/s</th>
                         <th>Executors</th>
                         <th>Cores x Mem</th>
@@ -520,9 +521,9 @@
                 <td><code class="mono">lakebench-bronze-verify</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>79.4s</td>
-                <td>8.47 GB</td>
+                <td>8.47 GiB</td>
                 <td>26,671,878</td>
-                <td>0.22 GB/s</td>
+                <td>0.22 GiB/s</td>
                 <td>4</td>
                 <td>2</td>
                 <td>635</td>
@@ -532,9 +533,9 @@
                 <td><code class="mono">lakebench-silver-build</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>178.8s</td>
-                <td>8.47 GB</td>
+                <td>8.47 GiB</td>
                 <td>26,671,878</td>
-                <td>0.06 GB/s</td>
+                <td>0.06 GiB/s</td>
                 <td>8</td>
                 <td>4</td>
                 <td>5,723</td>
@@ -544,9 +545,9 @@
                 <td><code class="mono">lakebench-gold-finalize</code></td>
                 <td><span class="status status-success">Passed</span></td>
                 <td>593.7s</td>
-                <td>3.30 GB</td>
+                <td>3.30 GiB</td>
                 <td>728,291</td>
-                <td>0.01 GB/s</td>
+                <td>0.01 GiB/s</td>
                 <td>4</td>
                 <td>4</td>
                 <td>9,500</td>
@@ -649,7 +650,7 @@
             
             <tr>
                 <td><code class="mono">FQ8_alert_to_entity_join</code></td>
-                <td>Case investigation: alert -> entity -> recent txns</td>
+                <td>Case investigation: alert -&gt; entity -&gt; recent txns</td>
                 <td>operational</td>
                 <td>4.42s</td>
                 <td>100</td>
@@ -713,8 +714,8 @@
             </div>
             <p style="color: var(--warning); font-size: 0.875rem;">Collected by an older Lakebench whose queries summed each pod's own total, its pause container and any duplicate scrape with its containers: the CPU and memory figures below count containers more than once and overstate use by an unknown factor.</p>
             
-            <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--bg); border-radius: 0.25rem; font-size: 0.85rem;"><strong>Engine Metrics (Tier 2):</strong> Trino queries completed: 187</div>
-            
+            <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--bg); border-radius: 0.25rem; font-size: 0.85rem;"><strong>Engine Metrics (Tier 2):</strong> Trino queries completed during the run: 187</div>
+            <div style="margin-bottom: 1rem; font-size: 0.85rem; color: var(--text-muted);">S3 request counts and latency: not collected (no source emits them yet). Bytes stored are in the storage section.</div>
             <table>
                 <thead>
                     <tr>
@@ -823,7 +824,7 @@
                 
             </div>
         </section>
-        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus and mode match and every result fingerprint below (and, for an AML batch run, the alert set) is equal. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>9955fd82b8b4909a</code></td></tr><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>45b32f6d85cc3b3d</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:9382420</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>sha256:148ba6ad7350ad4a947d1bbdb542bce26a9be20cdd0be76a821a4783f60c014b</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;2013d&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>yes (from the datagen pods)</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 3</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>none</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W17_layering_chain, W2_structuring, W3_round_tripping, W4_risk_propagation, W5_sanctions_match, W6_pep_counterparty, W7_cross_border_high_risk, W8_dormant_reactivation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>W1_connected_components (giant-component)</code></td></tr></tbody></table><h3>Result fingerprints</h3><p>Query set <code class='mono'>qs12-4bd2d9416abb</code></p><table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead><tbody><tr><td>FQ1_txn_full_scan</td><td><code class='mono'>rf2 rows=1 cols=5 exact=ae25ed383bf414ec approx{4:13317.9}</code></td></tr><tr><td>FQ2_top_corridors_window</td><td><code class='mono'>rf2 rows=100 cols=5 exact=de9d89e45ec3690f</code></td></tr><tr><td>FQ3_entity_edge_risk</td><td><code class='mono'>rf2 rows=200 cols=5 exact=8d3845629c24b391</code></td></tr><tr><td>FQ4_running_balance_window</td><td><code class='mono'>rf2 rows=936353 cols=6 exact=ed628b61a1a01166</code></td></tr><tr><td>FQ5_alert_triage</td><td><code class='mono'>rf2 rows=17 cols=6 exact=71e1be4a74a7ea72 approx{5:12.523}</code></td></tr><tr><td>FQ6_structuring_scan</td><td><code class='mono'>rf2 rows=500 cols=6 exact=c1c0d7927cd200be</code></td></tr><tr><td>FQ7_cross_border_concentration</td><td><code class='mono'>rf2 rows=100 cols=5 exact=e9883348e9dd6b31 approx{4:30.798}</code></td></tr><tr><td>FQ8_alert_to_entity_join</td><td><code class='mono'>rf2 rows=100 cols=5 exact=a3729ef990f99f51</code></td></tr><tr><td>IQ1_customer_360</td><td><code class='mono'>rf2 rows=1 cols=18 exact=af0d7d91918adba4</code></td></tr><tr><td>IQ2_case_activity_12m</td><td><code class='mono'>rf2 rows=12 cols=6 exact=8122025d64cb3590</code></td></tr><tr><td>IQ3_counterparty_two_hop</td><td><code class='mono'>rf2 rows=500 cols=8 exact=518e349ba8d7e3e1</code></td></tr><tr><td>IQ4_open_cases_over_60_days</td><td><code class='mono'>rf2 rows=24 cols=10 exact=c969e7c2feea822f</code></td></tr></tbody></table></section>
+        <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus, mode and query set match (and, for an AML batch run, their alert sets are equal). Lakebench does not compare query answers: read the row counts and numbers of both reports. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>9955fd82b8b4909a</code></td></tr><tr><td>Workload</td><td><code class='mono'>financial aml-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>datagen-v2-rs-0.3</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>45b32f6d85cc3b3d</code></td></tr><tr><td>Seed</td><td><code class='mono'>777001</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>batch</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:9382420</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>sha256:148ba6ad7350ad4a947d1bbdb542bce26a9be20cdd0be76a821a4783f60c014b</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=on; recorded outcomes]</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;2013d&#x27;, &#x27;retention_source&#x27;: &#x27;resolve_maintenance_retention (batch pre-benchmark)&#x27;}</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>yes (from the datagen pods)</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 3</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>datagen, bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>none</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Query set</td><td><code class='mono'>qs12-4bd2d9416abb</code></td></tr><tr><td>Rules executed</td><td><code class='mono'>W17_layering_chain, W2_structuring, W3_round_tripping, W4_risk_propagation, W5_sanctions_match, W6_pep_counterparty, W7_cross_border_high_risk, W8_dormant_reactivation</code></td></tr><tr><td>Rules skipped</td><td><code class='mono'>W1_connected_components (giant-component)</code></td></tr></tbody></table></section>
 
         <footer>
             Generated by Lakebench | (timestamp removed)

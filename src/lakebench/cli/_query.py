@@ -251,7 +251,7 @@ def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list
     import io
 
     if engine == "duckdb":
-        from lakebench.benchmark.fingerprint import last_json_line
+        from lakebench.benchmark.result import last_json_line
 
         payload = last_json_line((raw or "").strip()) or {}
         return None, [[str(d)] for d in payload.get("data") or []], "python-repr"

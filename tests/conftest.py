@@ -480,27 +480,17 @@ def stub_experiment(
     query_names=(),
     *,
     mode: str = "batch",
-    failed=(),
     **identity_over,
 ) -> dict:
     """A minimal metrics.json ``experiment`` block (metrics/experiment.py) for
     fixtures that hand-build run records: one fixed experiment identity and
-    a usable result fingerprint per query in *query_names* (None for the
-    names in *failed*, as the runner records a failed query). Keyword
-    overrides replace identity fields (seed=..., scale=...)."""
-    from lakebench.benchmark.fingerprint import fingerprint_rows
+    the query set id of *query_names*. Keyword overrides replace identity
+    fields (seed=..., scale=...)."""
+    from lakebench.benchmark.queries import query_set_id
     from lakebench.metrics.experiment import EXPERIMENT_SCHEMA_V1
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
-    results: dict = {
-        "query_set_id": None,
-        "fingerprints": {
-            n: (None if n in failed else fingerprint_rows([(n, 1)], adapted_sql=n))
-            for n in query_names
-        },
-    }
-    # A continuous run carries the fingerprints of its end-of-run result
-    # check (metrics/experiment.py _continuous_results), like a batch run.
+    results: dict = {"query_set_id": query_set_id(query_names) if query_names else None}
     return {
         "schema": EXPERIMENT_SCHEMA_V1,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},

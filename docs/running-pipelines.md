@@ -264,8 +264,9 @@ messages. A long run grows its bronze bucket at the datagen rate:
 - Benchmark rounds run during the window (see In-stream benchmarking).
 - After the window, the continuous gate checks that data kept arriving and
   that silver and gold committed continuously inside the window.
-- The streams stop at window end; the last in-stream round's answers are
-  the run's answer check. See [Continuous gate](benchmarking/verdict.md#continuous-gate)
+- The streams stop at window end. The in-stream rounds are the run's only
+  query checks: failed queries (a Q9 failure is tolerated unless it fails in
+  every round) and empty answers in the last round. See [Continuous gate](benchmarking/verdict.md#continuous-gate)
   and [After the window](benchmarking/verdict.md#after-the-window).
 - A window much longer than a finite corpus needs to arrive measures an idle
   pipeline. The gate fails a run whose data stopped arriving before half the

@@ -41,13 +41,6 @@ class QueryResult:
     # score (elapsed_seconds) is their median. Empty means one untracked
     # sample, which is how older records (without a samples field) read.
     samples: list[float] = field(default_factory=list)
-    # benchmark.fingerprint of the rows, from one untimed execution after the
-    # timed samples. None: not fingerprinted (failed query, or a benchmark
-    # path that does not check results, such as in-stream rounds).
-    result_fingerprint: dict[str, Any] | None = None
-    # The SQL the timed samples sent (after the engine adapter). The
-    # fingerprint run sends exactly this text. Not serialised.
-    sent_sql: str | None = field(default=None, repr=False)
 
     def sample_times(self) -> list[float]:
         """The timed samples, or [elapsed_seconds] for a single-sample result."""
@@ -65,7 +58,6 @@ class QueryResult:
             "rows_returned": self.rows_returned,
             "success": self.success,
             "error_message": self.error_message,
-            "result_fingerprint": self.result_fingerprint,
             "samples": [round(t, 3) for t in times],
             "min_seconds": round(lo, 3),
             "max_seconds": round(hi, 3),
@@ -287,7 +279,6 @@ class BenchmarkRunner:
         query_class: str | None = None,
         progress_callback: Any = None,
         query_timeout: int = 300,
-        fingerprint: bool = True,
     ) -> BenchmarkResult:
         """Run power benchmark (single sequential stream).
 
@@ -298,8 +289,6 @@ class BenchmarkRunner:
             progress_callback: Called with (index, total, name, phase, **kwargs)
                 before ("start") and after ("done") each query. Optional.
             query_timeout: Per-query timeout in seconds (default 300).
-            fingerprint: After the timed stream, run each successful query
-                once more, untimed, and record its result fingerprint.
 
         Returns:
             BenchmarkResult with mode="power"
@@ -323,8 +312,6 @@ class BenchmarkRunner:
             progress_callback=progress_callback,
             query_timeout=query_timeout,
         )
-        if fingerprint:
-            self.fingerprint_results(results, query_timeout)
 
         successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
@@ -356,7 +343,6 @@ class BenchmarkRunner:
         cache: str = "hot",
         iterations: int = 1,
         query_class: str | None = None,
-        fingerprint: bool = True,
         query_timeout: int = 300,
         stream_queries: list[list[BenchmarkQuery]] | None = None,
         shuffle: bool = True,
@@ -452,9 +438,6 @@ class BenchmarkRunner:
 
         # Use stream 0's results as the representative query list
         representative_queries = stream_results[0].queries if stream_results else []
-        if fingerprint:
-            # After the wall clock stopped: the fingerprint runs are untimed.
-            self.fingerprint_results(representative_queries, query_timeout)
 
         return BenchmarkResult(
             engine=self._engine_name(),
@@ -497,8 +480,6 @@ class BenchmarkRunner:
             cache=cache,
             iterations=iterations,
             query_class=query_class,
-            # The power phase already fingerprinted every query.
-            fingerprint=False,
         )
 
         composite_qph = (
@@ -630,7 +611,6 @@ class BenchmarkRunner:
             success=True,
             error_message="",
             samples=times,
-            sent_sql=last.sent_sql,
         )
 
     def _render_sql(self, query: BenchmarkQuery) -> str:
@@ -644,63 +624,6 @@ class BenchmarkRunner:
             **self._extra_tables,
         )
         return self.executor.adapt_query(sql)
-
-    def fingerprint_results(self, results: list[QueryResult], timeout: int = 300) -> None:
-        """Set ``result_fingerprint`` on every successful result, from one
-        untimed execution of its query (benchmark.fingerprint).
-
-        A failure is recorded as a fingerprint that matches nothing, never
-        dropped: a result that could not be fingerprinted cannot be shown
-        equal to another engine's.
-        """
-        from .fingerprint import unusable
-
-        fingerprint_query = getattr(self.executor, "fingerprint_query", None)
-        engine = self.executor.engine_name()
-        for r in results:
-            if not r.success or r.result_fingerprint is not None:
-                continue
-            if fingerprint_query is None:
-                r.result_fingerprint = unusable(
-                    "unsupported", f"{engine} executor has no fingerprint path", engine
-                )
-                continue
-            try:
-                out = fingerprint_query(
-                    r.sent_sql or self._render_sql(r.query),
-                    timeout=timeout,
-                    approx_columns=r.query.fingerprint_columns(),
-                )
-                fp = out.fingerprint
-            except Exception as e:  # noqa: BLE001 -- recorded as an unusable fingerprint
-                fp = unusable("error", f"fingerprint run failed: {e}", engine)
-            if not isinstance(fp, dict):
-                fp = unusable("error", "fingerprint run returned nothing", engine)
-            elif "exact" in fp and int(fp.get("rows") or 0) != int(r.rows_returned or 0):
-                # The untimed run did not see what the timed run returned (an
-                # empty or truncated output, a table changing underneath):
-                # it cannot stand for the timed result.
-                fp = unusable(
-                    "error",
-                    f"fingerprint run saw {fp.get('rows')} rows, the timed run {r.rows_returned}",
-                    engine,
-                )
-            elif (
-                "unsupported" in fp
-                and r.rows_returned == 0
-                and "printed no rows" in str(fp["unsupported"])
-            ):
-                # Trino prints nothing for an empty result; the timed run
-                # agrees it was empty, so this is a real 0-row result.
-                from .fingerprint import fingerprint_rows
-
-                fp = fingerprint_rows(
-                    [],
-                    r.query.fingerprint_columns(),
-                    engine=engine,
-                    adapted_sql=r.sent_sql or self._render_sql(r.query),
-                )
-            r.result_fingerprint = fp
 
     def _execute_single_query(
         self,
@@ -727,5 +650,4 @@ class BenchmarkRunner:
             rows_returned=exec_result.rows_returned,
             success=exec_result.success,
             error_message=exec_result.error or "",
-            sent_sql=sql,
         )

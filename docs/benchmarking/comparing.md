@@ -6,7 +6,7 @@ Lakebench does not compare runs: read both reports' Experiment sections (the `ex
 
 1. **Both runs passed** ([verdict.md](verdict.md)). A run not PASSED has no performance to compare.
 2. **Same workload and data.** Workload and version, corpus id (generator, seed and scale) and mode are equal. The identity digest hashes workload, corpus, mode, execution conditions and system, not the recipe or its components: check the recipe and component rows too.
-3. **Same answers.** The query set and every query's result fingerprint are equal; for AML batch, every rule's alert count and hash in the Alert set table too. Different fingerprints: not comparable. A run without checked results (`--skip-benchmark`, a `*-none` recipe, a continuous run whose result check did not settle) cannot show this.
+3. **Same work.** The query set id is equal; for AML batch, every rule's alert count and hash in the Alert set table too. A different query set or alert set: not comparable. Lakebench does not compare query answers: compare the per-query row counts and numbers of both reports by eye. A run with no benchmark (`--skip-benchmark`, a `*-none` recipe) has no query set to compare.
 4. **Same execution conditions.** Effective maintenance and its compaction operation, maintenance settings, benchmark iterations, in-stream rounds and the binding [Lakebench caps](../glossary.md#caps) ([maintenance.md](maintenance.md)). A difference here is not attributable to the architecture. Maintenance skipped on every operation on both sides counts as the same, so an Iceberg and a Delta run both with `--skip-maintenance` compare on architecture.
 5. **One thing varied:** the architecture (recipe, components and versions, query access path, dependency set, Spark executor or driver overrides, user Spark conf) or the system (cluster and object store, `experiment.system_identity`). When both differ, neither explains a difference. Pre-1.7 records have no system identity.
 
@@ -17,7 +17,7 @@ Before reading the numbers:
 - `experiment.observed`: allocatable CPU and memory and other namespaces' pod requests at run start and at save.
 - Both runs must show the expected volume: `scale_ratio` (batch) or `ingest_ratio` (continuous).
 
-**By hand.** Once the `experiment` blocks match and results are equivalent, diff the two `metrics.json` files:
+**By hand.** Once the `experiment` blocks match, diff the two `metrics.json` files:
 
 | Field | Use |
 |---|---|

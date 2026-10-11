@@ -18,14 +18,15 @@ import subprocess
 import time
 from pathlib import Path
 
-from lakebench.benchmark.fingerprint import last_json_line, unusable
-from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.benchmark.result import (
+    QueryExecutorResult,
+    last_json_line,
+    summarise_engine_error,
+)
 from lakebench.modules.query_engines.duckdb.executor import (
     FETCH_ROWS,
     SESSION_SETTINGS,
     DuckDBExecutor,
-    fingerprint_from_payload,
-    fingerprint_statement,
 )
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         sql = self._rewrite_cardinality(sql)
         return sql
 
-    def _build_local_script(self, sql: str, result_statement: str | None = None) -> str:
+    def _build_local_script(self, sql: str) -> str:
         """Build the Python program DuckDB runs inside the container.
 
         The SQL is read from a sibling file rather than embedded. Benchmark
@@ -154,40 +155,12 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 # Report the engine version alongside every result. The pin is
                 # only a request; this is what proves the container honoured it.
                 "ver = conn.execute('SELECT version()').fetchone()[0]",
-                result_statement
-                or (
-                    "print(json.dumps({'rows': len(rows), 'version': ver, "
-                    "'data': [str(r) for r in rows[:100]]}))"
-                ),
+                "print(json.dumps({'rows': len(rows), 'version': ver, "
+                "'data': [str(r) for r in rows[:100]]}))",
             ]
         )
 
-    def fingerprint_query(
-        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
-    ) -> QueryExecutorResult:
-        """Run *sql* once, untimed, and fingerprint the rows in the container."""
-        start = time.monotonic()
-        result = self.execute_query(
-            sql, timeout=timeout, result_statement=fingerprint_statement(approx_columns)
-        )
-        if result.error:
-            fp = unusable("error", result.error, "duckdb")
-            error: str | None = result.error
-        else:
-            fp, error = fingerprint_from_payload(result.raw_output, sql)
-        return QueryExecutorResult(
-            sql=sql,
-            engine="duckdb",
-            duration_seconds=time.monotonic() - start,
-            rows_returned=int(fp.get("rows") or 0),
-            raw_output="",
-            error=error,
-            fingerprint=fp,
-        )
-
-    def execute_query(
-        self, sql: str, timeout: int = 300, result_statement: str | None = None
-    ) -> QueryExecutorResult:
+    def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
         if not self.workdir:
             raise ValueError("LocalDuckDBExecutor needs a workdir to stage the query")
 
@@ -196,7 +169,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         stage = Path(self.workdir)
         stage.mkdir(parents=True, exist_ok=True)
         (stage / "query.sql").write_text(sql)
-        (stage / "run.py").write_text(self._build_local_script(sql, result_statement))
+        (stage / "run.py").write_text(self._build_local_script(sql))
 
         cmd = [
             self.cli,

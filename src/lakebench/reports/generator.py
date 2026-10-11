@@ -3665,8 +3665,6 @@ class ReportGenerator:
 
     def _generate_experiment_section(self, metrics: PipelineMetrics) -> str:
         """The experiment block (metrics/experiment.py): what produced the run."""
-        from lakebench.benchmark.fingerprint import describe
-
         e = _html_escape
         exp = metrics.experiment_block()
         if not exp:
@@ -3762,6 +3760,11 @@ class ReportGenerator:
                 "Auto-sizing cuts (Lakebench limit)",
                 "; ".join(lim.get("autosize_cuts") or []) or "none",
             ),
+            (
+                "Query set",
+                res.get("query_set_id")
+                or ("not recorded" if metrics.benchmark else "none (no benchmark ran)"),
+            ),
         ]
         if rules:
             rows.append(("Rules executed", ", ".join(rules.get("executed") or []) or "none"))
@@ -3775,30 +3778,16 @@ class ReportGenerator:
             f"<tr><td>{e(str(k))}</td><td><code class='mono'>{e(str(v))}</code></td></tr>"
             for k, v in rows
         )
-        fps = res.get("fingerprints") or {}
-        fp_rows = "".join(
-            f"<tr><td>{e(n)}</td><td><code class='mono'>{e(describe(f))}</code></td></tr>"
-            for n, f in sorted(fps.items())
-        )
-        note = res.get("not_checked")
-        fp_html = (
-            f"<p>{e(note)}</p>"
-            if note
-            else f"<p>Query set <code class='mono'>{e(str(res.get('query_set_id') or 'unknown'))}"
-            "</code></p>"
-            f"<table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead>"
-            f"<tbody>{fp_rows}</tbody></table>"
-        )
         return (
             "<section><h2>Experiment</h2>"
-            "<p>Two runs can be compared when their workload, corpus and mode match and "
-            "every result fingerprint below (and, for an AML batch run, the alert set) is "
-            "equal. The identity digest hashes the workload, corpus, mode, execution "
-            "conditions and system; it does not include the recipe or its components, "
-            "which are listed separately.</p>"
+            "<p>Two runs can be compared when their workload, corpus, mode and query set "
+            "match (and, for an AML batch run, their alert sets are equal). Lakebench does "
+            "not compare query answers: read the row counts and numbers of both reports. "
+            "The identity digest hashes the workload, corpus, mode, execution conditions "
+            "and system; it does not include the recipe or its components, which are "
+            "listed separately.</p>"
             f"<table><tbody>{body}</tbody></table>"
-            "<h3>Result fingerprints</h3>"
-            f"{fp_html}{self._alert_set_html(exp)}</section>"
+            f"{self._alert_set_html(exp)}</section>"
         )
 
     @staticmethod

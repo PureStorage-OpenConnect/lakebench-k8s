@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 import pytest
-from c360_gold_compare import gold_differences, product_mismatch
+from c360_gold_compare import gold_differences
 
 pytest.importorskip("pyspark")
 
@@ -65,7 +65,6 @@ def test_incremental_cycles_equal_one_rebuild_in_gold(result, fmt):
     # Counts exact, rounded DOUBLE KPIs within one quantum.
     assert len(fp["incremental"]["rows"]) > 0
     assert gold_differences(fp["incremental"], fp["rebuild"]) == [], _why(result[fmt])
-    assert product_mismatch(fp["incremental"], fp["rebuild"]) is None
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
@@ -83,4 +82,3 @@ def test_one_changed_amount_changes_the_gold_fingerprint(result, fmt):
     # One purchase moved, so one day, and its revenue among what moved.
     assert len({p.split()[0] for p in problems}) == 1, problems
     assert any(" total_daily_revenue:" in p for p in problems), problems
-    assert product_mismatch(fp["changed"], fp["rebuild"]) is not None

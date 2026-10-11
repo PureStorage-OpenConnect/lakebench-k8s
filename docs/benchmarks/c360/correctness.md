@@ -19,8 +19,8 @@
 | Correctness gate: a `GATING_CHECKS` check that fails, does not run or is absent, or a record with no expected-result facts ([5.2](#52-expected-result-checks-batch-only)) | batch | `metrics/c360_correctness.py`, `cli/_run.py` |
 | Benchmark gate: every query succeeds and returns a row (no Customer 360 query is `allow_empty`; the known-failure list is empty) | batch | `cli/_run.py` |
 | In-stream rounds: a failed query other than Q9 fails the run in any round; an empty result fails only in the last round. A failed Q9 after its retries is reported and tolerated in every round, the last included; an empty Q9 is tolerated except in the last round | continuous | `cli/_sustained.py` |
-| Result check, when it runs: every query succeeds and is non-empty (skipped or unable to run: recorded as not checked) | continuous | `cli/_sustained.py` |
-| The benchmark runner for rounds and the result check cannot be created: exit 1 before any stream starts | continuous | `cli/_sustained.py` |
+| A run with a benchmark fails when no in-stream round ran (no answer was checked) or Q9 failed in every round (gold never answered) | continuous | `cli/_sustained.py` |
+| The benchmark runner for rounds cannot be created: exit 1 before any stream starts | continuous | `cli/_sustained.py` |
 | With gold on an interval, `run_duration` under three gold refresh intervals refused (exit 2) | continuous | `cli/_sustained.py` |
 | Continuous window gate ([5.3](#53-continuous-window-gate)) | continuous | `metrics/continuous_window.py` |
 | Balance gate: a handoff's lag rose by more than one cadence over the second half | continuous | `metrics/continuous_window.py`, `cli/_sustained.py` |
@@ -115,20 +115,10 @@ A continuous run fails unless, inside the window:
   across the window's second half (fails with "balance gate: ..." and a
   bottleneck line; see [Benchmarking](../../benchmarking.md)).
 
-### 5.4 Result equivalence
+### 5.4 Run equivalence
 
-- Batch: after the scored round's timed samples, each successful query runs
-  once more, untimed, and its result is fingerprinted (spec `rf2`,
-  `benchmark/fingerprint.py`):
-  - order-independent row hashes;
-  - approximate DOUBLE-derived columns compared as plain and row-weighted
-    sums, within a tolerance scaled from each column's declared quantum and
-    the row count;
-  - timestamps normalised to UTC.
-- Continuous: the fingerprints of the post-settle result check.
-- In-stream rounds and the pre-maintenance round are never fingerprinted.
-
-Fingerprints are compared only between runs of the same corpus. Two runs are
+Lakebench records no per-query answer hash: the answer checks are the
+benchmark gate and the expected-result checks above. Two runs are
 not comparable when (`metrics/comparability.py`):
 
 - they were recorded under different identity versions;

@@ -56,7 +56,7 @@ The continuous scenarios (``lakebench.cli._sustained._run_sustained``) add:
   carries the owner marker deploy writes there (``.lakebench/owner.json``).
 - Streams: submitted streams are RUNNING on their first driver until deleted;
   their driver logs are the record's, cut at the fake cluster clock
-  (:func:`log_until`), so the window and the settle wait see them grow.
+  (:func:`log_until`), so the window sees them grow.
 - ``lakebench.deploy.DatagenDeployer`` (the Job starts), the datagen Job's
   status (finished) and fleet (``metrics.datagen_aggregator.collect_from_k8s``,
   the record's row and file counts).
@@ -1196,7 +1196,7 @@ class FakeMonitor:
         """A stream driver's log as the cluster holds it now: the fixture
         log (captured just before the record's streams stopped) up to the
         last line stamped at or before the fake cluster clock, so the window
-        and the settle wait see the log grow as they did live."""
+        sees the log grow as it did live."""
         _checked(self._rec, self._real._get_driver_logs, *args, **kwargs)
         bound = inspect.signature(self._real._get_driver_logs).bind(None, *args, **kwargs)
         bound.apply_defaults()
@@ -1517,7 +1517,7 @@ class FakeBenchmark:
             queries = [q for q in queries if q.query_class != "investigator"]
         return queries
 
-    def _result(self, query, iterations: int = 1, seconds: float = _QUERY_SECONDS, fp=None):
+    def _result(self, query, iterations: int = 1, seconds: float = _QUERY_SECONDS):
         from lakebench.benchmark.runner import QueryResult
 
         prefix = query.name.split("_", 1)[0]
@@ -1527,7 +1527,6 @@ class FakeBenchmark:
             rows_returned={**C360_ROWS, **AML_ROWS}.get(prefix, 1),
             success=True,
             samples=[seconds] * iterations,
-            result_fingerprint=fp,
         )
 
     def _round_seconds(self, n_queries: int) -> tuple[list[float], float]:
@@ -1552,25 +1551,17 @@ class FakeBenchmark:
             a["cache"],
             a["iterations"],
             a["query_timeout"],
-            a["fingerprint"],
         )
         progress = a["progress_callback"]
         if self._rec.interrupt is not None and self._rec.interrupt[0] == "benchmark":
             send_interrupt(self._rec.interrupt[1])
         queries = self._queries()
-        if a["fingerprint"]:
-            # The batch benchmark and the continuous result check: fixed
-            # times; the continuous check carries the record's fingerprints.
-            seconds, wall = [_QUERY_SECONDS] * len(queries), 0.0
-        else:
-            seconds, wall = self._round_seconds(len(queries))
-        fps = CONTINUOUS_FINGERPRINTS if self._rec.clock is not None else {}
+        seconds, wall = self._round_seconds(len(queries))
         results = []
         for n, q in enumerate(queries, 1):
             if progress is not None:
                 progress(n, len(queries), q.name, "start")
-            fp = fps.get(q.name) if a["fingerprint"] else None
-            results.append(self._result(q, a["iterations"], seconds[n - 1], fp))
+            results.append(self._result(q, a["iterations"], seconds[n - 1]))
             if progress is not None:
                 progress(n, len(queries), q.name, "done", elapsed=seconds[n - 1], success=True)
         if self._rec.clock is not None:
@@ -1877,16 +1868,6 @@ class Scenario:
 #: (2026-10-01, UTC), 22.9 s ahead of the host: the host clock read
 #: 15:05:33.604. Nothing before the window advances the fake clock.
 _CONTINUOUS_START = datetime(2026, 10, 1, 15, 5, 33, 604000, tzinfo=timezone.utc).timestamp()
-
-
-def _continuous_fingerprints() -> dict[str, Any]:
-    path = FIXTURES / "continuous_c360" / "fingerprints.json"
-    return json.loads(path.read_text()) if path.exists() else {}
-
-
-#: The result check's fingerprints in the continuous record (its
-#: continuous.result_check.fingerprints), keyed by query name.
-CONTINUOUS_FINGERPRINTS = _continuous_fingerprints()
 
 
 SCENARIOS = {

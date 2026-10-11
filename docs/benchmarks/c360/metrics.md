@@ -91,9 +91,9 @@ Primary: `data_freshness_seconds`, lower is better.
 | `qph_degradation_pct` | pct | lower | `(1 - median(second half) / median(first half)) x 100`, 4 or more rounds |
 | `qph_degradation_withheld` | text | none | why `qph_degradation_pct` is absent with 4 or more rounds: the rounds ran different query sets |
 | `query_time_event_age_seconds` | s | none | median age of gold's newest event date at query time; tracks the corpus's position in time, not freshness |
-| `total_elapsed_seconds` | s | none | wall clock from run start (before datagen and stream submission) to the record, including stream start-up, the result check and its settle wait; shared with batch in name only |
+| `total_elapsed_seconds` | s | none | wall clock from run start (before datagen and stream submission) to the record, including stream start-up and stream stop; shared with batch in name only |
 | `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GB/s, GB/core-h | higher | `total_data_processed_gb` (stream input sizes, falling back to measured bucket sizes, plus the query stage's gold size when rounds ran) over the window; efficiency is the streams' input over their core-hours |
-| `total_s3_objects` | count | none | objects across the three buckets at the window's end, before the settle wait; unbounded growth means maintenance is not keeping up. Not on batch records |
+| `total_s3_objects` | count | none | objects across the three buckets at the window's end, before the streams stop; unbounded growth means maintenance is not keeping up. Not on batch records |
 | `total_core_hours` | core-h | none | core-hours of the streams, which scale with the window (config-bound) |
 
 In-stream rounds:
