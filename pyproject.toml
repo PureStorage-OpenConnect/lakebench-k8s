@@ -40,7 +40,9 @@ dependencies = [
     "boto3>=1.35.2",  # botocore 1.35.2 adds IfNoneMatch on PutObject (SAF-10 owner marker)
     "rich>=13.7.0",
     "jinja2>=3.1.6",
-    "kubernetes>=29.0.0",
+    # Below 37: kubernetes 37 makes its models validated pydantic models and
+    # has not been tested with Lakebench (the release matrix ran on 35, CI on 36).
+    "kubernetes>=29.0.0,<37",
     "httpx>=0.27.0",
     "prometheus_client>=0.20.0",
     # Imported directly, so declared, though boto3, pydantic and kubernetes
