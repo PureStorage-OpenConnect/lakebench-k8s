@@ -163,8 +163,13 @@ class TestStamping:
         assert row["cap_hit"] and row["scale_derived"] > row["cap"]
         assert any(b.startswith(f"{job}: executor cap") for b in e["limits"]["bound"])
 
-    def test_support_state_and_repetitions_are_stamped(self):
-        e = _metrics(_cfg()).to_dict()["experiment"]
+    def test_support_state_and_repetitions_are_stamped(self, tmp_path):
+        from lakebench.config import support
+
+        rec = tmp_path / "validated_combinations.yaml"
+        rec.write_text("validated: []\n")
+        with mock.patch.object(support, "VALIDATION_RECORD", rec):
+            e = _metrics(_cfg()).to_dict()["experiment"]
         assert e["support"]["state"] == "unverified"
         assert e["repetitions"]["runs"] == 1
         assert e["repetitions"]["benchmark_samples_per_query"] == 1
