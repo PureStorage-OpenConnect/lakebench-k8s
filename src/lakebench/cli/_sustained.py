@@ -869,9 +869,7 @@ def resolve_maintenance_retention(cfg) -> str:
     Returns ``"0s"`` (expire every snapshot older than now) for standard
     workloads. When ``workload.retention_workload`` is True, returns a
     day-string long enough to cover ``retention_months + 6`` months of
-    headroom, so historical replay (W8) and time-travel reproduction
-    (W10) can still resolve their target snapshots after maintenance.
-    Expressed in days because the maintenance parser accepts only
+    headroom, so that snapshot history survives maintenance. Expressed in days because the maintenance parser accepts only
     s/m/h/d suffixes (V-23 in the FinServ-Crime spec).
     """
     workload = cfg.architecture.workload

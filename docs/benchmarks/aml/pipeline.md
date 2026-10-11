@@ -203,44 +203,9 @@ record predates the drain.
 
 ## 4.4 Out-of-run AML commands
 
-None of these is part of `lakebench run` or its verdict (`cli/_financial.py`).
-
-**`lakebench financial score --manifest <uri> --output <uri>`** runs the
-recall scorer outside a run. With no run id it scores the run
-`gold.detection_status` names.
-
-**`lakebench financial replay --rule <id>`** re-runs one rule against the
-`silver.transactions` snapshot committed at least `--depth-months` (default
-60) before now.
-
-- Depth is measured on snapshot commit time, not settlement dates. A
-  deployment younger than the depth has no snapshot, and the job exits
-  non-zero.
-- It writes to the gold alerts table name with an `_replay` suffix
-  (`--output-alerts` to change it), replacing only that rule's rows. The
-  batch run's `gold.alerts` is never touched.
-- The historical-replay scenario asserts against a 60-month replay's
-  wall-clock budget.
-- `--rule` takes a detection rule id such as `W2_structuring`. The replay
-  scenario is not a rule; `W8` there would mean rule
-  `W8_dormant_reactivation`.
-
-**`lakebench financial reproduce CONFIG --alert-id <id>`** (`--run RUN_ID`)
-reruns one batch alert's rule on exactly what that run's gold-finalize read.
-
-- It reads each silver table at the snapshot gold-finalize logged. When that
-  snapshot expired, it falls back to the current table if its fingerprint
-  matches (content and batch stamping equal: `basis: equivalent`).
-- It filters transactions to the sealed batches, runs the rule, and matches
-  the alert on (rule, entity, `alert_ts`) and related transactions.
-- Exit 0: reproduced. Exit 1: not reproduced or alert not found.
-  Exit 4: a snapshot is gone and the content changed.
-- Refuses a protected corpus (exit 2) or a record with no read snapshots
-  (exit 4).
-
-The result is written to `scoring/reproduce/<alert_id>/result.json`. What is
-not pinned is in [12](limitations.md#12-known-limitations). Continuous alerts
-are not reproduced.
+`lakebench financial reference-score` is the one AML command outside
+`lakebench run`, and it is not part of `run` or its verdict
+(`cli/_financial.py`). Recall is scored only inside `run`.
 
 **`lakebench financial reference-score CONFIG --manifest ... --output-prefix ...`**
 runs the reference detector, the band-leakage report and the fidelity gate
@@ -249,8 +214,9 @@ runs the reference detector, the band-leakage report and the fidelity gate
 - It installs hash-checked scikit-learn wheels from the deployment's
   dependency set in an init container.
 - `--leakage-threshold` defaults to 0.10.
-- On a deployment that declares `corpus_role: evaluation` or `robustness`
-  its driver refuses after submission, so the command exits 1.
+- On a protected corpus it refuses before any cluster call, with exit 2
+  (the look guard, [seed policy](seed-policy.md)). Its driver refuses one
+  that gets past the CLI.
 - Its features come from silver read without the sealed-batch filter
   ([12](limitations.md#12-known-limitations)).
 

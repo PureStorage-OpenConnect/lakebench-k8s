@@ -124,7 +124,7 @@ refusal and exit code.
 - [AML spec 8.8](benchmarks/aml/scoring.md#88-band-leakage-report-and-reference-detector): the leakage gate and reference detector (`lakebench financial reference-score`).
 - [AML spec 4.2](benchmarks/aml/rules.md#42-detection-rules): reason codes and the rule list.
 - [AML spec 7.4](benchmarks/aml/execution-rules.md#74-lakebench-imposed-caps): per-alert evidence caps.
-- [AML spec 4.4](benchmarks/aml/pipeline.md#44-out-of-run-aml-commands): `replay`, `reproduce`, `score` and `reference-score` commands.
+- [AML spec 4.4](benchmarks/aml/pipeline.md#44-out-of-run-aml-commands): the `reference-score` command.
 - [AML spec 8.4](benchmarks/aml/scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails): continuous recall over covered instances.
 - [AML spec 8.5](benchmarks/aml/tm-operations.md#85-tm-operations): the TM operations layer.
 - [AML spec 8.6](benchmarks/aml/gold-timing.md#86-gold-finalize-timing): gold-finalize timing.

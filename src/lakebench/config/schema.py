@@ -2122,16 +2122,17 @@ class WorkloadConfig(ConfigModel):
     customer360: Customer360Config = Field(default_factory=Customer360Config)
     """Customer 360 workload parameters."""
 
-    # Snapshot-retention policy. Set retention_workload=True on Financial
-    # recipes whose workload set includes historical replay (W8) or
-    # time-travel reproduction (W10): the pre-benchmark maintenance step
-    # then preserves snapshots covering retention_months + headroom, rather
-    # than expiring everything with the default "0s" threshold. See
-    # REQ-R-03/REQ-R-05 in the FinServ-Crime spec.
+    # Snapshot-retention policy for batch runs: with retention_workload=True
+    # the pre-benchmark maintenance step keeps snapshots covering
+    # retention_months + headroom, rather than expiring everything with the
+    # default "0s" threshold. No Lakebench command reads those older
+    # snapshots; continuous time travel is bounded by
+    # sustained.retention_threshold instead. Both fields are part of the AML
+    # workload parameters (parameters_id).
     retention_workload: bool = False
-    """AML: keep the snapshots time-travel reproduction needs. Pre-benchmark
-    maintenance then retains `retention_months` plus headroom instead of expiring
-    every snapshot.
+    """AML batch: keep snapshot history through pre-benchmark maintenance, which
+    then retains `retention_months` plus headroom instead of expiring every
+    snapshot.
     """
     retention_months: int = Field(default=60, ge=1, le=120)
     """AML: months of snapshots kept when `retention_workload` is true (1--120)."""

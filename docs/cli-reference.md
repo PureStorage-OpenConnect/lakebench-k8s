@@ -1097,8 +1097,7 @@ Components:
 - `datagen`: the datagen Job pods.
 - Each pipeline stage's Spark driver: `bronze-verify`, `silver-build`,
   `gold-finalize`, `bronze-ingest`, `silver-stream`, `gold-refresh`,
-  `replay-financial`, `reproduce-financial`, `score-financial`,
-  `score-financial-reference`, `time-travel-financial`.
+  `score-financial`, `score-financial-reference`, `time-travel-financial`.
 - `spark-driver`: every Spark driver.
 - `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
   `polaris` and `postgres`.
@@ -1138,83 +1137,15 @@ lakebench journal [OPTIONS]
 
 ### financial
 
-AML (financial workload) operator actions. Each submits a Spark job against
-the deployment in the config. `--wait/--no-wait` (default wait) controls
-whether the command waits for it.
-
-| Subcommand | Purpose |
-|---|---|
-| `financial score` | Compute rule recall from the datagen manifest and `gold.alerts` |
-| `financial reference-score` | Run the reference detector and leakage gate over silver and the manifest |
-| `financial replay` | Rerun one detection rule against a historical Iceberg snapshot (the output defaults to the gold alerts table with an `_replay` suffix) |
-| `financial reproduce` | Rerun one batch alert's rule on the snapshots its run's gold read |
+AML (financial workload) operator actions. `financial reference-score` is
+the one subcommand: it submits the reference detector and leakage gate as a
+Spark job against the deployment in the config. `--wait/--no-wait` (default
+wait) controls whether it waits for the job. `lakebench run` scores recall
+itself, so there is no separate scoring command.
 
 See [AML Scoring](aml-scoring.md).
 
 <!-- BEGIN GENERATED: cli financial -->
-#### `financial replay`
-
-Rerun a detection rule against a historical Iceberg snapshot (W8).
-
-```
-lakebench financial replay CONFIG [OPTIONS]
-```
-
-| Argument | Required | Description |
-|---|---|---|
-| `CONFIG` | yes | Lakebench config YAML |
-
-| Flag | Short | Type | Default | Description |
-|---|---|---|---|---|
-| `--rule` |  | text |  | Rule id, e.g. W2_structuring |
-| `--depth-months` |  | integer | `60` | Snapshot depth in months |
-| `--threshold` |  | float |  | Rule-specific threshold override |
-| `--output-alerts` |  | text |  | Fully-qualified output alerts table (catalog.namespace.table). Defaults to the config's gold alerts table with an _replay suffix, so a replay never overwrites the batch run's alerts. Multiple rules can share the table: replay does DELETE WHERE rule_id=X before appending, so each rule owns its rows. |
-| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
-
-#### `financial reproduce`
-
-Reproduce one batch alert from the snapshots its run's gold read.
-
-```
-lakebench financial reproduce CONFIG [OPTIONS]
-```
-
-| Argument | Required | Description |
-|---|---|---|
-| `CONFIG` | yes | Lakebench config YAML |
-
-| Flag | Short | Type | Default | Description |
-|---|---|---|---|---|
-| `--alert-id` |  | text |  | Alert id (gold.alerts.alert_id) to reproduce |
-| `--run` |  | text |  | Run id whose record holds the snapshots gold read; default: the latest AML batch run of this deployment |
-| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for the result |
-
-Exit paths of this command (the shared ones, such as usage errors, prerequisites, nameless-config and lease refusals and declined confirmations, are in [Exit codes](exit-codes.md)):
-
-- `1` `financial.reproduce.mismatch`: `financial reproduce` ran the alert's rule on the snapshots its run's gold read and did not reproduce the alert (no match, several, different related transactions), or the rule declined to run
-- `1` `financial.reproduce.not_found`: `financial reproduce` found no such alert in gold.alerts, or one another run wrote
-- `2` `financial.reproduce.no_record`: `financial reproduce` found no AML batch run record of the deployment on this host (or none for `--run`)
-- `4` `financial.reproduce.snapshot_gone`: `financial reproduce` cannot read what the alert's run read: the run recorded no read snapshots (before 1.7), or a snapshot expired and the table's content changed
-
-#### `financial score`
-
-Compute recall from datagen manifest and gold.alerts.
-
-```
-lakebench financial score CONFIG [OPTIONS]
-```
-
-| Argument | Required | Description |
-|---|---|---|
-| `CONFIG` | yes | Lakebench config YAML |
-
-| Flag | Short | Type | Default | Description |
-|---|---|---|---|---|
-| `--manifest` |  | text |  | S3 URI to datagen manifest.parquet |
-| `--output` |  | text |  | S3 URI for recall.parquet output |
-| `--wait` / `--no-wait` |  | flag | `--wait` | Wait for job completion |
-
 #### `financial reference-score`
 
 Run the reference detector + leakage gate over silver + manifest.

@@ -347,7 +347,6 @@ def test_detected_ts_in_empty_schema_and_all_ddls():
     for script in (
         "gold_finalize_financial.py",
         "gold_refresh_financial.py",
-        "replay_financial.py",
     ):
         text = (root / "src/lakebench/spark/scripts" / script).read_text()
         assert "ensure_alert_columns(spark," in text, script

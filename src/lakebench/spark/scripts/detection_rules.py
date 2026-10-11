@@ -30,7 +30,8 @@ W5_splink_resolution (probabilistic entity resolution) is a separate
 research effort tracked as ENH; it is not a "fix" and is intentionally
 out of scope here.
 
-The rule dispatcher (`get_rule`) is called by replay_financial.py.
+The rule dispatcher (`get_rule`) is called by gold_finalize_financial.py and
+incremental_detection.py.
 """
 
 from __future__ import annotations
@@ -93,8 +94,8 @@ _STRUCTURING_THRESHOLDS = {
     "KRW": 10_000_000.0,
 }
 
-# Written into every alert; reproduce refuses an alert another version
-# raised. 1.1.0: W3 and W17 hubs are per week.
+# Written into every alert: the rule version that raised it.
+# 1.1.0: W3 and W17 hubs are per week.
 RULE_VERSION = "1.1.0"
 MODEL_ID = "lb-rules"
 MODEL_VERSION = "1.0.0"
@@ -196,7 +197,7 @@ class RuleSkipped(Exception):
 
     Raised when a rule cannot execute against the given silver corpus but
     nothing is broken -- e.g. W1 connected-components refusing above its
-    vertex cap. The caller (gold_finalize / replay) must treat this as a
+    vertex cap. The caller (gold_finalize) must treat this as a
     THIRD outcome, distinct from both "ran and found zero alerts" and
     "raised an unexpected error". Reporting a skip as ``alerts=0`` makes a
     scale-100 W1 skip read as a 0% recall regression on the scorecard;
@@ -698,7 +699,7 @@ PATH_SEARCH_MAX_PARTITIONS = 2048
 PATH_SEARCH_RESULT_FILES = 16
 # Spill directories of drivers that died before their cleanup are swept at
 # the next detection run once their newest file is this old. Well above any
-# gold job's run time, so a live replay driver's files are never touched.
+# gold job's run time, so a live driver's files are never touched.
 PATH_SEARCH_STALE_HOURS = 24
 _SCRATCH_SIZE_CONF = (
     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.sizeLimit"
@@ -756,7 +757,7 @@ def path_search_partitions(spark, n_edges: int) -> int:
 def _path_spill_root(spark) -> str | None:
     """Where path levels are written, or None (local checkpoints, tests).
 
-    Under ``LB_GOLD_URI`` and the driver's application id, so a replay
+    Under ``LB_GOLD_URI`` and the driver's application id, so another
     driver of the same deployment never shares or deletes this one's files.
     """
     import os
@@ -1875,15 +1876,15 @@ def cleanup_w1_checkpoints(spark) -> None:
     Nothing else removes it (Spark's cleaner does not delete reliable
     checkpoints by default), and left in place it grew with every run and
     was counted in the measured gold size. The W3/W17 path-search files are
-    removed too (cleanup_path_search_spill), for callers such as replay that
-    do not go through the gold detection loop.
+    removed too (cleanup_path_search_spill), for callers that do not go
+    through the gold detection loop.
     """
     cleanup_path_search_spill(spark)
     if not _w1_checkpoint_dir():
         return
     # Only this driver's directory: setCheckpointDir writes under a random
     # per-context subdirectory, and another driver of the same deployment
-    # (a replay running W1) may be using a sibling right now.
+    # (another gold job running W1) may be using a sibling right now.
     path = spark.sparkContext.getCheckpointDir()
     if not path:
         return
@@ -1909,7 +1910,7 @@ def w1_connected_components(
     among itself and its neighbours. Converges to the "min id in the
     connected component" label in O(diameter) iterations. Bounded by
     `max_iterations` so a pathologically hostile graph can't hang the
-    replay job.
+    gold job.
 
     Implemented directly in Spark SQL rather than through GraphFrames
     because GraphFrames publishes per Spark minor and per Scala minor
@@ -1988,7 +1989,7 @@ def w1_connected_components(
     v_count = vertices.count()
     if v_count > max_vertices:
         # Skip loud AND distinguishably. Raising RuleSkipped (rather than
-        # returning an empty alerts DF) lets gold_finalize / replay emit a
+        # returning an empty alerts DF) lets gold_finalize emit a
         # ``skipped=vertex-cap`` log line the metrics collector records as a
         # third state, so a scale-100 W1 skip is never rendered as a 0%
         # recall regression. Raise the cap via the
@@ -2735,7 +2736,7 @@ def w7_cross_border_high_risk(
     Historically this rule crashed inside the driver when the caller did
     NOT pass silver_entities AND the reference JSON was not mounted --
     the ImportError from ``import lakebench.spark.data`` surfaced as a
-    hard failure of the whole replay job. A missing reference JSON now
+    hard failure of the whole job. A missing reference JSON now
     degrades to an empty alerts DF with a stderr note.
     """
     from pyspark.sql.functions import broadcast
@@ -2965,8 +2966,7 @@ def w1_max_vertices() -> int:
 
 
 def rule_params(fn, run_id: str, silver_entities=None) -> dict:
-    """The keyword arguments a rule is called with, the same in gold-finalize,
-    replay and reproduce: ``run_id``; ``silver_entities`` when the rule
+    """The keyword arguments gold-finalize calls a rule with: ``run_id``; ``silver_entities`` when the rule
     accepts it and a frame is given; and ``max_vertices`` from the
     configured W1 cap when the rule accepts it and the cap is positive (a
     non-positive value keeps the rule's own default, so a mis-set variable

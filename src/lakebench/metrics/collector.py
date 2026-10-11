@@ -460,8 +460,8 @@ class PipelineMetrics:
     # Serialised as ``datagen.stale_bronze``.
     datagen_stale_bronze: dict[str, Any] | None = None
 
-    # Financial (AML) recall scoring (optional -- populated for a batch
-    # financial run when `financial score` is folded into `run`).
+    # Financial (AML) recall scoring (optional -- populated when `run`
+    # scores a financial run).
     # Shape: the recall.json sidecar written by score_financial.py --
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",

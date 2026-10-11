@@ -695,7 +695,7 @@ Advanced workload overrides. Most users should leave these at defaults and contr
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `workload.customer360.unique_customers` | integer or null | `null` | advanced | Override: unique customer count. If None, derived from scale. |
-| `workload.retention_workload` | boolean | `false` | advanced | AML: keep the snapshots time-travel reproduction needs. Pre-benchmark maintenance then retains `retention_months` plus headroom instead of expiring every snapshot. |
+| `workload.retention_workload` | boolean | `false` | advanced | AML batch: keep snapshot history through pre-benchmark maintenance, which then retains `retention_months` plus headroom instead of expiring every snapshot. |
 | `workload.retention_months` | integer | `60` | advanced | AML: months of snapshots kept when `retention_workload` is true (1--120). |
 | `workload.w1_max_vertices` | integer | `8000000` | advanced | AML: vertex cap of the W1 connected-components rule, a Lakebench-imposed cap. The default covers scale 10 (1.1M entities); raise it for larger scales that have the executor budget. |
 | `workload.tm_operations.enabled` | boolean | `true` | advanced | Run the TM operations layer. When it cannot run (no manifest, an error) the run reports it as not run; only violated workflow invariants fail a run |

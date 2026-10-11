@@ -70,13 +70,6 @@
 - **TM operations figures are simulations**
   ([8.5](tm-operations.md#85-tm-operations)); recall and false-positive rate
   are measured from alerts against the manifest.
-- **`lakebench financial reproduce` pins the three silver tables only.**
-  - W5 and W6 read the bronze watchlist as it is now, and W1 its vertex cap
-    from the current config (listed as `not_pinned`).
-  - The W3 and W17 path budgets depend on the job's executor count and
-    scratch size.
-  - A W2 or W4 alert is the clean check. Continuous alerts are not
-    reproduced.
 - **The reference-model score reads unsealed silver.** `lakebench financial
   reference-score` reads silver without the sealed-batch filter the rules and
   the covered scorer use (`spark/scripts/aml_features.py`). Rows from a batch

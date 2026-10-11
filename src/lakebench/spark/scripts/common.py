@@ -2489,7 +2489,7 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     the sealed-marker commit leaves rows visible in silver.transactions
     with no matching row in ``silver_batch_versions``. The semi-join hides
     that partial batch from every gold-side consumer, so a mid-batch crash
-    window is invisible to detection, scoring, replay, and reproduction.
+    window is invisible to detection and scoring.
 
     Batch mode stamps rows with ``(_stream_id='batch', _batch_id=cycle)``
     and writes a matching versions row last, so the same filter applies
@@ -2681,7 +2681,7 @@ def frame_fingerprint(df, cols):
     costs higher-order functions per row: measure it before fingerprinting
     a full large table on a hot path.
 
-    Callers name the columns; AML time travel and reproduction pass every
+    Callers name the columns; AML time travel passes every
     column of the snapshot schema, including ``_stream_id``, ``_batch_id``
     and ``ingest_ts``, which decide sealed visibility.
 

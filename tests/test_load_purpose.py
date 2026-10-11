@@ -205,7 +205,7 @@ VERB_PURPOSES = [
     ("lakebench.cli", ["results"], LoadPurpose.READ, False),
     (
         "lakebench.cli._financial",
-        ["financial", "score", "--manifest", "s3://m", "--output", "s3://o"],
+        ["financial", "reference-score", "--manifest", "s3://m", "--output-prefix", "s3://o"],
         LoadPurpose.MUTATE,
         False,
     ),

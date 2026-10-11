@@ -211,46 +211,9 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # The financial operations jobs (replay, reproduce, the reference
-    # detector) took silver-build's profile through a fallback that is now an
-    # error (MissingSizingProfile); these are literal copies of it, so their
-    # manifests do not change.
-    "replay-financial": {
-        "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
-        "executor_cores": 4,
-        "executor_memory": "48g",
-        "executor_memory_overhead": "12g",
-        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
-        # on device" mid-silver-build: c360's window + wide-join shuffle
-        # spill exceeds 150Gi per executor once the max_executors cap
-        # (28) means data-per-executor stops decreasing with scale.
-        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
-        # only costs bare block storage. Do not shrink.
-        "scratch_size": "300Gi",
-        "base_executors": 8,  # scale <= 10
-        "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": _MAX_EXECUTORS_SAFE,
-        "base_partitions": 64,
-    },
-    "reproduce-financial": {
-        "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
-        "executor_cores": 4,
-        "executor_memory": "48g",
-        "executor_memory_overhead": "12g",
-        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
-        # on device" mid-silver-build: c360's window + wide-join shuffle
-        # spill exceeds 150Gi per executor once the max_executors cap
-        # (28) means data-per-executor stops decreasing with scale.
-        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
-        # only costs bare block storage. Do not shrink.
-        "scratch_size": "300Gi",
-        "base_executors": 8,  # scale <= 10
-        "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": _MAX_EXECUTORS_SAFE,
-        "base_partitions": 64,
-    },
+    # The reference detector took silver-build's profile through a fallback
+    # that is now an error (MissingSizingProfile); this is a literal copy of
+    # it, so its manifest does not change.
     "score-financial-reference": {
         "driver_cores": 4,
         "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
@@ -1899,9 +1862,7 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
-    # Financial-only operator actions (W8 / W10 / recall scoring)
-    REPLAY_FINANCIAL = "replay-financial"
-    REPRODUCE_FINANCIAL = "reproduce-financial"
+    # Financial-only: recall scoring (submitted by `run`)
     SCORE_FINANCIAL = "score-financial"
     # Post-window re-read of the snapshots continuous AML ticks read.
     TIME_TRAVEL_FINANCIAL = "time-travel-financial"
@@ -2120,8 +2081,8 @@ class SparkJobManager:
             cycle_env: Extra environment variables for multi-cycle batch runs
                        (e.g. LB_SILVER_INCREMENTAL, LB_GOLD_INCREMENTAL)
             arguments: CLI arguments to append to the main application file.
-                       Used by financial replay/reproduce/score which take
-                       --rule / --alert-id / --manifest at the script level.
+                       Used by the financial jobs that take options such as
+                       --manifest at the script level.
 
         Returns:
             Initial JobStatus
@@ -2520,13 +2481,11 @@ class SparkJobManager:
                     JobType.GOLD_REFRESH: "gold_refresh_delta.py",
                 }
             )
-        # Financial-only operator actions (replay/reproduce/score) are
-        # schema-agnostic in the deploy path but only meaningful for
-        # Financial workloads. Registered unconditionally so
-        # `lakebench financial <verb>` works regardless of the elif
+        # Financial-only jobs (scoring, time travel, the reference detector)
+        # are schema-agnostic in the deploy path but only meaningful for
+        # Financial workloads. Registered unconditionally so `run` and
+        # `lakebench financial reference-score` work regardless of the elif
         # branch above.
-        script_map.setdefault(JobType.REPLAY_FINANCIAL, "replay_financial.py")
-        script_map.setdefault(JobType.REPRODUCE_FINANCIAL, "reproduce_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
         script_map.setdefault(JobType.TIME_TRAVEL_FINANCIAL, "time_travel_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
@@ -3089,11 +3048,10 @@ class SparkJobManager:
             }
         )
 
-        if job_type in (JobType.REPRODUCE_FINANCIAL, JobType.TIME_TRAVEL_FINANCIAL):
-            # One attempt: a reproduction or a time-travel read writes one
-            # result, and a retried driver would only repeat a determined
-            # outcome or a crash (and, for time travel, scan everything again
-            # inside the same job budget).
+        if job_type is JobType.TIME_TRAVEL_FINANCIAL:
+            # One attempt: a time-travel read writes one result, and a retried
+            # driver would only repeat a determined outcome or a crash, and
+            # scan everything again inside the same job budget.
             # Submission retries stay (they run before the driver starts).
             _restart_policy = {
                 "type": "OnFailure",
@@ -3136,7 +3094,7 @@ class SparkJobManager:
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
                 "mainApplicationFile": main_file,
-                # Args for scripts that take CLI options (replay/reproduce/score).
+                # Args for scripts that take CLI options (score, reference score).
                 # SparkOperator maps this to the driver's Python argv after the
                 # script path. Omit when unused so we don't break the older
                 # config's assumption that omitting the field is safe.

@@ -27,7 +27,7 @@ run.
   category.
 - The cuts are `HIGH_PRIORITY_CUTOFFS` in `spark/scripts/detection_rules.py`.
 - W9 to W16 are workload ids the specification reserves (writeback,
-  reproduce, ingest, the ML workloads); hence W17.
+  time travel, ingest, the ML workloads); hence W17.
 
 **The screen is bounded on purpose** (W5, W6).
 

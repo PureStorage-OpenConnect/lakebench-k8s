@@ -119,11 +119,11 @@ def test_missing_profile_raises(monkeypatch):
     from tests.fixtures.spark_helpers import _mock_k8s
 
     profiles = dict(job_mod._JOB_PROFILES)
-    del profiles["replay-financial"]
+    del profiles["time-travel-financial"]
     monkeypatch.setattr(job_mod, "_JOB_PROFILES", profiles)
     mgr = SparkJobManager(make_config(), _mock_k8s())
-    with pytest.raises(MissingSizingProfile, match="replay-financial"):
-        mgr._build_manifest(JobType.REPLAY_FINANCIAL)
+    with pytest.raises(MissingSizingProfile, match="time-travel-financial"):
+        mgr._build_manifest(JobType.TIME_TRAVEL_FINANCIAL)
 
 
 # -- 4. labelled when it binds -------------------------------------------------------

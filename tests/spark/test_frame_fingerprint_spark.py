@@ -1,6 +1,6 @@
 """``common.frame_fingerprint`` is
-order-independent and sees every change a time-travel or reproduction
-comparison must see, and gives the same value on the 4.0 and 4.1 lines.
+order-independent and sees every change a time-travel comparison must
+see, and gives the same value on the 4.0 and 4.1 lines.
 
 No jars: the helper reads a DataFrame, not a table.
 """

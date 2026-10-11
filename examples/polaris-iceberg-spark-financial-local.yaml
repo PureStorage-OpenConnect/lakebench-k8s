@@ -59,7 +59,7 @@ architecture:
 
 workload:
   schema: financial
-  retention_workload: false    # W8/W10 not exercised in local recipe
+  retention_workload: false    # no snapshot history kept in the local recipe
   datagen:
     scale: 1                   # LOCAL_SCALE_ADVISORY_MAX = 1.0
     timestamp_start: "2024-01-01"

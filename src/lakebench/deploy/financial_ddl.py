@@ -462,8 +462,7 @@ TBLPROPERTIES (
 
 # Risk scores: one row per (entity, model). W9 writeback MERGEs into this
 # table on (entity_id, model_id). Version history is preserved via Iceberg
-# snapshots (time-travel), not a separate history table -- consistent with
-# W10 reproduction requirements.
+# snapshots (time-travel), not a separate history table.
 GOLD_RISK_SCORES_DDL = """
 CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     entity_id              BIGINT NOT NULL,

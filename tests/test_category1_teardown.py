@@ -171,8 +171,6 @@ def _job_types(workload: str) -> list:
         jobs += [
             JobType.SCORE_FINANCIAL,
             JobType.SCORE_FINANCIAL_REFERENCE,
-            JobType.REPLAY_FINANCIAL,
-            JobType.REPRODUCE_FINANCIAL,
         ]
     return jobs
 

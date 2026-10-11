@@ -60,8 +60,7 @@ and the `financial` commands refuse a protected corpus right after
 config load, before any cluster call, with exit 2 (`run.protected_corpus`).
 Protected: the config declares `corpus_role: evaluation` or `robustness`,
 names a seed hashing to a held-out role, or (AML) points its bronze datagen
-prefix at one where this host generated a registered corpus. `financial
-reproduce` also refuses a stored run record from such a corpus.
+prefix at one where this host generated a registered corpus.
 
 - `generate` writes a protected corpus only with `--registered-corpus --yes`
   and a digest-pinned `images.datagen`. It records the attempt in the host's

@@ -90,18 +90,7 @@ def _verb_argv(verb: str, cfg: Path) -> list[str]:
         "run": ["run", str(cfg), "--yes"],
         "benchmark": ["benchmark", str(cfg)],
         "query": ["query", str(cfg), "--sql", "SELECT 1"],
-        "financial score": [
-            "financial",
-            "score",
-            str(cfg),
-            "--manifest",
-            "s3a://b/m.parquet",
-            "--output",
-            "s3a://g/o.parquet",
-        ],
         "query --interactive": ["query", str(cfg), "--interactive"],
-        "financial replay": ["financial", "replay", str(cfg), "--rule", "W2_structuring"],
-        "financial reproduce": ["financial", "reproduce", str(cfg), "--alert-id", "a-1"],
         "financial reference-score": [
             "financial",
             "reference-score",
@@ -119,9 +108,6 @@ VERBS = [
     "benchmark",
     "query",
     "query --interactive",
-    "financial score",
-    "financial replay",
-    "financial reproduce",
     "financial reference-score",
 ]
 
@@ -639,19 +625,3 @@ def test_a_financial_stage_subset_runs_the_check_before_its_stages(
     elif cycles == 1:
         assert result.exit_code == 0, result.output
         assert [job for job, _ in submitted] == ["bronze-verify", stage]
-
-
-def test_record_refusal_is_fail_closed_by_default(monkeypatch):
-    """With compare gone, no caller needs the fail-open default: a financial
-    record whose held-out check cannot run is refused unless a caller
-    opts out."""
-
-    def boom(seed):
-        raise OSError("held-out record unreadable")
-
-    monkeypatch.setattr(lg, "recorded_seed_role", boom)
-    rec = _rec(seed=12345)
-    with pytest.raises(lg.UsageError) as e:
-        lg.refuse_protected_records([("r1", rec)], "financial reproduce")
-    assert "cannot be read" in str(e.value)
-    lg.refuse_protected_records([("r1", rec)], "financial reproduce", fail_closed=False)

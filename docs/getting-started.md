@@ -331,9 +331,8 @@ for scale factors and row counts.
   detection rules (W1-W8 and W17) inline after gold-finalize.
 
   Recall and precision from the default seed, 43, are in-sample and
-  uncalibrated. What that means, how to cite them, and re-scoring, replay,
-  reproduce and the reference detector:
-  [AML Scoring](aml-scoring.md#running-an-aml-pipeline).
+  uncalibrated. What that means, how to cite them, and the reference
+  detector: [AML Scoring](aml-scoring.md).
 
 ## Next steps
 

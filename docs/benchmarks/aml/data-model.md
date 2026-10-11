@@ -106,5 +106,3 @@ stream fills it.
 `alert_ts`, `alert_score`, `priority`, `status`, `disposition`,
 `alert_type`, `run_id`, `narrative`, `evidence` (map), `detected_ts`,
 `reason_codes` (array, added in 1.7; [4.2](rules.md#42-detection-rules)).
-An optional `gold.alerts_replay` is written only by `lakebench financial
-replay` ([4.4](pipeline.md#44-out-of-run-aml-commands)).

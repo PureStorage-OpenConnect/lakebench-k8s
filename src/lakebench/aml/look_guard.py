@@ -10,7 +10,7 @@ silently. One guard serves every caller:
   ``corpus_role`` or whose ``datagen.seed`` hashes to a held-out seed
   (``heldout_hashes.json`` and the compiled floor);
 - ``protected_record_reason(record)``: a stored run record whose corpus is a
-  protected one, for ``financial reproduce`` and the held-out audit;
+  protected one, for the held-out audit and the screen-rate script;
 - ``manifest_protected_reason(rows)``: a corpus manifest, over every row
   (``config/datagen_seed.py``, which also ships flat to the Spark driver);
 - ``refuse_if_protected(cfg, verb)``: the refusal itself, exit 2 on the
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -38,7 +38,6 @@ __all__ = [
     "protected_corpus_reason",
     "protected_record_reason",
     "refuse_if_protected",
-    "refuse_protected_records",
 ]
 
 #: The exit path every protected-corpus refusal takes (exit 2).
@@ -337,26 +336,3 @@ def refuse_if_protected(cfg: Any, verb: str) -> None:
             next=_NEXT,
             path=PATH,
         )
-
-
-def refuse_protected_records(
-    records: Iterable[tuple[str, Any]],
-    verb: str,
-    *,
-    require_identity: bool = False,
-    fail_closed: bool = True,
-) -> None:
-    """Raise UsageError (exit 2) for the first ``(run_id, record)`` whose
-    record is from a protected AML corpus. Fail-closed by default: a
-    financial record whose held-out check cannot run is refused."""
-    for run_id, record in records:
-        reason = protected_record_reason(
-            record, require_identity=require_identity, fail_closed=fail_closed
-        )
-        if reason is not None:
-            raise UsageError(
-                f"Refused: `{verb}` never reads a run on a protected AML corpus "
-                f"(run {run_id}: {reason}).",
-                next=_NEXT,
-                path=PATH,
-            )
