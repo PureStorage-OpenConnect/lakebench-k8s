@@ -3,97 +3,99 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/LICENSE)
 
-Lakebench evaluates how composed lakehouse architectures behave when they
-execute real data workloads on real infrastructure.
+**Evaluate lakehouse architectures through the workloads they execute.**
 
-It deploys a configurable architecture onto Kubernetes, runs a defined
-workload through it under controlled conditions, and produces evidence of
-correctness, performance, throughput and resource consumption. Each run
-records what produced it so a reader can judge whether two results are
-comparable.
+Lakebench runs defined data workloads against configurable lakehouse
+architectures on Kubernetes. It measures how the assembled system behaves,
+where time and resources are consumed, and how results change when
+architectural choices or operating conditions change.
+
+Rather than benchmarking individual components in isolation, Lakebench
+evaluates the behaviour of the architecture as a whole.
 
 ## Why Lakebench?
 
-Architectural decisions need evidence from executing workloads, not
-component specifications in isolation. Lakebench helps investigate three
-questions:
+A lakehouse is a composition of technologies. Its behaviour depends on how
+those technologies work together, the workload being executed and the
+infrastructure underneath them.
 
-1. **How does an architecture execute a workload?** Deploy a catalog, table
-   format and query engine together, run a workload end to end, and observe
-   where time goes, how resources are used, and whether results are correct.
-2. **Where do constraints emerge?** Run the same workload at increasing
-   scale to find where throughput stops growing, which stages dominate, and
-   where the system saturates.
-3. **What changes when the composition changes?** Swap one component (Hive
-   for Polaris, Trino for DuckDB), rerun the same workload on the same
-   system, and compare the evidence.
+Component benchmarks cannot tell you how the complete architecture will
+behave when ingesting, transforming, analyzing and maintaining data.
 
-The value is repeatable evidence under disclosed conditions, not an
-automated recommendation.
+Lakebench provides a repeatable way to investigate three questions:
 
-## How it works
+1. **How does the architecture behave?** Execute a defined workload and
+   measure its outcomes, processing stages and resource consumption.
+2. **Where are the constraints?** Examine where execution time is spent and
+   which system resources contribute to observed behaviour.
+3. **What changes when the architecture changes?** Repeat the workload with
+   different supported components, configurations or operating conditions
+   and compare the evidence.
 
-Lakebench combines four inputs into one experiment:
+Lakebench produces measurements and supporting context. It does not
+automatically determine the best architecture or establish production
+suitability.
 
-```
-Workload × Architecture × System × Execution conditions → Evidence
-```
+## How Lakebench Works
 
-- **Workload.** The data, processing stages, queries and outcomes that
-  exercise the architecture.
-- **Architecture.** A composition of catalog, table format, pipeline engine
-  and query engine, expressed as a recipe.
-- **System.** The Kubernetes cluster, node hardware, network and
-  S3-compatible object storage.
-- **Execution conditions.** Scale factor, pipeline mode (batch or
-  continuous), resource allocation, concurrency and maintenance.
-- **Evidence.** Observed correctness, stage timing, throughput, query
-  latencies, resource consumption, and the conditions and limits that apply.
+Every Lakebench experiment brings together four elements:
 
-A recipe names one supported composition. There are 11. `lakebench init
---recipe <name>` writes its config; `lakebench config recipes` lists them
-all. See [Recipes](docs/recipes.md).
+**Workload:** The data, processing, queries and outcomes that exercise the
+architecture.
 
-## Supported workloads
+**Architecture:** The supported composition of processing engines, table
+formats, catalogs and query engines.
 
-Workloads are the means of evaluating the architecture. Each defines its
-data, processing stages, queries and measured outcomes.
+**System:** The Kubernetes, compute, network and storage environment on
+which the architecture runs.
+
+**Execution conditions:** The scale, resource allocations, execution mode
+and other controls under which the workload executes.
+
+Together, these produce evidence of how the workload behaved.
+
+`Workload x Architecture x System x Execution conditions -> Evidence`
+
+Lakebench automates supported deployment and execution activities, collects
+measurements and produces reports for examining the results.
+
+## Workloads
+
+Lakebench currently provides two synthetic workloads.
 
 ### Customer 360
 
-A synthetic customer-interaction analytics workload. Retail interactions
-across multiple channels flow through bronze ingestion, silver enrichment
-and gold aggregation into an executive dashboard. An 8-query analytical
-benchmark measures query latency and throughput against the silver and gold
-tables.
+Customer 360 exercises a retail analytics workload. Customer interactions
+are ingested, validated, transformed and aggregated into analytical datasets
+that are queried for business insights.
 
-Batch mode runs the three stages in sequence. Continuous mode keeps data
-arriving and measures the pipeline under ongoing ingest.
+It exercises the architecture through data preparation, transformation,
+aggregation and analytical querying.
 
-Set `workload.schema: customer360` (the default).
+### Financial Crime / AML
 
-### Financial crime (AML)
+The financial-crime workload exercises transaction-monitoring data
+processing using synthetic financial transactions.
 
-A synthetic financial-transaction workload. pacs.008 wire messages flow
-through the same medallion stages, then nine detection rules score recall
-and precision against planted typologies. A 12-query benchmark covers
-transactional and investigator queries.
+It combines ingestion, transformation, detection and analytical activity to
+examine both processing behaviour and detection outcomes.
 
-Both pipeline execution and detection correctness are measured. Continuous
-mode adds time-to-detect. Recall and precision from the default seed are
-in-sample and uncalibrated; what those numbers mean and how to cite them:
-[AML Scoring](docs/aml-scoring.md).
+Its purpose is to evaluate how the architecture executes the workload, not
+to establish the effectiveness of a production AML detection system.
 
-Set `workload.schema: financial`. Requires an Iceberg recipe.
+The two workloads exercise different data-processing behaviours while using
+the same underlying architectural composition model.
 
-### Shared and workload-specific behaviour
+## Running an Experiment
 
-Both workloads share the same architectural components and medallion
-pipeline. They differ in data model, processing logic, detection rules (AML
-only), query sets and scored outcomes. The run's `experiment` block records
-which workload, stages, rules and query set produced each result.
+Lakebench supports a workflow that:
 
-## Quick start
+1. Defines the workload, architecture and execution configuration.
+2. Deploys the required supported components onto Kubernetes.
+3. Generates synthetic workload data.
+4. Executes the workload.
+5. Collects measurements and produces results.
+6. Supports subsequent investigation and comparison.
 
 ### Install
 
@@ -104,143 +106,100 @@ pip install lakebench-k8s
 Binaries that need no Python are on
 [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
 
-### Prerequisites
-
-Lakebench runs on an existing Kubernetes cluster with S3-compatible storage.
-It does not provision the underlying infrastructure.
-
-- `kubectl` and `helm` on PATH.
-- Kubernetes 1.26+.
-- S3-compatible object storage with an endpoint, access key and secret key.
-  Validated on FlashBlade and Garage; expected to work on AWS S3, MinIO and
-  other S3-compatible stores. Check yours with `lakebench config storage`.
-- Cluster room for the workload. Scale 1 batch needs about 41 cores and
-  544 GB. `lakebench plan` checks your cluster; [Sizing](docs/sizing.md)
-  has the minimum per workload, mode and scale.
-
-The [Prerequisites](docs/prerequisites.md) page lists every cluster check
-and its fix.
-
-### First experiment
+### Run
 
 ```bash
 lakebench init --endpoint http://your-s3-endpoint:80    # writes lakebench.yaml
 export LAKEBENCH_S3_ACCESS_KEY=...
 export LAKEBENCH_S3_SECRET_KEY=...
 lakebench admin install --component all lakebench.yaml  # once per cluster
-lakebench plan lakebench.yaml                           # read-only: what the run needs
-lakebench run lakebench.yaml --generate --yes           # deploy, generate, pipeline, benchmark
-lakebench report lakebench.yaml                         # print the scorecard
+lakebench plan lakebench.yaml                           # what the run needs (read-only)
+lakebench run lakebench.yaml --generate --yes           # deploy, generate, run workload
+lakebench report lakebench.yaml                         # print results
 lakebench destroy lakebench.yaml                        # remove what this deployment created
 ```
 
+- `init` writes a minimal configuration. `--recipe <name>` selects an
+  architectural composition; `--workload financial` selects the AML
+  workload. There are 11 supported recipes. `lakebench config recipes`
+  lists them.
+- `admin install` places shared cluster components (Spark Operator,
+  Stackable operators for Hive recipes, scratch StorageClass). Run once
+  per cluster.
+- `plan` checks whether the cluster has room for the workload. It changes
+  nothing.
+- `--generate` fills the bronze bucket with synthetic data. Without it,
+  `run` refuses (exit 4).
 - `--yes` lets `run` deploy the namespace and components. Without it, run
   `lakebench deploy` first.
-- `--generate` fills the bronze bucket. Without it, `run` refuses with
-  exit 4.
-- `admin install` places the Spark Operator, Stackable operators (for Hive
-  recipes) and the scratch StorageClass. Run it once per cluster.
+- `destroy` removes only what this deployment created. It asks for
+  confirmation unless `--yes` is passed.
 
 The full walkthrough is [Getting Started](docs/getting-started.md).
 
-### Minimal configuration
+## Understanding Results
 
-`lakebench init` writes a config that is sufficient for a first run:
+Lakebench records how the workload executed under the specified conditions.
 
-```yaml
-name: lb-alice-7f3c
-recipe: polaris-iceberg-spark-trino
-workload:
-  schema: customer360
-  datagen:
-    scale: 1                       # ~10 GB of bronze data
-platform:
-  storage:
-    s3:
-      endpoint: "http://your-s3-endpoint:80"
-      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
-      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
-```
+Depending on the workload and available instrumentation, this can include:
 
-- `name` is required. It names the namespace and the buckets.
-- The recipe sets the catalog, table format and engines. A component that
-  contradicts it is refused at load.
-- Credentials are environment-variable references, never plaintext.
-- `init --workload financial` writes an AML config.
+- Workload outcomes and correctness.
+- Execution time and processing-stage behaviour.
+- Throughput and resource efficiency.
+- Query or detection performance.
+- Compute, memory and storage observations.
 
-Every YAML field: [Configuration](docs/configuration.md).
+Results describe observed behaviour under particular conditions. They are
+not universal performance claims.
 
-## Understanding results
+Comparing results requires understanding what changed between runs and
+whether their execution conditions and workload semantics are equivalent.
 
-Each run records what happened and what produced it.
+`lakebench report` prints a summary and the path to the HTML report.
+`--render` writes a fresh copy; `--format json` or `csv` for scripts.
 
-**Workload outcomes.** Stage completion, row counts (bronze, silver, gold)
-and, for AML, detection recall and precision per rule. A run that silently
-skips work or produces zero rows is not a pass.
+## Prerequisites
 
-**Execution time.** Per-stage duration, total pipeline time, and Time to
-Value (deploy through benchmark).
+Lakebench requires a supported Kubernetes environment and access to
+compatible storage. It does not provision the underlying infrastructure.
 
-**Throughput.** Pipeline throughput (GB/s), compute efficiency (GB per
-core-hour) and, for continuous mode, sustained throughput (rows/s) and data
-freshness (seconds of lag).
+**Host tooling:**
 
-**Query behaviour.** Per-query latency and queries per hour (QpH). AML
-continuous mode adds time-to-detect (p50 and p95).
+- `kubectl` and `helm` on PATH.
 
-**Resource consumption.** With observability enabled, the HTML report adds
-pod CPU, memory and S3 I/O.
+**Kubernetes:**
 
-**Conditions and limits.** The `experiment` block in `metrics.json` records
-the corpus, datagen image, recipe, component versions, scale, mode,
-maintenance, Lakebench caps (and whether they bound), and the support state.
-A number bounded by a cap is labelled as such.
+- Kubernetes 1.26+.
+- Permission to create a namespace.
 
-A slow stage is an observation. Attributing it to a specific component or
-resource requires supporting evidence.
+**Storage:**
 
-`lakebench report` prints the scorecard and the path to `report.html`.
-`--render` writes a fresh copy. `--format json` or `csv` for scripts.
+- S3-compatible object storage with an endpoint URL, access key and secret
+  key. Validated on FlashBlade and Garage; expected to work on AWS S3,
+  MinIO and other S3-compatible stores. `lakebench config storage` checks
+  yours.
 
-## Comparing runs
+**Cluster capacity:**
 
-Run each config, then read the two HTML reports side by side.
+- Room for the workload. Scale 1 batch needs about 41 cores and 544 GB.
+  Requirements grow with scale and differ by workload and execution mode.
+  `lakebench plan` checks the cluster;
+  [Sizing](docs/sizing.md) has every combination.
 
-The Experiment section of each report lists the corpus, components,
-maintenance, stages, rules, query set id and (for AML batch) the alert set.
-Compare performance only when the corpus and query set match.
-
-**Like-for-like:** same workload, architecture, system and execution
-conditions. Differences in numbers reflect variance and measurement.
-
-**Comparable:** same workload and system, different architecture or
-execution conditions. The disclosed differences are the subject of the
-comparison.
-
-Lakebench does not compare query answers automatically. Check per-query row
-counts and numbers in both reports.
-
-## Support states
-
-Each workload, recipe and mode combination has a support state:
-
-- **supported:** validated end to end on the release tree.
-- **unverified:** valid, not release-validated.
-- **unsupported:** refused before a run.
-
-Every run records its state. The table for this release is in the
-[Compatibility Matrix](docs/compatibility-matrix.md#support-states).
+The [Prerequisites](docs/prerequisites.md) page lists every check and its
+fix.
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md): install and first run
-- [All documentation](docs/README.md): the full index
-- [CLI Reference](docs/cli-reference.md): every command and flag
+- [Getting Started](docs/getting-started.md): install, first run, teardown
+- [Documentation index](docs/README.md): full navigation
 - [Configuration](docs/configuration.md): every YAML field
-- [Sizing](docs/sizing.md): minimum cluster per workload, mode and scale
-- [Supported Components](docs/compatibility-matrix.md#components): versions
+- [CLI Reference](docs/cli-reference.md): every command and flag
+- [Workloads](docs/README.md#workloads): Customer 360 and AML
+- [Recipes](docs/recipes.md): supported architectural compositions
+- [Results & Comparison](docs/README.md#results--comparison): measurements
+  and interpretation
 - [Upgrading to 1.7](UPGRADING-1.7.md): every breaking change from 1.6
-- [CHANGELOG](CHANGELOG.md)
 
 ## License
 
