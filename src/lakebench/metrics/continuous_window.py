@@ -1,4 +1,4 @@
-"""The continuous-mode measurement window (DESIGN 5).
+"""The continuous-mode measurement window.
 
 Continuous mode runs the stages concurrently over a corpus that keeps
 arriving. Lakebench offers the corpus to the pipeline at a fixed trickle

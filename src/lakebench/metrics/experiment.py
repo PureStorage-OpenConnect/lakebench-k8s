@@ -784,7 +784,7 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
 def support_state(
     workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str = "cluster"
 ) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of a run's workload x architecture x mode,
+    """The support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
     validation record (config/validated_combinations.yaml), at the Spark
     minor and table format version the architecture block names."""
@@ -903,7 +903,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     if mode == "sustained":
         limits["intake_limit"] = getattr(pb, "intake_limit", None)
         # Rounds behind the continuous QpH median: benchmark iterations are
-        # an execution condition (DESIGN 2.4), and a median over 4 rounds
+        # an execution condition, and a median over 4 rounds
         # does not stand like-for-like against one over 5.
         limits["benchmark_rounds"] = sum(
             1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0

@@ -1,4 +1,4 @@
-"""Continuous-mode credibility (mission invariant 3, DESIGN 5).
+"""Continuous-mode credibility (mission invariant 3).
 
 The 2026-09-27 discovery run (20260926-215221-65567b, integrate f8b29eb)
 exited 0 on a degenerate window: silver-stream and gold-refresh failed to

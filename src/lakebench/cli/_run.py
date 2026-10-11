@@ -2024,7 +2024,7 @@ def _run_once(
         resolve_maintenance_retention,
     )
 
-    # DESIGN 6.5: an unsupported workload x architecture x mode is refused
+    # An unsupported workload x architecture x mode is refused
     # before anything runs. Load already checks the config's own mode; check
     # the mode this run will use. --local runs Customer 360 batch only.
     from lakebench.config.support import UNSUPPORTED, support_state_for_config

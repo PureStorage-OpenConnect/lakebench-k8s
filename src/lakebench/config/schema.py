@@ -1884,7 +1884,7 @@ class DatagenConfig(ConfigModel):
     # Datagen output file size, fixed at 64mb for every workload and mode
     # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
     # by file size, so one size keeps row content identical across delivery
-    # modes (DESIGN.md) and keeps corpus identity stable. The field stays so
+    # modes and keeps corpus identity stable. The field stays so
     # existing configs that set 64mb still load; any other value is refused.
     file_size: Literal["64mb"] = "64mb"
     """Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps
@@ -2261,8 +2261,8 @@ _SUPPORTED_COMBINATIONS = [
 ]
 
 
-# What each workload can run on (DESIGN.md 6.5, layers 2 and 3). The
-# architecture tuple list above says nothing about workloads; this does. A
+# What each workload can run on (support layers 2 and 3, config/support.py).
+# The architecture tuple list above says nothing about workloads; this does. A
 # workload x format or workload x mode pair not listed here is refused at load.
 # The AML stage scripts and DDL write Iceberg tables (USING iceberg), so AML on
 # Delta used to pass validation and then run Iceberg code on a Delta
@@ -3493,7 +3493,7 @@ class LakebenchConfig(ConfigModel):
         Destroy deletes the deployment's namespace. If that namespace were
         the shared observability namespace or the cluster-lock namespace,
         tearing down one deployment would remove what every other deployment
-        uses (DESIGN.md invariant 6).
+        uses: destroying deployment A must never affect deployment B.
         """
         ns = self.get_namespace()
         if ns in RESERVED_NAMESPACES:

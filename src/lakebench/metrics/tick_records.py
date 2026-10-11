@@ -229,7 +229,7 @@ def scored_tick(parsed: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
 
 
 def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``continuous.ticks[]`` as recorded (DESIGN interfaces): the pins and
+    """``continuous.ticks[]`` as recorded: the pins and
     times of each tick, with the commit snapshots and the driver start."""
     keys = (
         "cycle",
@@ -248,7 +248,7 @@ def tick_list(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``continuous.time_travel.ticks[]`` (DESIGN interfaces): one entry per
+    """``continuous.time_travel.ticks[]``: one entry per
     tick that logged a time-travel record, with its driver start, cycle and
     whether it completed (``(start, cycle)`` is the key into
     ``continuous.ticks``).

@@ -1,4 +1,4 @@
-# Release validation record (DESIGN.md section 6.5, layer 4): the combinations
+# Release validation record (support layer 4, config/support.py): the combinations
 # this release was validated on, with the runs that did it.
 #
 # Only a run of a listed combination at the listed versions is stamped

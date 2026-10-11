@@ -3,8 +3,7 @@
 Reference: the code map, test tooling, CI, extension points and why the code is built as it is.
 
 Setup, test tiers, pull requests and review are in
-[CONTRIBUTING.md](../CONTRIBUTING.md). The product model is in
-[DESIGN.md](DESIGN.md); the [extension rules](#extension-rules) moved here.
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Architecture map
 
@@ -308,11 +307,11 @@ pull request cancels its older run. A job over its time limit fails.
 
 ## Extension rules
 
-Rules for extending the product. From [DESIGN.md](DESIGN.md) section 6.
+Rules for extending the product.
 
 ### Adding a workload (design rules)
 
-A new workload brings all five parts of section 2.3. It adds no
+A new workload brings all five parts below. It adds no
 workload-specific logic to component modules; any per-component adapter it
 needs is owned by the workload and passes its correctness contract.
 

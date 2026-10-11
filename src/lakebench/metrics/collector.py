@@ -1852,7 +1852,7 @@ class PipelineBenchmark:
                     else {
                         "composite_qph": composite_qph,
                         # The n behind the figure: medians over different
-                        # round counts are not like-for-like (DESIGN 2.4).
+                        # round counts are not like-for-like.
                         "composite_qph_rounds": self.qph_rounds() if in_stream_qph > 0 else 0,
                     }
                 ),

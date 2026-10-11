@@ -1,4 +1,4 @@
-"""Support states (DESIGN 6.5): workload x recipe x mode declarations, the
+"""Support states: workload x recipe x mode declarations, the
 release validation record, the computed state and the docs generated from it."""
 
 from __future__ import annotations

@@ -3351,7 +3351,8 @@ def _run_sustained(
 
     # The trickle this run offers: derived from the corpus and the window
     # unless the config sets it, and refused when data would stop arriving
-    # before the window ends (DESIGN 5: a corpus that keeps arriving).
+    # before the window ends (continuous mode needs a corpus that keeps
+    # arriving).
     trickle = resolve_trickle(cfg, run_duration, continuous_datagen=not skip_generate)
     if trickle["problem"]:
         print_error(trickle["problem"])
@@ -3380,8 +3381,8 @@ def _run_sustained(
             )
         )
 
-    # Maintenance inside the window (DESIGN 5: continuous mode includes
-    # periodic maintenance). Resolved values are written back so the config
+    # Maintenance inside the window (continuous mode includes periodic
+    # maintenance). Resolved values are written back so the config
     # snapshot and the experiment block record the intervals that ran.
     sustained_cfg = cfg.architecture.pipeline.sustained
     schedule = resolve_maintenance_schedule(

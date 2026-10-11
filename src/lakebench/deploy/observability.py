@@ -12,8 +12,7 @@ observability`` (``deploy/shared_components.py``), which installs only when no
 release of it exists anywhere on the cluster. ``deploy`` only checks that it is
 there and applies the deployment's own PodMonitors; it never installs,
 upgrades or modifies the release. ``destroy`` never uninstalls the shared
-release: deployment A's teardown must not remove deployment B's monitoring
-(DESIGN.md invariant 6).
+release: deployment A's teardown must not remove deployment B's monitoring.
 Each deployment's own PodMonitors and Pushgateway live in its namespace:
 they go with it, and when ``create_namespace: false`` keeps it, destroy's
 category1 step deletes them by name (``deploy/category1.py``).

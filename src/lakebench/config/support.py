@@ -1,4 +1,4 @@
-"""Support states for workload x architecture x mode (DESIGN.md section 6.5).
+"""Support states for workload x architecture x mode.
 
 Support is judged in four layers:
 
@@ -518,7 +518,7 @@ def support_state(
     spark: str | None = None,
     table_format_version: str | None = None,
 ) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of one workload x architecture x mode
+    """The support state of one workload x architecture x mode
     at one Spark minor (*spark*) and table format version.
 
     Returns ``{"state", "basis", ...}``. ``supported`` only when the release

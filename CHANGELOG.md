@@ -60,6 +60,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 - **AML continuous `detected_ts`** is the first pass that wrote an alert's content, not the last rewrite.
 - **AML continuous silver** keeps `distinct_counterparties_out/in` from a new table, `silver.counterparty_pairs` (`architecture.tables.silver_counterparty_pairs`), so a batch's cost no longer grows with run length. Counts stay exact; batch-stream parity holds.
 - **Customer 360 continuous gold streams silver** commits since its checkpoint, at one pinned snapshot (Delta: version), and recomputes only the dates touched. A restart resumes from the checkpoint. Bronze keeps each row's arrival as `ingest_ts`.
+- **`docs/DESIGN.md` is removed.**
 
 ### Fixed
 
